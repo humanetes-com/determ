@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from pipeline_core.adapters.process import run_bounded
+from pipeline_core.domain.test_results import join_capture
 
 _HOST_TRIPLE = "x86_64-unknown-linux-gnu"
 
@@ -68,7 +69,10 @@ def run_asan_sweep(
     proc = run_bounded(argv, cwd=cwd, env=asan_env, timeout=float(timeout))
     if proc.failure is not None:
         return None
-    out = proc.stdout + "\n" + proc.stderr
+    # The one capture layout: a sanitized run's sections are read like the
+    # sweep's, and a stderr line (trybuild's coloured progress, run
+    # `12616-8345ae1d`) never enters a stdout section.
+    out = join_capture(proc.stdout, proc.stderr)
     _archive_report(out)
     return proc.returncode, out
 

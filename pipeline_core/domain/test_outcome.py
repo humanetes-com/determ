@@ -33,16 +33,19 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pipeline_core.domain.abort_cause import AbortReading, read_abort
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.reference_floor import doc_test_line
 from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
 from pipeline_core.domain.test_results import (
+    failure_bodies_for,
     parse_binary_results,
     stable_name_keys,
 )
 
 __all__ = [
+    "abort_readings",
     "RunKind",
     "SiteKind",
     "StubHold",
@@ -110,6 +113,9 @@ class TestOutcome:
     first_line: int | None = None
     aborted: bool = False
     silent: bool = False
+    #: Why this test's own process aborted (`abort_cause`), read from its
+    #: own block; None when it did not abort.
+    abort: AbortReading | None = None
     #: The same name's failures in other test binaries, first failure site
     #: each (`TestFailure.others`): one name, several failing tests.
     others: tuple[TestOutcome, ...] = ()
@@ -125,20 +131,30 @@ def outcomes_of(capture: str) -> dict[str, TestOutcome]:
     test name) is failed: a failure anywhere is the evidence. A name that
     failed in several binaries carries each further copy in `others`."""
     report = parse_test_output(capture)
-    aborted: set[str] = set()
     silent: set[str] = set()
     for b in parse_binary_results(capture):
-        aborted |= b.aborted
         silent |= b.aborted_silent
+    causes = abort_readings(capture)
     out: dict[str, TestOutcome] = {
         n: TestOutcome(n, True) for n in report.passed}
     for f in report.failures:
         out[f.test_name] = TestOutcome(
             f.test_name, False, f.panic_file, f.panic_line,
-            aborted=f.test_name in aborted, silent=f.test_name in silent,
+            aborted=f.test_name in causes, silent=f.test_name in silent,
+            abort=causes.get(f.test_name),
             others=tuple(TestOutcome(o.test_name, False, o.panic_file,
                                      o.panic_line) for o in f.others))
     return out
+
+
+def abort_readings(capture: str) -> dict[str, AbortReading]:
+    """Every test whose own process aborted, with the cause its block
+    states — the one reading the outcome and the crash localizer share."""
+    aborted: set[str] = set()
+    for b in parse_binary_results(capture):
+        aborted |= b.aborted
+    bodies = failure_bodies_for(capture, aborted) if aborted else {}
+    return {n: read_abort(bodies.get(n, "")) for n in aborted}
 
 
 def run_kind(o: TestOutcome) -> RunKind:

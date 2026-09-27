@@ -1540,6 +1540,41 @@ def failure_block_name(line: str) -> str | None:
     return name if name and " " not in name else None
 
 
+#: The line a capture puts between a process's stdout and its stderr. The
+#: layout is stdout, this line, stderr — written by :func:`join_capture` and
+#: read by :func:`split_capture`, and nowhere else.
+STDERR_MARK = "--- stderr ---"
+
+
+def join_capture(stdout: str, stderr: str) -> str:
+    """The one capture layout: stdout, then :data:`STDERR_MARK`, then
+    stderr (no mark when stderr is empty)."""
+    return stdout + ("\n" + STDERR_MARK + "\n" + stderr if stderr else "")
+
+
+def split_capture(output: str) -> tuple[str, str]:
+    """(stdout, stderr) of a :func:`join_capture` capture, or (output, "")
+    when the capture carries no mark (hand-made fixtures, other runners).
+
+    The split is at the LAST mark. Every writer that embeds a process's
+    output inside a stdout section now writes it without the mark
+    (`test_isolation.read_single_test_run`), but captures recorded before
+    that carry one mark per isolated test inside stdout, and stderr is
+    cargo's and the runtime's, which never print the mark. Two readers
+    that each switched at the FIRST mark read those embedded marks as
+    stderr: `binary_output_sections` marked every isolated binary as never
+    completed and dropped every section after it (measured 2026-09-27 on a
+    capture rebuilt by the real isolation renderer), and the sanitizer
+    sweep, which joined its streams with no mark at all, let trybuild's
+    stderr progress line become a crashed binary's in-flight test (run
+    `12616-8345ae1d`)."""
+    lines = output.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == STDERR_MARK:
+            return "\n".join(lines[:i]), "\n".join(lines[i + 1:])
+    return output, ""
+
+
 def _verdict_of_test_line(line: str) -> tuple[str, str] | None:
     """``test NAME ... ok|FAILED|ignored|bench`` → (name, verdict); a line
     whose verdict slot is empty or holds foreign text (the in-flight test when
@@ -1653,10 +1688,10 @@ def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
     (cargo executes targets sequentially, so the i-th label names the i-th
     section; a section past the last label is ``unnamed section #i``).
 
-    Two layouts are read. The pipeline's combined layout is stdout, then a
-    ``--- stderr ---`` separator, then stderr: stdout lines belong to the
-    section whose header they follow, stderr lines to the label they
-    follow. Measured on rustc 1.95.0 (run `2585062-494e630e`): a binary
+    Two layouts are read. The pipeline's combined layout is stdout, then
+    :data:`STDERR_MARK`, then stderr, split by :func:`split_capture`: stdout
+    lines belong to the section whose header they follow, stderr lines to
+    the label they follow. Measured on rustc 1.95.0 (run `2585062-494e630e`): a binary
     aborted by a panic in `Drop` prints its crate panics — ``not
     implemented`` at the stub's own line — on STDOUT under its header, and
     the runtime's ``panicked at /rustc/…/library/core/src/panicking.rs:233:5:
@@ -1675,22 +1710,14 @@ def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
     stdout_by: dict[int, list[str]] = {}
     stderr_by: dict[int, list[str]] = {}
     completed: set[int] = set()
-    in_stderr = False
     sec_idx = -1
     lab_idx = -1
     sec_open = False
-    for raw in test_output.splitlines():
+    out_text, err_text = split_capture(test_output)
+    for raw in out_text.splitlines():
         line = raw.strip()
-        if line == "--- stderr ---":
-            in_stderr = True
-            lab_idx = -1
-            continue
         if _target_label(line) is not None:
             lab_idx += 1
-            continue
-        if in_stderr:
-            if lab_idx >= 0:
-                stderr_by.setdefault(lab_idx, []).append(raw)
             continue
         if _is_section_header(line):
             sec_idx += 1
@@ -1711,6 +1738,13 @@ def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
         idx = max(lab_idx, sec_idx)
         if idx >= 0:
             stderr_by.setdefault(idx, []).append(raw)
+    lab_idx = -1
+    for raw in err_text.splitlines():
+        if _target_label(raw.strip()) is not None:
+            lab_idx += 1
+            continue
+        if lab_idx >= 0:
+            stderr_by.setdefault(lab_idx, []).append(raw)
     out: list[BinaryOutputSection] = []
     for i in range(sec_idx + 1):
         out.append(BinaryOutputSection(
@@ -1766,7 +1800,9 @@ def parse_binary_results(
 
     sections: list[_Section] = []
     current: _Section | None = None
-    for raw in test_output.splitlines():
+    # Sections, verdicts and in-flight tests are stdout's; a stderr line is
+    # never a verdict (labels above are read from the whole capture).
+    for raw in split_capture(test_output)[0].splitlines():
         line = raw.strip()
         if _is_section_header(line):
             current = _Section()

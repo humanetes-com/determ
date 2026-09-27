@@ -59,6 +59,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 )
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain import unit_clock
+from pipeline_core.domain.attribution import canon_site, record_site, site_label
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.coverage_slice import (
@@ -85,7 +86,7 @@ from pipeline_core.domain.model_notes import (
     body_fingerprint,
     rejected_symbols_in_errors,
 )
-from pipeline_core.domain.models import FillResult, FnLocator, FnSite, Stub
+from pipeline_core.domain.models import FillResult, FnLocator, FnRecord, FnSite, Stub
 from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
@@ -135,6 +136,12 @@ from pipeline_core.domain.verdict import (
     GateOutcome,
     ValidityVector,
     VerdictRecord,
+)
+from pipeline_core.domain.write_set import (
+    CoupledUnit,
+    coupled_units,
+    records_by_site,
+    render_coupled,
 )
 from pipeline_core.ports.fill_engine import (
     Cargo,
@@ -246,7 +253,8 @@ class FillOneFn:
         if best.extras and joint is not None:
             # The best attempt was a joint write: restore it whole or not at
             # all — its body alone is not the attempt that compiled.
-            _missed = self._splice_extras(file_path, best.extras, joint)
+            _missed = self._splice_extras(
+                Path(ctx.target_src_dir), best.extras, joint)
             if _missed:
                 self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: best "
                              "compiling joint attempt NOT salvaged (extras "
@@ -289,20 +297,21 @@ class FillOneFn:
             # An exit that returned with an attempt's extras still spliced
             # is a bug in that exit; the tree must not keep half a write.
             with ctx.splice_check_lock:
-                self._revert_extras(Path(ctx.target_src_dir) / rec.file,
-                                    joint, ctx)
+                self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
         return replace(res, joint=tuple(joint.kept),
                        joint_named=tuple(dict.fromkeys(joint.named)))
 
-    def _revert_extras(self, file_path: Path, joint: _JointState,
+    def _revert_extras(self, root: Path, joint: _JointState,
                        ctx: PerFnPassCtx) -> bool:
-        """Restore every extra the attempt in flight spliced, last first.
-        Caller holds the splice lock. False when any restore failed (logged
-        loudly: a failed restore leaves a broken body in the tree)."""
+        """Restore every extra the attempt in flight spliced, last first,
+        each in its own file under the cluster ``root`` (a coupled extra may
+        sit in another file than the target). Caller holds the splice lock.
+        False when any restore failed (logged loudly: a failed restore leaves
+        a broken body in the tree)."""
         ok = True
         for u, pre in reversed(joint.live):
             out = self.mut.revert_body_scoped(
-                file_path, u.fn_name, u.container, u.sig_text, pre,
+                root / u.file, u.fn_name, u.container, u.sig_text, pre,
                 cfg_predicates=u.cfg_predicates or None)
             if not out.ok:
                 ok = False
@@ -317,21 +326,23 @@ class FillOneFn:
         joint.live.clear()
         return ok
 
-    def _splice_extras(self, file_path: Path, units: tuple[JointUnit, ...],
+    def _splice_extras(self, root: Path, units: tuple[JointUnit, ...],
                        joint: _JointState) -> list[tuple[str, str]]:
-        """Splice each admitted extra, recording its prior body in
-        ``joint.live``. Caller holds the splice lock. Returns the extras
-        that could not be written, with the splicer's reason."""
+        """Splice each admitted extra into its own file under the cluster
+        ``root``, recording its prior body in ``joint.live``. Caller holds
+        the splice lock. Returns the extras that could not be written, with
+        the splicer's reason."""
         failed: list[tuple[str, str]] = []
         for u in units:
+            path = root / u.file
             loc = self.mut.locate_fn_by_record(
-                file_path, u.fn_name, u.container, u.sig_text,
+                path, u.fn_name, u.container, u.sig_text,
                 u.cfg_predicates or None)
             if loc is None:
                 failed.append((u.label, "not found in the file now"))
                 continue
             out = self.mut.splice_body_scoped(
-                file_path, u.fn_name, u.container, u.sig_text, u.body,
+                path, u.fn_name, u.container, u.sig_text, u.body,
                 cfg_predicates=u.cfg_predicates or None, allow_nonstub=True)
             if not out.ok:
                 failed.append((u.label, out.reason))
@@ -568,6 +579,40 @@ class FillOneFn:
         # The reply may widen the write to other functions of this file
         # when the pass knows the file's records to resolve them against.
         _joint_on = bool(ctx.fn_records) and ctx.joint_max > 0
+        # The bodies coupled to this unit (`domain.write_set`): a cycle of
+        # the tree's call graph or of an observed faulting stack. Offered
+        # with their current bodies and admitted from any file; the file
+        # rule stays for everything else.
+        _coupled: tuple[CoupledUnit, ...] = ()
+        _tree_recs: dict[FnSite, FnRecord] = {}
+        if _joint_on:
+            _tree_recs = records_by_site(
+                (FnRecord.from_dict(r) if isinstance(r, dict) else r
+                 for r in ctx.fn_records), record_site)
+            _coupled = coupled_units(
+                (canon_site(FnSite(rel_file, fn_name, container)),),
+                list(_tree_recs.values()), cap=ctx.joint_max)
+            if _coupled:
+                self.tel.log(
+                    f"  [phase-c/per-fn] {rel_file}::{fn_name}: coupled "
+                    "bodies offered as a joint write — " + "; ".join(
+                        f"{site_label(c.site)} ({c.coupling.value})"
+                        for c in _coupled))
+
+        def _coupled_section() -> str:
+            """Each coupled body as it stands now (re-read per attempt: a
+            sibling's keep may have rewritten it)."""
+            items = []
+            for c in _coupled:
+                _r = _tree_recs.get(c.site)
+                if _r is None:
+                    continue
+                _loc = self.mut.locate_fn_by_record(
+                    Path(ctx.target_src_dir) / c.site.file, _r.fn_name,
+                    _r.container, _r.sig_text, _r.cfg_predicates or None)
+                items.append((c, _r.sig_text,
+                              _loc.body_text if _loc is not None else _r.body_text))
+            return render_coupled(items)
 
         def _revert_own_body() -> bool:
             # A revert that silently no-ops leaves the failed body in the
@@ -588,7 +633,7 @@ class FillOneFn:
                     "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                     "file": rel_file, "fn": fn_name, "reason": out.reason,
                 })
-            extras_ok = self._revert_extras(file_path, joint, ctx)
+            extras_ok = self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
             return out.ok and extras_ok
 
         test_blocks = self.tests.find_tests_for_fn(
@@ -807,6 +852,7 @@ class FillOneFn:
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
+                        coupled=_coupled_section(),
                         usage_examples=select_usage_examples(
                             ctx.behaviour_specs, fn_name=fn_name,
                             container=container, char_budget=1200),
@@ -894,6 +940,7 @@ class FillOneFn:
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
+                        coupled=_coupled_section(),
                         identity_must=identity_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
@@ -957,7 +1004,8 @@ class FillOneFn:
                     extract_fn_bodies(last_response), target_file=rel_file,
                     target_name=fn_name, target_container=container,
                     records=ctx.fn_records, cfg_dead=ctx.cfg_dead,
-                    cap=ctx.joint_max)
+                    cap=ctx.joint_max,
+                    coupled=tuple(c.site for c in _coupled))
                 joint.refusal = _admission.refusal_note()
                 if _admission.asked:
                     self.tel.log(
@@ -1015,7 +1063,7 @@ class FillOneFn:
                 # record, so the target's offsets are read after the extras
                 # moved them. A revert of this attempt restores them all.
                 _not_written = self._splice_extras(
-                    file_path, _admission.admitted, joint)
+                    Path(ctx.target_src_dir), _admission.admitted, joint)
                 if _not_written:
                     self.tel.log(
                         f"  [phase-c/per-fn] {rel_file}::{fn_name}: joint "
@@ -1081,7 +1129,7 @@ class FillOneFn:
                              "closed the body itself.")
             if not ok:
                 # The target did not land: its extras must not stay alone.
-                self._revert_extras(file_path, joint, ctx)
+                self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
                 ctx.splice_check_lock.release()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""

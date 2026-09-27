@@ -18,6 +18,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+from pipeline_core.domain.abort_cause import AbortCause, AbortReading
 from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name,
     parse_gen_tests_integration_filename,
@@ -96,11 +97,23 @@ class FaultClass(Enum):
 _EXHAUSTION_SIGNALS = ("STACK-OVERFLOW",)
 
 
-def fault_class(signal: str) -> FaultClass:
-    """The :class:`FaultClass` a report's kind (``signal``) names."""
+def fault_class(signal: str, abort: AbortReading | None = None) -> FaultClass:
+    """The :class:`FaultClass` of a fault, most specific reading first: a
+    sanitizer's own verdict (its kind string is a detector's diagnosis), then
+    the cause the test's own process announced (`abort_cause`), then the
+    bare signal. A debugger reports a stack overflow as `SIGSEGV` and a panic
+    in a destructor as `SIGABRT`; read off the signal alone, both were
+    invalid memory, and the runtime had said which one it was in the same
+    test's block."""
     up = signal.upper()
     if any(s in up for s in _EXHAUSTION_SIGNALS):
         return FaultClass.EXHAUSTION
+    if "SANITIZER" in up:
+        return FaultClass.INVALID_MEMORY
+    if abort is not None and abort.cause is AbortCause.STACK_EXHAUSTION:
+        return FaultClass.EXHAUSTION
+    if abort is not None and abort.cause is AbortCause.PANIC_IN_PANIC:
+        return FaultClass.OTHER
     if any(s in up for s in _MEMORY_FAULT_SIGNALS):
         return FaultClass.INVALID_MEMORY
     return FaultClass.OTHER
@@ -985,12 +998,15 @@ class CrashSite:
     # from ALL the report's authorable crate frames (`frames` keeps the
     # innermost few for display, too few to hold a three-member period twice).
     cycle: StackCycle | None = None
+    # What the in-flight test's own process announced when it aborted
+    # (`abort_cause`), when the capture isolated it; None otherwise.
+    abort: AbortReading | None = None
 
     @property
     def fault(self) -> FaultClass:
-        """The class of this fault, from the report's own kind — read here once
-        so no rule below matches the signal string again."""
-        cls = fault_class(self.signal)
+        """The class of this fault (:func:`fault_class`) — read here once so
+        no rule below matches the signal string again."""
+        cls = fault_class(self.signal, self.abort)
         if cls is FaultClass.OTHER and self.origin_frames:
             # A detector that printed an ORIGIN stack (freed by / allocated by)
             # is speaking about invalid memory whatever its kind string says.
@@ -1438,6 +1454,7 @@ def site_from_frames(
     source_line: str | None = None,
     source_loc: tuple[str, int] | None = None,
     source_window: SourceWindow | None = None,
+    abort: AbortReading | None = None,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
@@ -1462,7 +1479,7 @@ def site_from_frames(
     origin_raw = origin_raw_frames or []
     origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
     cycle: StackCycle | None = None
-    if fault_class(signal or "") is FaultClass.EXHAUSTION:
+    if fault_class(signal or "", abort) is FaultClass.EXHAUSTION:
         # The whole faulting stack, not the innermost `max_frames`: a period
         # of three fns needs two periods to be seen as one.
         cycle = repeating_cycle(authorable_frames(_crate_frames(
@@ -1479,7 +1496,8 @@ def site_from_frames(
         signal=signal or "fatal signal",
         frames=_crate_frames(raw_frames, crate_file_prefix, max_frames),
         origin_frames=origin,
-        raw_report=raw_report, origin_capable=origin_capable, cycle=cycle)
+        raw_report=raw_report, origin_capable=origin_capable, cycle=cycle,
+        abort=abort)
 
 
 def asan_stack_excerpt(report: str, *, max_access: int = 24,
@@ -2050,6 +2068,30 @@ def faulting_stack_sites(
             if resolved is not None:
                 out.setdefault(test, set()).add(resolved)
     return {t: frozenset(v) for t, v in out.items()}
+
+
+def observed_cycle_sites(
+    sites: tuple[CrashSite, ...],
+    records: Sequence[FnRecord],
+    file_text: Callable[[str], str | None],
+) -> tuple[frozenset[FnSite], ...]:
+    """Each stack exhaustion's repeating period as the declared bodies it
+    ran (:func:`frame_site`), one set per distinct cycle. The write-set
+    model's observed coupling (`domain.write_set`): members of one period
+    are written together, whatever file they sit in. A member no record's
+    span holds is left out rather than guessed; a period that resolves to
+    fewer than two bodies couples nothing."""
+    out: dict[tuple[tuple[str, str], ...], frozenset[FnSite]] = {}
+    for site in sites:
+        cyc = site.cycle
+        if cyc is None or site.fault is not FaultClass.EXHAUSTION:
+            continue
+        resolved = frozenset(
+            r for r in (frame_site(f, records, file_text) for f in cyc.members)
+            if r is not None)
+        if len(resolved) > 1:
+            out.setdefault(cyc.key, resolved)
+    return tuple(out.values())
 
 
 def exhaustion_culprit_locators(

@@ -1,5 +1,9 @@
-"""A slice session's write set at open: the planned slice plus the table
-complement of its files (`installable_fns.table_complement`).
+"""A slice session's write set at open: the planned slice, the table
+complement of its files (`installable_fns.table_complement`), and the bodies
+coupled to its units (`domain.write_set.coupled_units`: a cycle of the
+tree's call graph or of an observed faulting stack). The coupling is the
+same function the per-fn route asks; the session only adds the slot fit
+beside it, because a slot nothing references yet is not a coupling.
 
 The planner reads the write set off the failing tests' coverage. A free fn
 that fits a field of a fn-pointer table an editable unit builds can be out of
@@ -19,13 +23,15 @@ opened rendered at the widest threshold (found in review, 2026-09-21).
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
-from pipeline_core.domain.attribution import locator_of, record_site
+from pipeline_core.domain.attribution import canon_site, locator_of, record_site
 from pipeline_core.domain.installable_fns import table_complement
+from pipeline_core.domain.joint_write import DEFAULT_JOINT_MAX
 from pipeline_core.domain.models import FnRecord, FnSite, TypeRecord
 from pipeline_core.domain.rust_idents import fn_reference_counts
 from pipeline_core.domain.slice_session import SessionSlice
+from pipeline_core.domain.write_set import coupled_units
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +39,7 @@ class SessionWriteSet:
     slice_: SessionSlice
     records: dict[FnSite, FnRecord]
     installable: dict[FnSite, str]     # admitted site -> "Table.field"
+    coupled: dict[FnSite, str] = field(default_factory=dict)  # site -> coupling
 
 
 def session_write_set(
@@ -41,11 +48,15 @@ def session_write_set(
     tree_records: Sequence[FnRecord],
     type_records: Iterable[TypeRecord],
     read_text: Callable[[str], str | None],
+    *,
+    coupled_cap: int = DEFAULT_JOINT_MAX,
 ) -> SessionWriteSet:
     """The slice's resolved records plus every slice file's table
     complement, as records, as units of the returned slice, and as the
-    installable marks the turn-0 header renders. `read_text(file)` is the
-    live file text (None when unreadable: that file admits nothing)."""
+    installable marks the turn-0 header renders, then the bodies coupled to
+    any unit of that set (at most ``coupled_cap``), recorded in ``coupled``.
+    `read_text(file)` is the live file text (None when unreadable: that file
+    admits nothing)."""
     out = dict(records)
     marks: dict[FnSite, str] = {}
     types = list(type_records)
@@ -63,5 +74,13 @@ def session_write_set(
                     out[site] = r
                     marks[site] = f"{inst.type_name}.{inst.field}"
                     break
+    by_site = {record_site(r): r for r in tree_records}
+    have = frozenset(canon_site(u) for u in out)
+    coupled: dict[FnSite, str] = {}
+    for cu in coupled_units(have, tree_records, cap=coupled_cap):
+        rec = by_site.get(cu.site)
+        if rec is not None and cu.site not in have:
+            out[cu.site] = rec
+            coupled[cu.site] = cu.coupling.value
     units = tuple(sorted(out, key=lambda u: (u.file, u.fn_name, u.container)))
-    return SessionWriteSet(replace(slice_, units=units), out, marks)
+    return SessionWriteSet(replace(slice_, units=units), out, marks, coupled)

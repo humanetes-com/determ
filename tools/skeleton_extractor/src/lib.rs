@@ -1170,4 +1170,52 @@ macro_rules! documented {
             out.items_out
         );
     }
+
+    /// Each body's references as the pipeline reads them to build its call
+    /// graph. An invented crate: a three-fn cycle through a qualified path
+    /// (`Wrap::make`), a free call, a turbofish fn-pointer reference in a
+    /// struct literal, a method call inside a macro argument, and a macro
+    /// name that is not a reference.
+    #[test]
+    fn a_body_s_references_are_its_spelled_paths_calls_and_methods() {
+        let src = r#"
+            pub struct Wrap;
+            impl Wrap {
+                pub fn make(self, x: u8) -> Out { Out::from_raw(x) }
+            }
+            pub struct Out { f: fn(u8) -> u8 }
+            impl Out {
+                pub fn from_raw(x: u8) -> Self { build_raw(x) }
+                pub fn show(&self) -> String { format!("{}", self.inner.render()) }
+            }
+            fn build_raw(x: u8) -> Out {
+                let _t = Out { f: helper::<u8> };
+                crate::m::Wrap::make(crate::m::Wrap, x)
+            }
+            fn helper<T>(x: u8) -> u8 { x }
+        "#;
+        let recs = enumerate_fns_in_source(src, "src/m.rs").unwrap();
+        let refs = |name: &str| -> Vec<(String, String, String)> {
+            recs.iter()
+                .find(|r| r.fn_name == name)
+                .unwrap()
+                .refs
+                .iter()
+                .map(|r| (r.kind.clone(), r.qualifier.clone(), r.name.clone()))
+                .collect()
+        };
+        let t = |k: &str, q: &str, n: &str| (k.to_string(), q.to_string(), n.to_string());
+        assert_eq!(refs("make"), vec![t("path", "Out", "from_raw")]);
+        assert_eq!(refs("from_raw"), vec![t("call", "", "build_raw")]);
+        assert_eq!(refs("show"), vec![t("method", "", "render")]);
+        assert_eq!(
+            refs("build_raw"),
+            vec![
+                t("path", "", "helper"),
+                t("path", "Wrap", "make"),
+                t("path", "m", "Wrap")
+            ]
+        );
+        assert!(refs("helper").is_empty());
+    }
 }

@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.test_results import join_capture
+
 from ...domain.test_results import OUTPUT_SEPARATOR, TestOutcome, parse_test_counts
 
 
@@ -86,9 +88,7 @@ def run_legacy_single(
             done["data"] = TestOutcome.command_not_found().as_event_data()
             sys.exit(1)
 
-        test_output = result.stdout
-        if result.stderr:
-            test_output += "\n--- stderr ---\n" + result.stderr
+        test_output = join_capture(result.stdout, result.stderr)
         genesis = deps.read(genesis_path)
         deps.write(output_file,
                    f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n{OUTPUT_SEPARATOR}\n{test_output}")

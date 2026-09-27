@@ -46,6 +46,10 @@ class PerFnSections:
     # Localized crash backtrace implicating this fn (faulting + origin
     # frames). "" when no binary crash points here.
     crash_evidence: str = ""
+    # The bodies coupled to this fn (`domain.write_set.render_coupled`),
+    # writable with it as extra <FN> blocks. "" when none, or when the
+    # route cannot write extras.
+    coupled: str = ""
 
 
 @dataclass(frozen=True, slots=True)

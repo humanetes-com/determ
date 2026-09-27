@@ -49,6 +49,22 @@ pub struct FnRecord {
     pub mod_path: String,
     pub has_unimplemented_body: bool, // body is a single `unimplemented!()` or annotated stub
     pub is_test: bool, // fn carries a test attribute (#[test], #[tokio::test], #[rstest], …)
+    // Every fn-shaped reference the body spells, macro arguments included
+    // (`collect_fn_refs`). Syntax only: the pipeline resolves a reference to
+    // a record, and refuses what the spelling does not decide. The tree had
+    // no reference data at all, and four Python modules each re-read callees
+    // from body text their own way.
+    pub refs: Vec<FnRef>,
+}
+
+/// One reference a fn body spells: `Q::name(…)` / `Q::name::<T>` (kind
+/// `path`, qualifier `Q`), `name(…)` (kind `call`, no qualifier), or
+/// `.name(…)` (kind `method`, no qualifier). Sorted and deduplicated.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FnRef {
+    pub kind: String,
+    pub qualifier: String,
+    pub name: String,
 }
 
 #[derive(serde::Serialize, Debug, Clone)]

@@ -1,0 +1,3515 @@
+{
+"source": "tmp/anyhow/.skeleton-filled/stable, 2026-09-27 after run 59479-cc3afffd (the ring of run 38934-2999cc94 still on the tree); extractor --enumerate-fns, body text dropped",
+"records": [
+{
+"file": "src/backtrace.rs",
+"fn_name": "_assert_send_sync",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "",
+"name": "assert_send_sync"
+}
+],
+"sig_byte_start": 985,
+"body_byte_start": 1009,
+"body_byte_end": 1092
+},
+{
+"file": "src/chain.rs",
+"fn_name": "new",
+"container": "impl Chain < 'a >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+}
+],
+"sig_byte_start": 841,
+"body_byte_start": 893,
+"body_byte_end": 951
+},
+{
+"file": "src/chain.rs",
+"fn_name": "next",
+"container": "impl Iterator for Chain < 'a >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "next"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "source"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "take"
+}
+],
+"sig_byte_start": 1039,
+"body_byte_start": 1081,
+"body_byte_end": 1325
+},
+{
+"file": "src/chain.rs",
+"fn_name": "size_hint",
+"container": "impl Iterator for Chain < 'a >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "len"
+}
+],
+"sig_byte_start": 1331,
+"body_byte_start": 1378,
+"body_byte_end": 1438
+},
+{
+"file": "src/chain.rs",
+"fn_name": "next_back",
+"container": "impl DoubleEndedIterator for Chain < '_ >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_iter"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "next_back"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "push"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "source"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "take"
+},
+{
+"kind": "path",
+"qualifier": "Vec",
+"name": "new"
+}
+],
+"sig_byte_start": 1543,
+"body_byte_start": 1590,
+"body_byte_end": 2173
+},
+{
+"file": "src/chain.rs",
+"fn_name": "len",
+"container": "impl ExactSizeIterator for Chain < '_ >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "len"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "source"
+}
+],
+"sig_byte_start": 2220,
+"body_byte_start": 2244,
+"body_byte_end": 2619
+},
+{
+"file": "src/chain.rs",
+"fn_name": "default",
+"container": "impl Default for Chain < '_ >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_iter"
+},
+{
+"kind": "path",
+"qualifier": "Vec",
+"name": "new"
+}
+],
+"sig_byte_start": 2712,
+"body_byte_start": 2734,
+"body_byte_end": 2806
+},
+{
+"file": "src/context.rs",
+"fn_name": "ext_context",
+"container": "impl StdError for E",
+"mod_path": "ext",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_context"
+}
+],
+"sig_byte_start": 722,
+"body_byte_start": 838,
+"body_byte_end": 932
+},
+{
+"file": "src/context.rs",
+"fn_name": "ext_context",
+"container": "impl StdError for Error",
+"mod_path": "ext",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "context"
+}
+],
+"sig_byte_start": 978,
+"body_byte_start": 1094,
+"body_byte_end": 1137
+},
+{
+"file": "src/context.rs",
+"fn_name": "context",
+"container": "impl Context < T , E > for Result < T , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "ext_context"
+}
+],
+"sig_byte_start": 1247,
+"body_byte_start": 1358,
+"body_byte_end": 1473
+},
+{
+"file": "src/context.rs",
+"fn_name": "with_context",
+"container": "impl Context < T , E > for Result < T , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "context"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "ext_context"
+}
+],
+"sig_byte_start": 1479,
+"body_byte_start": 1624,
+"body_byte_end": 1741
+},
+{
+"file": "src/context.rs",
+"fn_name": "context",
+"container": "impl Context < T , Infallible > for Option < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_display"
+}
+],
+"sig_byte_start": 2203,
+"body_byte_start": 2314,
+"body_byte_end": 2459
+},
+{
+"file": "src/context.rs",
+"fn_name": "with_context",
+"container": "impl Context < T , Infallible > for Option < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "context"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_display"
+}
+],
+"sig_byte_start": 2465,
+"body_byte_start": 2610,
+"body_byte_end": 2749
+},
+{
+"file": "src/context.rs",
+"fn_name": "fmt",
+"container": "impl Debug for ContextError < C , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "alternate"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "debug_struct"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "field"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "finish"
+},
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+},
+{
+"kind": "path",
+"qualifier": "context",
+"name": "Quoted"
+}
+],
+"sig_byte_start": 2835,
+"body_byte_start": 2889,
+"body_byte_end": 3173
+},
+{
+"file": "src/context.rs",
+"fn_name": "fmt",
+"container": "impl Display for ContextError < C , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 3247,
+"body_byte_start": 3301,
+"body_byte_end": 3345
+},
+{
+"file": "src/context.rs",
+"fn_name": "source",
+"container": "impl StdError for ContextError < C , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+}
+],
+"sig_byte_start": 3447,
+"body_byte_start": 3502,
+"body_byte_end": 3533
+},
+{
+"file": "src/context.rs",
+"fn_name": "provide",
+"container": "impl StdError for ContextError < C , E >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 3579,
+"body_byte_start": 3632,
+"body_byte_end": 3670
+},
+{
+"file": "src/context.rs",
+"fn_name": "source",
+"container": "impl StdError for ContextError < C , Error >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+}
+],
+"sig_byte_start": 3746,
+"body_byte_start": 3801,
+"body_byte_end": 3833
+},
+{
+"file": "src/context.rs",
+"fn_name": "provide",
+"container": "impl StdError for ContextError < C , Error >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 3879,
+"body_byte_start": 3932,
+"body_byte_end": 3970
+},
+{
+"file": "src/context.rs",
+"fn_name": "fmt",
+"container": "impl Debug for Quoted < C >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "fmt"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+}
+],
+"sig_byte_start": 4134,
+"body_byte_start": 4196,
+"body_byte_end": 4303
+},
+{
+"file": "src/context.rs",
+"fn_name": "write_str",
+"container": "impl Write for Quoted < & mut fmt :: Formatter < '_ > >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+}
+],
+"sig_byte_start": 4360,
+"body_byte_start": 4409,
+"body_byte_end": 4442
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "__dispatch_ensure",
+"container": "impl BothDebug for (A , B)",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_boxed_str"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "is_ok"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Buf",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "msg"
+}
+],
+"sig_byte_start": 475,
+"body_byte_start": 531,
+"body_byte_end": 1122
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "__dispatch_ensure",
+"container": "impl NotBothDebug for & (A , B)",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "msg"
+}
+],
+"sig_byte_start": 1436,
+"body_byte_start": 1492,
+"body_byte_end": 1521
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "new",
+"container": "impl Buf",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "MaybeUninit",
+"name": "new"
+}
+],
+"sig_byte_start": 1804,
+"body_byte_start": 1822,
+"body_byte_end": 1934
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "as_str",
+"container": "impl Buf",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "slice",
+"name": "from_raw_parts"
+},
+{
+"kind": "path",
+"qualifier": "str",
+"name": "from_utf8_unchecked"
+}
+],
+"sig_byte_start": 1940,
+"body_byte_start": 1966,
+"body_byte_end": 2176
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "write_str",
+"container": "impl Write for Buf",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_bytes"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "len"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write"
+},
+{
+"kind": "path",
+"qualifier": "fmt",
+"name": "Error"
+}
+],
+"sig_byte_start": 2205,
+"body_byte_start": 2254,
+"body_byte_end": 2595
+},
+{
+"file": "src/ensure.rs",
+"fn_name": "render",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_str"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_boxed_str"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "is_ok"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Buf",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "msg"
+},
+{
+"kind": "path",
+"qualifier": "String",
+"name": "from"
+}
+],
+"sig_byte_start": 2599,
+"body_byte_start": 2672,
+"body_byte_end": 3199
+},
+{
+"file": "src/error.rs",
+"fn_name": "new",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_std"
+}
+],
+"sig_byte_start": 1027,
+"body_byte_start": 1115,
+"body_byte_end": 1190
+},
+{
+"file": "src/error.rs",
+"fn_name": "msg",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_adhoc"
+}
+],
+"sig_byte_start": 2569,
+"body_byte_start": 2666,
+"body_byte_end": 2751
+},
+{
+"file": "src/error.rs",
+"fn_name": "from_boxed",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_boxed"
+}
+],
+"sig_byte_start": 4598,
+"body_byte_start": 4677,
+"body_byte_end": 4745
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct_from_std",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_boxed"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_downcast"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_drop"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_drop_front"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_reallocate_boxed"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_ref"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct"
+}
+],
+"sig_byte_start": 4849,
+"body_byte_start": 4970,
+"body_byte_end": 5848
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct_from_adhoc",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct"
+},
+{
+"kind": "path",
+"qualifier": "any",
+"name": "TypeId"
+},
+{
+"kind": "path",
+"qualifier": "backtrace",
+"name": "Backtrace"
+},
+{
+"kind": "path",
+"qualifier": "crate",
+"name": "StdError"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorImpl"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorVTable"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "no_backtrace"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_downcast"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_drop"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_drop_front"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_reallocate_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_ref"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Ref"
+},
+{
+"kind": "path",
+"qualifier": "wrapper",
+"name": "DisplayError"
+}
+],
+"sig_byte_start": 5941,
+"body_byte_start": 6073,
+"body_byte_end": 7542
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct_from_display",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct"
+},
+{
+"kind": "path",
+"qualifier": "any",
+"name": "TypeId"
+},
+{
+"kind": "path",
+"qualifier": "backtrace",
+"name": "Backtrace"
+},
+{
+"kind": "path",
+"qualifier": "crate",
+"name": "StdError"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorImpl"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorVTable"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "no_backtrace"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_downcast"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_drop"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_drop_front"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_reallocate_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_ref"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Ref"
+},
+{
+"kind": "path",
+"qualifier": "wrapper",
+"name": "DisplayError"
+}
+],
+"sig_byte_start": 7635,
+"body_byte_start": 7761,
+"body_byte_end": 9253
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct_from_context",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "",
+"name": "context_downcast"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "context_drop_rest"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_boxed"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_drop"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_reallocate_boxed"
+},
+{
+"kind": "path",
+"qualifier": "",
+"name": "object_ref"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct"
+}
+],
+"sig_byte_start": 9411,
+"body_byte_start": 9591,
+"body_byte_end": 10593
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct_from_boxed",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Boxed",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "kind",
+"name": "Boxed"
+}
+],
+"sig_byte_start": 10752,
+"body_byte_start": 10855,
+"body_byte_end": 10934
+},
+{
+"file": "src/error.rs",
+"fn_name": "construct",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "into_raw"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "ManuallyDrop",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+}
+],
+"sig_byte_start": 11027,
+"body_byte_start": 11169,
+"body_byte_end": 11419
+},
+{
+"file": "src/error.rs",
+"fn_name": "context",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "leak"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "construct"
+},
+{
+"kind": "path",
+"qualifier": "any",
+"name": "TypeId"
+},
+{
+"kind": "path",
+"qualifier": "backtrace",
+"name": "Backtrace"
+},
+{
+"kind": "path",
+"qualifier": "crate",
+"name": "StdError"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ContextError"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorImpl"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorVTable"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "context_backtrace"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "context_chain_downcast"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "context_chain_drop_rest"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_drop"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_reallocate_boxed"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "object_ref"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Ref"
+}
+],
+"sig_byte_start": 13245,
+"body_byte_start": 13344,
+"body_byte_end": 15007
+},
+{
+"file": "src/error.rs",
+"fn_name": "backtrace",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "backtrace"
+}
+],
+"sig_byte_start": 16301,
+"body_byte_start": 16336,
+"body_byte_end": 16427
+},
+{
+"file": "src/error.rs",
+"fn_name": "chain",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Chain",
+"name": "new"
+}
+],
+"sig_byte_start": 17182,
+"body_byte_start": 17208,
+"body_byte_end": 17241
+},
+{
+"file": "src/error.rs",
+"fn_name": "root_cause",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "chain"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "expect"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "last"
+}
+],
+"sig_byte_start": 17573,
+"body_byte_start": 17624,
+"body_byte_end": 17688
+},
+{
+"file": "src/error.rs",
+"fn_name": "is",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "is_some"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+}
+],
+"sig_byte_start": 18111,
+"body_byte_start": 18202,
+"body_byte_end": 18408
+},
+{
+"file": "src/error.rs",
+"fn_name": "downcast",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Err"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "dangling"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+},
+{
+"kind": "path",
+"qualifier": "mem",
+"name": "replace"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "read"
+}
+],
+"sig_byte_start": 18483,
+"body_byte_start": 18594,
+"body_byte_end": 19225
+},
+{
+"file": "src/error.rs",
+"fn_name": "downcast_ref",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "map"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+}
+],
+"sig_byte_start": 20284,
+"body_byte_start": 20391,
+"body_byte_end": 20700
+},
+{
+"file": "src/error.rs",
+"fn_name": "downcast_mut",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_mut"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "map"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+}
+],
+"sig_byte_start": 20767,
+"body_byte_start": 20882,
+"body_byte_end": 21214
+},
+{
+"file": "src/error.rs",
+"fn_name": "into_boxed_dyn_error",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "dangling"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+},
+{
+"kind": "path",
+"qualifier": "mem",
+"name": "replace"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+}
+],
+"sig_byte_start": 23052,
+"body_byte_start": 23128,
+"body_byte_end": 23388
+},
+{
+"file": "src/error.rs",
+"fn_name": "reallocate_into_boxed_dyn_error_without_backtrace",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "dangling"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+},
+{
+"kind": "path",
+"qualifier": "mem",
+"name": "replace"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+}
+],
+"sig_byte_start": 24880,
+"body_byte_start": 25000,
+"body_byte_end": 25273
+},
+{
+"file": "src/error.rs",
+"fn_name": "provide",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 25330,
+"body_byte_start": 25383,
+"body_byte_end": 25421
+},
+{
+"file": "src/error.rs",
+"fn_name": "thiserror_provide",
+"container": "impl Error",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 25490,
+"body_byte_start": 25553,
+"body_byte_end": 25591
+},
+{
+"file": "src/error.rs",
+"fn_name": "from",
+"container": "impl From < E > for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "construct_from_std"
+}
+],
+"sig_byte_start": 25742,
+"body_byte_start": 25769,
+"body_byte_end": 25844
+},
+{
+"file": "src/error.rs",
+"fn_name": "deref",
+"container": "impl Deref for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "error"
+}
+],
+"sig_byte_start": 25987,
+"body_byte_start": 26021,
+"body_byte_end": 26122
+},
+{
+"file": "src/error.rs",
+"fn_name": "deref_mut",
+"container": "impl DerefMut for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_mut"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "error_mut"
+}
+],
+"sig_byte_start": 26212,
+"body_byte_start": 26258,
+"body_byte_end": 26351
+},
+{
+"file": "src/error.rs",
+"fn_name": "fmt",
+"container": "impl Display for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "alternate"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "chain"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+},
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "display"
+}
+],
+"sig_byte_start": 26384,
+"body_byte_start": 26446,
+"body_byte_end": 26926
+},
+{
+"file": "src/error.rs",
+"fn_name": "fmt",
+"container": "impl Debug for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "debug"
+}
+],
+"sig_byte_start": 26957,
+"body_byte_start": 27019,
+"body_byte_end": 27155
+},
+{
+"file": "src/error.rs",
+"fn_name": "drop",
+"container": "impl Drop for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "dangling"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "vtable"
+},
+{
+"kind": "path",
+"qualifier": "mem",
+"name": "replace"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "Own"
+}
+],
+"sig_byte_start": 27185,
+"body_byte_start": 27205,
+"body_byte_end": 27607
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_drop",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "drop_in_place"
+}
+],
+"sig_byte_start": 28785,
+"body_byte_start": 28823,
+"body_byte_end": 29057
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_drop_front",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+}
+],
+"sig_byte_start": 29141,
+"body_byte_start": 29201,
+"body_byte_end": 29298
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_ref",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Ref",
+"name": "new"
+}
+],
+"sig_byte_start": 29383,
+"body_byte_start": 29512,
+"body_byte_end": 29665
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_boxed",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "ManuallyDrop",
+"name": "into_inner"
+}
+],
+"sig_byte_start": 29801,
+"body_byte_start": 29932,
+"body_byte_end": 30129
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_reallocate_boxed",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "ManuallyDrop",
+"name": "into_inner"
+}
+],
+"sig_byte_start": 30365,
+"body_byte_start": 30547,
+"body_byte_end": 30744
+},
+{
+"file": "src/error.rs",
+"fn_name": "object_downcast",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+},
+{
+"kind": "path",
+"qualifier": "Ref",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+}
+],
+"sig_byte_start": 30849,
+"body_byte_start": 30997,
+"body_byte_end": 31354
+},
+{
+"file": "src/error.rs",
+"fn_name": "no_backtrace",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 31496,
+"body_byte_start": 31554,
+"body_byte_end": 31579
+},
+{
+"file": "src/error.rs",
+"fn_name": "context_downcast",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+},
+{
+"kind": "path",
+"qualifier": "Ref",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+}
+],
+"sig_byte_start": 31738,
+"body_byte_start": 31906,
+"body_byte_end": 32556
+},
+{
+"file": "src/error.rs",
+"fn_name": "context_drop_rest",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "drop_in_place"
+}
+],
+"sig_byte_start": 32709,
+"body_byte_start": 32847,
+"body_byte_end": 33400
+},
+{
+"file": "src/error.rs",
+"fn_name": "context_chain_downcast",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+},
+{
+"kind": "path",
+"qualifier": "Ref",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+}
+],
+"sig_byte_start": 33497,
+"body_byte_start": 33652,
+"body_byte_end": 34393
+},
+{
+"file": "src/error.rs",
+"fn_name": "context_chain_drop_rest",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "TypeId",
+"name": "of"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "drop_in_place"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "read"
+}
+],
+"sig_byte_start": 34488,
+"body_byte_start": 34613,
+"body_byte_end": 35532
+},
+{
+"file": "src/error.rs",
+"fn_name": "context_backtrace",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "add"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "backtrace"
+}
+],
+"sig_byte_start": 35716,
+"body_byte_start": 35804,
+"body_byte_end": 36077
+},
+{
+"file": "src/error.rs",
+"fn_name": "vtable",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorVTable"
+}
+],
+"sig_byte_start": 36397,
+"body_byte_start": 36494,
+"body_byte_end": 36569
+},
+{
+"file": "src/error.rs",
+"fn_name": "erase",
+"container": "impl ErrorImpl < E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+},
+{
+"kind": "path",
+"qualifier": "Ref",
+"name": "from_raw"
+},
+{
+"kind": "path",
+"qualifier": "error",
+"name": "ErrorImpl"
+}
+],
+"sig_byte_start": 36882,
+"body_byte_start": 36943,
+"body_byte_end": 37109
+},
+{
+"file": "src/error.rs",
+"fn_name": "error",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "deref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "erase"
+}
+],
+"sig_byte_start": 37245,
+"body_byte_start": 37334,
+"body_byte_end": 37537
+},
+{
+"file": "src/error.rs",
+"fn_name": "error_mut",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "deref"
+},
+{
+"kind": "path",
+"qualifier": "crate",
+"name": "StdError"
+}
+],
+"sig_byte_start": 37710,
+"body_byte_start": 37807,
+"body_byte_end": 38122
+},
+{
+"file": "src/error.rs",
+"fn_name": "backtrace",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "deref"
+},
+{
+"kind": "path",
+"qualifier": "Backtrace",
+"name": "disabled"
+},
+{
+"kind": "path",
+"qualifier": "backtrace",
+"name": "Backtrace"
+}
+],
+"sig_byte_start": 38254,
+"body_byte_start": 38299,
+"body_byte_end": 38613
+},
+{
+"file": "src/error.rs",
+"fn_name": "provide",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 38666,
+"body_byte_start": 38730,
+"body_byte_end": 38768
+},
+{
+"file": "src/error.rs",
+"fn_name": "chain",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Chain",
+"name": "new"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "error"
+}
+],
+"sig_byte_start": 38888,
+"body_byte_start": 38924,
+"body_byte_end": 39003
+},
+{
+"file": "src/error.rs",
+"fn_name": "source",
+"container": "impl StdError for ErrorImpl < E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "source"
+}
+],
+"sig_byte_start": 39070,
+"body_byte_start": 39125,
+"body_byte_end": 39228
+},
+{
+"file": "src/error.rs",
+"fn_name": "provide",
+"container": "impl StdError for ErrorImpl < E >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 39274,
+"body_byte_start": 39327,
+"body_byte_end": 39365
+},
+{
+"file": "src/error.rs",
+"fn_name": "fmt",
+"container": "impl Debug for ErrorImpl < E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "Debug",
+"name": "fmt"
+}
+],
+"sig_byte_start": 39426,
+"body_byte_start": 39488,
+"body_byte_end": 39659
+},
+{
+"file": "src/error.rs",
+"fn_name": "fmt",
+"container": "impl Display for ErrorImpl < E >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 39724,
+"body_byte_start": 39786,
+"body_byte_end": 39850
+},
+{
+"file": "src/error.rs",
+"fn_name": "from",
+"container": "impl From < Error > for Box < dyn StdError + Send + Sync + 'static >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_boxed_dyn_error"
+}
+],
+"sig_byte_start": 39991,
+"body_byte_start": 40022,
+"body_byte_end": 40064
+},
+{
+"file": "src/error.rs",
+"fn_name": "from",
+"container": "impl From < Error > for Box < dyn StdError + Send + 'static >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_boxed_dyn_error"
+}
+],
+"sig_byte_start": 40198,
+"body_byte_start": 40229,
+"body_byte_end": 40271
+},
+{
+"file": "src/error.rs",
+"fn_name": "from",
+"container": "impl From < Error > for Box < dyn StdError + 'static >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into_boxed_dyn_error"
+}
+],
+"sig_byte_start": 40398,
+"body_byte_start": 40429,
+"body_byte_end": 40471
+},
+{
+"file": "src/error.rs",
+"fn_name": "as_ref",
+"container": "impl AsRef < dyn StdError + Send + Sync > for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 40586,
+"body_byte_start": 40647,
+"body_byte_end": 40668
+},
+{
+"file": "src/error.rs",
+"fn_name": "as_ref",
+"container": "impl AsRef < dyn StdError > for Error",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 40769,
+"body_byte_start": 40816,
+"body_byte_end": 40837
+},
+{
+"file": "src/fmt.rs",
+"fn_name": "display",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "error"
+}
+],
+"sig_byte_start": 286,
+"body_byte_start": 354,
+"body_byte_end": 439
+},
+{
+"file": "src/fmt.rs",
+"fn_name": "debug",
+"container": "impl ErrorImpl",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "alternate"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "enumerate"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "expect"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "fmt"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "len"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "next"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "status"
+},
+{
+"kind": "path",
+"qualifier": "BacktraceStatus",
+"name": "Captured"
+},
+{
+"kind": "path",
+"qualifier": "Debug",
+"name": "fmt"
+},
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "backtrace"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "chain"
+},
+{
+"kind": "path",
+"qualifier": "Self",
+"name": "error"
+},
+{
+"kind": "path",
+"qualifier": "fmt",
+"name": "Debug"
+},
+{
+"kind": "path",
+"qualifier": "fmt",
+"name": "Indented"
+},
+{
+"kind": "path",
+"qualifier": "fmt",
+"name": "Write"
+},
+{
+"kind": "path",
+"qualifier": "mem",
+"name": "transmute"
+}
+],
+"sig_byte_start": 537,
+"body_byte_start": 603,
+"body_byte_end": 2411
+},
+{
+"file": "src/fmt.rs",
+"fn_name": "write_str",
+"container": "impl Write for Indented < '_ , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+},
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "bytes"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "enumerate"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "is_some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+}
+],
+"sig_byte_start": 2742,
+"body_byte_start": 2791,
+"body_byte_end": 3546
+},
+{
+"file": "src/kind.rs",
+"fn_name": "anyhow_kind",
+"container": "trait AdhocKind",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 505,
+"body_byte_start": 537,
+"body_byte_end": 556
+},
+{
+"file": "src/kind.rs",
+"fn_name": "new",
+"container": "impl Adhoc",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "msg"
+}
+],
+"sig_byte_start": 684,
+"body_byte_start": 788,
+"body_byte_end": 843
+},
+{
+"file": "src/kind.rs",
+"fn_name": "anyhow_kind",
+"container": "trait TraitKind",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 1044,
+"body_byte_start": 1076,
+"body_byte_end": 1095
+},
+{
+"file": "src/kind.rs",
+"fn_name": "new",
+"container": "impl Trait",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "into"
+}
+],
+"sig_byte_start": 1185,
+"body_byte_start": 1259,
+"body_byte_end": 1307
+},
+{
+"file": "src/kind.rs",
+"fn_name": "anyhow_kind",
+"container": "trait BoxedKind",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 1819,
+"body_byte_start": 1851,
+"body_byte_end": 1870
+},
+{
+"file": "src/kind.rs",
+"fn_name": "new",
+"container": "impl Boxed",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "from_boxed"
+}
+],
+"sig_byte_start": 2073,
+"body_byte_start": 2136,
+"body_byte_end": 2196
+},
+{
+"file": "src/lib.rs",
+"fn_name": "source",
+"container": "trait StdError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "by_ref"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "source"
+},
+{
+"kind": "path",
+"qualifier": "ErrorImpl",
+"name": "error"
+}
+],
+"sig_byte_start": 8303,
+"body_byte_start": 8358,
+"body_byte_end": 8443
+},
+{
+"file": "src/lib.rs",
+"fn_name": "Ok",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 16408,
+"body_byte_start": 16441,
+"body_byte_end": 16480
+},
+{
+"file": "src/lib.rs",
+"fn_name": "format_err",
+"container": "mod __private",
+"mod_path": "__private",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_str"
+},
+{
+"kind": "path",
+"qualifier": "Error",
+"name": "msg"
+}
+],
+"sig_byte_start": 17162,
+"body_byte_start": 17203,
+"body_byte_end": 17306
+},
+{
+"file": "src/lib.rs",
+"fn_name": "must_use",
+"container": "mod __private",
+"mod_path": "__private",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 17377,
+"body_byte_start": 17413,
+"body_byte_end": 17432
+},
+{
+"file": "src/lib.rs",
+"fn_name": "not",
+"container": "mod __private",
+"mod_path": "__private",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "not"
+}
+],
+"sig_byte_start": 17475,
+"body_byte_start": 17508,
+"body_byte_end": 17532
+},
+{
+"file": "src/lib.rs",
+"fn_name": "not",
+"container": "impl Bool for bool",
+"mod_path": "__private::not",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 17703,
+"body_byte_start": 17725,
+"body_byte_end": 17760
+},
+{
+"file": "src/lib.rs",
+"fn_name": "not",
+"container": "impl Bool for & bool",
+"mod_path": "__private::not",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 17836,
+"body_byte_start": 17858,
+"body_byte_end": 17894
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "fmt",
+"container": "impl Debug for MyError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "debug_tuple"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "field"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "finish"
+}
+],
+"sig_byte_start": 376,
+"body_byte_start": 439,
+"body_byte_end": 509
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "fmt",
+"container": "impl Display for MyError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Ok"
+}
+],
+"sig_byte_start": 556,
+"body_byte_start": 619,
+"body_byte_end": 647
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "provide",
+"container": "impl Error for MyError",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 692,
+"body_byte_start": 745,
+"body_byte_end": 791
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "request_ref_backtrace",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 889,
+"body_byte_start": 954,
+"body_byte_end": 984
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "request_ref",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 986,
+"body_byte_start": 1089,
+"body_byte_end": 1119
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "provide_ref_backtrace",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 1125,
+"body_byte_start": 1208,
+"body_byte_end": 1238
+},
+{
+"file": "src/nightly.rs",
+"fn_name": "provide",
+"container": "",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 1244,
+"body_byte_start": 1319,
+"body_byte_end": 1349
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "clone",
+"container": "impl Clone for Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 511,
+"body_byte_start": 536,
+"body_byte_end": 572
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "new",
+"container": "impl Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "into_raw"
+},
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "new_unchecked"
+}
+],
+"sig_byte_start": 622,
+"body_byte_start": 651,
+"body_byte_end": 732
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "cast",
+"container": "impl Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "U",
+"name": "Target"
+}
+],
+"sig_byte_start": 742,
+"body_byte_start": 786,
+"body_byte_end": 841
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "boxed",
+"container": "impl Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "Box",
+"name": "from_raw"
+}
+],
+"sig_byte_start": 858,
+"body_byte_start": 884,
+"body_byte_end": 941
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "by_ref",
+"container": "impl Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 951,
+"body_byte_start": 979,
+"body_byte_end": 1051
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "by_mut",
+"container": "impl Own < T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 1061,
+"body_byte_start": 1093,
+"body_byte_end": 1165
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "clone",
+"container": "impl Clone for Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 1489,
+"body_byte_start": 1514,
+"body_byte_end": 1573
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "new",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "NonNull",
+"name": "from_ref"
+},
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 1631,
+"body_byte_start": 1659,
+"body_byte_end": 1757
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "from_raw",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 1767,
+"body_byte_start": 1805,
+"body_byte_end": 1868
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "cast",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "U",
+"name": "Target"
+},
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 1878,
+"body_byte_start": 1926,
+"body_byte_end": 2018
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "by_mut",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 2028,
+"body_byte_start": 2059,
+"body_byte_end": 2131
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "as_ptr",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+}
+],
+"sig_byte_start": 2141,
+"body_byte_start": 2170,
+"body_byte_end": 2213
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "deref",
+"container": "impl Ref < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+}
+],
+"sig_byte_start": 2230,
+"body_byte_start": 2255,
+"body_byte_end": 2299
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "clone",
+"container": "impl Clone for Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 2639,
+"body_byte_start": 2664,
+"body_byte_end": 2723
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "cast",
+"container": "impl Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "cast"
+},
+{
+"kind": "path",
+"qualifier": "U",
+"name": "Target"
+},
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 2781,
+"body_byte_start": 2829,
+"body_byte_end": 2921
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "by_ref",
+"container": "impl Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 2931,
+"body_byte_start": 2962,
+"body_byte_end": 3034
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "extend",
+"container": "impl Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "marker",
+"name": "PhantomData"
+}
+],
+"sig_byte_start": 3044,
+"body_byte_start": 3079,
+"body_byte_end": 3151
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "deref_mut",
+"container": "impl Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+}
+],
+"sig_byte_start": 3168,
+"body_byte_start": 3201,
+"body_byte_end": 3249
+},
+{
+"file": "src/ptr.rs",
+"fn_name": "read",
+"container": "impl Mut < 'a , T >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "as_ptr"
+},
+{
+"kind": "path",
+"qualifier": "ptr",
+"name": "read"
+}
+],
+"sig_byte_start": 3293,
+"body_byte_start": 3313,
+"body_byte_end": 3372
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Debug for MessageError < M >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Debug",
+"name": "fmt"
+}
+],
+"sig_byte_start": 522,
+"body_byte_start": 576,
+"body_byte_end": 623
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Display for MessageError < M >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 699,
+"body_byte_start": 753,
+"body_byte_end": 802
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Debug for DisplayError < M >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 1105,
+"body_byte_start": 1159,
+"body_byte_end": 1208
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Display for DisplayError < M >",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 1276,
+"body_byte_start": 1330,
+"body_byte_end": 1379
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Debug for BoxedError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Debug",
+"name": "fmt"
+}
+],
+"sig_byte_start": 1883,
+"body_byte_start": 1937,
+"body_byte_end": 1985
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "fmt",
+"container": "impl Display for BoxedError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "Display",
+"name": "fmt"
+}
+],
+"sig_byte_start": 2079,
+"body_byte_start": 2133,
+"body_byte_end": 2183
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "source",
+"container": "impl StdError for BoxedError",
+"mod_path": "",
+"is_test": false,
+"refs": [
+{
+"kind": "path",
+"qualifier": "StdError",
+"name": "source"
+}
+],
+"sig_byte_start": 2278,
+"body_byte_start": 2333,
+"body_byte_end": 2380
+},
+{
+"file": "src/wrapper.rs",
+"fn_name": "provide",
+"container": "impl StdError for BoxedError",
+"mod_path": "",
+"is_test": false,
+"refs": [],
+"sig_byte_start": 2426,
+"body_byte_start": 2479,
+"body_byte_end": 2517
+},
+{
+"file": "src/fmt.gen_tests_3.rs",
+"fn_name": "one_digit",
+"container": "",
+"mod_path": "",
+"is_test": true,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "unwrap"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+},
+{
+"kind": "path",
+"qualifier": "String",
+"name": "new"
+}
+],
+"sig_byte_start": 50,
+"body_byte_start": 66,
+"body_byte_end": 355
+},
+{
+"file": "src/fmt.gen_tests_3.rs",
+"fn_name": "two_digits",
+"container": "",
+"mod_path": "",
+"is_test": true,
+"refs": [
+{
+"kind": "call",
+"qualifier": "",
+"name": "Some"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "unwrap"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+},
+{
+"kind": "path",
+"qualifier": "String",
+"name": "new"
+}
+],
+"sig_byte_start": 366,
+"body_byte_start": 383,
+"body_byte_end": 673
+},
+{
+"file": "src/fmt.gen_tests_3.rs",
+"fn_name": "no_digits",
+"container": "",
+"mod_path": "",
+"is_test": true,
+"refs": [
+{
+"kind": "method",
+"qualifier": "",
+"name": "unwrap"
+},
+{
+"kind": "method",
+"qualifier": "",
+"name": "write_str"
+},
+{
+"kind": "path",
+"qualifier": "String",
+"name": "new"
+}
+],
+"sig_byte_start": 684,
+"body_byte_start": 700,
+"body_byte_end": 980
+}
+]
+}

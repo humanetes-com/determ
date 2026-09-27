@@ -22,6 +22,16 @@ only `context`, answered with the call it had already shown cannot compile
 the run ever opened a write set holding `context` together with those
 table functions.
 
+Beyond the target's file. The file limit was the first answer to "who may
+write together", and it cannot write a coupling that spans files: the
+recursion `Boxed::new` (`src/kind.rs`) -> `from_boxed` ->
+`construct_from_boxed` (`src/error.rs`) of runs `38934-2999cc94` through
+`59479-cc3afffd` (2026-09-26/27) was opened per-fn on one member, whose
+reply could name only functions of its own file. A unit's COUPLED bodies
+(`domain.write_set.coupled_units`: a cycle of the tree's call graph, or of
+an observed faulting stack) are admitted from any file, resolved against
+that coupled set only; everything else keeps the file rule.
+
 Pure: records in, admission out. The splice, the judge and the revert are
 the route's (`fill_one_fn`)."""
 from __future__ import annotations
@@ -31,7 +41,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 
 #: How many functions besides the target one reply may add. Sized to the
 #: widest joint write measured: a table-builder and the three table entries
@@ -80,7 +90,8 @@ class JointAdmission:
             return ""
         parts = "; ".join(f"`{name}`: {why}" for name, why in self.refused)
         return ("Not written (the extra <FN> blocks may only name other "
-                f"functions of this file): {parts}.")
+                "functions of this file, or a body listed under "
+                f"COUPLED_BODIES): {parts}.")
 
 
 def _norm(text: str) -> str:
@@ -124,6 +135,7 @@ def admit_joint(
     records: Sequence[Mapping[str, Any]],
     cfg_dead: Collection[tuple[str, str]] = (),
     cap: int = DEFAULT_JOINT_MAX,
+    coupled: Collection[FnSite] = (),
 ) -> JointAdmission:
     """Which of the reply's extra ``<FN>`` blocks the unit may write.
 
@@ -132,32 +144,64 @@ def admit_joint(
     ``container``, ``sig_text``, ``cfg_predicates``). A block is admitted
     when its name resolves to exactly one record of ``target_file``: by
     name alone when one record has it, else by the block header matched to
-    the record's container. The target itself, a compiled-out function, a
-    second block for an admitted function and anything past ``cap`` are
-    refused, each with its reason; nothing is silently dropped."""
-    here = [r for r in records if str(r.get("file", "")) == target_file]
+    the record's container. A name the target's file does not declare
+    resolves against ``coupled`` (sites of any file), by name, then by the
+    block header against the site's container; a ``file::name`` spelling
+    picks the file. The target itself, a compiled-out function, a second
+    block for an admitted function and anything past ``cap`` are refused,
+    each with its reason; nothing is silently dropped."""
+    here_all = [r for r in records if str(r.get("file", "")) == target_file]
+    coupled_keys = {(c.file, c.fn_name, _norm(c.container)) for c in coupled}
+    coupled_recs = [r for r in records
+                    if (str(r.get("file", "")), str(r.get("fn_name", "")),
+                        _norm(str(r.get("container", "") or "")))
+                    in coupled_keys]
     dead = frozenset(cfg_dead)
     admitted: list[JointUnit] = []
     refused: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     for b in blocks:
         name = str(b.get("fn_name", "")).strip()
         block = str(b.get("block", "") or "")
         body = str(b.get("body", "") or "")
         shown = name + (f" [{block}]" if block else "")
-        if not any(str(r.get("fn_name", "")) == name for r in here):
+        if not any(str(r.get("fn_name", "")) == name for r in here_all):
             # Only when the literal name resolves to nothing: a fn whose own
             # name is the identifier keeps the reading it always had, and an
             # explicit `block=` outranks a container spelled into the name.
             bare, labelled = _split_label(name)
             if bare != name:
                 name, block = bare, (block or labelled)
+        # `src/other.rs::name` spells the file; only a coupled body may be
+        # named in another file than the target's.
+        spelled, _sep, leaf = name.rpartition("::")
+        spelled = spelled if _sep and spelled.endswith(".rs") else ""
+        if spelled:
+            name = leaf
         if not name or not body.strip():
             refused.append((shown or "?", "no name or no body"))
             continue
-        named = [r for r in here if str(r.get("fn_name", "")) == name]
+        coupled_named = [r for r in coupled_recs
+                         if str(r.get("fn_name", "")) == name
+                         and (not spelled or str(r.get("file", "")) == spelled)]
+        if spelled and spelled != target_file:
+            named = coupled_named
+        else:
+            named = [r for r in here_all if str(r.get("fn_name", "")) == name]
+            by_block = [r for r in coupled_named
+                        if _block_matches(block, str(r.get("container", "")))]
+            if (block and by_block and not spelled
+                    and not any(_block_matches(block, str(r.get("container", "")))
+                                for r in named)):
+                # The header names a coupled body, not this file's
+                # same-named function.
+                named = by_block
+            elif not named and not spelled:
+                named = coupled_named
         if not named:
-            refused.append((shown, f"no function of that name in {target_file}"))
+            refused.append((shown, f"no function of that name in {target_file}"
+                                   + (" or among the coupled bodies"
+                                      if coupled_recs else "")))
             continue
         if len(named) > 1:
             named = [r for r in named
@@ -168,14 +212,16 @@ def admit_joint(
                 continue
         rec = named[0]
         container = str(rec.get("container", ""))
-        if name == target_name and _norm(container) == _norm(target_container):
+        rec_file = str(rec.get("file", "")) or target_file
+        if (rec_file == target_file and name == target_name
+                and _norm(container) == _norm(target_container)):
             refused.append((shown, "that is the target — its body goes in "
                                    "<BODY>"))
             continue
-        if (target_file, name) in dead:
+        if (rec_file, name) in dead:
             refused.append((shown, "compiled out in this cluster"))
             continue
-        key = (name, _norm(container))
+        key = (rec_file, name, _norm(container))
         if key in seen:
             refused.append((shown, "given twice"))
             continue
@@ -184,7 +230,7 @@ def admit_joint(
             continue
         seen.add(key)
         admitted.append(JointUnit(
-            file=target_file, fn_name=name, container=container,
+            file=rec_file, fn_name=name, container=container,
             sig_text=str(rec.get("sig_text", "")),
             cfg_predicates=tuple(rec.get("cfg_predicates") or ()),
             body=body))
@@ -201,5 +247,7 @@ JOINT_OUTPUT_CLAUSE = (
     "  body without surrounding braces\n"
     "  </FN>\n"
     f"at most {DEFAULT_JOINT_MAX}. They are written and judged together with "
-    "this body: all kept or all reverted. Only functions of this file; "
+    "this body: all kept or all reverted. Only functions of this file, or a "
+    "body listed under COUPLED_BODIES (those may sit in another file: name "
+    'it `name="src/other.rs::fn_name"` with its impl header in `block`); '
     "leave them out when the target alone is enough.")

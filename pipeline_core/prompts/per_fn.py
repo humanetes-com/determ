@@ -70,6 +70,7 @@ def build_per_fn_prompt(
                          "invoked indirectly via a macro; consult MACROS below)")
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
         prefix=crash_evidence_prefix(
@@ -149,7 +150,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
+{crash_block}{coupled_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -249,6 +250,7 @@ def build_per_fn_fix_prompt(
         tests_section = "(no tests directly reference this fn — see MACROS)"
     annotated = annotate_file_view(file_text, fn_name)
     notes_block = tag_block("MODEL_NOTES", notes_section)
+    coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
         prefix=crash_evidence_prefix(
@@ -381,7 +383,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
+{crash_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 FILE (previous attempt reverted; stubs annotated):
 {file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}

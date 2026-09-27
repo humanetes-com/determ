@@ -5562,6 +5562,16 @@ def prepare_impl_fill(
                     "cluster": cluster_name, "tests": list(_sl.tests),
                     "admitted": [{**site_payload(u), "slot": t}
                                  for u, t in _installable_sites.items()]})
+            if _ws.coupled:
+                _log(f"  [phase-c/session] {_sl.label()}: {len(_ws.coupled)} "
+                     "coupled body(ies) admitted to the editable set — they "
+                     "sit on one cycle with an editable unit: " + ", ".join(
+                         f"{site_label(u)} ({c})"
+                         for u, c in _ws.coupled.items()))
+                _emit("phase_c.session.coupled_admitted", data={
+                    "cluster": cluster_name, "tests": list(_sl.tests),
+                    "admitted": [{**site_payload(u), "coupling": c}
+                                 for u, c in _ws.coupled.items()]})
             _sl, _records = _ws.slice_, _ws.records
             _units = _sl.units
             _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))

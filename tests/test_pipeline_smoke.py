@@ -2560,6 +2560,7 @@ def test_slice6_models() -> None:
         "cfg_predicates": ["feature = \"std\""], "is_pub": True, "is_exactly_pub": True,
         "container": "impl Error", "impl_self_generic": False, "mod_path": "ext",
         "has_unimplemented_body": True, "is_test": False,
+        "refs": [{"kind": "path", "qualifier": "Error", "name": "new"}],
     }
     fr = FnRecord.from_dict(fn_wire)
     assert fr.fn_name == "backtrace" and fr.container == "impl Error" and fr.has_unimplemented_body

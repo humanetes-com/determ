@@ -47,6 +47,7 @@ from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
     locator_of,
+    site_label,
     site_payload,
     union_unattributed_stubs,
 )
@@ -85,6 +86,7 @@ from pipeline_core.domain.crash_site import (
     destruction_path_subjects,
     faulting_stack_records,
     faulting_stack_sites,
+    observed_cycle_sites,
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
@@ -252,6 +254,7 @@ from pipeline_core.domain.test_results import (
     uncoded_src_diagnostics,
 )
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
+from pipeline_core.domain.write_set import bind_observed as bind_observed_cycles
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
     paid_off,
@@ -3311,7 +3314,9 @@ def run_phase_c_tdd(
                              f"::{_site.test_name or '?'} {_site.signal} — "
                              f"blamed {_site.blame_label} "
                              f"(fault={_site.fault.value}, "
-                             f"provenance={_site.provenance})")
+                             + (f"abort={_site.abort.label()}, "
+                                if _site.abort is not None else "")
+                             + f"provenance={_site.provenance})")
                     # Access and origin stacks stay SEPARATE on the event: the
                     # old single `frames` list was access+origin concatenated,
                     # so "origin is empty" was only inferrable by counting, and
@@ -3328,6 +3333,8 @@ def run_phase_c_tdd(
                         "blamed": (None if _site.blamed is None else
                                    [_site.blamed.file_rel, _site.blamed.fn_name]),
                         "fault": _site.fault.value,
+                        "abort": (None if _site.abort is None
+                                  else _site.abort.label()),
                         "culprits": sorted(
                             f"{c.file}::{c.fn_name}"
                             for c in _site.culprit_locators),
@@ -4866,6 +4873,23 @@ def run_phase_c_tdd(
                     "claim(s) withheld and those tests' owner sets kept as "
                     "positive evidence only")
         bind_coverage_slice(_cov)
+        # The sweep's observed cycles, for every route's write set
+        # (`domain.write_set`): bound, not passed, so no route can open a
+        # cycle member without them. Cleared on a sweep with none.
+        _cycles_seen: tuple[frozenset[FnSite], ...] = ()
+        if (deps.enumerate_fns is not None
+                and any(getattr(s, "cycle", None) is not None for s in _sites)):
+            _cycles_seen = observed_cycle_sites(
+                _sites,
+                [FnRecord.from_dict(r)
+                 for r in deps.enumerate_fns(target_src_dir) or []],
+                lambda rel: _read_cluster_file(target_src_dir, rel))
+        bind_observed_cycles(_cycles_seen)
+        if _cycles_seen:
+            deps.log(f"  {tag} [phase-c/write-set] observed cycle(s) bound "
+                     "for every route's write set: " + "; ".join(
+                         " <-> ".join(site_label(x) for x in sorted(c))
+                         for c in _cycles_seen))
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
         # The owner sets the ranking and the admission read: measured

@@ -69,6 +69,7 @@ from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.std_api_sigs import std_api_def
+from pipeline_core.domain.test_results import join_capture
 
 
 def _no_stop(_context: str) -> None:
@@ -426,9 +427,7 @@ def generate_fix_loop(
                     deps.parse_cmd(check_cmd), cwd=project_dir,
                     capture_output=True, text=True, timeout=timeout, env=env,
                 )
-                output = result.stdout + (
-                    "\n--- stderr ---\n" + result.stderr if result.stderr else ""
-                )
+                output = join_capture(result.stdout, result.stderr)
                 if result.returncode == 0:
                     return True, output, 0
         except subprocess.TimeoutExpired:

@@ -166,3 +166,67 @@ def test_negative_control_shared_process_charges_the_fill(
                      monkeypatch, "filled")
     cmp = compare_readings(base, after)
     assert cmp.regressed and cmp.newly_crashed
+
+
+# ---- a stderr line is never a verdict (2026-09-27) ----
+#
+# The sanitized sweep of run `12616-8345ae1d` joined stdout and stderr with no
+# mark, and trybuild's stderr progress line (`test tests/ui/x.rs ... ok`)
+# became the in-flight test of a binary that aborted before libtest flushed
+# its own line. The fix rests on one fact about cargo: a test process's raw
+# stderr reaches cargo's STDERR, never its stdout. The invented crate writes a
+# verdict-shaped line (no colour, so the name rule cannot catch it) straight
+# to the process's stderr, then aborts inside the test libtest announced.
+
+_PHANTOM_TESTS = """use std::io::Write;
+
+#[test]
+fn real_in_flight() {
+    std::io::stderr().write_all(b"test phantom_from_stderr ... \\n").unwrap();
+    std::io::stderr().flush().unwrap();
+    std::process::abort();
+}
+"""
+
+
+def _phantom_crate(root: Path) -> Path:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    # No doc tests: the aborted binary is the last stdout section, as in the
+    # sanitized sweep (`--target` skips doc tests), so nothing closes after it.
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "phantom")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text("pub fn f() {}\n")
+    (root / "tests" / "phantom.rs").write_text(_PHANTOM_TESTS)
+    return root
+
+
+def _shared_capture(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+    """(stdout, stderr) of the shared-process run, through the real adapter."""
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "0")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "phantom")
+    p = CargoCli().run(_CMD, root, env=env, timeout=600)
+    return p.stdout, p.stderr
+
+
+def test_premise_a_test_process_s_raw_stderr_reaches_cargo_s_stderr(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out, err = _shared_capture(_phantom_crate(tmp_path / "p"), monkeypatch)
+    assert "phantom_from_stderr" in err and "phantom_from_stderr" not in out, (
+        "cargo no longer keeps a test process's stderr apart from libtest's "
+        "stdout — the capture layout's split has nothing to split on")
+    assert "test real_in_flight ..." in out
+
+
+def test_the_in_flight_test_is_libtest_s_not_the_stderr_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_results import join_capture
+    out, err = _shared_capture(_phantom_crate(tmp_path / "p"), monkeypatch)
+    (b,) = [b for b in parse_binary_results(join_capture(out, err))
+            if b.label.endswith("phantom.rs")]
+    assert not b.completed and b.dangling == "real_in_flight"
+    # Negative control: the sweep's old unmarked join.
+    (old,) = [b for b in parse_binary_results(out + "\n" + err)
+              if b.label.endswith("phantom.rs")]
+    assert old.dangling == "phantom_from_stderr"

@@ -348,6 +348,27 @@ def type_records_from_enumeration(data: Any) -> list[TypeRecord] | None:
     return [replace(TypeRecord.from_dict(r), blanket_impls=blankets)
             for r in data["types"]]
 
+
+@dataclass(frozen=True, slots=True)
+class FnRef:
+    """One reference a fn body spells (model.rs FnRef): ``kind`` is
+    ``path`` (``Q::name`` / ``Q::name::<T>``, ``qualifier`` = ``Q``, or
+    empty for a turbofish-only ``name::<T>``), ``call`` (``name(…)``) or
+    ``method`` (``.name(…)``). Syntax only — resolution to a record is
+    `domain.reference_graph`'s."""
+    kind: str
+    qualifier: str
+    name: str
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FnRef:
+        return cls(str(d.get("kind", "")), str(d.get("qualifier", "")),
+                   str(d.get("name", "")))
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "qualifier": self.qualifier,
+                "name": self.name}
+
 @dataclass(frozen=True, slots=True)
 class FnRecord:
     """A free fn / inherent or trait-impl method / trait method (model.rs FnRecord)."""
@@ -382,6 +403,10 @@ class FnRecord:
     mod_path: str = ""
     has_unimplemented_body: bool = False
     is_test: bool = False       # carries a test attr (#[test]/#[tokio::test]/#[rstest]/…)
+    # Every fn-shaped reference the body spells (model.rs FnRef), as syntax;
+    # `domain.reference_graph` resolves them. Empty for records written
+    # before the extractor emitted them.
+    refs: tuple[FnRef, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FnRecord:
@@ -401,6 +426,8 @@ class FnRecord:
             mod_path=d.get("mod_path", ""),
             has_unimplemented_body=bool(d.get("has_unimplemented_body", False)),
             is_test=bool(d.get("is_test", False)),
+            refs=tuple(FnRef.from_dict(r) for r in d.get("refs") or ()
+                       if isinstance(r, dict)),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -420,6 +447,7 @@ class FnRecord:
             "mod_path": self.mod_path,
             "has_unimplemented_body": self.has_unimplemented_body,
             "is_test": self.is_test,
+            "refs": [r.to_dict() for r in self.refs],
         }
 
 

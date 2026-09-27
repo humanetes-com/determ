@@ -104,6 +104,7 @@ impl<'a> FnEnumerator<'a> {
                 .join("::"),
             has_unimplemented_body: body_looks_unimplemented(&body_text),
             is_test,
+            refs: collect_fn_refs(block),
         });
     }
 
@@ -1497,6 +1498,134 @@ pub fn enumerate_doc_items_in_tree(input_dir: &Path) -> Result<Vec<DocItemRecord
         out.append(&mut c.out);
     }
     Ok(out)
+}
+
+/// Every fn-shaped reference a body spells, as syntax: `Q::name(…)` and
+/// `Q::name::<T>` / `Q::name` without a call (kind `path`, qualifier = the
+/// segment before the name), `name(…)` (kind `call`), `.name(…)` and
+/// `.name::<T>(…)` (kind `method`). A token walk, so macro arguments
+/// (`format!("{}", self.inner.name())`, `backtrace!()`) are read like any
+/// other tokens; a macro's own name (`name!`) is not a reference. No
+/// resolution happens here: which record a spelling names is the pipeline's
+/// question, and it refuses a spelling that does not decide it.
+pub(crate) fn collect_fn_refs(block: &syn::Block) -> Vec<FnRef> {
+    use quote::ToTokens;
+    let mut out = std::collections::BTreeSet::new();
+    walk_fn_refs(block.to_token_stream(), &mut out);
+    out.into_iter().collect()
+}
+
+const NOT_A_FN_NAME: &[&str] = &[
+    "as", "break", "const", "continue", "crate", "else", "enum", "fn", "for", "if", "impl", "in",
+    "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
+    "struct", "super", "trait", "type", "unsafe", "use", "where", "while", "dyn", "async", "await",
+];
+
+fn walk_fn_refs(ts: TokenStream, out: &mut std::collections::BTreeSet<FnRef>) {
+    use proc_macro2::{Delimiter, Spacing, TokenTree};
+    let t: Vec<TokenTree> = ts.into_iter().collect();
+    let punct =
+        |i: usize, c: char| matches!(t.get(i), Some(TokenTree::Punct(p)) if p.as_char() == c);
+    let path_sep = |i: usize| {
+        matches!(t.get(i), Some(TokenTree::Punct(p)) if p.as_char() == ':' && p.spacing() == Spacing::Joint)
+            && punct(i + 1, ':')
+    };
+    // Index just past the `>` closing the `<` at `i`. A `>` that ends an
+    // arrow (`Fn() -> T`) is not a closing bracket.
+    let skip_angle = |i: usize| {
+        let mut depth = 0usize;
+        let mut j = i;
+        while j < t.len() {
+            if let TokenTree::Punct(p) = &t[j] {
+                let arrow = p.as_char() == '>'
+                    && matches!(t.get(j.wrapping_sub(1)), Some(TokenTree::Punct(q))
+                        if q.as_char() == '-' && q.spacing() == Spacing::Joint);
+                if p.as_char() == '<' {
+                    depth += 1;
+                } else if p.as_char() == '>' && !arrow {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return j + 1;
+                    }
+                }
+            }
+            j += 1;
+        }
+        j
+    };
+    let paren = |i: usize| matches!(t.get(i), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
+    let mut push = |kind: &str, qualifier: &str, name: &str| {
+        if !NOT_A_FN_NAME.contains(&name) {
+            out.insert(FnRef {
+                kind: kind.to_string(),
+                qualifier: qualifier.to_string(),
+                name: name.to_string(),
+            });
+        }
+    };
+    let mut groups: Vec<TokenStream> = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        match &t[i] {
+            TokenTree::Group(g) => {
+                groups.push(g.stream());
+                i += 1;
+            }
+            TokenTree::Ident(id) => {
+                let after_fn = i > 0 && matches!(&t[i - 1], TokenTree::Ident(k) if k == "fn");
+                let after_sep = i >= 2 && path_sep(i - 2);
+                if after_fn || after_sep {
+                    i += 1;
+                    continue;
+                }
+                if i > 0 && punct(i - 1, '.') {
+                    let mut j = i + 1;
+                    if path_sep(j) && punct(j + 2, '<') {
+                        j = skip_angle(j + 2);
+                    }
+                    if paren(j) {
+                        push("method", "", &id.to_string());
+                    }
+                    i += 1;
+                    continue;
+                }
+                let mut segs = vec![id.to_string()];
+                let mut turbofish = false;
+                let mut j = i + 1;
+                while path_sep(j) {
+                    if let Some(TokenTree::Ident(n)) = t.get(j + 2) {
+                        segs.push(n.to_string());
+                        j += 3;
+                    } else if punct(j + 2, '<') {
+                        j = skip_angle(j + 2);
+                        turbofish = true;
+                    } else {
+                        break;
+                    }
+                }
+                if punct(j, '!') {
+                    i = j + 1;
+                    continue;
+                }
+                let name = segs.last().cloned().unwrap_or_default();
+                if segs.len() >= 2 || turbofish {
+                    let qual = if segs.len() >= 2 {
+                        segs[segs.len() - 2].clone()
+                    } else {
+                        String::new()
+                    };
+                    push("path", &qual, &name);
+                } else if paren(j) {
+                    push("call", "", &name);
+                }
+                i = j.max(i + 1);
+            }
+            _ => i += 1,
+        }
+    }
+    for g in groups {
+        walk_fn_refs(g, out);
+    }
 }
 
 /// Walk a macro body's token stream and collect every method name invoked as

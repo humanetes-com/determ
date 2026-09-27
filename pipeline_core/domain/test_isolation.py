@@ -38,6 +38,7 @@ from pipeline_core.domain.test_results import (
     failure_block_name,
     is_section_header,
     parse_binary_results,
+    split_capture,
     target_label,
 )
 
@@ -195,21 +196,33 @@ def _failure_body(out: str, name: str) -> str:
     return ""
 
 
+#: How an isolated block labels the lines its process wrote to stderr. Not
+#: :data:`STDERR_MARK`: the block sits inside the capture's stdout, and a
+#: second mark there is what made two readers split one capture two ways.
+STDERR_IN_BLOCK = "(stderr)"
+
+
 def read_single_test_run(
     name: str, rc: int, out: str, *, timed_out: bool, timeout: float,
+    stderr: str | None = None,
 ) -> IsolatedTest:
-    """The outcome of ``name``'s own process from its combined capture.
+    """The outcome of ``name``'s own process. ``out`` is its stdout and
+    ``stderr`` its stderr; with ``stderr`` omitted, ``out`` is a joined
+    capture and is split (`split_capture`).
 
     A section that closed carries libtest's verdict. One that did not close
     is an abort of THIS test's process (its body is everything the process
-    printed after the section opened, which is where the runtime's panic
-    lines land); a run the timeout cut is a hang. A process that printed no
-    section at all (the binary refused to start) is a failure whose body is
-    the whole capture — never a pass."""
+    printed on stdout after the section opened, then its stderr — which is
+    where the runtime's panic lines land — under :data:`STDERR_IN_BLOCK`);
+    a run the timeout cut is a hang. A process that printed no section at
+    all (the binary refused to start) is a failure whose body is the whole
+    output — never a pass."""
+    stdout, err = (out, stderr) if stderr is not None else split_capture(out)
+    whole = stdout + (f"\n{STDERR_IN_BLOCK}\n{err}" if err.strip() else "")
     if timed_out:
         return IsolatedTest(name, IsolatedStatus.HUNG,
                             f"test did not return within {timeout:.0f}s")
-    sections = parse_binary_results(out)
+    sections = parse_binary_results(stdout)
     sec = sections[0] if sections else None
     if sec is not None and sec.completed:
         if name in sec.passed:
@@ -218,20 +231,22 @@ def read_single_test_run(
             return IsolatedTest(name, IsolatedStatus.IGNORED)
         if name in sec.failed:
             return IsolatedTest(name, IsolatedStatus.FAILED,
-                                _failure_body(out, name) or out.strip())
+                                _failure_body(stdout, name) or whole.strip())
     if sec is not None:
         after: list[str] = []
         opened = False
-        for ln in out.splitlines():
+        for ln in stdout.splitlines():
             if opened:
                 after.append(ln)
             elif is_section_header(ln.strip()):
                 opened = True
-        body = "\n".join(after).strip("\n") or out.strip()
+        if err.strip():
+            after += [STDERR_IN_BLOCK, *err.splitlines()]
+        body = "\n".join(after).strip("\n") or whole.strip()
         return IsolatedTest(name, IsolatedStatus.ABORTED,
                             f"{body}\n(exit status {rc})")
     return IsolatedTest(name, IsolatedStatus.FAILED,
-                        out.strip() or f"(exit status {rc}, no output)")
+                        whole.strip() or f"(exit status {rc}, no output)")
 
 
 def render_isolated_section(tests: Sequence[IsolatedTest]) -> str:

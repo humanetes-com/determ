@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.test_results import join_capture
+
 from ...application.reconstruct.attribution import not_body_repairable_tests
 from ...domain.reference_floor import (
     ReferenceMeasurement,
@@ -152,7 +154,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
                       f"{deps.test_timeout}s")
             log(f"  [task3/{cluster.name}] {stderr}")
         dt = time.monotonic() - t_c
-        output = stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+        output = join_capture(stdout, stderr)
         pass_n, fail_n, ign_n = parse_test_counts(output)
         expected_n = deps.count_active_tests_for_cluster(project_dir, cluster)
         status, reason = validate_task3_output_strict(

@@ -65,6 +65,7 @@ from pipeline_core.domain.test_results import (
     compare_readings,
     failure_bodies_for,
     hung_sections,
+    join_capture,
     parse_binary_results,
     parse_failed_tests,
     render_regression_detail,
@@ -88,9 +89,10 @@ _KNOWN_SUBS = {"check", "test", "build", "run", "doc", "clippy"}
 
 
 def _combined(stdout: str, stderr: str) -> str:
-    """stdout + stderr in the legacy `_run_cargo` layout — built from the
-    port's plain stdout/stderr (keeps the port a pure result record)."""
-    return stdout + ("\n--- stderr ---\n" + stderr if stderr else "")
+    """stdout + stderr in the one capture layout (`test_results.join_capture`)
+    — built from the port's plain stdout/stderr (keeps the port a pure
+    result record)."""
+    return join_capture(stdout, stderr)
 
 
 def run_cargo(
@@ -150,9 +152,9 @@ def isolate_aborted_binaries(
     binary, and a harness may read it at runtime)."""
     if not (isolation_enabled() and is_isolatable_test_run(cmd)):
         return stdout, stderr
+    # Sections are read from stdout only, so this is stdout's own section
+    # list with the labels and executables stderr names.
     combined = parse_binary_results(_combined(stdout, stderr))
-    if len(combined) != len(parse_binary_results(stdout)):
-        return stdout, stderr
     targets = [(i, b) for i, b in enumerate(combined)
                if not b.completed and not b.hung and b.exe_path]
     if not targets:
@@ -187,7 +189,7 @@ def isolate_aborted_binaries(
             timed_out = (one.returncode == -1
                          and getattr(one, "failure", None) is not ProcessFailure.BINARY_MISSING)
             runs.append(read_single_test_run(
-                name, one.returncode, _combined(one.stdout, one.stderr),
+                name, one.returncode, one.stdout, stderr=one.stderr,
                 timed_out=timed_out, timeout=min(left, timeout)))
         if len(runs) != len(names):
             continue

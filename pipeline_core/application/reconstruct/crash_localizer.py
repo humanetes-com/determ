@@ -31,18 +31,19 @@ from pathlib import Path
 from pipeline_core.domain.crash_site import (
     AsanReport,
     CrashSite,
+    FaultClass,
     SourceWindow,
     asan_stack_excerpt,
     enclosing_fn_window,
     first_test_file_after_destructor,
     first_test_file_on_access,
-    is_memory_fault_signal,
     parse_asan_reports,
     relativize_frame_files,
     site_from_frames,
 )
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
+from pipeline_core.domain.test_outcome import abort_readings
 from pipeline_core.domain.test_results import BinaryResult, parse_binary_results
 
 # adapter signatures (composition injects the concrete fns)
@@ -55,11 +56,6 @@ class CrashLocalizerDeps:
     gdb_localize: GdbLocalize          # adapters.gdb_backtrace.localize_crashed_binary
     asan_sweep: AsanSweep | None       # adapters.asan_sweep.run_asan_sweep (None: unavailable)
     log: Callable[[str], None]
-
-
-# The memory-fault classification is the domain's (`crash_site`), so the
-# blame rule and the escalation rule below can never drift apart.
-_is_memory_fault = is_memory_fault_signal
 
 
 def _read_lines(workspace_root: Path, file_rel: str) -> list[str] | None:
@@ -286,6 +282,11 @@ def localize_crashes(
     if not crashed:
         return ()
     considered = crashed[:max_binaries]
+    # What each isolated test's own process announced when it aborted: the
+    # debugger's signal names how the process died, not why (a stack
+    # overflow is a SIGSEGV to gdb), and the site's fault class reads this
+    # first.
+    causes = abort_readings(sweep_output)
     sites: list[CrashSite] = []
     for b, test_filter in considered:
         if not b.exe_path:
@@ -306,7 +307,9 @@ def localize_crashes(
         if got is None:
             continue
         signal, frames = got
-        site = site_from_frames(b.label, b.dangling, signal, frames)
+        site = site_from_frames(
+            b.label, b.dangling, signal, frames,
+            abort=causes.get(b.dangling or ""))
         if site.frames:
             sites.append(site)
     if deps.asan_sweep is None:
@@ -317,7 +320,8 @@ def localize_crashes(
     # innermost frame may be an innocent reader.
     unreproduced = len(sites) < len(considered)
     needs_origin = unreproduced or any(
-        _is_memory_fault(s.signal) and not s.origin_frames for s in sites)
+        s.fault is FaultClass.INVALID_MEMORY and not s.origin_frames
+        for s in sites)
     if not needs_origin:
         return tuple(sites)
     deps.log("  [phase-c/crash-localizer] "

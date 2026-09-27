@@ -157,7 +157,7 @@ def _all_crate_frames(fixture: str) -> list[CrashFrame]:
 def test_negative_control_read_as_invalid_memory_the_cycle_blames_nobody(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(crash_site, "fault_class",
-                        lambda _sig: FaultClass.INVALID_MEMORY)
+                        lambda _sig, _abort=None: FaultClass.INVALID_MEMORY)
     sites = _sites(_TWO, _BINARIES)
     assert all(s.origin_unattributed for s in sites)
     assert all(s.blamed is None and not s.culprit_locators for s in sites)
@@ -205,7 +205,7 @@ def test_the_cycle_reaches_the_block_planner_as_a_refill_stamp() -> None:
 def test_negative_control_the_old_blame_stamped_neither(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(crash_site, "fault_class",
-                        lambda _sig: FaultClass.INVALID_MEMORY)
+                        lambda _sig, _abort=None: FaultClass.INVALID_MEMORY)
     assert _stamped(blamed_locators(_sites(_TWO, _BINARIES))) == set()
 
 
@@ -236,7 +236,7 @@ def test_only_the_cycle_carries_the_evidence_not_the_innermost_frame() -> None:
 def test_negative_control_the_old_reading_printed_one_block_per_binary(
         monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(crash_site, "fault_class",
-                        lambda _sig: FaultClass.INVALID_MEMORY)
+                        lambda _sig, _abort=None: FaultClass.INVALID_MEMORY)
     sites = _sites(_TWO, _BINARIES)
     text = crash_evidence_by_locator(sites)[_LOC_CFB]
     assert text.count("The detector did not report an in-crate origin") == 3
