@@ -252,6 +252,7 @@ from pipeline_core.domain.test_results import (
     summarize_test_binaries,
     sweep_build,
     uncoded_src_diagnostics,
+    unmeasured_failures,
 )
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
 from pipeline_core.domain.write_set import bind_observed as bind_observed_cycles
@@ -2300,8 +2301,9 @@ def run_phase_c_tdd(
         # A bare name is not a verdict here: one name runs in several binaries,
         # and a crashed binary breaks the name<->execution mapping in both
         # directions at once. Pairs are what `tools/pass_delta.py` must diff.
-        _p_pairs, _f_pairs, _incomplete = qualified_verdicts(
-            parse_binary_results(output))  # same output `_rec` was read from
+        _sweep_bins = parse_binary_results(output)  # same output `_rec` was read from
+        _p_pairs, _f_pairs, _incomplete = qualified_verdicts(_sweep_bins)
+        _unmeasured = unmeasured_failures(_sweep_bins, cur_failed)
         _measure = Measurement(
             cluster=cluster.name, iteration=iter_n,
             tree_sha=_tree_sha,
@@ -6098,14 +6100,11 @@ def run_phase_c_tdd(
                     crash_evidence=crash_texts or None,
                     crash_blamed=crash_blamed or None,
                     crash_blocked=crash_blocked_units,
-                    # Tests listed failed whose binary did not complete
-                    # (no pair in failed_pairs). The schedule ranks a run
+                    # Failing tests whose own verdict was never read
+                    # (`unmeasured_failures`). The schedule ranks a run
                     # whose every aimed test is in this set, and whose
                     # targets miss crash_blamed, as a flat re-buy.
-                    unmeasurable_tests=frozenset(
-                        bare_test_name(t) for t in cur_failed
-                        if bare_test_name(t) not in {
-                            bare_test_name(n) for _b, n in _f_pairs}),
+                    unmeasurable_tests=_unmeasured,
                     attributed=_attributed_locs,
                     unit_evidence=_unit_evidence,
                     body_rows=_body_rows,

@@ -88,6 +88,12 @@ markers = [
     # class, with no model. Cargo-backed ones skip unless INTEGRATION=1;
     # `scripts/run_integration.sh` runs the whole set.
     "integration: real adapters over an invented shape reproducing one defect class",
+    # A gate test is an integration test whose failure must refuse the launch:
+    # a contract between a real tool's output and a DECISION the loop makes
+    # (the schedule's crash inputs). `pre_run.sh` runs `-m gate` with
+    # INTEGRATION=1 as its own stage, so a change to how the pipeline measures
+    # cannot silently turn a decision off.
+    "gate: real-tool contract that pre_run.sh runs and refuses the stamp on",
 ]
 
 # Enforce the clean-architecture dependency rule: a higher layer

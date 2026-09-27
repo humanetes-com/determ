@@ -11,8 +11,8 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -25,6 +25,7 @@ from pipeline_core.domain.last_error import (
     LastErrorKind,
     instruction_for,
 )
+from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reference_floor import doc_test_line
 
 
@@ -1907,6 +1908,56 @@ def hung_sections(test_output: str) -> tuple[BinaryResult, ...]:
     timeout cut a build, not a test."""
     return tuple(b for b in parse_binary_results(test_output, timed_out=True)
                  if b.hung)
+
+
+def native_crashes(
+    binaries: Sequence[BinaryResult],
+) -> tuple[tuple[BinaryResult, str | None], ...]:
+    """The native faults a reading still shows, each as (binary, the one test
+    to re-run or None for the whole binary). This is the one definition of
+    "the crash is still there": the localizer blames units from it, and every
+    later reader that asks whether that blame still holds reads the same set.
+
+    Two shapes carry a native fault. A binary whose section never closed (it
+    could not be re-run one test per process). And, the normal case since the
+    capture isolates aborted binaries, a test whose OWN process died without
+    printing a panic (`aborted_silent`): an isolated binary always completes,
+    so a reader that asks only "did a binary not complete" sees no crash on
+    any isolated capture. Run `118933-877c43bd` (2026-09-27) fill 1: the
+    stale-refill probe asked exactly that and dropped a crash-blamed unit as
+    "crash gone" while 11 binaries were still aborting on the same stack
+    overflow. An abort that printed a panic already names its site in its
+    failure block and is not a native fault."""
+    out: list[tuple[BinaryResult, str | None]] = []
+    for b in binaries:
+        if not b.completed:
+            out.append((b, None))
+        for name in sorted(b.aborted_silent):
+            out.append((replace(b, dangling=name), name))
+    return tuple(out)
+
+
+def unmeasured_failures(
+    binaries: Sequence[BinaryResult], failed: Iterable[str],
+) -> frozenset[str]:
+    """Bare names of the failing tests whose own verdict was never read: the
+    failure reported with no binary verdict behind it (its binary died before
+    it printed one), or a test the reading still shows as a native crash
+    (:func:`native_crashes`) — its process died before any assertion spoke.
+
+    The schedule ranks a run aimed only at these, holding no crash-blamed
+    unit, as a flat re-buy. Before `native_crashes` this was "no binary
+    verdict" alone, which an isolated capture never produces: from the day
+    isolation shipped (2026-09-19) to run `118933-877c43bd` (2026-09-27) the
+    set was non-empty in 1 of ~160 fills, and the fill of that run put two
+    formatter pairs and six file/impl runs aimed only at 13 stack-overflow
+    aborts into the budget beside the runs holding the recursion."""
+    verdicted = {bare_test_name(n) for b in binaries for n in b.failed}
+    crashed = {bare_test_name(name) for _b, name in native_crashes(binaries)
+               if name}
+    return frozenset(
+        bare for bare in (bare_test_name(n) for n in failed)
+        if bare not in verdicted or bare in crashed)
 
 
 def still_open_names(output: str) -> frozenset[str]:

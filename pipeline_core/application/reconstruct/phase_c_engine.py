@@ -95,6 +95,7 @@ from pipeline_core.domain.refill_stamp import (
 from pipeline_core.domain.refine import FixProgress, FloorStall
 from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_results import (
+    native_crashes,
     parse_binary_results,
     parse_failed_tests,
     still_open_names,
@@ -746,10 +747,12 @@ class PhaseCFillEngine:
                 _still_open = still_open_names(_out_probe)
                 # The collector admitted on failing tests OR crash blame; the
                 # probe re-asks the same question of its own reading. Blame
-                # holds while the probe still has a binary that did not
-                # complete — the crash the localizer read.
-                _crash_now = any(not b.completed
-                                 for b in parse_binary_results(_out_probe))
+                # holds while the probe still shows a native crash, by the
+                # localizer's own definition (`native_crashes`): the probe's
+                # capture is isolated, so its aborting binaries complete and
+                # "a binary did not complete" can never hold on it.
+                _crash_now = bool(native_crashes(
+                    parse_binary_results(_out_probe)))
                 _blamed = crash_blamed or frozenset()
                 _fresh_recs = [
                     r for r in _refill_recs

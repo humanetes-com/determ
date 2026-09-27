@@ -775,6 +775,50 @@ def test_a_crash_blamed_refill_stays_while_the_probe_still_crashes(
     assert any("behavioral re-fill target(s)" in m for m in fake.logs)
 
 
+def _isolated_stack_overflow_capture() -> str:
+    """What `run_cargo` hands every reader when a binary aborts on a stack
+    overflow: the binary re-run one test per process and its section rebuilt
+    — built here by the same reader and renderer production uses."""
+    from pipeline_core.domain.test_isolation import (
+        read_single_test_run,
+        render_isolated_section,
+    )
+    one = read_single_test_run(
+        "t_crashed", -6, "running 1 test\ntest t_crashed ... ",
+        stderr=("thread 't_crashed' has overflowed its stack\n"
+                "fatal runtime error: stack overflow, aborting\n"),
+        timed_out=False, timeout=120)
+    return ("    Running tests/ring.rs (target/debug/deps/ring-abc)\n"
+            + render_isolated_section([one]))
+
+
+def test_a_crash_blamed_refill_stays_while_an_isolated_probe_still_aborts(
+        tmp_path: Path) -> None:
+    """Run `118933-877c43bd` (2026-09-27) fill 1: the probe's capture is
+    isolated, so the aborting binary's section is rebuilt COMPLETE, and the
+    probe dropped the stack-overflow-blamed `construct_from_boxed` as "crash
+    gone" while 11 binaries were still aborting. Blame holds while the
+    reading still shows the crash by the localizer's own definition."""
+    fake = _crash_blamed_probe(tmp_path, (101,
+                                          _isolated_stack_overflow_capture()))
+    assert "phase_c.refill.stale_dropped" not in fake.events
+    assert any("behavioral re-fill target(s)" in m for m in fake.logs)
+
+
+def test_the_pre_fix_probe_question_sees_no_crash_on_an_isolated_capture(
+) -> None:
+    # Negative control: the question the probe used to ask ("did a binary not
+    # complete") reads this capture as crash-free; the shared definition
+    # reads the abort.
+    from pipeline_core.domain.test_results import (
+        native_crashes,
+        parse_binary_results,
+    )
+    bins = parse_binary_results(_isolated_stack_overflow_capture())
+    assert not any(not b.completed for b in bins)
+    assert [name for _, name in native_crashes(bins)] == ["t_crashed"]
+
+
 def test_a_crash_blamed_refill_is_dropped_once_the_crash_is_gone(
         tmp_path: Path) -> None:
     # Negative control: the same unit when every binary completes — the crash

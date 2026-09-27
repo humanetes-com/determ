@@ -1180,6 +1180,23 @@ class CrashSite:
 #: fault class's renderer below.
 CRASH_EVIDENCE_LEAD = "A test binary CRASHED at runtime inside this file:\n"
 
+
+def crash_evidence_for_units(
+    evidence: Mapping[FnLocator, str],
+    units: Collection[FnSite] | None,
+) -> str:
+    """The rendered evidence of every crash blamed on one of ``units`` (every
+    crash when None), each distinct block once, in the localizer's order.
+    Evidence is keyed by locator and a unit is a site, so they join on the
+    locator's own identity, ``(file, fn_name)``, after the same path
+    normalization every locator reader applies."""
+    keys = (None if units is None
+            else {(norm_src_rel(u.file), u.fn_name) for u in units})
+    return "\n\n".join(dict.fromkeys(
+        txt for loc, txt in evidence.items()
+        if txt and (keys is None
+                    or (norm_src_rel(loc.file), loc.fn_name) in keys)))
+
 #: The invalid-memory instruction about the bodies already on disk. It used to
 #: be appended by the file-first builder to every crash block whatever its
 #: class; it is this class's claim — memory that outlived its owner is a

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The gate a run has to pass before `continue.sh` will start one.
 #
-# Three stages, in this order, because they answer different questions and each is
+# Four stages, in this order, because they answer different questions and each is
 # unreadable while the one before it is red:
 #
 #   1. the extractor build — "is the binary the pipeline runs the one these sources
@@ -9,7 +9,10 @@
 #      compiled artefact, and only a build keeps the two from drifting apart.
 #   2. check.sh — "is the code correct". Static gates, the pytest suite, the
 #      coverage ratchet. A type error or a broken invariant fails here.
-#   3. walks    — "does the loop's decision sequence go where the theory says".
+#   3. gate contracts — "does each decision still see what real cargo reports".
+#      Integration tests marked `gate`, run with INTEGRATION=1: a decision's
+#      inputs derived from a real capture through the real runner.
+#   4. walks    — "does the loop's decision sequence go where the theory says".
 #      Each walk replays a recorded pathological run through the real
 #      `run_phase_c_tdd` with cargo and the model stubbed, and asserts on the
 #      DECISION the fix was supposed to make reachable. A walk carries its own
@@ -78,10 +81,10 @@ fi
 # habit that the rest of this file exists to stop relying on.
 if [[ "$_WALKS_ONLY" == true ]]; then
     echo ""
-    echo "--- stage 1/3: extractor build ....... SKIPPED (--walks-only) ---"
+    echo "--- stage 1/4: extractor build ....... SKIPPED (--walks-only) ---"
 else
     echo ""
-    echo "--- stage 1/3: cargo build --release (the extractor binary the pipeline runs) ---"
+    echo "--- stage 1/4: cargo build --release (the extractor binary the pipeline runs) ---"
     if ! (cd "$SCRIPT_DIR/tools/skeleton_extractor" && cargo build --release); then
         echo ""
         echo "PRE-RUN FAILED at stage 1 (extractor build). No stamp written; continue.sh will refuse."
@@ -95,10 +98,10 @@ if [[ "$_WALKS_ONLY" == true ]]; then
     # and re-running the full static sweep between attempts costs more than it
     # catches. This path deliberately writes NO stamp — see the end of the file.
     echo ""
-    echo "--- stage 2/3: check.sh ....... SKIPPED (--walks-only) ---"
+    echo "--- stage 2/4: check.sh ....... SKIPPED (--walks-only) ---"
 else
     echo ""
-    echo "--- stage 2/3: check.sh (static gates, pytest, coverage ratchet) ---"
+    echo "--- stage 2/4: check.sh (static gates, pytest, coverage ratchet) ---"
     if ! bash "$SCRIPT_DIR/check.sh"; then
         echo ""
         echo "PRE-RUN FAILED at stage 2 (check.sh). No stamp written; continue.sh will refuse."
@@ -110,8 +113,43 @@ else
 fi
 
 # --- stage 3: does the loop decide what the theory says -------------------- #
+# --- stage 3: gate contracts (real cargo -> the loop's decisions) ---------- #
+# check.sh skips every cargo-backed integration test (INTEGRATION=1 is off
+# there, for speed), and a unit test's fixture is a capture someone wrote. So
+# when the pipeline changed how it MEASURES, the decisions keyed on the old
+# measurement went dead with every test green: isolation (2026-09-19) rebuilt
+# aborted binaries as completed sections, and the stale-refill probe and the
+# schedule's unmeasurable demotion, both asking "did a binary not complete",
+# never fired again until run 118933-877c43bd (2026-09-27) spent its fill on
+# runs that could not move 13 stack-overflow aborts. A `gate` test derives a
+# decision's inputs from what real cargo prints through the real runner, so
+# that class refuses the stamp here instead of costing a run.
+if [[ "$_WALKS_ONLY" == true ]]; then
+    echo ""
+    echo "--- stage 3/4: gate contracts ....... SKIPPED (--walks-only) ---"
+else
+    echo ""
+    echo "--- stage 3/4: gate contracts (real cargo -> schedule decisions) ---"
+    set +e
+    INTEGRATION=1 "$SCRIPT_DIR/.venv/bin/python" -m pytest -p no:cacheprovider \
+        -m gate tests/integration --timeout=600 --timeout-method=thread -q
+    _GATE_RC=$?
+    set -e
+    if [[ "$_GATE_RC" -eq 5 ]]; then
+        echo ""
+        echo "PRE-RUN FAILED at stage 3: no gate test collected. The contract between"
+        echo "cargo's output and the schedule's crash inputs is unguarded."
+        exit 1
+    elif [[ "$_GATE_RC" -ne 0 ]]; then
+        echo ""
+        echo "PRE-RUN FAILED at stage 3 (gate contracts). No stamp written; continue.sh will refuse."
+        echo "A decision of the loop no longer sees what real cargo reports — read the"
+        echo "failing assertion: it names the reader that went blind."
+        exit 1
+    fi
+fi
 echo ""
-echo "--- stage 3/3: walks (recorded runs replayed through the real loop) ---"
+echo "--- stage 4/4: walks (recorded runs replayed through the real loop) ---"
 set +e
 "$SCRIPT_DIR/.venv/bin/python" -m pytest -m walk --timeout=120 --timeout-method=thread -q
 _WALK_RC=$?
@@ -127,7 +165,7 @@ if [[ "$_WALK_RC" -eq 5 ]]; then
     echo "           this repo has hit so far is still un-gated."
 elif [[ "$_WALK_RC" -ne 0 ]]; then
     echo ""
-    echo "PRE-RUN FAILED at stage 3 (walks). No stamp written; continue.sh will refuse."
+    echo "PRE-RUN FAILED at stage 4 (walks). No stamp written; continue.sh will refuse."
     echo "A walk failure means the loop's decisions diverged from the trajectory the"
     echo "fix predicted — read the walk's assertion, not the pass count."
     exit 1

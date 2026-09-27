@@ -230,3 +230,138 @@ def test_the_in_flight_test_is_libtest_s_not_the_stderr_line(
     (old,) = [b for b in parse_binary_results(out + "\n" + err)
               if b.label.endswith("phantom.rs")]
     assert old.dangling == "phantom_from_stderr"
+
+
+# ---- the schedule's crash inputs read a real isolated capture (2026-09-27) ----
+#
+# Isolation (2026-09-19) rebuilt every aborted binary as a COMPLETED section.
+# Two decisions still asked "did a binary not complete" and went dead with no
+# signal: the stale-refill probe (run `118933-877c43bd` dropped a culprit of a
+# live stack overflow as "crash gone") and the schedule's unmeasurable
+# demotion (non-empty in 1 of ~160 fills since). Their unit tests passed
+# throughout, because their fixtures were hand-written or pre-isolation
+# captures. This section derives every crash input the fill schedule reads
+# from the capture the real runner produces, so a change to how the pipeline
+# MEASURES cannot silently disable a schedule rule. It carries the `gate`
+# marker: `pre_run.sh` runs it and refuses the stamp when it fails.
+#
+# The invented crate: `ping`/`pong` recurse into each other without a base
+# case (the shape of the live ring), `id` is an ordinary body. `overflow`
+# dies on a stack overflow, `asserts` fails its own assertion, `passes`
+# passes.
+
+_RING_LIB = """#![allow(unconditional_recursion)]
+pub fn ping(n: u64) -> u64 {
+    let pad = [n; 64];
+    pong(pad[(n % 64) as usize] + 1) + pad[1]
+}
+
+pub fn pong(n: u64) -> u64 {
+    let pad = [n; 64];
+    ping(pad[(n % 64) as usize] + 1) + pad[2]
+}
+
+pub fn id(n: u64) -> u64 {
+    n
+}
+"""
+
+_RING_TESTS = """#[test]
+fn overflow() {
+    assert_eq!(ring::ping(1), 0);
+}
+
+#[test]
+fn asserts() {
+    assert_eq!(ring::id(1), 2);
+}
+
+#[test]
+fn passes() {
+    assert_eq!(ring::id(1), 1);
+}
+"""
+
+
+def _ring_capture(root: Path, monkeypatch: pytest.MonkeyPatch,
+                  isolation: str = "1") -> str:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "ring")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(_RING_LIB)
+    (root / "tests" / "ring.rs").write_text(_RING_TESTS)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", isolation)
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "ring")
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    return out
+
+
+def _ring_runs():
+    from pipeline_core.domain.fill_schedule import RouteKind, RouteRun
+    from pipeline_core.domain.models import FnLocator
+    culprit = FnLocator("src/lib.rs", "ping")
+    bystander = FnLocator("src/lib.rs", "id")
+    return culprit, [
+        RouteRun(RouteKind.FILE, "bystander", frozenset({bystander}),
+                 target_tests=frozenset({"overflow"}), seq=0),
+        RouteRun(RouteKind.PER_FN, "culprit", frozenset({culprit}),
+                 target_tests=frozenset({"overflow"}), seq=1),
+    ]
+
+
+@pytest.mark.gate
+def test_premise_a_stack_overflow_is_a_silent_abort_under_isolation(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (b,) = [b for b in parse_binary_results(
+        _ring_capture(tmp_path / "r", monkeypatch)) if b.label.endswith("ring.rs")]
+    assert b.completed, "isolation no longer rebuilds an aborted binary"
+    assert b.passed == {"passes"} and b.failed == {"overflow", "asserts"}
+    assert b.aborted_silent == {"overflow"}, (
+        "the runtime's stack-overflow abort is no longer a panic-less abort "
+        "of its own process — re-derive what the crash readers key on")
+
+
+@pytest.mark.gate
+def test_every_schedule_crash_input_sees_the_isolated_abort(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The contract: on one real capture, the crash definition, the
+    unmeasurable set, the probe's admission and the schedule agree."""
+    from pipeline_core.domain.fill_schedule import schedule
+    from pipeline_core.domain.refill_stamp import RefillAdmission, refill_admission
+    from pipeline_core.domain.test_results import (
+        native_crashes,
+        parse_failed_tests,
+        unmeasured_failures,
+    )
+    out = _ring_capture(tmp_path / "r", monkeypatch)
+    bins = parse_binary_results(out)
+    assert [n for _b, n in native_crashes(bins)] == ["overflow"]
+    assert unmeasured_failures(bins, parse_failed_tests(out)) == {"overflow"}
+    # The probe: a culprit with no attributed test stays while the crash does.
+    assert refill_admission((), crash_blamed=bool(native_crashes(bins))) \
+        is RefillAdmission.CRASH_BLAMED
+    culprit, runs = _ring_runs()
+    s = schedule(runs, [], oracle_fp="o", hollow={}, budget_minutes=60,
+                 unmeasurable_tests=unmeasured_failures(
+                     bins, parse_failed_tests(out)),
+                 crash_blamed=frozenset({culprit}))
+    assert [r.run.label for r in s.ordered] == ["culprit"]
+    assert [(r.run.label, r.reason) for r in s.deferred] == [
+        ("bystander", "rebuy_flat")]
+
+
+@pytest.mark.gate
+def test_negative_control_the_binary_completion_question_is_blind(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # What both dead readers asked, on the same real capture: no binary is
+    # incomplete, so "crash present" is False and "no verdict" is empty.
+    from pipeline_core.domain.oracle_ledger import bare_test_name
+    from pipeline_core.domain.test_results import parse_failed_tests
+    out = _ring_capture(tmp_path / "r", monkeypatch)
+    bins = parse_binary_results(out)
+    assert not any(not b.completed for b in bins)
+    verdicted = {bare_test_name(n) for b in bins for n in b.failed}
+    assert {bare_test_name(t) for t in parse_failed_tests(out)} <= verdicted

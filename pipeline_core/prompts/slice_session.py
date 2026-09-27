@@ -37,6 +37,10 @@ from pipeline_core.prompts.sections import tag_block
 DEFAULT_FILE_CHARS = 36_000
 
 
+_CRASH_LEAD = ("A test binary CRASHED at runtime in a body this session can "
+               "edit:\n")
+
+
 def render_slice_file(
     file_rel: str,
     text: str,
@@ -166,8 +170,17 @@ def build_slice_session_prompt(
     file_chars: int = DEFAULT_FILE_CHARS,
     executed: Collection[FnSite] | None = None,
     installable: Mapping[FnSite, str] | None = None,
+    crash_evidence: str = "",
 ) -> str:
     """Turn 0 of a session over `slice_`.
+
+    `crash_evidence` is the localizer's rendered evidence for every crash
+    blamed on an editable unit of the slice — the same blocks the file,
+    per-impl and per-fn builders carry. A target that aborted says only
+    "stack overflow" in its own words; the fault class, the cycle and its
+    members are in this block. Run `118933-877c43bd` (2026-09-27): both
+    sessions over a three-member recursion ran six turns without it while
+    the file and per-fn prompts of the same fill carried it.
 
     `target_evidence` maps each failing test to its own words — the panic
     line, the quoted source line and the probe's `observed:` lines — and is
@@ -226,7 +239,7 @@ Crate: {module_name} | Cluster: {cluster_name} | Session budget: {max_turns} tur
 FAILING TESTS (the targets):
 
 {tests_part}
-
+{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
 {tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", regression_body)}
 <RUST_GOTCHAS>
 {language_driver().gotchas_summary()}

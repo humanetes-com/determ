@@ -25,7 +25,7 @@ concrete frames), and the exhaustion gate (crash evidence voids a prior
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
@@ -44,7 +44,10 @@ from pipeline_core.domain.crash_site import (
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.test_outcome import abort_readings
-from pipeline_core.domain.test_results import BinaryResult, parse_binary_results
+from pipeline_core.domain.test_results import (
+    native_crashes,
+    parse_binary_results,
+)
 
 # adapter signatures (composition injects the concrete fns)
 GdbLocalize = Callable[..., "tuple[str, list[dict[str, object]]] | None"]
@@ -266,19 +269,10 @@ def localize_crashes(
     Returns () when nothing crashed or nothing could be localized — callers
     must treat an empty result on a shrunken oracle as "unlocalized", never
     as health."""
-    # Two shapes carry a native fault: a binary whose section never closed
-    # (it could not be re-run one test per process), and — the normal case
-    # since the capture isolates aborted binaries — a test whose OWN process
-    # died without printing a panic (`aborted_silent`). The second names its
-    # test exactly, so gdb re-runs that one test (`test_filter`) instead of
-    # the whole binary. An abort that printed a panic already names its site
-    # in its failure block and is not a localizer target.
-    crashed: list[tuple[BinaryResult, str | None]] = []
-    for b in parse_binary_results(sweep_output):
-        if not b.completed:
-            crashed.append((b, None))
-        for name in sorted(b.aborted_silent):
-            crashed.append((replace(b, dangling=name), name))
+    # `native_crashes` is the one definition of what a crash is; an isolated
+    # abort names its test exactly, so gdb re-runs that one test
+    # (`test_filter`) instead of the whole binary.
+    crashed = native_crashes(parse_binary_results(sweep_output))
     if not crashed:
         return ()
     considered = crashed[:max_binaries]

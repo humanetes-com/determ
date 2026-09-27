@@ -123,7 +123,10 @@ from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
-from pipeline_core.domain.crash_site import blame_outside_unit
+from pipeline_core.domain.crash_site import (
+    blame_outside_unit,
+    crash_evidence_for_units,
+)
 from pipeline_core.domain.declined import declined_guidance, note_declined
 from pipeline_core.domain.dispatch import (
     file_route_units,
@@ -5440,7 +5443,13 @@ def prepare_impl_fill(
                 all_records=[], file_texts={}, target_evidence={},
                 test_blocks=[], types_section="",
                 invariants=invariants_section, macros=macros_section,
-                fr_path=fr_path, max_turns=_max_turns))
+                fr_path=fr_path, max_turns=_max_turns,
+                # Every distinct crash block, reserved for every slice: the
+                # blocks are keyed by unit, not by test, so the fit cannot
+                # know which slice carries which; over-reserving costs a
+                # little packing, under-reserving a turn 0 over the cap.
+                crash_evidence=crash_evidence_for_units(
+                    crash_evidence or {}, None)))
             return SliceCosts(file_chars=file_chars, test_chars=test_chars,
                               fixed_chars=fixed, max_chars=max_chars,
                               types_chars=types_chars,
@@ -5650,7 +5659,9 @@ def prepare_impl_fill(
                 blueprint=_bp, fr_path=fr_path,
                 max_turns=_max_turns, executed=_executed_all,
                 file_chars=_sl.file_chars or SESSION_FILE_CHARS,
-                installable=_installable_sites)
+                installable=_installable_sites,
+                crash_evidence=crash_evidence_for_units(
+                    crash_evidence or {}, _sl.units))
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:
