@@ -365,3 +365,37 @@ def test_negative_control_the_binary_completion_question_is_blind(
     assert not any(not b.completed for b in bins)
     verdicted = {bare_test_name(n) for b in bins for n in b.failed}
     assert {bare_test_name(t) for t in parse_failed_tests(out)} <= verdicted
+
+
+# ---- crash blame from the real localizer (full_pre_run contract) ----
+#
+# The gate tests above hand the schedule its `crash_blamed` set. This one
+# derives it the way the loop does: the real isolated capture, then
+# `localize_crashes` with the real gdb adapter, then `blamed_locators`.
+# Premise: gdb is installed (the loop's localizer needs it too).
+
+def test_the_localizer_blames_both_members_of_the_recursion(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    from pipeline_core.domain.crash_site import blamed_locators
+    from pipeline_core.domain.models import FnLocator
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    root = tmp_path / "r"
+    out = _ring_capture(root, monkeypatch)
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "ring")
+    logs: list[str] = []
+    sites = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                           asan_sweep=None, log=logs.append),
+        out, _CMD, root, env)
+    assert sites, "no crash site localized:\n" + "\n".join(logs)
+    blamed = blamed_locators(sites)
+    assert {FnLocator("src/lib.rs", "ping"),
+            FnLocator("src/lib.rs", "pong")} <= blamed, (blamed, logs)

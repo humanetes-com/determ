@@ -1334,7 +1334,8 @@ for the record; the copy `./commit.sh` reads is `last_commit_message.txt`.
 
 ## The commands this repo's gate is made of
 
-    bash pre_run.sh                 # extractor release build + check.sh + walks, then stamp
+    bash pre_run.sh                 # extractor release build + check.sh + gate contracts + walks, then stamp
+    bash full_pre_run.sh            # pre_run.sh, then the whole integration suite; revokes the stamp on failure
     bash pre_run.sh --walks-only    # walks alone; writes NO stamp, for the fix loop
     bash continue.sh                # refuses (exit 3) unless the stamp matches
     bash continue.sh --no-pre-run   # launch untested, printed loudly
@@ -1351,7 +1352,7 @@ untracked). Both are sourced, never executed.
 
 ## A run does not start until something has vouched for the code
 
-`bash pre_run.sh` is the gate; `continue.sh` refuses to launch without it. Three
+`bash pre_run.sh` is the gate; `continue.sh` refuses to launch without it. Four
 stages, in this order because each is unreadable while the one before it is red:
 
 1. **extractor build** — `cargo build --release` in `tools/skeleton_extractor`.
@@ -1366,9 +1367,30 @@ stages, in this order because each is unreadable while the one before it is red:
    coverage ratchet. Compiles the extractor under the pinned gate toolchain in
    the debug profile — that green line is not a statement about
    `target/release`.
-3. **walks** (`pytest -m walk`) — does the loop's decision sequence go where the
+3. **gate contracts** (`INTEGRATION=1 pytest -m gate tests/integration`) — does
+   each decision still see what real cargo reports. The schedule's crash
+   inputs are derived from a real isolated capture of an invented recursive
+   crate through the real runner. Test isolation (2026-09-19) rebuilt aborted
+   binaries as completed sections, and the stale-refill probe and the
+   schedule's unmeasurable demotion, both asking "did a binary not complete",
+   were dead for eight days with every test green (run `118933-877c43bd`,
+   2026-09-27). Zero collected also fails.
+4. **walks** (`pytest -m walk`) — does the loop's decision sequence go where the
    theory says. A walk replays a recorded pathological run through the real
    `run_phase_c_tdd` with cargo and the model stubbed.
+
+**`bash full_pre_run.sh` is the slow gate** (about 20 s more on this box). It
+runs `pre_run.sh` unchanged, then `scripts/run_integration.sh` over every
+integration test except the `gate` ones, and REMOVES the stamp when that
+stage fails, so `continue.sh` refuses. Nothing else runs that suite (check.sh
+skips cargo-backed tests); its first run found a test left red for three days
+by the 2026-09-24 conversation refactor. It holds
+`tests/integration/test_schedule_input_contracts.py`: every `schedule()`
+parameter is classified (tool / store / planner / config), and every tool
+input names an integration test that derives it from real output and asserts
+the decision it feeds, so a new schedule input without one fails the gate.
+Use it before a launch that validates a scheduler, measurement or reader
+change; `pre_run.sh` stays the fast default.
 
 Adding a walk costs pointing the distiller at the log the pathology is in — the
 run's iterations, its retrigger fires and its refusals are all already printed:

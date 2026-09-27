@@ -78,7 +78,8 @@ from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain import unit_clock
-from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 __all__ = [
     "DEFAULT_UNPAID_GRACE",
@@ -211,6 +212,29 @@ def bodies_sha_of(bodies: Iterable[tuple[FnLocator, str]]) -> str:
         h.update(" ".join((text or "").split()).encode("utf-8"))
         h.update(b"\0")
     return h.hexdigest()[:16]
+
+
+def bodies_sha_on_tree(targets: Collection[FnLocator],
+                       records: Iterable[FnRecord]) -> str:
+    """:func:`bodies_sha_of` over the bodies the extractor read for
+    ``targets`` — the identity a run's re-buy detection compares.
+
+    ``records`` are the extractor's records of the tree (``file`` relative to
+    the directory it was given, so ``src/x.rs`` when handed the cluster root)
+    and ``targets`` the loop's locators; the two are joined after the same
+    ``src/`` normalization on both sides. An empty join is not a small
+    identity: every run of the same targets would hash alike whatever their
+    bodies, and a moved body would read as the same try."""
+    if not targets:
+        return ""
+    wanted = {FnLocator(norm_src_rel(t.file), t.fn_name) for t in targets}
+    bodies: dict[FnLocator, list[str]] = {}
+    for r in records:
+        loc = FnLocator(norm_src_rel(r.file), r.fn_name)
+        if loc in wanted:
+            bodies.setdefault(loc, []).append(r.body_text or "")
+    return bodies_sha_of(
+        (loc, "\n".join(texts)) for loc, texts in bodies.items())
 
 
 def rebuy_identity(kind: RouteKind, targets: Collection[FnLocator],

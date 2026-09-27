@@ -153,7 +153,7 @@ from pipeline_core.domain.fill_class import (
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.fill_schedule import (
     RunClock,
-    bodies_sha_of,
+    bodies_sha_on_tree,
     hollow_by_test,
 )
 from pipeline_core.domain.identity import ContainerId, RetroKey
@@ -6002,16 +6002,9 @@ def prepare_impl_fill(
         tests_for=_tests_for, stubs=_stubs_all, log=_log)
 
     def _bodies_sha(targets: frozenset[FnLocator]) -> str:
-        if not targets:
-            return ""
-        bodies: dict[FnLocator, list[str]] = {}
-        for _raw in _enumerate_fns_via_extractor(target_src_dir) or []:
-            r = FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
-            loc = FnLocator(_norm_src_rel(r.file), r.fn_name)
-            if loc in targets or FnLocator(r.file, r.fn_name) in targets:
-                bodies.setdefault(loc, []).append(r.body_text or "")
-        return bodies_sha_of(
-            (loc, "\n".join(texts)) for loc, texts in bodies.items())
+        return bodies_sha_on_tree(targets, (
+            FnRecord.from_dict(_raw) if isinstance(_raw, dict) else _raw
+            for _raw in _enumerate_fns_via_extractor(target_src_dir) or []))
 
     def _finish() -> ClusterFillResult:
         if _retro_gate.total:

@@ -117,9 +117,29 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
     prompts: list[str] = []
     diagnoses = [0]
 
-    def ask(prompt: str, *_a: Any, **_k: Any) -> tuple[str | None, str]:
-        prompts.append(prompt)
-        return _BODY, _BODY
+    # The model is scripted at the transport: the real per-fn ask and the
+    # real conversation run, so `prompts` is every user turn the model
+    # would read. Since every fill unit became one conversation
+    # (2026-09-24), later attempts are retry turns on the transcript; a
+    # stub of `ask_per_fn_body` never opened the conversation, so every
+    # attempt was re-built as a first attempt, which carries no lesson, and
+    # the test failed while the live re-entry turn carried it (run
+    # `118933-877c43bd`, prompt `8e5fa66a…`).
+    from pipeline_core.application.reconstruct.unit_conversation import (
+        ConversationPorts,
+        UnitConversation,
+    )
+
+    def ask_turns(messages: list[dict[str, Any]], **_k: Any) -> str:
+        prompts.append(str(messages[-1]["content"]))
+        return f"<BODY>\n{_BODY}\n</BODY>"
+
+    def open_conversation(label: str, *, route: str = "per-fn",
+                          sources: object = None,
+                          max_pulls: int = 2) -> UnitConversation:
+        return UnitConversation(
+            ConversationPorts(ask_turns=ask_turns, log=lambda _m: None),
+            label=label, route=route)
 
     def diagnose(**_k: Any) -> dict[str, Any]:
         diagnoses[0] += 1
@@ -129,7 +149,7 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
     tel = _Tel()
     fill = FillOneFn(
         tel=tel, mut=roles.mut, cargo=roles.cargo,
-        prompt=_Delegate(roles.prompt, ask_per_fn_body=ask),
+        prompt=_Delegate(roles.prompt, open_conversation=open_conversation),
         retros=_Delegate(roles.retros, diagnose=diagnose,
                          extract_self_note=lambda *a, **k: None),
         tests=roles.tests, stall=roles.stall,

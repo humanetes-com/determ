@@ -152,3 +152,68 @@ def test_negative_control_the_binary_reading_is_silent_under_isolation(
 def test_premise_the_shared_process_loses_the_neighbour(tmp_path: Path) -> None:
     out = _run(_crate(tmp_path / "c"), "0")
     assert "c_passes" not in outcomes_of(out)
+
+
+# ---- the schedule's hollow and bodies inputs (full_pre_run contracts) ----
+#
+# The loop hands the fill schedule `hollow` = the stub hold of the sweep's
+# capture as locators (plus the session slices' stubs), and a `bodies_sha`
+# that joins the extractor's records to each run's targets. Both are read
+# from real tools; these tests derive them the way the loop does and assert
+# the DECISION they feed: a run writing the stub a failing test stops in is
+# tier 1, and a run's identity moves when its body does.
+
+def test_the_stub_hold_puts_the_stub_writer_in_the_blockers_tier(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.attribution import locator_of
+    from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, schedule
+    from pipeline_core.domain.models import FnLocator
+    root = _crate(tmp_path / "c")
+    out = _run(root, "1")
+    locate, is_stub = _stub_reader(root)
+    hold = stub_hold_of(out, locate, is_stub)
+    # The loop's conversion (`phase_c_tdd`, `stub_hold_hollow=`).
+    hollow = {t: frozenset(locator_of(s) for s in ss)
+              for t, ss in hold.by_test.items()}
+    assert hollow == {"a_drops": frozenset({FnLocator("src/lib.rs", "release")})}
+    runs = [
+        RouteRun(RouteKind.FILE, "other", frozenset({FnLocator("src/lib.rs", "new")}),
+                 target_tests=frozenset({"a_drops"}), seq=0),
+        RouteRun(RouteKind.PER_FN, "stub", frozenset({FnLocator("src/lib.rs", "release")}),
+                 target_tests=frozenset({"a_drops"}),
+                 stubs_in_targets=frozenset({FnLocator("src/lib.rs", "release")}),
+                 seq=1),
+    ]
+    s = schedule(runs, [], oracle_fp="o", hollow=hollow)
+    levels = {r.run.label: r.level for r in s.ordered}
+    assert levels == {"stub": 1, "other": 2}
+    assert s.ordered[0].run.label == "stub"
+
+
+def test_a_runs_body_identity_joins_the_extractor_records(tmp_path: Path) -> None:
+    from pipeline_core.domain.fill_schedule import bodies_sha_of, bodies_sha_on_tree
+    from pipeline_core.domain.models import FnLocator, FnRecord
+    assert _EXTRACTOR.exists(), "build the release extractor (bash pre_run.sh)"
+    structure = CliStructureReader(CliExtractor(_EXTRACTOR))
+    target = frozenset({FnLocator("src/lib.rs", "new")})   # the loop's spelling
+
+    def _records(root: Path) -> list[FnRecord]:
+        return [FnRecord.from_dict(r) for r in structure.enumerate_fns(root) or []]
+
+    root = _crate(tmp_path / "a")
+    before = bodies_sha_on_tree(target, _records(root))
+    assert before and before != bodies_sha_of(()), (
+        "the extractor's records did not join the loop's target — every run "
+        "of these targets would share one identity")
+    lib = root / "src" / "lib.rs"
+    lib.write_text(lib.read_text().replace("Handle { id }", "Handle { id: id + 1 }"))
+    assert bodies_sha_on_tree(target, _records(root)) != before
+    # The same join from records rooted at `src/` (`lib.rs`): the pre-fix
+    # join compared the raw and the normalized spelling against `src/lib.rs`
+    # targets only, and joined nothing.
+    rooted = _records(root / "src")
+    assert rooted and all(not r.file.startswith("src/") for r in rooted)
+    assert bodies_sha_on_tree(target, rooted) != bodies_sha_of(())
+    pre_fix = [r for r in rooted
+               if FnLocator(r.file, r.fn_name) in target]
+    assert pre_fix == []
