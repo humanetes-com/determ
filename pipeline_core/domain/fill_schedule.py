@@ -62,6 +62,15 @@ pair_wait, coverage-split, kind_cap and nothing_aimed (a run that fills no
 stub, aims at no failing test and writes no crash-blamed locator) still
 defer at budget 0.
 
+Two rules hold over all of the above, whatever the inputs, and are checked
+on every decision (`domain/schedule_invariants.py`): a run waits only on runs
+that OPEN in the same schedule — a run's own deferrals (nothing aimed, a
+re-buy under a budget) are decided before it can hold anyone — and no
+deferral leaves a blocker (a stub a leftover test is hollow on, or a
+crash-blamed locator) that some candidate writes with no opened writer: the
+first deferred writer in order opens for it. :func:`admit_ranked` is where
+both are decided, once.
+
 Deliberately not here: any route's own preconditions (what a session may
 edit, which blocks the impl route covers), the keep contract applied to a
 run's landed change set, or the process-level fill-phase stop — those are
@@ -86,6 +95,7 @@ __all__ = [
     "TODAY_ORDER",
     "UnitEvidence",
     "FillBudget",
+    "RankedRun",
     "FillSchedule",
     "RouteKind",
     "RouteLedgerRow",
@@ -93,6 +103,7 @@ __all__ = [
     "RunClock",
     "RunOutcome",
     "ScheduledRun",
+    "admit_ranked",
     "bodies_sha_of",
     "carve_rebuys",
     "condensed_order",
@@ -530,6 +541,10 @@ class ScheduledRun:
     #: This run's index in the schedule's topological order, deferred runs
     #: included, so a released run re-enters where the order put it.
     position: int = 0
+    #: The blockers (``file::fn``) this run was opened for after a deferral
+    #: of its own had left them with no opened writer (stage 3 of
+    #: :func:`admit_ranked`). Empty for a run the pass opened.
+    blocker_writer: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -543,6 +558,8 @@ class ScheduledRun:
             "deferred": self.deferred, "blocked_by": list(self.blocked_by),
             "lapsed": list(self.lapsed), "mutual": list(self.mutual),
             "held_by": list(self.held_by),
+            "prior_reason": self.prior_reason, "position": self.position,
+            "blocker_writer": list(self.blocker_writer),
         }
 
 
@@ -563,6 +580,9 @@ class FillSchedule:
             bits = [s.reason]
             if stub_n:
                 bits.append(f"{stub_n} stub(s)")
+            if s.blocker_writer:
+                bits.append("opened as the only writer of "
+                            + ", ".join(s.blocker_writer))
             if s.lapsed:
                 bits.append("grace spent: " + ", ".join(s.lapsed))
             if s.mutual:
@@ -1668,7 +1688,11 @@ def schedule(
     sequence number. A run goes after every run that :func:`run_blocks`
     it (a stable topological order; a cycle falls back to that sort for
     its members). A hop-pair-blocked run is then deferred this fill
-    (reason ``pair_wait``), including at ``budget_minutes=0``.
+    (reason ``pair_wait``), including at ``budget_minutes=0``. Ordering and
+    every deferral are :func:`admit_ranked`'s, which this function calls
+    with the ranking it computed: a run's own deferrals come before any
+    hold, and a blocker left with no opened writer opens its first deferred
+    writer.
 
     ``unmeasurable_tests`` / ``crash_blamed`` are optional; empty (the
     default) leaves every rank as the ledger would. A run whose every
@@ -1758,9 +1782,6 @@ def schedule(
     units = UnitService(rows_list, oracle_fp,
                         session_min_turns=session_min_turns,
                         evidence=unit_evidence)
-    order_index = {k: i for i, k in enumerate(today_order)}
-    attr = frozenset(attributed)
-    split_of: dict[str, bool] = {}
     blamed = frozenset(crash_blamed)
 
     # Routes whose schedule exemptions have lapsed: graded `unpaid_grace`
@@ -1779,25 +1800,107 @@ def schedule(
                 piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
             carved.append(piece)
 
-    ranked: list[tuple[RouteRun, int, str, int, int]] = []
+    ranked: list[RankedRun] = []
     for run in carved:
-        rank, reason, deferrals = _rank_of(
+        rank, reason, _deferrals = _rank_of(
             run, oracle_fp, history, units,
             readmit_after=readmit_after,
             grace_left=_served_key(run) not in spent)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
             rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
-        level = _level(run, hollow, blamed)
-        split_of[run.key] = _is_coverage_split(run, attr)
-        ranked.append((run, rank, reason, deferrals, level))
+        ranked.append((run, rank, reason, _level(run, hollow, blamed)))
 
-    def _sort_key(item: tuple[RouteRun, int, str, int, int]
-                  ) -> tuple[int, int, int, int, int]:
-        run, rank, _reason, _d, level = item
+    return admit_ranked(
+        ranked, rows_list, oracle_fp=oracle_fp, hollow=hollow,
+        budget_minutes=budget_minutes, today_order=today_order,
+        crash_blamed=blamed, max_per_kind=max_per_kind,
+        attributed=attributed, unpaid_grace=unpaid_grace,
+        session_min_turns=session_min_turns)
+
+
+#: One candidate as the ranking stage leaves it: the run, its rank class,
+#: the reason it ranked with, and its blockers-first level (:func:`_level`).
+RankedRun = tuple[RouteRun, int, str, int]
+
+
+def admit_ranked(
+    ranked: Sequence[RankedRun],
+    rows: Iterable[RouteLedgerRow],
+    *,
+    oracle_fp: str,
+    hollow: Mapping[str, frozenset[FnLocator]],
+    budget_minutes: float = 0.0,
+    today_order: Sequence[RouteKind] = TODAY_ORDER,
+    crash_blamed: Collection[FnLocator] = (),
+    max_per_kind: Mapping[RouteKind, int] | None = None,
+    attributed: Collection[FnLocator] = (),
+    unpaid_grace: int = DEFAULT_UNPAID_GRACE,
+    session_min_turns: int = 0,
+) -> FillSchedule:
+    """Order the ranked candidates, decide which open, allot the budget.
+
+    The second half of :func:`schedule`, apart so the decision can be run on
+    a recorded ranking (`tests/test_schedule_invariants.py`) and so the
+    order it decides in is written once. Three stages, each deciding ONE
+    question once:
+
+    1. ORDER — blockers-first level, attributed writes before coverage
+       splits, ledger rank, `today_order`, sequence; then a topological
+       order over :func:`run_blocks` while a pair's grace lasts.
+    2. ADMIT — one pass in that order gives every run exactly one decision:
+       deferred for a reason of its own (it aims at nothing; it is a re-buy
+       under a budget), waiting on runs this pass has already OPENED
+       (``pair_wait``, ``coverage_split``), deferred by the per-kind cap, or
+       opened. A run's own reasons are decided BEFORE it can join the opened
+       set, so a run that holds another has opened for good.
+    3. COVER — a blocker (a stub a leftover test is hollow on, or a
+       crash-blamed locator) that some candidate writes and no opened run
+       writes opens its first deferred writer in order, whatever deferred it.
+
+    Why stage 2 is one pass with the self-deferrals inside it: the re-buy
+    deferral used to run after the holds, so a re-buy could hold a run and
+    then be deferred itself. Run `82925-203ed7b8` (2026-09-28, cluster
+    `stable`), fills 5 and 6: the per-fn run holding `src/error.rs::context`
+    — the first failure of 47-48 of the 49 failing tests — waited
+    `coverage_split` on the file and impl runs of the same stub, which were
+    then deferred `rebuy_reverted`. Nothing wrote the stub for 2 h 10 min;
+    the fill that opened the per-fn run moved 135 -> 174. The same shape had
+    been closed for pair_wait on 2026-09-18 (run `3127-6763a5c6`: fills 2-6
+    opened nothing) and for executor deferrals on 2026-09-25
+    (:func:`release_held`); each correction closed one door.
+
+    Why stage 3 exists: a hollow test cannot be judged by any route until
+    its stub has a body, so a fill that opens none of a blocker's writers
+    spends its whole budget on tests that cannot move. Every deferral reason
+    is a local judgement about one run (it is a re-buy; a pair should go
+    first; a session cap) and none of them can see that it removed the last
+    writer. The cover opens that writer at the smallest weight (1), after
+    the deferral that removed it: 3000 generated candidate sets left a
+    blocker with no opened writer in 977 violations under the pre-change
+    function (`tests/test_schedule_invariants.py`). A promoted run opens
+    past the per-kind cap; the cap bounds how a fill is shaped, a blocker
+    decides whether it can move at all. It holds no one: its waiters were
+    decided in stage 2 against runs that opened there.
+    """
+    rows_list = list(rows)
+    order_index = {k: i for i, k in enumerate(today_order)}
+    attr = frozenset(attributed)
+    blamed = frozenset(crash_blamed)
+    split_of = {run.key: _is_coverage_split(run, attr) for run, *_ in ranked}
+    # Only a pair's grace is read below (its right to go first and to hold
+    # the runs it blocks); pairs are never carved, so the planned and the
+    # ranked pair are the same run.
+    spent = frozenset(
+        _served_key(run) for run, *_ in ranked
+        if run.kind is RouteKind.PAIR and unpaid_grace > 0
+        and consecutive_unpaid(rows_list, run, oracle_fp) >= unpaid_grace)
+
+    def _sort_key(item: RankedRun) -> tuple[int, int, int, int, int]:
+        run, rank, _reason, level = item
         return (level, int(split_of.get(run.key, False)), rank,
                 order_index.get(run.kind, len(order_index)), run.seq)
 
-    ranked.sort(key=_sort_key)
+    ranked = sorted(ranked, key=_sort_key)
     _per_test: dict[tuple[str, str], int] = {}
 
     def _test_spent(kind: str, test: str) -> bool:
@@ -1835,7 +1938,6 @@ def schedule(
             return False
         return a.kind is not RouteKind.PAIR or _grace_left(a, b)
 
-
     # Topological order over the blocks relation, condensed to its strongly
     # connected components (:func:`condensed_order`): runs that block each
     # other form one component, which is placed by its best member's sort
@@ -1853,41 +1955,43 @@ def schedule(
             and _orders(other[0], it[0])}
         for it in ranked}
     by_key = {it[0].key: it for it in ranked}
-    ordered_items: list[tuple[RouteRun, int, str, int, int, tuple[str, ...]]] = [
+    ordered_items = [
         (*by_key[k], blockers_of[k])
         for k in condensed_order([it[0].key for it in ranked], blocker_keys)]
 
     scheduled: list[ScheduledRun] = []
-    for pos, (run, rank, reason, _d, level, by) in enumerate(ordered_items):
+    for pos, (run, rank, reason, level, by) in enumerate(ordered_items):
         weight = 1 if reason == "rebuy_readmitted" else _WEIGHT[rank]
         scheduled.append(ScheduledRun(
             run=run, rank=rank, weight=weight, reason=reason, level=level,
             blocked_by=by, position=pos))
 
-    # ONE pass in schedule order decides every deferral, and a run is held
-    # only by a run this pass has already OPENED. Every deferral above is
+    # Every candidate a re-buy: share the budget equally rather than spin an
+    # empty fill (the exhausted set's rule, one level up). Decided before
+    # the pass, so the pass defers exactly the runs it will not open.
+    if budget_minutes > 0 and not any(
+            s.weight > 0 for s in scheduled
+            if not _aims_at_nothing(s.run, blamed)):
+        scheduled = [
+            s if _aims_at_nothing(s.run, blamed)
+            else replace(s, weight=1, reason="rebuy_readmitted")
+            for s in scheduled]
+
+    # STAGE 2 — ONE pass in schedule order decides every deferral, and a run
+    # is held only by a run this pass has already OPENED. Every hold is
     # "wait for X": if X is itself deferred, waiting for it is waiting for
     # nothing, and a deferred run writes no graded row, so no grace clock
     # (`_unpaid_streak` skips deferred rows) can ever release it. Run
-    # `3127-6763a5c6` (2026-09-18, cluster `stable`, the first fresh tree
-    # since these deferrals shipped: hollow 142) is that lock: two hop
-    # pairs sharing one dispatcher each held the other (each holds a stub
-    # the other's tests are hollow on), and each held every file, impl and
-    # per-fn run, which in turn held them. Fills 2-6 opened 0 runs, fill 7
-    # opened only the one run sharing nothing with either pair; the score
-    # sat at 37/184 with 142 hollow tests. The pass can open nothing only
-    # when there is nothing to open: the first run in order has no opened
-    # run before it, so it is never held.
+    # `3127-6763a5c6` (2026-09-18, cluster `stable`, hollow 142): two hop
+    # pairs sharing one dispatcher each held the other and every file, impl
+    # and per-fn run; fills 2-6 opened 0 runs. A run's own deferrals (it
+    # aims at nothing, it is a re-buy under a budget) are decided first, so
+    # a run that reaches the opened set stays there.
     #
     # A pair also does not hold a run that must land before the PAIR can
     # be judged (`run_blocks(run, pair)`): deferring it makes the pair's
     # own verdict unreachable, which is the split pair_wait exists to
-    # prevent, in the other direction. On the endgame trees these rules
-    # were measured on (hollow 0) no run blocks a pair, so this changes
-    # nothing there.
-    #
-    # The kind cap is applied in the same pass for the same reason: a
-    # holder the cap then defers held its waiters for nothing.
+    # prevent, in the other direction.
     waiting: list[ScheduledRun] = []
 
     # A coverage-split waits on a non-split candidate of the same
@@ -1903,6 +2007,9 @@ def schedule(
         if _aims_at_nothing(run, blamed):
             waiting.append(replace(s, deferred=True, share_minutes=0.0,
                                    reason="nothing_aimed"))
+            continue
+        if budget_minutes > 0 and s.weight <= 0:
+            waiting.append(replace(s, deferred=True, share_minutes=0.0))
             continue
         blocking_pairs = [p for p in opened_runs
                           if p.kind is RouteKind.PAIR
@@ -1946,11 +2053,13 @@ def schedule(
         opened_per_kind[run.kind] = opened_per_kind.get(run.kind, 0) + 1
         opened_runs.append(run)
         kept.append(s)
+
+    # STAGE 3 — every blocker a candidate writes has an opened writer.
+    kept, waiting = _cover_blockers(kept, waiting, hollow, blamed)
     scheduled = kept
-    capped: list[ScheduledRun] = waiting
 
     if budget_minutes <= 0:
-        return FillSchedule(tuple(scheduled), tuple(capped), 0.0)
+        return FillSchedule(tuple(scheduled), tuple(waiting), 0.0)
 
     if session_min_turns > 0:
         priced: dict[str, float] = {}
@@ -1975,22 +2084,47 @@ def schedule(
             if sr.run.key in priced else sr
             for sr in scheduled]
 
-    runnable = [s for s in scheduled if s.weight > 0]
-    if not runnable:
-        # Every candidate is a re-buy: share the budget equally rather than
-        # spin an empty fill (the exhausted set's rule, one level up).
-        scheduled = [replace(s, weight=1, reason="rebuy_readmitted")
-                     for s in scheduled]
-        runnable = list(scheduled)
-    ordered: list[ScheduledRun] = []
-    deferred: list[ScheduledRun] = list(capped)
-    for s in scheduled:
-        if s.weight <= 0:
-            deferred.append(replace(s, deferred=True, share_minutes=0.0))
+    ordered = _allot(list(scheduled), float(budget_minutes))
+    return FillSchedule(tuple(ordered), tuple(waiting), float(budget_minutes))
+
+
+def _cover_blockers(
+    opened: list[ScheduledRun], deferred: list[ScheduledRun],
+    hollow: Mapping[str, frozenset[FnLocator]],
+    blamed: frozenset[FnLocator],
+) -> tuple[list[ScheduledRun], list[ScheduledRun]]:
+    """Open, in schedule order, the first deferred writer of every blocker
+    no opened run writes (stage 3 of :func:`admit_ranked`). A blocker is a
+    stub some leftover test is hollow on, or a crash-blamed locator. The
+    promoted run keeps the reason it was ranked with, takes weight at least
+    1, and names the blockers it opened for (`blocker_writer`)."""
+    blocking: set[FnLocator] = set(blamed)
+    for locs in hollow.values():
+        blocking |= locs
+    written: set[FnLocator] = set()
+    for s in opened:
+        written |= s.run.targets
+    candidates: set[FnLocator] = set()
+    for s in deferred:
+        candidates |= s.run.targets
+    uncovered = (blocking & candidates) - written
+    if not uncovered:
+        return opened, deferred
+    promoted: list[ScheduledRun] = []
+    still: list[ScheduledRun] = []
+    for s in sorted(deferred, key=lambda d: d.position):
+        hit = s.run.targets & uncovered
+        if not hit:
+            still.append(s)
             continue
-        ordered.append(s)
-    ordered = _allot(ordered, float(budget_minutes))
-    return FillSchedule(tuple(ordered), tuple(deferred), float(budget_minutes))
+        uncovered -= s.run.targets
+        promoted.append(replace(
+            s, deferred=False, share_minutes=None, held_by=(),
+            reason=s.prior_reason or s.reason, prior_reason="",
+            weight=max(s.weight, 1),
+            blocker_writer=tuple(sorted(
+                f"{u.file}::{u.fn_name}" for u in hit))))
+    return sorted([*opened, *promoted], key=lambda s: s.position), still
 
 
 def _floor_clip(floors: Sequence[float], budget: float) -> float | None:

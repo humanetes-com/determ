@@ -2980,6 +2980,49 @@ def detect_p43(run: Run, iters: list[dict]) -> list[dict]:
              "refs": refs[:4]}]
 
 
+def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
+    """`iter N <kind>: <detail>` for every invariant a recorded schedule
+    decision breaks (`domain/schedule_invariants.py`, the checker the
+    executor runs live since 2026-09-28). Pure over the event list. Events
+    without recorded `inputs` are checked without the hollow relation (the
+    blocker check then reads crash-blamed locators only)."""
+    from pipeline_core.domain.schedule_invariants import (
+        blamed_from_event,
+        decided_from_event,
+        hollow_stubs_from_event,
+        violations,
+    )
+    out: list[str] = []
+    for sc in schedule_ev:
+        if not sc.get("scheduled", True):
+            continue
+        for v in violations(
+                decided_from_event(sc), hollow_stubs=hollow_stubs_from_event(sc),
+                crash_blamed=blamed_from_event(sc),
+                budget_minutes=float(sc.get("budget_minutes") or 0.0)):
+            out.append(f"iter {sc.get('iter')} {v.kind}: {v.detail}")
+    return out
+
+
+def detect_p44(run: Run, iters: list[dict]) -> list[dict]:
+    """Fill schedules that broke a schedule invariant. One hit per run,
+    counting the violations by kind."""
+    ev = _p32_events_by_run().get(run.run_id)
+    if not ev or not ev["schedule"]:
+        return []
+    hits = p44_schedule_violations(ev["schedule"])
+    if not hits:
+        return []
+    kinds: dict[str, int] = {}
+    for h in hits:
+        k = h.split(" ", 2)[2].split(":", 1)[0]
+        kinds[k] = kinds.get(k, 0) + 1
+    return [{"evidence": f"{len(hits)} schedule invariant violation(s) ("
+                         + ", ".join(f"{k} x{n}" for k, n in sorted(kinds.items()))
+                         + f"): {hits[0][:200]}",
+             "key": sorted(kinds), "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -2999,7 +3042,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
              "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
-             "P43": detect_p43}
+             "P43": detect_p43, "P44": detect_p44}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3038,6 +3081,7 @@ CLASS_NAMES = {
     "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
     "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",
     "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)",
+    "P44": "schedule invariant broken (a hold named a run that did not open, a blocker stub or crash-blamed locator had no opened writer, a fill opened nothing, or shares broke the budget; pre-fix a re-buy could hold a run and then be deferred itself, run 82925-203ed7b8 fills 5-6)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

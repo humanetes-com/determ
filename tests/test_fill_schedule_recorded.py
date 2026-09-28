@@ -39,6 +39,8 @@ Sentences pinned here, with the fixed pre-schedule walk as the control:
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     TODAY_ORDER,
@@ -234,7 +236,6 @@ def test_fill_1_of_the_97_run_s_file_wave_rows_each_run_s_own_landings() -> None
     Negative control: read off the whole window, the context.rs row's
     kept set is exactly the nine foreign locators the ledger recorded, it
     grades FLAT as the ledger did, and the identity ranks `rebuy_flat`."""
-    from dataclasses import replace
 
     from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
     from pipeline_core.application.reconstruct.fill_scheduler import _outcome
@@ -460,13 +461,21 @@ def test_the_681204_fill_stops_zeroing_the_runs_behind_a_pair_that_never_pays() 
     assert not any(r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0
                    for r in rows if r.kind is RouteKind.PAIR)
 
-    # Negative control: the shipped behaviour reproduces the record.
+    # Negative control: the record itself (asserted above) — the pair alone,
+    # ranked 3 (`rebuy_flat`), opened as `rebuy_readmitted` with the whole
+    # budget because its own holds had left nothing else runnable. With the
+    # grace disabled (`unpaid_grace=0`) today's schedule no longer
+    # reproduces it either: since 2026-09-28 a re-buy under a budget is
+    # deferred for that before it can hold anyone (`admit_ranked`), so the
+    # record's state is not reachable through the grace alone any more.
+    recorded_pair = next(raw for raw in fix["schedule_runs"]
+                         if str(raw["label"]) == pair_label)
+    assert (recorded_pair["reason"], recorded_pair["rank"]) == (
+        "rebuy_readmitted", 3)
     control = schedule(runs, rows, oracle_fp=oracle, hollow=hollow_of(fix),
                        budget_minutes=200, unpaid_grace=0)
-    assert [s.run.label for s in control.ordered] == [pair_label]
-    assert {s.run.label for s in control.deferred} == set(recorded) - {pair_label}
-    assert all(s.reason == "pair_wait" and s.share_minutes == 0.0
-               for s in control.deferred)
+    assert [(s.run.label, s.reason) for s in control.deferred] == [
+        (pair_label, "rebuy_flat")]
 
     # The change: nothing is zeroed behind the pair, and past its grace the
     # pair is ranked by its ledger like any run — its last try on these
@@ -484,9 +493,13 @@ def test_the_681204_fill_stops_zeroing_the_runs_behind_a_pair_that_never_pays() 
 
 def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> None:
     """The bound is a grace, not a removal: with the pair's own history
-    trimmed to fewer graded rows than the grace, the recorded fill
-    schedules exactly as it did — pair alone, six `pair_wait`. Same
-    records, same function, one input shortened."""
+    trimmed to fewer graded rows than the grace and its last try a REVERT
+    (whose retry carries the revert's diagnosis), the recorded fill
+    schedules as it did — pair alone, six `pair_wait`. The same trimmed
+    history with the recorded FLAT last try is a re-buy of identical bodies,
+    deferred before it can hold (since 2026-09-28), and the six open. Same
+    records, same function, one input shortened and one outcome read two
+    ways."""
     fix = load_fill("681204-b695ab3f_iter2")
     rows = ledger_of(fix)
     oracle = next(r.oracle_fp for r in rows if r.kind is RouteKind.PAIR)
@@ -496,8 +509,15 @@ def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> N
     trimmed = [r for r in rows if r.kind is not RouteKind.PAIR]
     trimmed += pair_rows[-(DEFAULT_UNPAID_GRACE - 1):]
     assert consecutive_unpaid(trimmed, pair, oracle) < DEFAULT_UNPAID_GRACE
+    assert trimmed[-1].outcome is RunOutcome.FLAT
 
-    sched = schedule(runs, trimmed, oracle_fp=oracle, hollow=hollow_of(fix),
+    flat = schedule(runs, trimmed, oracle_fp=oracle, hollow=hollow_of(fix),
+                    budget_minutes=200)
+    assert [(s.run.label, s.reason) for s in flat.deferred] == [
+        (pair.label, "rebuy_flat")]
+    reverted = [*trimmed[:-1],
+                replace(trimmed[-1], outcome=RunOutcome.REVERTED)]
+    sched = schedule(runs, reverted, oracle_fp=oracle, hollow=hollow_of(fix),
                      budget_minutes=200)
     assert [s.run.label for s in sched.ordered] == [pair.label]
     assert all(s.reason == "pair_wait" and s.share_minutes == 0.0

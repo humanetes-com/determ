@@ -14,6 +14,14 @@ Chat replies are short and plain. No markdown: no headings, lists, tables, bold,
 
 "The pipeline is slow" means it is slow to complete steps (fills landing, iterations closing, verdicts moving), not that token throughput is low.
 
+## Which model answers which topic — warn before proceeding on the wrong one
+
+Two topics are pinned to a model. A question about how the pipeline is proceeding (the state of a live or recent run: iterations, stall, frontier, fills, verdicts, why a run is flat, a monitor wake) is answered on the larger model, Opus. A question about `monitor.py` itself (its rows, views, rendering, or `pipeline_core/monitor`) is answered on the smaller model, Sonnet. The reasoning is the work's shape: reading a run per fill, against the record, is the deep analysis in this file's opening section; changing what the monitor displays is display code.
+
+**The rule, checkable.** Before starting work on either topic, read the model this session is running on (the environment block names it). If it is the pinned one, proceed. If it is not, do NOT start: the first and only content of the reply is a one-line warning that names the topic, the model the session is on, and the model the topic is pinned to, and asks the user to switch (`/model`) or say to proceed anyway. Proceed on the wrong model only after the user says so, and then say once at the top of the answer that it ran on the unpinned model. A request that spans both topics (reading a live run through `monitor.py`'s output) is a pipeline-progress question: Opus governs.
+
+**What this is not.** It is not a reason to refuse or to spawn a subagent on the pinned model. Every other topic is model-agnostic and needs no warning. The assistant cannot change the session's model itself; the warning is the whole mechanism, and it costs one line, not a pre-check of anything else.
+
 ## After every implementation, name the launch command — never probe whether a pipeline is running
 
 A finished fix, mechanism, or gate is not finished until the reply names the exact command that starts the reading that can see it. The assistant does not pgrep, does not inspect live pids, does not curl a process list, and does not hedge with "if something is already running". The user owns the live process. `--y` on the launcher stops whatever is live; that is the stop, not a pre-check.

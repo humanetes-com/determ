@@ -53,6 +53,11 @@ from pipeline_core.domain.fill_schedule import (
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
+from pipeline_core.domain.schedule_invariants import (
+    all_blocking,
+    decided_from_schedule,
+    violations,
+)
 from pipeline_core.domain.test_outcome import (
     PremiseEntry,
     ground_left,
@@ -388,6 +393,33 @@ def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
               data={**row.to_dict(), **({"unchanged": True} if unchanged else {})})
 
 
+def _check_schedule(sched: FillSchedule,
+                    hollow: Mapping[str, frozenset[FnLocator]],
+                    deps: FillExecutionDeps) -> None:
+    """Hold the decision to the invariants every schedule must satisfy
+    (`domain/schedule_invariants.py`) and say so loudly when it does not.
+
+    The schedule was corrected one incident at a time for a month and each
+    correction left a sibling of its hole open; the one found on run
+    `82925-203ed7b8` (2026-09-28) cost two fills before anyone read the
+    schedule lines. This does not change the decision — the schedule is
+    built to satisfy the invariants — it makes the next hole a log line on
+    the fill that opens it."""
+    if not deps.scheduled:
+        return
+    found = violations(
+        decided_from_schedule(sched), hollow_stubs=all_blocking(hollow),
+        crash_blamed=deps.crash_blamed,
+        budget_minutes=sched.budget_minutes)
+    if not found:
+        return
+    deps.log(f"  HEALTH ‼ SCHEDULE_INVARIANT fill {deps.iteration}: "
+             + "; ".join(v.render() for v in found))
+    deps.emit("phase_c.fill.schedule_invariant", data={
+        "cluster": deps.cluster, "iter": deps.iteration,
+        "violations": [{"kind": v.kind, "detail": v.detail} for v in found]})
+
+
 def _schedule_inputs(deps: FillExecutionDeps,
                      hollow: Mapping[str, frozenset[FnLocator]],
                      ) -> dict[str, object]:
@@ -539,6 +571,7 @@ def execute_fill(
         # a flat landing, because the grade matches the sha. `body_rows` is
         # the ledger length that verdict was built from.
         "inputs": _schedule_inputs(deps, hollow)})
+    _check_schedule(sched, hollow, deps)
 
     budget = FillBudget(sched.budget_minutes, now=deps.now)
     rows: list[RouteLedgerRow] = []

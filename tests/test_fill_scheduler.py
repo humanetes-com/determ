@@ -183,16 +183,32 @@ def test_rows_are_written_and_a_flat_rebuy_is_deferred_next_fill(tmp_path: Path)
     assert len(stored) == 2 and stored[0].label == "file src/x.rs"
     # Same bodies next fill: both are re-buys; every candidate a re-buy →
     # shared budget (nothing deferred). With a never-served neighbour, the
-    # re-buys defer.
+    # re-buys defer. The keep filled the stub, so the next sweep's hollow
+    # map no longer names it.
     calls.clear()
     fresh = _Route(RouteKind.SESSION, [_session()], calls=calls)
-    second = execute_fill([*routes, fresh], hollow=hollow,
+    second = execute_fill([*routes, fresh], hollow={},
                           bodies_sha=lambda _t: "same",
                           deps=_deps(tmp_path, log, events, budget=60))
     assert calls == ["session[1 test(s)]"]
     deferred = [r for r in second.rows if r.outcome is RunOutcome.DEFERRED]
     assert {r.label for r in deferred} == {"file src/x.rs", "per-fn"}
     assert all(r.reason in ("rebuy_flat",) for r in deferred)
+    # Same history, but the next sweep still finds a test hollow on the
+    # stub: a fill does not defer every writer of a blocker — the first
+    # re-buy in order opens for it, the other still defers.
+    other = tmp_path / "still_hollow"
+    other.mkdir()
+    calls.clear()
+    execute_fill(routes, hollow=hollow, bodies_sha=lambda _t: "same",
+                 deps=_deps(other, log, events, budget=60))
+    calls.clear()
+    held = execute_fill([*routes, fresh], hollow=hollow,
+                        bodies_sha=lambda _t: "same",
+                        deps=_deps(other, log, events, budget=60))
+    assert calls == ["file src/x.rs", "session[1 test(s)]"]
+    assert [(r.label, r.reason) for r in held.rows
+            if r.outcome is RunOutcome.DEFERRED] == [("per-fn", "rebuy_flat")]
 
 
 def test_the_clock_gates_the_next_claim_never_the_unit_in_flight(tmp_path: Path) -> None:

@@ -173,12 +173,24 @@ def test_a_pair_blocked_run_is_deferred_this_fill() -> None:
                     budget_minutes=0)
     assert [s.run.label for s in zero.ordered] == [pair.label]
     assert {s.reason for s in zero.deferred} == {"pair_wait"}
+    # Under a budget the same pair is a flat re-buy (weight 0): it is
+    # deferred for that reason BEFORE it can hold anyone, so the runs it
+    # blocks open. The pre-2026-09-28 schedule let it hold both and then
+    # readmitted it as the only runnable run left — the re-buy that holds
+    # then leaves (run `82925-203ed7b8`, fills 5-6).
     budgeted = schedule(
         [per_fn, file_run, pair], rows, oracle_fp="o", hollow={},
         budget_minutes=60)
-    assert [s.run.label for s in budgeted.ordered] == [pair.label]
-    assert budgeted.ordered[0].share_minutes == 60.0
-    assert {s.reason for s in budgeted.deferred} == {"pair_wait"}
+    assert [s.run.label for s in budgeted.ordered] == [
+        per_fn.label, file_run.label]
+    assert {s.run.label: s.reason for s in budgeted.deferred} == {
+        pair.label: "rebuy_flat"}
+    fresh = schedule(
+        [per_fn, file_run, pair], [], oracle_fp="o", hollow={},
+        budget_minutes=60)
+    assert [s.run.label for s in fresh.ordered] == [pair.label]
+    assert fresh.ordered[0].share_minutes == 60.0
+    assert {s.reason for s in fresh.deferred} == {"pair_wait"}
     holder = _file("file src/x.rs", {_STUB, _FMT}, {_STUB}, {"t_hollow"})
     hollow_pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW},
                         {"t_hollow"})
@@ -286,24 +298,30 @@ def test_a_pair_sharing_a_sessions_units_goes_before_that_session() -> None:
         "session[1 test(s)]", "pair src/y.rs::new + src/y.rs::next"]
 
 
-def test_a_flat_pair_is_readmitted_when_pair_wait_empties_the_rest() -> None:
-    """A FLAT pair is still a rebuy. Today a FLAT pair plus never-served
-    sessions of the same leftovers opened the sessions. After pair_wait
-    the sessions leave scheduled; the pair is the only remaining
-    candidate; rebuy_readmitted opens the pair. Control: a FLAT pair
-    next to a session of different leftovers still defers as rebuy_flat.
-    Do not also flip pair FLAT to never_served."""
+def test_a_flat_pair_is_a_rebuy_and_holds_nothing_under_a_budget() -> None:
+    """A FLAT pair is still a rebuy, and a re-buy under a budget is
+    deferred for that reason before it can hold any run: the never-served
+    session of the same leftovers opens. The pre-2026-09-28 schedule let
+    the pair hold the session first and then readmitted the pair as the
+    only candidate left (`rebuy_readmitted`, the whole budget) — the shape
+    of 13 recorded fills, run `681204-b695ab3f` iter 2 among them (a
+    rank-3 pair at share 200 while six weight-2 runs waited). A pair that
+    is not a re-buy still holds it (control). A FLAT pair next to a session
+    of different leftovers defers as rebuy_flat. Do not also flip pair FLAT
+    to never_served."""
     pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
     session = _session("session[1 test(s)]", {"t_fmt"}, {_FMT, _NEW})
     rows = [_row(pair, RunOutcome.FLAT, 0)]
-    _pre_pair_wait_ordered = [session.label]
     sched = schedule([pair, session], rows, oracle_fp="o", hollow={},
                      budget_minutes=60)
-    assert [s.run.label for s in sched.ordered] == [pair.label]
-    assert [s.run.label for s in sched.ordered] != _pre_pair_wait_ordered
-    assert sched.ordered[0].reason == "rebuy_readmitted"
-    assert [s.run.label for s in sched.deferred] == [session.label]
-    assert sched.deferred[0].reason == "pair_wait"
+    assert [s.run.label for s in sched.ordered] == [session.label]
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (pair.label, "rebuy_flat")]
+    fresh = schedule([pair, session], [], oracle_fp="o", hollow={},
+                     budget_minutes=60)
+    assert [s.run.label for s in fresh.ordered] == [pair.label]
+    assert [(s.run.label, s.reason) for s in fresh.deferred] == [
+        (session.label, "pair_wait")]
     other = _session("session[1 test(s)]", {"t_other"}, {_STUB})
     mixed = schedule([pair, other], rows, oracle_fp="o", hollow={},
                      budget_minutes=60)
@@ -326,11 +344,19 @@ def test_an_attributed_write_defers_a_coverage_session_when_there_is_no_pair() -
     assert [s.run.label for s in control.ordered] == [
         session.label, file_run.label]
     assert not control.deferred
-    sched = schedule([file_run, session], rows, oracle_fp="o", hollow={},
+    sched = schedule([file_run, session], [], oracle_fp="o", hollow={},
                      attributed={_FMT}, budget_minutes=60)
     assert [s.run.label for s in sched.ordered] == [file_run.label]
     assert [s.run.label for s in sched.deferred] == [session.label]
     assert sched.deferred[0].reason == "coverage_split"
+    # The same attributed write as a flat re-buy under a budget is deferred
+    # for that before it can hold, so the session is not held behind a run
+    # that does not open (run `82925-203ed7b8` fills 5-6).
+    rebuy = schedule([file_run, session], rows, oracle_fp="o", hollow={},
+                     attributed={_FMT}, budget_minutes=60)
+    assert [s.run.label for s in rebuy.ordered] == [session.label]
+    assert [(s.run.label, s.reason) for s in rebuy.deferred] == [
+        (file_run.label, "rebuy_flat")]
     zero = schedule([file_run, session], rows, oracle_fp="o", hollow={},
                     attributed={_FMT})
     assert [s.run.label for s in zero.ordered] == [file_run.label]
@@ -841,8 +867,9 @@ def test_a_pair_past_its_grace_loses_its_precedence_and_the_rest_get_a_share() -
 def test_a_pair_past_its_grace_that_returned_the_same_bodies_flat_is_a_rebuy() -> None:
     """Past the grace the ledger speaks for the pair as for any run: its
     last graded row on the identical bodies came back FLAT, so it is a
-    `rebuy_flat` and a positive budget defers it. Inside the grace the
-    same history keeps it first (control)."""
+    `rebuy_flat` and a positive budget defers it. A FLAT pair is a re-buy
+    inside the grace too; what the grace keeps first is a REVERTED pair,
+    whose retry carries the revert's diagnosis (control)."""
     pair, per_fn, file_run, _ = _pair_blocked_inputs()
     moved = [_row(replace(pair, bodies_sha=f"b{i}"), RunOutcome.FLAT)
              for i in range(DEFAULT_UNPAID_GRACE - 1)]
@@ -852,7 +879,8 @@ def test_a_pair_past_its_grace_that_returned_the_same_bodies_flat_is_a_rebuy() -
     assert [s.run.label for s in sched.deferred] == [pair.label]
     assert sched.deferred[0].reason == "rebuy_flat"
     assert {s.run.label for s in sched.ordered} == {per_fn.label, file_run.label}
-    control = schedule([pair, per_fn, file_run], rows[1:], oracle_fp="o",
+    reverted = [*moved[1:], _row(pair, RunOutcome.REVERTED)]
+    control = schedule([pair, per_fn, file_run], reverted, oracle_fp="o",
                        hollow={}, budget_minutes=120)
     assert [s.run.label for s in control.ordered] == [pair.label]
 
@@ -1281,4 +1309,13 @@ def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_f
     assert first.run.kind is RouteKind.PER_FN and first.level == 0
     assert FnLocator("src/error.rs", "construct") in first.run.targets
     control = schedule(runs, rows, **kw)
-    assert [s.run.label for s in control.ordered] == fix["live_order"]
+    assert [s.run.label for s in control.ordered
+            if not s.blocker_writer] == fix["live_order"]
+    # The live fill also left `src/error.rs::downcast_mut` — a stub, and
+    # under this fixture's hollow relation a blocker — with no opened
+    # writer: its only writers, the error.rs file and impl runs, were both
+    # deferred `rebuy_reverted`. Since 2026-09-28 the first of them opens
+    # for it (stage 3 of `admit_ranked`).
+    assert [(s.run.label, s.blocker_writer) for s in control.ordered
+            if s.blocker_writer] == [
+        ("file src/error.rs", ("src/error.rs::downcast_mut",))]
