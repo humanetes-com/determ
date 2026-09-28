@@ -736,6 +736,7 @@ def test_a_per_kind_cap_defers_the_sessions_beyond_it_in_schedule_order() -> Non
     assert [s.run.label for s in capped.deferred] == [f"session #{i}" for i in range(4, 8)]
     assert all(s.reason == "kind_cap" and s.deferred and s.share_minutes == 0.0
                for s in capped.deferred)
+    assert all(s.prior_reason == "never_served" for s in capped.deferred)
     # Under a budget the capped ones stay deferred and the rest share it.
     budgeted = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
                         budget_minutes=100.0, max_per_kind={RouteKind.SESSION: 4})
@@ -746,6 +747,29 @@ def test_a_per_kind_cap_defers_the_sessions_beyond_it_in_schedule_order() -> Non
         free = schedule([*sessions, per_fn], [], oracle_fp="o", hollow={},
                         max_per_kind=cap)
         assert len(free.ordered) == 9 and not free.deferred
+
+
+def test_a_capped_run_opened_as_the_only_writer_keeps_its_ranked_reason() -> None:
+    """A per-kind cap defers a run, and the cover may still open it when it
+    is the only writer of a blocker. That opening is the ranked reason, not
+    the cap. A capped run that writes no uncovered blocker stays `kind_cap`."""
+    a = FnLocator("src/x.rs", "a")
+    b = FnLocator("src/x.rs", "b")
+    c = FnLocator("src/x.rs", "c")
+    first = replace(_session("session #0", {"t0"}, {a}, seq=0),
+                    stubs_in_targets=frozenset({a}))
+    writer = replace(_session("session #1", {"t1"}, {b}, seq=1),
+                     stubs_in_targets=frozenset({b}))
+    extra = _session("session #2", {"t2"}, {c}, seq=2)
+    hollow = {"t0": frozenset({a}), "t1": frozenset({b})}
+    sched = schedule([first, writer, extra], [], oracle_fp="o", hollow=hollow,
+                     max_per_kind={RouteKind.SESSION: 1})
+    opened = {s.run.label: s for s in sched.ordered}
+    assert opened["session #1"].reason == "never_served"
+    assert opened["session #1"].blocker_writer == ("src/x.rs::b",)
+    assert opened["session #1"].weight >= 1
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        ("session #2", "kind_cap")]
 
 
 def test_the_grace_counts_a_route_across_a_moved_bodies_sha() -> None:

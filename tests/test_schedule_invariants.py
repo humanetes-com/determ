@@ -19,19 +19,33 @@ has produced. The generator names no crate symbol and no live test.
 The recorded half: `tests/fixtures/fills/82925-203ed7b8_iter5_decided.json`
 is that fill's schedule event verbatim (candidates, recorded decisions,
 inputs) plus its route ledger rows. The recorded decision — produced by the
-code of that day — is the negative control and must break both invariants;
-the admission stage of today's code, fed the same ranked candidates, must
-break neither and must open a run that writes the stub.
+code of that day — is the negative control and must break both invariants.
+Today's admission, fed the same ranked candidates, must break neither, open
+the per-fn run first, and defer the two re-buys of that stub with nobody
+held.
+
+The generated seeds assert today's schedule breaks neither invariant. The
+pre-change admission (holds, then a weight-zero deferral) is the negative
+control twice: on a constructed case of that same shape (a flat re-buy
+opens, holds the run that also writes the stub, and is then deferred), and
+over the same generator, where it breaks the invariants on 841 of the 3000
+seeds (968 unwritten blockers, 582 holds on runs that did not open). Those
+counts are the same under every PYTHONHASHSEED only because the generator
+samples from sorted sequences; sampling from a frozenset made each process
+draw different cases (measured 2026-09-28: 977/583 in one process, 1086-1097
+unwritten blockers in others).
 """
 from __future__ import annotations
 
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pipeline_core.domain import fill_schedule as fs
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteLedgerRow,
@@ -128,7 +142,10 @@ def _case(seed: int) -> dict[str, Any]:
     hollow: dict[str, frozenset[FnLocator]] = {}
     for t in TESTS:
         if stubs and rng.random() < 0.5:
-            hollow[t] = _pick(rng, tuple(stubs), 1, 2)
+            # Sorted: a frozenset's order follows the per-process string
+            # hash, so sampling from it gave each process different cases.
+            hollow[t] = _pick(rng, tuple(sorted(
+                stubs, key=lambda u: (u.file, u.fn_name))), 1, 2)
     runs = [_run(rng, i, stubs, hollow) for i in range(rng.randint(2, 9))]
     blamed = _pick(rng, FNS, 0, 2) if rng.random() < 0.4 else frozenset()
     attributed = _pick(rng, FNS, 0, 6) if rng.random() < 0.6 else frozenset()
@@ -153,6 +170,163 @@ def _schedule(case: dict[str, Any]) -> Any:
 SEEDS = range(3000)
 
 
+def _prechange_schedule(case: dict[str, Any]) -> Any:
+    """Admission as it was before a run's own deferral was decided inside
+    the hold pass: a re-buy could join the opened set, hold someone, and
+    then be deferred by the weight-zero step. No cover."""
+    rows_list = list(case["rows"])
+    oracle_fp = ORACLE
+    hollow = case["hollow"]
+    budget_minutes = case["budget"]
+    unpaid_grace = case["unpaid_grace"]
+    max_per_kind = case["max_per_kind"]
+    readmit_after = 2
+    blamed = frozenset(case["blamed"])
+    attr = frozenset(case["attributed"])
+    history = fs._latest_by_identity(rows_list)
+    units = fs.UnitService(rows_list, oracle_fp)
+    spent = frozenset(
+        fs._served_key(r) for r in case["runs"]
+        if unpaid_grace > 0
+        and fs.consecutive_unpaid(rows_list, r, oracle_fp) >= unpaid_grace)
+    carved: list[RouteRun] = []
+    for planned in case["runs"]:
+        for piece in fs.carve_rebuys(planned, units, readmit_after=readmit_after):
+            if piece.parent:
+                piece = replace(piece, bodies_sha="b")
+            carved.append(piece)
+    order_index = {k: i for i, k in enumerate(fs.TODAY_ORDER)}
+    split_of: dict[str, bool] = {}
+    ranked: list[tuple[RouteRun, int, str, int]] = []
+    for run in carved:
+        rank, reason, _deferrals = fs._rank_of(
+            run, oracle_fp, history, units, readmit_after=readmit_after,
+            grace_left=fs._served_key(run) not in spent)
+        level = fs._level(run, hollow, blamed)
+        split_of[run.key] = fs._is_coverage_split(run, attr)
+        ranked.append((run, rank, reason, level))
+
+    def _sort_key(item: tuple[RouteRun, int, str, int]
+                  ) -> tuple[int, int, int, int, int]:
+        run, rank, _reason, level = item
+        return (level, int(split_of.get(run.key, False)), rank,
+                order_index.get(run.kind, len(order_index)), run.seq)
+
+    ranked.sort(key=_sort_key)
+    per_test: dict[tuple[str, str], int] = {}
+
+    def _test_spent(kind: str, test: str) -> bool:
+        if unpaid_grace <= 0:
+            return False
+        key = (kind, test)
+        if key not in per_test:
+            per_test[key] = (
+                fs.unpaid_tries_for_test(
+                    rows_list, test, oracle_fp,
+                    match=lambda r: r.kind is RouteKind.PAIR)
+                if kind == "pair" else
+                fs.unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
+        return per_test[key] >= unpaid_grace
+
+    def _grace_left(p: RouteRun, run: RouteRun) -> bool:
+        return (fs._served_key(p) not in spent
+                and not ((shared := p.target_tests & run.target_tests)
+                         and all(_test_spent("pair", t) for t in shared)))
+
+    def _orders(a: RouteRun, b: RouteRun) -> bool:
+        if not fs.run_blocks(a, b, hollow, blamed):
+            return False
+        return a.kind is not RouteKind.PAIR or _grace_left(a, b)
+
+    blockers_of = {
+        it[0].key: tuple(
+            other[0].label for other in ranked
+            if other[0] is not it[0] and _orders(other[0], it[0]))
+        for it in ranked}
+    blocker_keys = {
+        it[0].key: {
+            other[0].key for other in ranked
+            if other[0] is not it[0] and _orders(other[0], it[0])}
+        for it in ranked}
+    by_key = {it[0].key: it for it in ranked}
+    ordered_items = [
+        (*by_key[k], blockers_of[k])
+        for k in fs.condensed_order([it[0].key for it in ranked], blocker_keys)]
+    scheduled: list[fs.ScheduledRun] = []
+    for pos, (run, rank, reason, level, by) in enumerate(ordered_items):
+        weight = 1 if reason == "rebuy_readmitted" else fs._WEIGHT[rank]
+        scheduled.append(fs.ScheduledRun(
+            run=run, rank=rank, weight=weight, reason=reason, level=level,
+            blocked_by=by, position=pos))
+    waiting: list[fs.ScheduledRun] = []
+    non_split_runs = [s.run for s in scheduled if not split_of.get(s.run.key, False)]
+    opened_runs: list[RouteRun] = []
+    opened_per_kind: dict[RouteKind, int] = {}
+    kept: list[fs.ScheduledRun] = []
+    for s in scheduled:
+        run = s.run
+        if fs._aims_at_nothing(run, blamed):
+            waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                   reason="nothing_aimed"))
+            continue
+        blocking_pairs = [p for p in opened_runs
+                          if p.kind is RouteKind.PAIR
+                          and fs.run_blocks(p, run, hollow, blamed)]
+        mutual = [p for p in blocking_pairs if fs.run_blocks(run, p, hollow, blamed)]
+        with_grace = [p for p in blocking_pairs if _grace_left(p, run)]
+        holders = [p for p in with_grace if p not in mutual]
+        if holders:
+            waiting.append(replace(
+                s, deferred=True, share_minutes=0.0, reason="pair_wait",
+                held_by=tuple(p.key for p in holders), prior_reason=s.reason))
+            continue
+        if with_grace:
+            s = replace(s, mutual=tuple(p.label for p in with_grace))
+        elif blocking_pairs:
+            s = replace(s, lapsed=("pair_wait",))
+        if attr and split_of.get(run.key, False):
+            shared = frozenset().union(*(
+                run.target_tests & o.target_tests for o in non_split_runs))
+            if shared:
+                split_holders = [
+                    o for o in non_split_runs
+                    if o in opened_runs and (run.target_tests & o.target_tests)]
+                if split_holders and not all(
+                        _test_spent("attributed", t) for t in shared):
+                    waiting.append(replace(
+                        s, deferred=True, share_minutes=0.0,
+                        reason="coverage_split",
+                        held_by=tuple(o.key for o in split_holders),
+                        prior_reason=s.reason))
+                    continue
+                s = replace(s, lapsed=tuple(dict.fromkeys(
+                    (*s.lapsed, "coverage_split"))))
+        cap = int((max_per_kind or {}).get(run.kind, 0) or 0)
+        if cap > 0 and opened_per_kind.get(run.kind, 0) >= cap:
+            waiting.append(replace(s, deferred=True, share_minutes=0.0,
+                                   reason="kind_cap"))
+            continue
+        opened_per_kind[run.kind] = opened_per_kind.get(run.kind, 0) + 1
+        opened_runs.append(run)
+        kept.append(s)
+    scheduled = kept
+    if budget_minutes <= 0:
+        return fs.FillSchedule(tuple(scheduled), tuple(waiting), 0.0)
+    runnable = [s for s in scheduled if s.weight > 0]
+    if not runnable:
+        scheduled = [replace(s, weight=1, reason="rebuy_readmitted")
+                     for s in scheduled]
+    ordered: list[fs.ScheduledRun] = []
+    deferred: list[fs.ScheduledRun] = list(waiting)
+    for s in scheduled:
+        if s.weight <= 0:
+            deferred.append(replace(s, deferred=True, share_minutes=0.0))
+            continue
+        ordered.append(s)
+    ordered = fs._allot(ordered, float(budget_minutes))
+    return fs.FillSchedule(tuple(ordered), tuple(deferred), float(budget_minutes))
+
+
 def test_every_generated_schedule_satisfies_the_invariants() -> None:
     broken: list[str] = []
     for seed in SEEDS:
@@ -164,6 +338,87 @@ def test_every_generated_schedule_satisfies_the_invariants() -> None:
             crash_blamed=case["blamed"], budget_minutes=case["budget"])
         broken.extend(f"seed {seed}: {v.render()}" for v in found)
     assert not broken, f"{len(broken)} violation(s):\n" + "\n".join(broken[:20])
+
+
+def test_the_generator_reaches_the_pre_change_defect() -> None:
+    """The property is only a test if the same generator breaks it under the
+    code it was written against: the pre-change admission must violate the
+    invariants on some seeds, both kinds."""
+    kinds: set[str] = set()
+    for seed in range(0, 3000, 5):
+        case = _case(seed)
+        kinds.update(v.kind for v in violations(
+            decided_from_schedule(_prechange_schedule(case)),
+            hollow_stubs=all_blocking(case["hollow"]),
+            crash_blamed=case["blamed"], budget_minutes=case["budget"]))
+    assert {"holder_not_opened", "blocker_unwritten"} <= kinds
+
+
+def _rebuy_then_hold_case() -> dict[str, Any]:
+    """A flat re-buy of the stub, and a coverage-split that writes it too.
+    The pre-change admission lets the re-buy hold the split and then defers
+    the re-buy. Names no live unit: two files, one stub, one test."""
+    stub = FnLocator("src/a.rs", "f0")
+    extra = FnLocator("src/b.rs", "f1")
+    other = FnLocator("src/c.rs", "f2")
+    test = "t0"
+    file_run = RouteRun(
+        kind=RouteKind.FILE, label="file src/a.rs",
+        targets=frozenset({stub}), target_tests=frozenset({test}),
+        stubs_in_targets=frozenset({stub}), files=("src/a.rs",),
+        seq=0, bodies_sha="b")
+    per_fn = RouteRun(
+        kind=RouteKind.PER_FN, label="per-fn",
+        targets=frozenset({stub, extra}), target_tests=frozenset({test}),
+        stubs_in_targets=frozenset({stub}),
+        files=("src/a.rs", "src/b.rs"), seq=1, bodies_sha="p")
+    # A weight-positive run so the "every opened run is a re-buy" readmission
+    # does not put the holder back. It writes neither the stub nor the test.
+    bystander = RouteRun(
+        kind=RouteKind.FILE, label="file src/c.rs",
+        targets=frozenset({other}), target_tests=frozenset({"t1"}),
+        files=("src/c.rs",), seq=2, bodies_sha="c")
+    tgt = tuple(sorted((u.file, u.fn_name) for u in file_run.targets))
+    row = RouteLedgerRow(
+        kind=file_run.kind, label=file_run.label, targets=tgt,
+        bodies_sha=file_run.bodies_sha, oracle_fp=ORACLE,
+        outcome=RunOutcome.FLAT, net_pass_delta=0,
+        target_tests=(test,), kept=tgt, opened=tgt)
+    return {
+        "runs": [file_run, per_fn, bystander], "rows": [row],
+        "hollow": {test: frozenset({stub})}, "blamed": frozenset(),
+        "attributed": frozenset({stub}), "budget": 200.0,
+        "max_per_kind": None, "unpaid_grace": 3,
+    }
+
+
+def test_a_rebuy_that_holds_and_is_then_deferred_breaks_both() -> None:
+    """The pre-change admission on the shape of the recorded fill: the re-buy
+    holds the other writer, then the weight-zero step defers the re-buy, and
+    the stub has no opened writer. Today's schedule defers the re-buy first
+    and opens the other writer."""
+    case = _rebuy_then_hold_case()
+    old = _prechange_schedule(case)
+    found = violations(
+        decided_from_schedule(old),
+        hollow_stubs=all_blocking(case["hollow"]),
+        crash_blamed=case["blamed"], budget_minutes=case["budget"])
+    kinds = {v.kind for v in found}
+    assert kinds == {"holder_not_opened", "blocker_unwritten"}
+    deferred = {s.run.label: s for s in old.deferred}
+    assert deferred["file src/a.rs"].reason == "rebuy_flat"
+    assert deferred["per-fn"].reason == "coverage_split"
+    assert deferred["per-fn"].held_by == (deferred["file src/a.rs"].run.key,)
+    assert [s.run.label for s in old.ordered] == ["file src/c.rs"]
+
+    now = _schedule(case)
+    assert not violations(
+        decided_from_schedule(now),
+        hollow_stubs=all_blocking(case["hollow"]),
+        crash_blamed=case["blamed"], budget_minutes=case["budget"])
+    assert [s.run.label for s in now.ordered][0] == "per-fn"
+    assert ("file src/a.rs", "rebuy_flat", ()) in [
+        (s.run.label, s.reason, s.held_by) for s in now.deferred]
 
 
 def test_the_schedule_is_deterministic() -> None:
@@ -243,8 +498,19 @@ def test_todays_admission_on_the_recorded_ranking_keeps_both() -> None:
         crash_blamed=blamed_from_event(ev),
         budget_minutes=float(ev["budget_minutes"]))
     assert not found, [v.render() for v in found]
+    opened = list(sched.ordered)
+    assert opened[0].run.label == "per-fn 1 stub(s), 18 re-fill(s)"
     stubs = hollow_stubs_from_event(ev) or frozenset()
-    assert any(d.opened and d.targets & stubs for d in decided)
+    assert opened[0].run.targets & stubs
+    rebuys = [s for s in sched.deferred if s.reason == "rebuy_reverted"]
+    assert [s.run.label for s in rebuys] == [
+        "file src/error.rs [1 re-buy unit(s)]",
+        "impl src/error.rs [1 re-buy unit(s)]",
+    ]
+    assert all(not s.held_by for s in rebuys)
+    opened_keys = {s.run.key for s in opened}
+    held = [s for s in sched.deferred if s.held_by]
+    assert held and all(set(s.held_by) <= opened_keys for s in held)
 
 
 def _ranked_inputs(rec: dict[str, Any]) -> dict[str, Any]:
@@ -340,3 +606,35 @@ def test_the_executor_logs_a_broken_schedule_loudly() -> None:
     events.clear()
     _check_schedule(admit_ranked(**inputs), inputs["hollow"], deps)  # type: ignore[arg-type]
     assert log == [] and events == []
+
+
+def test_the_ledger_slice_keeps_the_session_turn_price() -> None:
+    """A session floor is priced from minutes and model calls. The slice
+    the admission replay reads keeps both on a session row."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts" / "distill_schedule_decision.py"
+    spec = importlib.util.spec_from_file_location(
+        "distill_schedule_decision", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    event = {"runs": [{"target_tests": ["t_floor"], "kind": "session"}],
+             "deferred": []}
+    loaded = [{
+        "kind": "session", "label": "session #0", "targets": [],
+        "bodies_sha": "b", "oracle_fp": "o", "outcome": "flat",
+        "run_id": "r", "iteration": 1, "cluster": "c",
+        "net_pass_delta": 0, "target_tests": ["t_floor", "other"],
+        "newly_green": [], "reason": "served",
+        "minutes": 11.3, "model_calls": 2,
+    }]
+    oracle, kept = mod.slice_ledger(loaded, event, run_id="r")
+    assert oracle == "o"
+    assert kept == [{
+        "kind": "session", "label": "session #0", "targets": [],
+        "bodies_sha": "b", "oracle_fp": "o", "outcome": "flat",
+        "run_id": "r", "iteration": 1, "cluster": "c",
+        "net_pass_delta": 0, "target_tests": ["t_floor"],
+        "newly_green": [], "reason": "served",
+        "minutes": 11.3, "model_calls": 2,
+    }]

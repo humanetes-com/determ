@@ -24,6 +24,8 @@ index, N being the event's `ledger_rows`. Of those, the fixture keeps the rows
 the admission stage can read: rows aimed at any candidate's tests (the
 per-test grace clocks) and PAIR rows (a pair's own grace), under the fill's
 oracle (every clock skips the others), with the fields those clocks read.
+`minutes` and `model_calls` stay too: a session floor is priced from them
+(`session_turn_minutes`), and dropping them replays every floor as absent.
 `oracle_fp` is the oracle of the newest such row of the same run, else of
 the newest such row.
 
@@ -37,6 +39,43 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+
+# Fields the admission clocks read. `minutes` and `model_calls` price a
+# session's floor; the grace clocks read the rest.
+_CLOCK_FIELDS = (
+    "kind", "label", "targets", "bodies_sha", "oracle_fp",
+    "outcome", "run_id", "iteration", "cluster", "net_pass_delta",
+    "target_tests", "newly_green", "reason", "minutes", "model_calls",
+)
+
+
+def slice_ledger(loaded: list[dict], event: dict, *, run_id: str,
+                 ) -> tuple[str, list[dict]]:
+    """The ledger rows `admit_ranked` can read, and the oracle it reads them
+    under. A session row keeps `minutes` and `model_calls` so a replay can
+    price its floor. `run_id` is the fill's run: the schedule payload itself
+    does not carry it, and the oracle is the newest matching row of that run."""
+    tests: set[str] = set()
+    for raw in list(event.get("runs") or ()) + list(event.get("deferred") or ()):
+        tests.update(raw.get("target_tests") or ())
+    relevant = [r for r in loaded
+                if r.get("kind") == "pair"
+                or tests & set(r.get("target_tests") or ())]
+    own = [r for r in relevant if r.get("run_id") == run_id]
+    oracle = (own or relevant or [{"oracle_fp": ""}])[-1].get("oracle_fp", "")
+    kept = [{k: r[k] for k in _CLOCK_FIELDS if k in r}
+            for r in relevant if r.get("oracle_fp") == oracle]
+    # A non-pair row is read only as "was it aimed at / did it turn green
+    # this candidate test", so its lists keep the candidates' tests. A pair
+    # row's aimed tests are part of its work key and stay whole.
+    for r in kept:
+        if r.get("kind") != "pair":
+            r["target_tests"] = sorted(tests & set(r.get("target_tests") or ()))
+            if isinstance(r.get("newly_green"), list):
+                r["newly_green"] = sorted(
+                    n for n in r["newly_green"]
+                    if str(n).rsplit("::", 1)[-1] in tests)
+    return str(oracle), kept
 
 
 def main() -> int:
@@ -72,31 +111,7 @@ def main() -> int:
                 loaded.append(row)
                 if len(loaded) >= n:
                     break
-    tests: set[str] = set()
-    for r in list(event.get("runs") or ()) + list(event.get("deferred") or ()):
-        tests.update(r.get("target_tests") or ())
-    relevant = [r for r in loaded
-                if r.get("kind") == "pair"
-                or tests & set(r.get("target_tests") or ())]
-    own = [r for r in relevant if r.get("run_id") == args.run]
-    oracle = (own or relevant or [{"oracle_fp": ""}])[-1].get("oracle_fp", "")
-    # Every clock the stage reads skips rows under another oracle, and reads
-    # only these fields of the rest.
-    fields = ("kind", "label", "targets", "bodies_sha", "oracle_fp",
-              "outcome", "run_id", "iteration", "cluster", "net_pass_delta",
-              "target_tests", "newly_green", "reason")
-    kept = [{k: r[k] for k in fields if k in r}
-            for r in relevant if r.get("oracle_fp") == oracle]
-    # A non-pair row is read only as "was it aimed at / did it turn green
-    # this candidate test", so its lists keep the candidates' tests. A pair
-    # row's aimed tests are part of its work key and stay whole.
-    for r in kept:
-        if r.get("kind") != "pair":
-            r["target_tests"] = sorted(tests & set(r.get("target_tests") or ()))
-            if isinstance(r.get("newly_green"), list):
-                r["newly_green"] = sorted(
-                    n for n in r["newly_green"]
-                    if str(n).rsplit("::", 1)[-1] in tests)
+    oracle, kept = slice_ledger(loaded, event, run_id=args.run)
     out = {"run_id": args.run, "iter": args.iter, "cluster": args.cluster,
            "oracle_fp": oracle, "ledger_loaded": n, "event": event,
            "ledger_rows": kept}

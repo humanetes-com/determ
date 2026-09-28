@@ -1875,9 +1875,10 @@ def admit_ranked(
     is a local judgement about one run (it is a re-buy; a pair should go
     first; a session cap) and none of them can see that it removed the last
     writer. The cover opens that writer at the smallest weight (1), after
-    the deferral that removed it: 3000 generated candidate sets left a
-    blocker with no opened writer in 977 violations under the pre-change
-    function (`tests/test_schedule_invariants.py`). A promoted run opens
+    the deferral that removed it. The pre-change admission — holds first,
+    then a weight-zero deferral — is the negative control in
+    `tests/test_schedule_invariants.py`: a flat re-buy holds the other
+    writer of the stub and is then deferred. A promoted run opens
     past the per-kind cap; the cap bounds how a fill is shaped, a blocker
     decides whether it can move at all. It holds no one: its waiters were
     decided in stage 2 against runs that opened there.
@@ -2047,8 +2048,10 @@ def admit_ranked(
                     (*s.lapsed, "coverage_split"))))
         cap = int((max_per_kind or {}).get(run.kind, 0) or 0)
         if cap > 0 and opened_per_kind.get(run.kind, 0) >= cap:
+            # Keep the ranked reason: a later cover may open this run as
+            # the only writer of a blocker, and that opening is not a cap.
             waiting.append(replace(s, deferred=True, share_minutes=0.0,
-                                   reason="kind_cap"))
+                                   reason="kind_cap", prior_reason=s.reason))
             continue
         opened_per_kind[run.kind] = opened_per_kind.get(run.kind, 0) + 1
         opened_runs.append(run)
