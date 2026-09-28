@@ -56,8 +56,9 @@ from pipeline_core.domain.attribution import (
     site_payload,
 )
 from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.llm_output import extract_fn_bodies
-from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.reasoning_cap import CallCapReading
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import quote_panic_site
@@ -115,6 +116,11 @@ class SessionPorts:
     log: Callable[[str], None]
     emit: Callable[..., None]
     check_graceful_stop: Callable[[str], None]
+    # Whether a compiling turn left the crash it was written against
+    # (`crash_keep.SameCrashJudge`). Required: the session cannot keep a
+    # turn without saying which units the crash held when the fill
+    # started, so a caller cannot reopen the rotation keep by omission.
+    same_crash: SameCrashJudge
     # (test names) -> rendered `observed:` lines per test; None disables.
     probe: Callable[[Sequence[str]], Mapping[str, str]] | None = None
     # (diagnostics) -> (file, fn_name, one-line container) per body the
@@ -609,6 +615,29 @@ def run_slice_session(
             judged_turns += 1
             if cap is not None and cap.capped:
                 judged_capped += 1
+            _crash_out = raw[-1] if raw else ""
+            _written = [FnLocator(u.file, u.fn_name) for u in cs.units]
+            if ports.same_crash.refuses(
+                    output=_crash_out, aimed=slice_.tests, written=_written):
+                _restore(pre)
+                _held = ", ".join(sorted(
+                    f"{u.file}::{u.fn_name}"
+                    for u in ports.same_crash.written_culprits(_written)))
+                ports.log(
+                    f"  [phase-c/session] {label}: turn {turns} — compiled, "
+                    "but every aimed test is still a native crash and the "
+                    f"crash's culprit(s) it wrote ({_held}) still are; not "
+                    "kept.")
+                ports.emit("phase_c.session.turn", data={
+                    "cluster": cluster_name, "turn": turns, "kind": "same_crash",
+                    "units": [site_payload(u) for u in sorted(cs.units)]})
+                pending = (
+                    "RESULT: this change compiled, and every aimed test is "
+                    "still the same native crash. The crash's culprit(s) it "
+                    f"wrote ({_held}) are still on the crashing stack after "
+                    "it, so the change was not kept.\n"
+                    + render_budget_turn(max_turns - turns))
+                continue
             # The best-state decision, before anything reads the reading:
             # a turn at least as good as the best becomes it; a worse one
             # is put back to the best's bytes before the next turn opens.

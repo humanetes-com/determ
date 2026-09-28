@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -46,7 +47,7 @@ import pytest
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.dispatch_batch import promote_crash_evidence, take_batch
 from pipeline_core.domain.landed_change import declined_unchanged
-from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.domain.language_driver import GenericLanguageDriver, using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
@@ -236,7 +237,8 @@ def test_the_evidence_section_states_the_fault_instead_of_hedging() -> None:
     assert "nothing singles out" in render_refill_evidence([named]), (
         "negative control: the INFERRED sentence the fault used to get")
     text = render_refill_evidence([crashed])
-    assert "CRASHED" in text and "MEMORY FAULT" in text
+    assert "CRASHED" in text and "crash evidence" in text
+    assert "MEMORY FAULT" not in text
     assert "return it UNCHANGED" not in text
 
 
@@ -314,7 +316,8 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     destructor.
     """
     drop_plan = BlockFillPlan(header="impl Drop for Error {",
-                              refills=("drop",), crashed=("drop",))
+                              refills=("drop",), crashed=("drop",),
+                              memory_crashed=("drop",))
     drop_line = _plan_line(drop_plan)
     assert "A TEST BINARY CRASHED INSIDE THIS BODY" in drop_line
     assert "self must not drop" not in drop_line, (
@@ -322,7 +325,8 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
 
     conv = BlockFillPlan(header="impl Error {",
                          refills=("into_boxed_dyn_error",),
-                         crashed=("into_boxed_dyn_error",))
+                         crashed=("into_boxed_dyn_error",),
+                         memory_crashed=("into_boxed_dyn_error",))
     line = _plan_line(conv)
     assert "into_boxed_dyn_error" in line
     assert "MUST:" in line
@@ -334,10 +338,43 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     # the MUST sat on `into_boxed_dyn_error`): crashed on its own evidence,
     # it carries the MUST.
     dc = BlockFillPlan(header="impl Error {", refills=("downcast",),
-                       crashed=("downcast",))
+                       crashed=("downcast",), memory_crashed=("downcast",))
     dc_line = _plan_line(dc)
     assert "A TEST BINARY CRASHED INSIDE THIS BODY" in dc_line
     assert "self must not drop" in dc_line
+
+
+def test_a_stack_overflow_plan_carries_no_ownership_claim() -> None:
+    """Run `371055-1a407b3c`'s file prompt `8bd6c469…` (2026-09-27): the
+    cycle member `from_boxed` of a stack overflow was listed CRASHED with
+    "a memory fault … ownership, lifetimes or raw pointers" and the MUST
+    "the original owner must not drop", while the same prompt's
+    CRASH_EVIDENCE said "This is not a memory-lifetime fault". An
+    exhaustion culprit is crashed and not memory-crashed. Negative
+    control: the same name under an invalid-memory blame carries the MUST,
+    so the line is keyed on the class and not on the name."""
+    overflow = BlockFillPlan(header="impl Error {",
+                             refills=("from_boxed", "into_boxed_dyn_error",
+                                      "object_boxed"),
+                             crashed=("from_boxed", "into_boxed_dyn_error"),
+                             aimed=("object_boxed",))
+    for drv in (GenericLanguageDriver(), catalog_driver()):
+        with using_driver(drv):
+            line = _plan_line(overflow)
+            assert "A TEST BINARY CRASHED INSIDE THIS BODY" in line
+            assert "from_boxed" in line
+            low = line.lower()
+            assert "must not drop" not in low
+            assert "memory fault" not in low
+            assert "ownership" not in low
+            # No family promotion off a stack overflow: object_boxed keeps
+            # its AIMED line.
+            _, _, aimed_part = line.partition(
+                "; REWRITE — A TEST BINARY CRASHED and")
+            assert "object_boxed" in aimed_part
+            memory = replace(overflow,
+                             memory_crashed=("into_boxed_dyn_error",))
+            assert "must not drop" in _plan_line(memory)
 
 
 def test_a_family_member_aimed_beside_a_crashed_conversion_is_listed_crashed() -> None:
@@ -354,6 +391,7 @@ def test_a_family_member_aimed_beside_a_crashed_conversion_is_listed_crashed() -
         refills=("reallocate_into_boxed_dyn_error_without_backtrace",
                  "object_boxed", "vtable"),
         crashed=("reallocate_into_boxed_dyn_error_without_backtrace",),
+        memory_crashed=("reallocate_into_boxed_dyn_error_without_backtrace",),
         aimed=("object_boxed", "vtable"))
     line = _plan_line(plan)
     crash_part, _, rest = line.partition("; REWRITE — A TEST BINARY CRASHED and")
@@ -365,7 +403,7 @@ def test_a_family_member_aimed_beside_a_crashed_conversion_is_listed_crashed() -
 
     unpromoted = BlockFillPlan(
         header="impl Error {", refills=("drop", "object_boxed"),
-        crashed=("drop",), aimed=("object_boxed",))
+        crashed=("drop",), memory_crashed=("drop",), aimed=("object_boxed",))
     before = _plan_line(unpromoted)
     _, _, aimed_part = before.partition("; REWRITE — A TEST BINARY CRASHED and")
     assert "object_boxed" in aimed_part, (

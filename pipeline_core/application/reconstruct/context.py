@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -98,6 +99,11 @@ class PerFnPassCtx:
     fn_records: tuple[Any, ...] = ()
     # How many extra functions one reply may add to its write.
     joint_max: int = 0
+    # (cargo test output) -> culprits still in it, read by
+    # `crash_keep.SameCrashJudge` beside `crash_blamed`. None is "not
+    # localized": a keep that wrote a crash_blamed unit whose aimed tests
+    # still crash is then refused, never silently kept.
+    culprits_of: Callable[[str], Collection[Any]] | None = None
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

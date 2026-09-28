@@ -852,15 +852,6 @@ def ownership_transfer_must(names: Collection[str]) -> str:
     return language_driver().ownership_transfer_must(names)
 
 
-def crash_evidence_prefix(base: str, names: Collection[str]) -> str:
-    """``base`` with :data:`OWNERSHIP_TRANSFER_MUST` in front when ``names``
-    intersects the conversion family. Empty evidence still renders empty
-    because :func:`tag_block` drops a blank content regardless of prefix.
-    """
-    extra = ownership_transfer_must(names)
-    return f"{extra}\n{base}" if extra else base
-
-
 @dataclass(frozen=True, slots=True)
 class DestructionFault:
     """A use-after-free whose FREE and whose ACCESS are both a DROP: the same
@@ -1245,6 +1236,14 @@ def _render_invalid_memory(site: CrashSite) -> str:
             "memory that outlived its owner (dangling 'static from a "
             "stack local, wrong cast target, double free). Do not patch "
             "the calling test's fn.")
+        # The ownership MUST is this class's claim about the blamed body.
+        # The per-fn and per-impl builders used to prefix it to every crash
+        # block by the prompt's fn name, so a stack overflow's cycle member
+        # was told "the original owner must not drop" (run
+        # `371055-1a407b3c`, per-fn `from_boxed`, prompt `104265c6…`).
+        must = ownership_transfer_must((f.fn_name,))
+        if must:
+            lines.append(f"`{f.fn_name}` — {must}")
     elif site.origin_unattributed:
         # Say the origin is unknown instead of naming the reader. The
         # frames above ARE the access path and are worth showing; what
@@ -2132,6 +2131,18 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     exhaustion (:func:`exhaustion_culprit_locators`). The set the refill
     stamp, the schedule and the dispatch grade read."""
     return reader_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+
+
+def memory_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
+    """The reader blame of the INVALID-MEMORY sites only: the units an
+    ownership instruction is about. A stack exhaustion's cycle and a fault
+    of no memory class blame units too, and neither says anything about
+    who owns a pointer; `_plan_line` attached the ownership MUST to every
+    crashed conversion whatever its class, and run `371055-1a407b3c`'s
+    file prompt `8bd6c469…` told a stack overflow's cycle member that the
+    original owner must not drop."""
+    return reader_blamed_locators(tuple(
+        s for s in sites if s.fault is FaultClass.INVALID_MEMORY))
 
 
 def reader_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:

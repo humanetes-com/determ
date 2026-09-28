@@ -27,6 +27,7 @@ from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
     run_slice_session,
 )
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
@@ -69,7 +70,8 @@ def _run(root: Path, *, bound: int, max_turns: int = 8):
         answer_pulls=lambda r, conversation="": "here is the error",
         log=lambda m: None,
         emit=lambda ev, data=None, **k: events.append((ev, data or {})),
-        check_graceful_stop=lambda s: None)
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
     out = run_slice_session(
         ports, target_src_dir=root, cluster_name="t",
         slice_=SessionSlice(tests=("t_fmt",), units=(_FMT,)),

@@ -463,13 +463,11 @@ def render_refill_evidence(
             # instruction that kept `src/error.rs::drop` on the tree across
             # five processes while it was leaking a use-after-free.
             lines.append(
-                f"`{e.fn_name}` — CRASHED: a test binary died of a MEMORY "
-                f"FAULT and the faulting frame is this body. This is not an "
-                f"inference from a verdict — the tests attributed to it report "
-                f"NO verdict at all, because the process that would have run "
-                f"them aborted. Rewrite it: the fault is in what this body "
-                f"does with ownership, lifetimes or raw pointers. Read the "
-                f"fault text below before writing.")
+                f"`{e.fn_name}` — CRASHED: a test binary aborted and the "
+                f"faulting frame is this body. The tests attributed to it "
+                f"report no verdict, because the process aborted. What the "
+                f"crash was is in the crash evidence below — follow that. "
+                f"Rewrite it.")
         elif e.direct:
             lines.append(
                 f"`{e.fn_name}` — DIRECT: a failing test's own failure points "
@@ -488,6 +486,12 @@ def render_refill_evidence(
                 f"what this fn constructs or returns. This is a measurement, "
                 f"not a claim about which line is wrong. Rewrite it.")
         elif e.attribution is Attribution.AIMED:
+            # AIMED exists only for an invalid-memory crash: it is the
+            # crash evidence keys minus `crash_blamed`, and a stack
+            # exhaustion keys its evidence on its cycle members, which are
+            # all blamed. So the pointer sentence is this class's claim, the
+            # same one `_plan_line`'s aimed clause and the `[REFILL]` comment
+            # in `format_impl_block_for_prompt` make.
             lines.append(
                 f"`{e.fn_name}` — AIMED: a test binary died of a MEMORY FAULT "
                 f"and this body is a callee of the faulting frame (evidence, "

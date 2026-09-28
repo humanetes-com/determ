@@ -807,6 +807,11 @@ class U2Verdict:
     aborted: frozenset[str] = frozenset()
     crash: CrashPanics | None = None
     external_stub_sites: frozenset[tuple[str, int]] = frozenset()
+    # The scoped `cargo test` capture this verdict was read from. Empty on
+    # verdicts built without a run (tests, the accepts that never asked).
+    # The same-crash keep reads native crashes from it; a summary string
+    # is not that capture.
+    capture: str = ""
 
     @classmethod
     def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
@@ -841,12 +846,14 @@ class U2Verdict:
                aborted: frozenset[str] = frozenset(),
                crash: CrashPanics | None = None,
                external_stub_sites: frozenset[tuple[str, int]] = frozenset(),
+               capture: str = "",
                ) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
                    detail=detail, no_verdict=no_verdict,
                    self_passed=self_passed, self_failure_sites=sites,
                    aborted=aborted, crash=crash,
-                   external_stub_sites=external_stub_sites)
+                   external_stub_sites=external_stub_sites,
+                   capture=capture)
 
     @property
     def panic_sites(self) -> dict[str, tuple[str, int]]:

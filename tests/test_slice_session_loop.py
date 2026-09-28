@@ -15,6 +15,7 @@ from pipeline_core.application.reconstruct.slice_session import (
     run_slice_session,
 )
 from pipeline_core.application.reconstruct.tree_txn import PreImage
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
@@ -71,7 +72,87 @@ def _ports(*, measure, splice=None, ask=None, bodies=None):
             u: r.body_text for u, r in _RECS.items()},
         answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=lambda *a, **k: None,
-        check_graceful_stop=lambda s: None)
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
+
+
+def test_a_compiling_turn_that_is_still_the_crash_is_not_kept(tmp_path):
+    """The session keep on run 371055-1a407b3c. The turn compiles, every
+    aimed test is still a native crash, the written unit was a culprit at
+    the sweep, and the localizer says it still is. The body goes back.
+    Negative control: the same turn when the sweep blamed nothing it wrote
+    is the old non-regression keep."""
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_isolation import IsolatedStatus, IsolatedTest, render_isolated_section
+
+    root = _tree(tmp_path)
+    baseline = _reading(set(), {"t_box"})
+    after = _reading(set(), {"t_box"})
+    capture = render_isolated_section([
+        IsolatedTest("t_box", IsolatedStatus.ABORTED,
+                     "thread 't_box' has overflowed its stack\n"),
+    ])
+    logs: list[str] = []
+
+    def measure(raw):
+        raw.append(capture)
+        lib = (root / "src" / "lib.rs").read_text()
+        return baseline if lib == "SESSION_LIB" else after
+
+    def ask(_m: object) -> str:
+        return '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>'
+
+    ports = _ports(measure=measure, ask=ask)
+    ports = SessionPorts(
+        ask_turns=ask,
+        splice=ports.splice,
+        check=lambda: (0, "", []),
+        focus_errors=lambda out, f: out,
+        blamed_type_api=lambda t: t,
+        measure_suite=measure,
+        read_source=lambda p: None,
+        enumerate_bodies=lambda: {
+            _FMT: (root / "src" / "lib.rs").read_text(),
+            _RENDER: (root / "src" / "render.rs").read_text(),
+        },
+        answer_pulls=lambda r, conversation="": None,
+        log=logs.append, emit=lambda *a, **k: None,
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(
+            frozenset({FnLocator(_FMT.file, _FMT.fn_name)}),
+            lambda _out: [FnLocator(_FMT.file, _FMT.fn_name)]))
+    out = run_slice_session(
+        ports, target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_box",), units=(_FMT,)),
+        records=_RECS, turn0="turn0", max_turns=1)
+    assert out.kept == frozenset()
+    assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+    assert any("still a native crash" in m for m in logs)
+
+    # Negative control: the same turn with no written unit in the sweep's
+    # blame is kept.
+    def measure_open(raw):
+        raw.append(capture)
+        return after
+
+    open_ports = SessionPorts(
+        ask_turns=ask, splice=ports.splice, check=lambda: (0, "", []),
+        focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
+        measure_suite=measure_open, read_source=lambda p: None,
+        enumerate_bodies=lambda: {
+            _FMT: (root / "src" / "lib.rs").read_text(),
+            _RENDER: (root / "src" / "render.rs").read_text(),
+        },
+        answer_pulls=lambda r, conversation="": None,
+        log=lambda m: None, emit=lambda *a, **k: None,
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
+    (root / "src" / "lib.rs").write_text("SESSION_LIB")
+    kept = run_slice_session(
+        open_ports, target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_box",), units=(_FMT,)),
+        records=_RECS, turn0="turn0", max_turns=1)
+    assert _FMT in kept.kept
 
 
 def test_an_inconclusive_opening_suite_does_not_run_or_keep(tmp_path):
@@ -200,7 +281,8 @@ def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
         enumerate_bodies=enumerate,
         answer_pulls=lambda r, conversation="": None,
         log=logs.append, emit=lambda *a, **k: None,
-        check_graceful_stop=lambda s: None)
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
     out = run_slice_session(
         ports, target_src_dir=root, cluster_name="t",
         slice_=SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
@@ -306,7 +388,8 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
         answer_pulls=lambda r, conversation="": "file src/i.rs follows." if "<REQUEST" in r else None,
         extend_body_watch=extend,
         log=logs.append, emit=lambda *a, **k: None,
-        check_graceful_stop=lambda s: None)
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
     out = run_slice_session(
         ports, target_src_dir=tmp_path, cluster_name="t",
         slice_=SessionSlice(tests=("t_wrap",), units=(disp_site,)),
@@ -341,7 +424,8 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
         enumerate_bodies=lambda: {disp_site: disp.body_text},
         answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=emit,
-        check_graceful_stop=lambda s: None)
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
     out_ctrl = run_slice_session(
         ports_ctrl, target_src_dir=src2, cluster_name="t",
         slice_=SessionSlice(tests=("t_wrap",), units=(disp_site,)),

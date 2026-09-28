@@ -123,6 +123,7 @@ from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.crash_site import (
     blame_outside_unit,
     crash_evidence_for_units,
@@ -717,9 +718,17 @@ def prepare_impl_fill(
     # include access frames, so key-membership reads the blame as inside the
     # innocent caller.
     crash_blamed: frozenset[FnLocator] | None = None,
+    # The subset of crash_blamed an invalid-memory crash blamed. The plan
+    # line's ownership MUST and family promotion attach to these only.
+    crash_memory_blamed: frozenset[FnLocator] | None = None,
     # Shared crash-block map (unit key -> blamed-file fingerprint), mutated
     # here and read across iterations — see PerFnPassCtx.crash_blocked.
     crash_blocked: dict[str, str] | None = None,
+    # (cargo test output) -> culprits of the crashes still in it, read by
+    # `SameCrashJudge` beside `crash_blamed`. None is "not localized": a
+    # keep that wrote a crash_blamed unit whose aimed tests still crash is
+    # then refused, never silently kept.
+    culprits_of: Callable[[str], Collection[FnLocator]] | None = None,
     # Cluster behaviour suite — identity Then on first-pass write: and
     # per-impl instructions. Default empty: callers that do not pass it
     # (fn_walk, tests) leave those prompts byte-identical to the pre-instruction
@@ -1809,6 +1818,11 @@ def prepare_impl_fill(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             crashed=tuple(sorted(crashed_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            memory_crashed=tuple(sorted(
+                n for n in crashed_refill_names(
+                    _file_refill_evs[_impl_block_id(b.file, b.container)])
+                if FnLocator(b.file, n) in (crash_memory_blamed
+                                            or frozenset()))),
             aimed=tuple(sorted(aimed_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             bypass=_bypass_for(b.container),
@@ -2523,6 +2537,15 @@ def prepare_impl_fill(
                                       and _joint is not None
                                       and not _joint.new_failures
                                       and not _joint.regressed_sites)
+                if _nonregr_keep_file and SameCrashJudge(
+                        frozenset(crash_blamed or ()), culprits_of).refuses(
+                        output=(_u2_file.capture if _u2_file is not None else ""),
+                        aimed=_file_tests,
+                        written=[FnLocator(file_rel, b.fn_name) for b in _landed]):
+                    _log(f"  [phase-c/file] GUARD {glabel}: re-fill REVERTED — "
+                         "every aimed test is still a native crash and the "
+                         "crash's culprit(s) it wrote still are.")
+                    _nonregr_keep_file = False
                 if _nonregr_keep_file:
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill KEPT on "
                          "non-regression — no self-failure is newly red "
@@ -3743,6 +3766,17 @@ def prepare_impl_fill(
                     and _u2_impl is not None and _baseline_test is not None
                     and not (_u2_impl.self_failures
                              & _baseline_test.passed_names))
+                if _crash_keep and SameCrashJudge(
+                        frozenset(crash_blamed or ()), culprits_of).refuses(
+                        output=(_u2_impl.capture if _u2_impl is not None else ""),
+                        aimed=_block_tests,
+                        written=[FnLocator(block.file, m.fn_name)
+                                 for m in (*block.stub_members,
+                                           *block.refill_members)]):
+                    _log(f"  [phase-c/impl] GUARD {block_id}: re-fill REVERTED "
+                         "— every aimed test is still a native crash and the "
+                         "crash's culprit(s) it wrote still are.")
+                    _crash_keep = False
                 if _crash_keep and _u2_impl is not None:
                     _log(f"  [phase-c/impl] GUARD {block_id}: re-fill KEPT on "
                          "non-regression "
@@ -5163,6 +5197,17 @@ def prepare_impl_fill(
                     and _pair_baseline is not None
                     and not (_pair_u2.self_failures
                              & _pair_baseline.passed_names))
+                if _pair_nonregr and SameCrashJudge(
+                        frozenset(crash_blamed or ()), culprits_of).refuses(
+                        output=(_pair_u2.capture if _pair_u2 is not None else ""),
+                        aimed=_pair_tests,
+                        written=[FnLocator(b.file, m.fn_name)
+                                 for b in (*halves, *_pair_extra)
+                                 for m in (*b.stub_members, *b.refill_members)]):
+                    _log(f"  [phase-c/pair] GUARD {pair_id}: joint re-fill "
+                         "REVERTED — every aimed test is still a native crash "
+                         "and the crash's culprit(s) it wrote still are.")
+                    _pair_nonregr = False
                 if _pair_nonregr and _pair_u2 is not None:
                     # The same bar as the file and impl routes: convicting
                     # tests still failing, none newly red — KEPT, deferred
@@ -5702,6 +5747,8 @@ def prepare_impl_fill(
                 focus_errors=lambda out, f: str(_focus_cargo_errors(out, f)),
                 blamed_type_api=lambda text: with_blamed_type_api(
                     text, _crate_type_records),
+                same_crash=SameCrashJudge(
+                    frozenset(crash_blamed or ()), culprits_of),
                 measure_suite=lambda raw: _test_regression_baseline(
                     tdd_test_cmd, target_src_dir, cluster_env, raw),
                 read_source=_read_source,

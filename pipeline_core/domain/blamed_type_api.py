@@ -119,14 +119,219 @@ def blamed_type_api_section(
     return "\n\n" + "\n\n".join(parts)
 
 
+_E0277 = "error[E0277]"
+_SIZE_OF = re.compile(
+    r"the size for values of type `([^`]+)` cannot be known")
+_BOUND_UNSAT = re.compile(
+    r"the trait bound `([^`]+)` is not satisfied")
+_TRAIT_MISSING = re.compile(
+    r"the trait `([^`]+)` is not implemented")
+# A rustc gutter line `    |     E: StdError + Send + Sync + 'static`.
+# The identifier before the colon is the parameter; the rest is the bound
+# this diagnostic required, which may spell the trait differently from
+# the `dyn` type in the error header.
+_BOUND_LINE = re.compile(
+    r"\|\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*([^,\n]+)")
+_AUTO_TRAITS = frozenset({
+    "Send", "Sync", "Unpin", "Sized", "UnwindSafe", "RefUnwindSafe", "Copy",
+})
+
+
+def _tighten(ty: str) -> str:
+    """Whitespace, `'static` and one layer of parentheses off a type the
+    compiler or a field spelled."""
+    t = re.sub(r"\s+", "", ty.strip())
+    t = t.replace("+'static", "").replace("+'_", "")
+    if t.startswith("(") and t.endswith(")"):
+        t = t[1:-1]
+    return t
+
+
+def _dyn_shape(ty: str) -> tuple[str, frozenset[str]] | None:
+    """`(principal trait leaf, auto-trait leaves)` of a `dyn` type, or
+    None when it is not a single-principal trait object."""
+    t = _tighten(ty)
+    if t.startswith("Box<") and t.endswith(">"):
+        t = t[4:-1]
+    if t.startswith("dyn"):
+        t = t[3:]
+    else:
+        return None
+    principal = ""
+    autos: set[str] = set()
+    for part in t.split("+"):
+        leaf = part.rsplit("::", 1)[-1]
+        if not leaf or leaf.startswith("'"):
+            continue
+        if leaf in _AUTO_TRAITS:
+            autos.add(leaf)
+        elif principal:
+            return None
+        else:
+            principal = leaf
+    if not principal:
+        return None
+    return principal, frozenset(autos)
+
+
+def _e0277_blocks(excerpt: str) -> list[str]:
+    parts = re.split(r"(?=error\[E0277\])", excerpt or "")
+    return [p for p in parts if p.startswith(_E0277)]
+
+
+def _alt_traits(block: str, principal: str) -> frozenset[str]:
+    """Trait leaves this one diagnostic uses for the same obligation.
+
+    The compiler prints `core::error::Error` and the source bound on the
+    same error prints the crate's name for that trait. Both leaves are
+    the obligation. No name is special: they are whatever this block
+    wrote."""
+    found = {principal}
+    for m in _TRAIT_MISSING.finditer(block):
+        leaf = m.group(1).rsplit("::", 1)[-1].split("<", 1)[0]
+        if leaf and leaf not in _AUTO_TRAITS:
+            found.add(leaf)
+    for m in _BOUND_LINE.finditer(block):
+        for part in m.group(1).split("+"):
+            leaf = part.strip().rsplit("::", 1)[-1].split("<", 1)[0]
+            if leaf and leaf not in _AUTO_TRAITS and leaf.isidentifier():
+                found.add(leaf)
+    return frozenset(found)
+
+
+def _subject_of(block: str) -> tuple[str, frozenset[str]] | None:
+    """`(subject type as spelled, traits the holder must implement)`.
+
+    The size form's subject is the unsized type. The bound form's subject
+    is the type that failed the trait. Traits are the obligation's leaves,
+    not `Sized` alone: a size error's useful obligation is the bound the
+    note says the callee required."""
+    size = _SIZE_OF.search(block)
+    bound = _BOUND_UNSAT.search(block)
+    if size:
+        subject = size.group(1).strip()
+        shape = _dyn_shape(subject)
+        traits = _alt_traits(block, shape[0]) if shape else frozenset()
+        traits = frozenset(t for t in traits if t not in _AUTO_TRAITS)
+        return subject, traits
+    if bound:
+        body = bound.group(1)
+        if ":" not in body:
+            return None
+        subject, trait = body.split(":", 1)
+        leaf = trait.strip().rsplit("::", 1)[-1].split("<", 1)[0]
+        wanted: set[str] = {leaf} if leaf and leaf not in _AUTO_TRAITS else set()
+        shape = _dyn_shape(subject.strip())
+        if shape:
+            wanted |= set(_alt_traits(block, shape[0]))
+        return subject.strip(), frozenset(
+            t for t in wanted if t not in _AUTO_TRAITS)
+    return None
+
+
+def _field_holds(field_ty: str, subject: str, alts: frozenset[str]) -> bool:
+    """The field is the subject, or `Box` of it, under either spelling
+    this diagnostic used for the trait object."""
+    field = _tighten(field_ty)
+    sub = _tighten(subject)
+    if field == sub or field == f"Box<{sub}>":
+        return True
+    shape = _dyn_shape(sub)
+    if shape is None:
+        return False
+    _leaf, autos = shape
+    inner = field[4:-1] if field.startswith("Box<") and field.endswith(">") else ""
+    got = _dyn_shape(inner) if inner else None
+    if got is None:
+        return False
+    return got[0] in alts and got[1] == autos
+
+
+def _implements(rec: TypeRecord, traits: frozenset[str]) -> bool:
+    if not traits:
+        return True
+    if rec.trait_impls is None:
+        return False
+    for impl in rec.trait_impls:
+        leaf = impl.trait_path.rsplit("::", 1)[-1].split("<", 1)[0]
+        if leaf in traits:
+            return True
+    return False
+
+
+def adapter_types_for_diagnostic(
+    excerpt: str, type_records: Sequence[TypeRecord] | Iterable[TypeRecord],
+) -> tuple[TypeRecord, ...]:
+    """Crate types that hold the E0277 subject (or a `Box` of it) and
+    implement the trait the diagnostic says was required.
+
+    `types_referenced_in_text` selects types whose name appears in the
+    signature. A wrapper whose name the signature never spells, and whose
+    field is the value the compiler rejected, is invisible to that walk.
+    Run `371055-1a407b3c`: ten replies passed the unsized trait object by
+    value (`construct_from_std`, `Error::new`); the reply that compiled
+    wrapped it in the one crate struct that holds `Box` of it and
+    implements the trait. That struct's name was in no failing prompt.
+    External records are not candidates: the compiler already printed the
+    foreign impls."""
+    records = [r for r in type_records
+               if r.name and not r.external_path and r.kind in ("struct", "enum")]
+    found: list[TypeRecord] = []
+    seen: set[str] = set()
+    for block in _e0277_blocks(excerpt):
+        parsed = _subject_of(block)
+        if parsed is None:
+            continue
+        subject, traits = parsed
+        shape = _dyn_shape(subject)
+        alts = _alt_traits(block, shape[0]) if shape else frozenset()
+        for rec in records:
+            if rec.name in seen:
+                continue
+            if not any(_field_holds(f.ty, subject, alts) for f in rec.fields if f.ty):
+                continue
+            if not _implements(rec, traits):
+                continue
+            seen.add(rec.name)
+            found.append(rec)
+    return tuple(found)
+
+
+def adapter_type_section(
+    excerpt: str, type_records: Sequence[TypeRecord] | Iterable[TypeRecord],
+) -> str:
+    """The retry appendix for an `E0277`, or "" when no crate type holds
+    the rejected value."""
+    recs = adapter_types_for_diagnostic(excerpt, type_records)
+    if not recs:
+        return ""
+    lines = []
+    for rec in recs:
+        fields = ", ".join(f"{f.name}: {f.ty}" for f in rec.fields if f.ty)
+        lines.append(
+            f"  `{rec.name}` in `{rec.file}` — {fields}")
+    return (
+        "\n\nThe error above rejects a value the compiler could not pass "
+        "where a trait and a size were required. These crate types hold "
+        "that value, or a Box of it, in a field, and implement the trait "
+        "the error names. The list is the records, not a guess:\n"
+        + "\n".join(lines))
+
+
 def with_blamed_type_api(
     excerpt: str, type_records: Sequence[TypeRecord] | Iterable[TypeRecord],
 ) -> str:
-    """`excerpt` with the blamed types' inventories appended — the form the
-    retry prompt's feedback slot takes. The raw excerpt is unchanged for
-    every other consumer (signature history, retrospectives, event
-    previews); only the prompt sees the appendix."""
+    """`excerpt` with the retry appendices the diagnostic asks for.
+
+    `E0616`/`E0599` get the blamed type's fn inventory. `E0277` gets the
+    crate types that hold the rejected value. Both are empty for every
+    other code, and the raw excerpt is unchanged for every consumer that
+    does not call this (signature history, retrospectives). Every retry
+    slot that shows the compiler's answer calls this, so a new slot cannot
+    grow one appendix and forget the other."""
     if not excerpt:
         return excerpt
-    section = blamed_type_api_section(excerpt, type_records)
-    return excerpt + section if section else excerpt
+    records = list(type_records)
+    extra = blamed_type_api_section(excerpt, records) + adapter_type_section(
+        excerpt, records)
+    return excerpt + extra if extra else excerpt

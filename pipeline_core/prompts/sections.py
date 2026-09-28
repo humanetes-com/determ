@@ -1082,10 +1082,10 @@ def format_impl_block_for_prompt(
                 # removed this unit's convicting test, so it arrives graded
                 # as inference and would otherwise be told to stand pat.
                 lines.append(
-                    f"    {sig} {{ /* [REFILL!] a test binary CRASHED with a "
-                    f"MEMORY FAULT inside this body — see CRASH_EVIDENCE and "
-                    f"REFILL_TARGETS. It compiles; it is still WRONG. Rewrite "
-                    f"it — do NOT return it unchanged */ {body} }}")
+                    f"    {sig} {{ /* [REFILL!] a test binary CRASHED inside "
+                    f"this body — see CRASH_EVIDENCE. It compiles; it is "
+                    f"still WRONG. Rewrite it — do NOT return it unchanged "
+                    f"*/ {body} }}")
             elif m.fn_name in aimed_fn_names:
                 lines.append(
                     f"    {sig} {{ /* [REFILL] a test binary CRASHED and this "

@@ -311,7 +311,12 @@ class PhaseCFillEngine:
         tdd_test_cmd: str | None = None,
         crash_evidence: dict[FnLocator, str] | None = None,
         crash_blamed: frozenset[FnLocator] | None = None,
+        # The subset of crash_blamed an invalid-memory crash blamed
+        # (`crash_site.memory_blamed_locators`): the only units the file
+        # plan's ownership MUST is about.
+        crash_memory_blamed: frozenset[FnLocator] | None = None,
         crash_blocked: dict[str, str] | None = None,
+        culprits_of: Callable[[str], Collection[FnLocator]] | None = None,
         # Leftover tests whose binary did not complete. The fill schedule
         # ranks a run whose every aimed test is in this set, and whose
         # targets miss crash_blamed, as a flat re-buy (weight 0).
@@ -461,7 +466,9 @@ class PhaseCFillEngine:
                 parallelism=self.config.parallelism,
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
+                crash_memory_blamed=crash_memory_blamed,
                 crash_blocked=crash_blocked,
+                culprits_of=culprits_of,
                 behaviour_specs=behaviour_specs,
                 dispatch_ranks=dispatch_ranks,
                 session_slices=session_slices,
@@ -483,7 +490,8 @@ class PhaseCFillEngine:
             skip_end_pass_test=skip_end_pass_test,
             tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
             crash_evidence=crash_evidence, crash_blamed=crash_blamed,
-            crash_blocked=crash_blocked, dispatch_ranks=dispatch_ranks,
+            crash_blocked=crash_blocked, culprits_of=culprits_of,
+            dispatch_ranks=dispatch_ranks,
             behaviour_specs=behaviour_specs, cfg_dead=_cfg_dead,
             is_cfg_dead=_is_cfg_dead, dispatched=_dispatched,
             reverted=_reverted, answer_lost=_answer_lost,
@@ -608,6 +616,7 @@ class PhaseCFillEngine:
         crash_evidence: dict[FnLocator, str] | None,
         crash_blamed: frozenset[FnLocator] | None,
         crash_blocked: dict[str, str] | None,
+        culprits_of: Callable[[str], Collection[FnLocator]] | None,
         dispatch_ranks: dict[FnLocator, int] | None,
         behaviour_specs: tuple[BehaviourSpec, ...],
         _cfg_dead: frozenset[tuple[str, str]],
@@ -904,6 +913,7 @@ class PhaseCFillEngine:
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_blocked=crash_blocked,
+                culprits_of=culprits_of,
                 still_stubbed=_pass_stub_keys,
                 cfg_dead=_cfg_dead,
                 # Pass-start, cfg-aware: a stub the cluster never compiles
@@ -1542,6 +1552,7 @@ class _PerFnRoute:
             tdd_frontier_tests=kw["tdd_frontier_tests"],
             tdd_test_cmd=kw["tdd_test_cmd"], crash_evidence=kw["crash_evidence"],
             crash_blamed=kw["crash_blamed"], crash_blocked=kw["crash_blocked"],
+            culprits_of=kw.get("culprits_of"),
             dispatch_ranks=kw["dispatch_ranks"],
             behaviour_specs=kw["behaviour_specs"], _cfg_dead=kw["cfg_dead"],
             _is_cfg_dead=kw["is_cfg_dead"], _dispatched=kw["dispatched"],

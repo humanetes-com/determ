@@ -27,6 +27,7 @@ from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
     run_slice_session,
 )
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteLedgerRow,
@@ -90,6 +91,7 @@ def _run(root: Path, replies: list[str], readings: list[CallCapReading | None] |
         enumerate_bodies=bodies, answer_pulls=lambda r, conversation="": None,
         log=lambda m: None, emit=lambda *a, **k: None,
         check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None),
         call_reading=(lambda: caps[len(calls) - 1] if readings is not None else None)
         if readings is not None else None)
     out = run_slice_session(

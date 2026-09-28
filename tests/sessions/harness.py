@@ -53,6 +53,7 @@ from pipeline_core.application.reconstruct.slice_session import (
     SessionPorts,
     run_slice_session,
 )
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
@@ -265,6 +266,7 @@ def replay(session: Mapping[str, Any], root: Path, *,
         answer_pulls=lambda r, conversation="": "answered." if "<REQUEST" in r else None,
         log=log.append, emit=lambda name, **kw: events.append((name, dict(kw.get("data") or {}))),
         check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None),
         note_delta=deltas.append)
     slice_ = SessionSlice(tests=tuple(session["tests"]), units=tuple(units))
     out = run_slice_session(

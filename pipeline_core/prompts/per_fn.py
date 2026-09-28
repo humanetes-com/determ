@@ -11,7 +11,6 @@ from typing import Any
 
 from pipeline_core.domain.construction_recipe import construction_recipe_prefix
 from pipeline_core.domain.coverage_slice import instruction_opener
-from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.joint_write import JOINT_OUTPUT_CLAUSE
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
@@ -73,11 +72,9 @@ def build_per_fn_prompt(
     coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
-        prefix=crash_evidence_prefix(
-            "A test binary CRASHED and this fn is on the faulting or "
-            "origin stack. This is runtime evidence from the actual "
-            "crash, stronger than any failing-test guess:\n",
-            (fn_name,)))
+        prefix=("A test binary CRASHED and this fn is on the faulting or "
+                "origin stack. This is runtime evidence from the actual "
+                "crash, stronger than any failing-test guess:\n"))
     # Concrete RIGHT usage examples harvested from the real
     # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
     # before the file context (same slot the archetype prescribes).
@@ -253,11 +250,9 @@ def build_per_fn_fix_prompt(
     coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
-        prefix=crash_evidence_prefix(
-            "A test binary CRASHED and this fn is on the faulting or "
-            "origin stack. This is runtime evidence from the actual "
-            "crash, stronger than any failing-test guess:\n",
-            (fn_name,)))
+        prefix=("A test binary CRASHED and this fn is on the faulting or "
+                "origin stack. This is runtime evidence from the actual "
+                "crash, stronger than any failing-test guess:\n"))
     usage_block = tag_block(
         "USAGE_EXAMPLES", sections.usage_examples,
         prefix="Real, working uses of this crate's public API (harvested from "

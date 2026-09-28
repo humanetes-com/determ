@@ -165,6 +165,13 @@ class BlockFillPlan:
     # frame for a heap-use-after-free costing 13 unmeasurable tests; the
     # re-check line told it to return the body unchanged and it did.
     crashed: tuple[str, ...] = ()
+    # The subset of `crashed` an INVALID-MEMORY crash blamed
+    # (`crash_site.memory_blamed_locators`). The ownership MUST and the
+    # conversion-family promotion are claims about who owns a pointer, and
+    # attach to these names only: run `371055-1a407b3c`'s file prompt
+    # `8bd6c469…` gave a stack overflow's cycle member `from_boxed` the MUST
+    # "the original owner must not drop".
+    memory_crashed: tuple[str, ...] = ()
     # The subset a callee of the faulting frame, carried as evidence and
     # kept out of `crash_blamed`. It outranks `inferred` and `installable`
     # because both of those render "return it unchanged if already right",
@@ -255,6 +262,7 @@ def restrict_fill_plan(
             inferred=tuple(n for n in p.inferred if n in want),
             escalated=tuple(n for n in p.escalated if n in want),
             crashed=tuple(n for n in p.crashed if n in want),
+            memory_crashed=tuple(n for n in p.memory_crashed if n in want),
             aimed=tuple(n for n in p.aimed if n in want),
             installable=tuple(n for n in p.installable if n in want),
             bypass=tuple(b for b in p.bypass if b.fn_name in want),
@@ -311,7 +319,10 @@ def _plan_line(p: BlockFillPlan) -> str:
     # it — run `1577437-c93d5c26`'s iter-1 error.rs prompt sent
     # `into_boxed_dyn_error` CRASHED with the MUST and `object_boxed` AIMED,
     # and the reply forgot self in one and re-boxed the payload in the other.
-    promoted = family_members_beside_a_crashed_conversion(p.crashed, p.aimed)
+    # Promotion is the ownership contract, so it starts from the names an
+    # invalid-memory crash blamed and from no other crash.
+    promoted = family_members_beside_a_crashed_conversion(
+        p.memory_crashed, p.aimed)
     crashed_names = frozenset(p.crashed) | promoted
     crashed = tuple(r for r in p.refills if r in crashed_names)
     aimed = tuple(r for r in p.refills
@@ -340,18 +351,18 @@ def _plan_line(p: BlockFillPlan) -> str:
         # implies, because the verdict for these units does not exist: their
         # binary aborted before reporting one.
         crash_clause = (
-            "REWRITE — A TEST BINARY CRASHED INSIDE THIS BODY (a "
-            "memory fault, with this fn on the faulting frame; the "
-            "tests attributed to it report no verdict at all because "
-            "the process aborted. It compiles and it is still wrong "
-            "— look at what it does with ownership, lifetimes or raw "
-            "pointers, and see CRASH_EVIDENCE): " + ", ".join(crashed))
+            "REWRITE — A TEST BINARY CRASHED INSIDE THIS BODY (the "
+            "process aborted, so the tests attributed to it report no "
+            "verdict. What the crash was is in CRASH_EVIDENCE, and that "
+            "block is the instruction): " + ", ".join(crashed))
         # Conversion family only. `drop` is a correct destructor; putting
         # this MUST on a drop rewrite re-instructs the innocent body the
         # skip exists to stop aiming at. Run `1790133-2181e509` had
         # `into_boxed_dyn_error` in CRASH_EVIDENCE and still wrote
         # `let own = self.inner` because this slot named drop.
-        extra = ownership_transfer_must(crashed)
+        extra = ownership_transfer_must(tuple(
+            r for r in crashed
+            if r in frozenset(p.memory_crashed) | promoted))
         if extra:
             crash_clause += " — " + extra
         parts.append(crash_clause)

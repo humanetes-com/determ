@@ -61,10 +61,12 @@ from pipeline_core.application.reconstruct.unit_conversation import TranscriptBo
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attribution import canon_site, record_site, site_label
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
+from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
 from pipeline_core.domain.coverage_slice import (
     unreached_by as coverage_unreached_by,
 )
+from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.crash_site import blame_outside_unit
 from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
@@ -837,6 +839,15 @@ class FillOneFn:
             # a re-fill target is corrective from attempt 1 — take the
             # fix branch (prev_body + failing test) rather than the stub-fill one.
             turn: str | AttemptFeedback
+            # What the retry SHOWS of the compiler's answer: the excerpt
+            # plus the appendices its codes ask for (the blamed type's fn
+            # inventory, the crate types that hold an E0277's rejected
+            # value). The raw excerpt stays the stall signature and the
+            # history. Run `371055-1a407b3c`: the file and session retries
+            # carried these, per-fn `display` hit E0277 on attempt 2 and
+            # its retry did not.
+            _shown_error = with_blamed_type_api(
+                error_excerpt, ctx.crate_type_records)
             if not _conv.opened and not rec.refill:
                 turn = build_per_fn_prompt(
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
@@ -896,7 +907,7 @@ class FillOneFn:
                 turn = AttemptFeedback(
                     kind=fix_prompt_kind(
                         _last_failure[0], quoted_run=_excerpt_quotes_run[0]),
-                    excerpt=error_excerpt, targets=(fn_name,),
+                    excerpt=_shown_error, targets=(fn_name,),
                     output=PER_FN_JOINT_OUTPUT if _joint_on else BODY_OUTPUT,
                     note="\n".join(p for p in (
                         joint.refusal,
@@ -926,7 +937,7 @@ class FillOneFn:
                     file_text=cur_text, fn_name=fn_name, sig_text=sig_text,
                     test_blocks=test_blocks, module_name=ctx.module_name,
                     cluster_name=ctx.cluster_name, file_rel=rel_file,
-                    prev_body=last_body, error_excerpt=error_excerpt,
+                    prev_body=last_body, error_excerpt=_shown_error,
                     sections=PerFnFixSections(
                         macros=ctx.macros_section, notes=notes_section,
                         container=container, types=_types_section_eff,
@@ -1223,13 +1234,26 @@ class FillOneFn:
                     if (_crash_evidence and _attempt_baseline_test is not None
                             and not (_v.self_failures
                                      & _attempt_baseline_test.passed_names)):
-                        self.tel.log(
-                            f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: "
-                            "crash-evidence re-fill KEPT on non-regression "
-                            f"({len(_v.self_failures)} self-failure(s), none "
-                            "passing at baseline) — judged for real at the "
-                            "next sweep, in the joint tree.")
-                        _u2_fail_sig = None
+                        _written = [FnLocator(rel_file, fn_name), *(
+                            FnLocator(u.file, u.fn_name) for u, _pre in joint.live)]
+                        if SameCrashJudge(
+                                frozenset(ctx.crash_blamed or ()),
+                                ctx.culprits_of).refuses(
+                                output=_v.capture, aimed=_evidence.tests,
+                                written=_written):
+                            self.tel.log(
+                                f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: "
+                                "re-fill REVERTED — every aimed test is still "
+                                "a native crash and the crash's culprit(s) it "
+                                "wrote still are.")
+                        else:
+                            self.tel.log(
+                                f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: "
+                                "crash-evidence re-fill KEPT on non-regression "
+                                f"({len(_v.self_failures)} self-failure(s), none "
+                                "passing at baseline) — judged for real at the "
+                                "next sweep, in the joint tree.")
+                            _u2_fail_sig = None
                     # Sibling-blocked pre-check, BEFORE the fix loop spends a
                     # call: when every failing attributed test also needs a
                     # still-stubbed sibling, no rewrite of THIS fn alone can

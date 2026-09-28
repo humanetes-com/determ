@@ -86,6 +86,7 @@ from pipeline_core.domain.crash_site import (
     destruction_path_subjects,
     faulting_stack_records,
     faulting_stack_sites,
+    memory_blamed_locators,
     observed_cycle_sites,
     origin_blamed_locators,
     placeholder_pointer_subjects,
@@ -3273,6 +3274,9 @@ def run_phase_c_tdd(
         # routes execution into the fault is a key too — any "is the blame
         # outside this unit" test needs the blamed locators, not the keys.
         crash_blamed: frozenset[FnLocator] = frozenset()
+        # The part of that blame an invalid-memory crash made, for the
+        # ownership instruction (`crash_site.memory_blamed_locators`).
+        crash_memory_blamed: frozenset[FnLocator] = frozenset()
         _sites: tuple[Any, ...] = ()
         # Sites where an origin-capable detector looked and placed no frame
         # in-crate — the precondition for chain-derived blame synthesis at
@@ -3309,6 +3313,7 @@ def run_phase_c_tdd(
                     output, test_cmd, target_src_dir, cluster_env))
                 crash_texts = crash_evidence_by_locator(_sites)
                 crash_blamed = blamed_locators(_sites)
+                crash_memory_blamed = memory_blamed_locators(_sites)
                 _unattributed_sites = [
                     s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
@@ -6045,6 +6050,21 @@ def run_phase_c_tdd(
                 if _rc_g == -1:
                     return None
                 return _premise_of_capture(_out_g)
+
+        def _culprits_after(captured: str) -> frozenset[FnLocator]:
+            # The in-fill cargo reading names the abort and not its frames.
+            # The same localizer the sweep uses names who still owns it
+            # after this change. No localizer is "not localized", the same
+            # answer `SameCrashJudge` gives to a localizer that found none.
+            if deps.localize_crashes is None:
+                return frozenset()
+            sites = deps.localize_crashes(
+                captured, test_cmd, target_src_dir, cluster_env)
+            found: set[FnLocator] = set()
+            for site in sites:
+                found.update(site.culprit_locators)
+            return frozenset(found)
+
         try:
             with collect_stream_meta() as _fill_meta:
                 sub = deps.task2_fill_fns_one_by_one(
@@ -6099,7 +6119,9 @@ def run_phase_c_tdd(
                     skip_end_pass_test=True,
                     crash_evidence=crash_texts or None,
                     crash_blamed=crash_blamed or None,
+                    crash_memory_blamed=crash_memory_blamed or None,
                     crash_blocked=crash_blocked_units,
+                    culprits_of=_culprits_after,
                     # Failing tests whose own verdict was never read
                     # (`unmeasured_failures`). The schedule ranks a run
                     # whose every aimed test is in this set, and whose

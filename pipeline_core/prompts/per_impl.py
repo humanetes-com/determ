@@ -11,7 +11,6 @@ from pathlib import Path
 
 from pipeline_core.domain.construction_recipe import construction_recipes_for
 from pipeline_core.domain.coverage_slice import instruction_opener
-from pipeline_core.domain.crash_site import crash_evidence_prefix
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import (
     LastErrorKind,
@@ -295,11 +294,9 @@ def build_per_impl_prompt(
                "error count. Apply this strategy differently this time:\n")
     crash_block = tag_block(
         "CRASH_EVIDENCE", sections.crash_evidence,
-        prefix=crash_evidence_prefix(
-            "A test binary CRASHED and fns of this block are on the "
-            "faulting or origin stack. This is runtime evidence from the "
-            "actual crash, stronger than any failing-test guess:\n",
-            sections.crashed_refill_names))
+        prefix=("A test binary CRASHED and fns of this block are on the "
+                "faulting or origin stack. This is runtime evidence from the "
+                "actual crash, stronger than any failing-test guess:\n"))
     # Crate idioms — patterns extracted from already-filled fns in THIS
     # file. Surfaces e.g. anyhow's `Self::construct_from_*(arg, None)`
     # constructor family, its `ContextError { context, error }` wrapper,

@@ -47,12 +47,13 @@ from pipeline_core.domain.crash_site import (
     crash_evidence_by_locator,
     fault_class,
     faulting_stack_records,
+    memory_blamed_locators,
     origin_blamed_locators,
     reader_blamed_locators,
     repeating_cycle,
     site_from_frames,
 )
-from pipeline_core.domain.language_driver import using_driver
+from pipeline_core.domain.language_driver import GenericLanguageDriver, using_driver
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.prompts.language_catalog import catalog_driver
 
@@ -380,6 +381,31 @@ def test_the_recorded_cycle_reaches_the_file_prompt_without_a_memory_claim() -> 
     raw = [{"func": "crate::a::f", "file": "src/a.rs", "line": 4}]
     memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw).render_evidence()
     assert _file_prompt_crash_block(memory).count("UNSOUND") == 1
+
+
+def test_the_ownership_must_is_the_memory_renderers_claim() -> None:
+    """Run `371055-1a407b3c` (2026-09-27): the per-fn prompt `104265c6…` for
+    the cycle member `from_boxed` opened CRASH_EVIDENCE with "MUST: after a
+    pointer field is copied out of a by-value receiver, the original owner
+    must not drop" above a block that says the fault is a stack overflow.
+    The builders prefixed it by the prompt's fn name; the generic driver
+    returns it for any name. It is the invalid-memory renderer's sentence
+    now, about the frame that renderer blames, and the plan line reads
+    `memory_blamed_locators` for the same class. Checked under both drivers.
+    """
+    sites = _sites(_THREE, _BINARIES)
+    raw = [{"func": "crate::error::into_boxed_dyn_error",
+            "file": "src/error.rs", "line": 4}]
+    memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw)
+    for drv in (GenericLanguageDriver(), catalog_driver()):
+        with using_driver(drv):
+            for text in crash_evidence_by_locator(sites).values():
+                assert "must not drop" not in text
+            assert "must not drop" in memory.render_evidence()
+    assert memory_blamed_locators(sites) == frozenset()
+    assert blamed_locators(sites) == {_LOC_CFB, _LOC_NEW, _LOC_FROM}
+    assert FnLocator("src/error.rs", "into_boxed_dyn_error") in (
+        memory_blamed_locators((memory,)))
 
 
 # ---- a frame resolves to the ONE body its line lies in ----

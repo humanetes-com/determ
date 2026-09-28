@@ -802,7 +802,8 @@ def u2_test_gate(
             _render_u2_abort(_aborted, scoped, err_cap, _panics),
             sites=scoped.failures, aborted=frozenset(_aborted), crash=_panics,
             external_stub_sites=stub_sites_outside(
-                _panics.stub_sites, frozenset(unit_sites), _locate))
+                _panics.stub_sites, frozenset(unit_sites), _locate),
+            capture=out or "")
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —
@@ -825,7 +826,7 @@ def u2_test_gate(
     return U2Verdict.reject(
         frozenset(f.test_name for f in blame.self_failures), detail, unjudged,
         self_passed=frozenset(report.passed & fn_tests),
-        sites=blame.self_failures)
+        sites=blame.self_failures, capture=out or "")
 
 
 def run_check_diag(
