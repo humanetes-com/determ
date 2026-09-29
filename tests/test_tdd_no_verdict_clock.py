@@ -92,7 +92,7 @@ def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
         attribute_failures=lambda *a, **k: AttributionResult(
             dict(_front), FailureKind.RUNTIME, dict(_front)),
         build_test_reverse_map=lambda *a, **k: {},
-        filter_test_targets=lambda frontier, src: frontier,
+        filter_test_targets=lambda frontier, src, **_k: frontier,
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,
@@ -249,7 +249,7 @@ def test_the_clock_and_the_guard_share_one_stop_site(
         attribute_failures=lambda *a, **k: AttributionResult(
             dict(_front), FailureKind.RUNTIME, dict(_front)),
         build_test_reverse_map=lambda *a, **k: {},
-        filter_test_targets=lambda frontier, src: frontier,
+        filter_test_targets=lambda frontier, src, **_k: frontier,
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,

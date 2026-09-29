@@ -22,6 +22,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -188,6 +189,9 @@ class WorkspaceModel(Protocol):
         self, target_src_dir: Path, file_rel: str, fn_name: str,
         cluster: BuildCluster, fn_cfg_predicates: list[str] | None = ...,
     ) -> bool: ...
+    def cluster_dead_sites(
+        self, target_src_dir: Path, cluster: BuildCluster | None,
+    ) -> CfgDeadSites: ...
     def cluster_filter_type_members(
         self, records: list[TypeRecord], cluster: BuildCluster | None,
     ) -> list[TypeRecord]: ...

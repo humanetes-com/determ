@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.attribution import AttributionResult
-from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator, Frontier
 from pipeline_core.domain.stub_inventory import StubInventory
 
 
@@ -156,7 +156,7 @@ class CargoBackendAdapter:
     implicated_fns_from_check_fn: Callable[
         [list[Any], str, Path], list[FnLocator]]
     attribute_failures_fn: Callable[..., AttributionResult]
-    filter_test_targets_fn: Callable[[Any, Path], Any]
+    filter_test_targets_fn: Callable[..., Any]
 
     def run_raw(self, cmd: list[str], cwd: Path, env: dict[str, str],
                 timeout: int) -> tuple[int, str, str]:
@@ -203,16 +203,26 @@ class CargoBackendAdapter:
                            cluster_name: str,
                            test_texts: dict[str, str] | None = None,
                            unrepairable_tests: frozenset[str] = frozenset(),
+                           *,
+                           cluster: Any,
                            ) -> AttributionResult:
         res = self.attribute_failures_fn(test_output, src_dir, recently_filled,
                                          test_reverse_map, cluster_name,
                                          test_texts=test_texts,
                                          unrepairable_tests=unrepairable_tests)
-        # Both projections go through the SAME oracle filter — a test fn left in
-        # `convicting` could revert a unit for a key dispatch already dropped.
+        # Both projections go through the SAME admission filter — a test fn
+        # (or a site the cluster never compiles) left in `convicting` could
+        # revert a unit for a key dispatch already dropped.
         return AttributionResult(
-            self.filter_test_targets_fn(res.frontier, src_dir), res.kind,
-            self.filter_test_targets_fn(res.convicting, src_dir))
+            self.filter_test_targets_fn(res.frontier, src_dir, cluster=cluster),
+            res.kind,
+            self.filter_test_targets_fn(res.convicting, src_dir, cluster=cluster))
+
+    def admit_frontier(self, frontier: Frontier, src_dir: Path, *,
+                       cluster: Any) -> Frontier:
+        admitted: Frontier = self.filter_test_targets_fn(
+            frontier, src_dir, cluster=cluster)
+        return admitted
 
 
 # --------------------------------------------------------------------------- #

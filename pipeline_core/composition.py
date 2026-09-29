@@ -474,7 +474,6 @@ from pipeline_core.application.reconstruct.impl_blocks import (
 )
 from pipeline_core.application.reconstruct.impl_fill import (
     ImplFillDeps,
-    cluster_inactive_stub_names,
 )
 from pipeline_core.application.reconstruct.impl_fill import (
     fill_impl_blocks as _fill_impl_blocks,
@@ -657,7 +656,7 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
 )
-from pipeline_core.domain.cluster_plan import nightly_rules_for
+from pipeline_core.domain.cluster_plan import merged_view_cluster, nightly_rules_for
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.coverage_annotation import (
@@ -1381,10 +1380,19 @@ def build_app(
         deps_a = app_ref().attribution_deps if app_ref is not None else _attr_deps
         return _attribution.build_test_reverse_map(deps_a, test_files, src_dir)
 
-    def filter_test_targets(frontier: Any, src_dir: Path) -> Any:
-        """Drop frontier keys that resolve to a #[cfg(test)]/#[test] fn."""
-        return _test_targets_mod.filter_test_targets(
-            frontier, enumerate_fns(src_dir) or [], log=ports.log)
+    def filter_test_targets(frontier: Any, src_dir: Path, *, cluster: Any) -> Any:
+        """The frontier's admission filter: drop keys that resolve to a
+        #[cfg(test)]/#[test] fn (the oracle) and keys at a site `cluster`
+        never compiles (`cluster_membership.cluster_dead_sites`), from one
+        enumeration of the tree. `cluster` is required so no caller can
+        admit a dead site by omission; the dead drops are not logged here —
+        a TDD iteration reports what its admission dropped once, with the
+        denominator. On run `473471-33301154` (2026-09-29) nothing dropped
+        `src/nightly.rs::fmt` from `stable`'s frontier, and it took a
+        dispatch slot, 31 route-run targets and held two tests' escalation."""
+        recs = enumerate_fns(src_dir) or []
+        kept = _test_targets_mod.filter_test_targets(frontier, recs, log=ports.log)
+        return structure_cache.dead_sites_among(recs, src_dir, cluster).split(kept)[0]
 
     def extract_skeleton(input_dir: Path, output_dir: Path,
                          cluster: Any = None) -> Any:
@@ -1856,6 +1864,7 @@ def build_app(
             collect_impl_blocks_for_cluster_fn=_via("collect_impl_blocks_for_cluster"),
             fn_container_index_fn=_via("fn_container_index"),
             fn_belongs_to_cluster_fn=structure_cache.fn_belongs_to_cluster,
+            cluster_dead_sites_fn=structure_cache.cluster_dead_sites,
             cluster_filter_type_members_fn=_membership.cluster_filter_type_members,
             is_gen_tests_file_fn=helpers.is_gen_tests_file,
             leaf_first_fn_order_fn=_leaf_first_fn_order,
@@ -2605,8 +2614,7 @@ def build_app(
                         _fn_occurrence_index_impl(
                             sd, enumerate_fns=enumerate_fns), targets),
                     reason=reason),
-            cfg_dead_stub_names=lambda sd, cl: cluster_inactive_stub_names(
-                sd, cl, structure_cache.scan_unimplemented_records_for_cluster),
+            cfg_dead_sites=structure_cache.cluster_dead_sites,
             checkpoint_fill_tree=_checkpoint_fill_tree,
             load_best_tree_mark=load_cluster_best_tree_mark,
             restore_best_tree_pair=_restore_best_tree_pair,
@@ -2704,6 +2712,7 @@ def build_app(
             save_retrospectives=_retros_save,
             scan_unimplemented_for_cluster=structure_cache.scan_unimplemented_for_cluster,
             scan_unimplemented_records_for_cluster=scan_stub_records_via_app,
+            cluster_dead_sites=structure_cache.cluster_dead_sites,
             splice_fn_with_where=splice_fn_with_where,
             splice_lock_for=_splice_mod.splice_lock_for,
             parse_ok=_validate_parse,
@@ -2838,6 +2847,7 @@ def build_app(
             check_stop=check_graceful_stop,
             extract_tdd_frontier=_via("extract_tdd_frontier"),
             filter_test_targets=filter_test_targets,
+            repair_cluster=lambda: merged_view_cluster(scope.all),
             fix_diag=helpers.fix_diag,
             frontier_from_diags=_via("frontier_from_diags"),
             gotchas_for_error=lambda e: _language_driver().gotchas_for_error(e),

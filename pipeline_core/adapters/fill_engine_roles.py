@@ -26,6 +26,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.models import (
     ClusterFillResult,
     FnFixContext,
@@ -324,6 +325,7 @@ class WorkspaceModelAdapter:
     collect_impl_blocks_for_cluster_fn: Callable[..., list[Any] | None]
     fn_container_index_fn: Callable[[Path], dict[FnLocator, str]]
     fn_belongs_to_cluster_fn: Callable[..., bool]
+    cluster_dead_sites_fn: Callable[[Path, Any], CfgDeadSites]
     cluster_filter_type_members_fn: Callable[[list[Any], Any], list[Any]]
     is_gen_tests_file_fn: Callable[[str], bool]
     leaf_first_fn_order_fn: Callable[[list[FnLocator], Any], list[FnLocator]]
@@ -357,6 +359,10 @@ class WorkspaceModelAdapter:
                               fn_cfg_predicates: list[str] | None = None) -> bool:
         return self.fn_belongs_to_cluster_fn(target_src_dir, file_rel, fn_name,
                                              cluster, fn_cfg_predicates=fn_cfg_predicates)
+
+    def cluster_dead_sites(self, target_src_dir: Path,
+                           cluster: Any) -> CfgDeadSites:
+        return self.cluster_dead_sites_fn(target_src_dir, cluster)
 
     def cluster_filter_type_members(self, records: list[Any],
                                     cluster: Any) -> list[Any]:

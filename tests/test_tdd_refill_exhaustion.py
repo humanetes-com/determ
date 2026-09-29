@@ -43,7 +43,7 @@ def _deps(fill_calls: list[frozenset[FnLocator]]) -> PhaseCTddDeps:
         attribute_failures=lambda *a, **k: AttributionResult(
             {_WRONG: {"t1"}}, FailureKind.RUNTIME, {_WRONG: {"t1"}}),
         build_test_reverse_map=lambda *a, **k: {},
-        filter_test_targets=lambda frontier, src: frontier,
+        filter_test_targets=lambda frontier, src, **_k: frontier,
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,

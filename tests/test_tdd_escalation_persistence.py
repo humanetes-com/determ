@@ -92,7 +92,7 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
     return PhaseCTddDeps(
         attribute_failures=_attr,
         build_test_reverse_map=lambda *a, **k: {},
-        filter_test_targets=lambda frontier, src: frontier,
+        filter_test_targets=lambda frontier, src, **_k: frontier,
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,
         converge_in_cluster=lambda *a, **k: None,

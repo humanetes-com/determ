@@ -12,6 +12,7 @@ from typing import Any
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.models import FillResult, FnLocator, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
 
@@ -80,11 +81,12 @@ class PerFnPassCtx:
     # failing attributed test needs one of these is kept-and-deferred instead
     # of re-prompted (`domain/dispatch.sibling_blocked_u2_failures`).
     still_stubbed: frozenset[FnLocator] = frozenset()
-    # (file, fn) pairs whose every stub occurrence is cfg-gated out of this
-    # cluster's build — the dispatch-side cfg verdict. Read by the retro
-    # gate: a conviction that recorded one of these as a blocker can never
-    # see it fill, so it is not a tree premise (`screen_guidance(cfg_dead=)`).
-    cfg_dead: frozenset[tuple[str, str]] = frozenset()
+    # The sites this cluster's build never compiles, stub or filled
+    # (`cluster_membership.cluster_dead_sites`) — the dispatch-side cfg
+    # verdict. Read by the retro gate: a conviction that recorded one of
+    # these as a blocker can never see it fill, so it is not a tree premise
+    # (`screen_guidance(cfg_dead=)`).
+    cfg_dead: CfgDeadSites = CfgDeadSites()
     # True when the cluster-active tree held NO hollow body at pass start.
     # Read by the regression gate: a fill that newly crashes binaries in a
     # stub-free tree has no hollow sibling to blame and is reverted at once,

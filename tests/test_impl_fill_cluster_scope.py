@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.impl_fill import (
-    cluster_inactive_stub_names,
+    cluster_active_stub_count,
     cluster_scoped_splice,
     file_first_guidance_keys,
 )
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.reconstruction import SpliceOutcome
 
 _SRC = Path("/x/.skeleton-filled/stable/src")
@@ -55,25 +56,17 @@ def _accepting_splice(calls: list[str]):
     return _splice
 
 
-def test_inactive_names_are_the_difference_between_every_stub_and_the_active_ones():
-    got = cluster_inactive_stub_names(_SRC, _Cluster(), _scan)
-    assert got == frozenset({("wrapper.rs", "provide")})
+def test_the_active_stub_count_is_what_the_cluster_compiles():
+    # The dead-site verdict moved to `cluster_membership.cluster_dead_sites`
+    # (tests/test_cluster_dead_sites.py); what stays here is the count the
+    # regression gate's `stub_free` reads.
+    assert cluster_active_stub_count(_SRC, _Cluster(), _scan) == 2
 
 
-def test_a_name_with_one_active_occurrence_is_never_convicted():
-    # `error.rs::context` is gated in one impl and ungated in another. A
-    # by-name refusal would block the fn nothing else can fill.
-    assert ("error.rs", "context") not in cluster_inactive_stub_names(
-        _SRC, _Cluster(), _scan)
-
-
-def test_no_cluster_means_no_verdict():
-    assert cluster_inactive_stub_names(_SRC, None, _scan) == frozenset()
-
-
-def test_an_absent_extractor_enforces_nothing():
-    assert cluster_inactive_stub_names(
-        _SRC, _Cluster(), lambda _d, _c: None) == frozenset()
+def test_no_cluster_or_no_extractor_is_unknown_not_zero():
+    assert cluster_active_stub_count(_SRC, None, _scan) is None
+    assert cluster_active_stub_count(
+        _SRC, _Cluster(), lambda _d, _c: None) is None
 
 
 def test_splice_refuses_a_body_for_a_fn_this_cluster_does_not_compile():
@@ -81,7 +74,7 @@ def test_splice_refuses_a_body_for_a_fn_this_cluster_does_not_compile():
     logs: list[str] = []
     guarded = cluster_scoped_splice(
         _accepting_splice(calls),
-        inactive=frozenset({("wrapper.rs", "provide")}),
+        inactive=CfgDeadSites(frozenset({("wrapper.rs", "provide")})),
         target_src_dir=_SRC, log=logs.append)
     out = guarded(_SRC / "wrapper.rs", "impl StdError for BoxedError",
                   "provide", "request.provide_ref(&*self.0)")
@@ -95,7 +88,7 @@ def test_the_sibling_in_the_same_block_still_lands():
     calls: list[str] = []
     guarded = cluster_scoped_splice(
         _accepting_splice(calls),
-        inactive=frozenset({("wrapper.rs", "provide")}),
+        inactive=CfgDeadSites(frozenset({("wrapper.rs", "provide")})),
         target_src_dir=_SRC, log=lambda _m: None)
     assert guarded(_SRC / "wrapper.rs", "impl StdError for BoxedError",
                    "source", "(&*self.0).source()").ok
@@ -114,7 +107,7 @@ def test_keyword_arguments_of_the_wrapped_splice_survive():
         return SpliceOutcome(True, "ok", 0)
 
     guarded = cluster_scoped_splice(
-        _splice, inactive=frozenset({("wrapper.rs", "provide")}),
+        _splice, inactive=CfgDeadSites(frozenset({("wrapper.rs", "provide")})),
         target_src_dir=_SRC, log=lambda _m: None)
     guarded(_SRC / "error.rs", "impl Error", "context", "x", "where T: Send",
             allow_nonstub=True, sig_text="fn context()")
@@ -125,7 +118,7 @@ def test_keyword_arguments_of_the_wrapped_splice_survive():
 def test_nothing_inactive_returns_the_splice_unwrapped():
     base = _accepting_splice([])
     assert cluster_scoped_splice(
-        base, inactive=frozenset(), target_src_dir=_SRC,
+        base, inactive=CfgDeadSites(), target_src_dir=_SRC,
         log=lambda _m: None) is base
 
 

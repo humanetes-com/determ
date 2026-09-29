@@ -48,7 +48,7 @@ def _deps(handoffs: list[Any]) -> PhaseCTddDeps:
         attribute_failures=lambda *a, **k: AttributionResult(
             {_DIRECT: {"t1"}}, FailureKind.BEHAVIOR, {_DIRECT: {"t1"}}),
         build_test_reverse_map=lambda *a, **k: {},
-        filter_test_targets=lambda frontier, src: {
+        filter_test_targets=lambda frontier, src, **_k: {
             k: v for k, v in frontier.items() if "gen_tests" not in k[0]},
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,

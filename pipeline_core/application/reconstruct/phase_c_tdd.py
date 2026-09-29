@@ -78,6 +78,7 @@ from pipeline_core.domain.body_ledger import (
     rows_for_units,
     standing_on_tree,
 )
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites, FrontierAdmission
 from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
@@ -283,16 +284,23 @@ class FilterTestTargets(Protocol):
     ``Callable[..., Frontier | SiteFrontier]`` is the other lie — every
     dispatch assignment then became the union. Overloads are the seam
     ``filter_test_targets`` already has in ``test_targets.py``.
+
+    ``cluster`` is required: the filter also drops sites the cluster never
+    compiles (`cluster_membership.cluster_dead_sites`), and a call site that
+    could omit it could admit one.
     """
 
     @overload
-    def __call__(self, frontier: Frontier, src_dir: Path) -> Frontier: ...
+    def __call__(self, frontier: Frontier, src_dir: Path, *,
+                 cluster: BuildCluster | None) -> Frontier: ...
 
     @overload
-    def __call__(self, frontier: SiteFrontier, src_dir: Path) -> SiteFrontier: ...
+    def __call__(self, frontier: SiteFrontier, src_dir: Path, *,
+                 cluster: BuildCluster | None) -> SiteFrontier: ...
 
     def __call__(
-        self, frontier: Frontier | SiteFrontier, src_dir: Path,
+        self, frontier: Frontier | SiteFrontier, src_dir: Path, *,
+        cluster: BuildCluster | None,
     ) -> Frontier | SiteFrontier: ...
 
 
@@ -363,12 +371,15 @@ class PhaseCTddDeps:
     # frontier on every sweep and the impl route skipped it at every dispatch.
     # None disables (the pre-fix behaviour).
     release_escalated_convictions: Callable[..., list[str]] | None = None
-    # The cluster's positive census of cfg-dead stubs: (src_dir, cluster) ->
-    # frozenset of (file, fn) this cluster's cfg-set never compiles. Threaded
-    # to the blocker release so a record `blocked_on` a cfg-dead name is read
-    # as unblocked, and so an empty cluster-scoped stub map can be told apart
-    # from a failed scan. None keeps the release's old guard.
-    cfg_dead_stub_names: Callable[..., frozenset[tuple[str, str]]] | None = None
+    # The cluster's dead sites: (src_dir, cluster) -> CfgDeadSites, every
+    # (file, fn) this cluster's cfg-set never compiles, stub or filled
+    # (`cluster_membership.cluster_dead_sites`). Threaded to the blocker
+    # release so a record `blocked_on` a cfg-dead name is read as unblocked,
+    # and so an empty cluster-scoped stub map can be told apart from a failed
+    # scan; and read by every frontier insert the locator filter does not
+    # see (pairs, session hops, measured-owner admits). None = no site is
+    # known dead (unit tests that do not exercise membership).
+    cfg_dead_sites: Callable[..., CfgDeadSites] | None = None
     # Stage A, the durable loop floor: (project_dir, cluster) -> the persisted
     # mapping or None, and (project_dir, cluster, mapping) -> None. Both None
     # keeps the pre-Stage-A behaviour (a fresh streak every process), which is
@@ -2857,11 +2868,10 @@ def run_phase_c_tdd(
             # compiles is an empty blocker (`blocked_on: ["provide"]` under
             # `stable`), and a non-empty census is the proof-of-scan that lets
             # an empty map mean "finished tree" rather than "failed scan".
-            _cfg_dead_now: frozenset[tuple[str, str]] = frozenset()
-            if deps.cfg_dead_stub_names is not None:
+            _cfg_dead_now = CfgDeadSites()
+            if deps.cfg_dead_sites is not None:
                 with suppress(Exception):
-                    _cfg_dead_now = frozenset(
-                        deps.cfg_dead_stub_names(target_src_dir, cluster))
+                    _cfg_dead_now = deps.cfg_dead_sites(target_src_dir, cluster)
             deps.retire_unblocked_convictions(
                 project_dir,
                 {f: frozenset(names) for f, names in _by_file.items()},
@@ -3405,21 +3415,40 @@ def run_phase_c_tdd(
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
         # test pairs feed the deterministic behavior path (s117 stable-51/72).
+        # One admission per iteration under the cluster's dead sites: every
+        # insert into the frontier — the map filters below, the pairs, the
+        # measured-owner admits, the session's owners and slices — goes
+        # through it, and it reports what it refused once, before dispatch.
+        _admission = FrontierAdmission(
+            deps.cfg_dead_sites(target_src_dir, cluster)
+            if deps.cfg_dead_sites is not None else CfgDeadSites())
+
+        def _admit_map[M: (Frontier, SiteFrontier)](
+                fr: M, adm: FrontierAdmission = _admission) -> M:
+            adm.observe(fr)
+            return deps.filter_test_targets(fr, src_dir, cluster=cluster)
+
         _attr = deps.attribute_failures(
             output, src_dir, recently_filled,
             test_reverse_map, cluster.name,
             test_texts=dict(cluster_tests),
             extra_failed=frozenset(_oracle.vanished),
         )
+        # The pairs and the site frontier are units the locator filter never
+        # sees: a pair with a dead member is dropped whole, here, so no pair
+        # route, dispatch map or session hop downstream can write one.
+        _attr = _attr._replace(
+            pairs=_admission.admit_pairs(_attr.pairs),
+            site_frontier=_admission.admit(_attr.site_frontier))
         frontier, kind = _attr.frontier, _attr.kind
-        frontier = deps.filter_test_targets(frontier, src_dir)
+        frontier = _admit_map(frontier)
         # Only the direct-evidence subset may revert a fill. Everything added
         # to `frontier` BELOW this line (crash-localized blame, futility
         # escalation, unattributed stubs) widens the work list without
         # convicting anyone: those units get attempted and are judged on
         # compiling + not regressing the suite, never on a failing test they
         # have no observed link to.
-        convicting = deps.filter_test_targets(_attr.convicting, src_dir)
+        convicting = _admit_map(_attr.convicting)
 
         # Crash localization: the vanished-test oracle names WHICH tests died;
         # the localizer names WHERE (gdb fast path, ASAN fallback with origin
@@ -3980,7 +4009,7 @@ def run_phase_c_tdd(
         # escalation ADD keys afterwards from raw fn records (escalation matched
         # `Error::` inside gen_tests bodies and proposed those tests as
         # "producers"), so the filter is re-applied over everything that landed.
-        frontier = deps.filter_test_targets(frontier, src_dir)
+        frontier = _admit_map(frontier)
 
         # Tests this sweep failed that no frontier unit owns — after
         # attribution, format-only fallback, and escalation. Always on the
@@ -4032,7 +4061,7 @@ def run_phase_c_tdd(
             # test binaries, i.e. straight at gen_tests fns. Re-apply the filter
             # over what the compiler named: an error INSIDE a test is still not
             # a licence to rewrite the thing the cluster is scored by.
-            eligible = deps.filter_test_targets(eligible, src_dir)
+            eligible = _admit_map(eligible)
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: build is RED — "
                      f"frontier narrowed to the {len(eligible)} fn(s) the "
                      f"compiler implicates ({len(_unaimed)} withheld: no test "
@@ -4346,8 +4375,8 @@ def run_phase_c_tdd(
                     "subjects": sorted(f"{k.file}::{k.fn_name}"
                                        for k in _dsubjects)})
                 _chain_fns = set(_dsubjects)
-            _chain_frontier = deps.filter_test_targets(
-                {k: set(_chain_from) for k in _chain_fns}, src_dir)
+            _chain_frontier = _admit_map(
+                {k: set(_chain_from) for k in _chain_fns})
             _chain_sites = [chain_derived_site(
                 s.binary_label, s.test_name, s.signal,
                 sorted(_chain_frontier),
@@ -5228,6 +5257,9 @@ def run_phase_c_tdd(
                 served=frozenset(_served_at),
                 paired_tests=_paired_tests,
             )
+            # Written into `eligible`, `ordered` and `escalation_products`
+            # after the last map filter.
+            _owner_admits = _admission.admit(_owner_admits)
         if _owner_admits:
             _by_test: dict[str, dict[FnLocator, set[str]]] = {}
             for _loc, _ts in _owner_admits.items():
@@ -5295,7 +5327,8 @@ def run_phase_c_tdd(
             for t, ks in _recorded_sites.items():
                 _session_from_cov.setdefault(
                     bare_test_name(t), set()).update(ks)
-            _cov_owners = {t: frozenset(ks) for t, ks in _session_from_cov.items()}
+            _cov_owners = {t: _admission.admit_sites(ks)
+                           for t, ks in _session_from_cov.items()}
             _session_owners = dict(_cov_owners)
             # Eligible is the filter, not the source. Walking eligible and
             # inserting FnSite(file, fn, "") when the site frontier had no
@@ -5313,6 +5346,8 @@ def run_phase_c_tdd(
                 units_by_test=_units_for_session,
                 pairs=((p.dispatcher, p.implementer) for p in _attr.pairs),
                 paired_tests=_paired_tests)
+            _session_slices = {t: _admission.admit_sites(sl)
+                               for t, sl in _session_slices.items()}
         _before_svc = [k for k, _ in ordered]
         # The ranking reads the VERIFIED service view, not the fire's
         # inclusive `_served_at`: a floor stamp the route-scoped rule never
@@ -6196,6 +6231,16 @@ def run_phase_c_tdd(
                     _sweep_evidence = merge_observations(_sweep_evidence, _observed)
                     deps.log(f"  {tag} [probe] observed values for "
                              f"{len(_observed)} failing test(s).")
+        # What this iteration's admission refused at sites the cluster never
+        # compiles: one line with its denominator, however many inserts
+        # proposed them.
+        _adm_report = _admission.report(cluster.name)
+        if _adm_report is not None:
+            deps.log(f"  {tag}" + _adm_report.log_line())
+            deps.emit("phase_c.tdd.cfg_dead_admission", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "proposed": _adm_report.total,
+                "refused": list(_adm_report.skipped)})
         _fill_meta: list[dict[str, Any]] = []
         # The ground this fill's plan stands on: the sweep's own capture,
         # read into per-test outcomes with crate sites resolved to the

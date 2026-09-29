@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.evidence_premise import retro_evidence_text
 from pipeline_core.domain.identity import RetroKey
 from pipeline_core.domain.models import FnLocator
@@ -148,7 +149,7 @@ def reset_exhaustion_flags(
 def retire_unblocked_convictions(
     project_dir: Path, still_stubbed: dict[str, frozenset[str]],
     cluster: str = "", *,
-    cfg_dead: frozenset[tuple[str, str]] = frozenset(),
+    cfg_dead: Collection[tuple[str, str]] = frozenset(),
 ) -> int:
 
     """Release every `fully_exhausted` verdict whose recorded blocking stubs
@@ -190,8 +191,9 @@ def retire_unblocked_convictions(
     released at most once per fn it recorded and each release answers to a
     distinct fill. A record with no `blocked_on` stamp is never touched.
 
-    ``cfg_dead`` is the cluster's positive census of ``(file, fn)`` stubs its
-    cfg-set never compiles (`cluster_inactive_stub_names`). It does two things.
+    ``cfg_dead`` is the cluster's positive census of ``(file, fn)`` sites its
+    cfg-set never compiles, stub or filled (`cluster_dead_sites`). It does
+    two things.
     A blocker in it is read as cleared: nothing in this cluster will ever see
     it fill, so a record `blocked_on: ["provide"]` under `stable` — where
     `provide` is `#[cfg(error_generic_member_access)]` — holds an empty
@@ -204,6 +206,7 @@ def retire_unblocked_convictions(
     record it existed to release."""
     if not still_stubbed and not cfg_dead:
         return 0
+    dead = CfgDeadSites(frozenset(cfg_dead))
     retros = load_retrospectives(project_dir)
     cleared = 0
     freed: list[str] = []
@@ -213,7 +216,7 @@ def retire_unblocked_convictions(
         if rec.get("cluster") != cluster:
             continue
         file_rel = str(key).split("::", 1)[0]
-        dead_here = frozenset(fn for f, fn in cfg_dead if f == file_rel)
+        dead_here = dead.fns_in(file_rel)
         released = cleared_blockers(
             rec, still_stubbed.get(file_rel, frozenset()) - dead_here)
 

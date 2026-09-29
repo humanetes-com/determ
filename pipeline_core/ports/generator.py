@@ -22,6 +22,7 @@ from ..domain.models import (
     ClusterFillResult,
     Diagnostic,
     FnLocator,
+    Frontier,
 )
 from ..domain.stub_inventory import StubInventory
 
@@ -129,13 +130,23 @@ class Cargo(Protocol):
     # over the whole test FILE — which is how a 2026-08-05 task3 frontier came to
     # hold five unrelated `new` fns. `unrepairable_tests` names failures no body
     # rewrite can satisfy (trybuild compile-fail harnesses).
+    # `cluster` is the cfg identity the frontier is admitted under: both
+    # projections drop oracle fns and sites that cluster never compiles.
     def attribute_failures(
         self, test_output: str, src_dir: Path,
         recently_filled: list[FnLocator],
         test_reverse_map: dict[str, set[FnLocator]], cluster_name: str,
         test_texts: dict[str, str] | None = ...,
         unrepairable_tests: frozenset[str] = ...,
+        *,
+        cluster: BuildCluster | None,
     ) -> AttributionResult: ...
+    # The same admission filter over a frontier built outside attribution
+    # (the crashed binaries' reverse-map keys).
+    def admit_frontier(
+        self, frontier: Frontier, src_dir: Path, *,
+        cluster: BuildCluster | None,
+    ) -> Frontier: ...
 
 
 @runtime_checkable

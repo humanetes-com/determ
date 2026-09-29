@@ -315,8 +315,9 @@ def analyze(
     membership = None
     for ln in reversed(segment_lines):
         membership = ClusterMembershipReport.parse(ln)
-        if membership is not None:
+        if membership is not None and not membership.frontier:
             break
+        membership = None
     # A filter that drops its whole input is a contradiction, not a phase: the
     # stubs on disk and the cluster come from the same bake, so "nothing here
     # belongs to this cluster" means the filter is wrong, not the tree. Ranked

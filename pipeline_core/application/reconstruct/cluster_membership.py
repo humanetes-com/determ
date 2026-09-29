@@ -24,6 +24,7 @@ from pipeline_core.application.reconstruct.stub_scan import (
 )
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.models import (
@@ -608,6 +609,64 @@ def fn_belongs_to_cluster(
         return True  # no cfg gating → exists in every cluster
     # False → excluded; None (undecidable) → conservatively kept.
     return all(cfg_set.evaluate(p) is not False for p in preds)
+
+
+def cluster_dead_sites(
+    target_src_dir: Path,
+    cluster: Any,
+    *,
+    enumerate_fns: Callable[[Path], list[dict[str, Any]] | None],
+    mod_records: Callable[[Path], list[ModRecord] | None],
+) -> CfgDeadSites:
+    """The `(file, fn_name)` sites `cluster` never compiles, over EVERY fn
+    record of the tree — stub or filled.
+
+    A site is dead iff it has at least one record and `fn_belongs_to_cluster`
+    is False for every one of them (the file's parent-mod gate plus the
+    record's own `cfg_predicates`). So a name with several records under
+    complementary gates (`provide` ×3 in one file, a `cap_limit` per arm)
+    stays live while any arm compiles, and an undecidable predicate keeps
+    its record live — better a wasted call than a fn nothing can fill.
+
+    The stub-only census this replaces read deadness off the stub list, so
+    filling a dead stub made it live to every consumer; a filled body this
+    cluster never compiles was then re-dispatched as a re-fill and accepted
+    by the splice (run `473471-33301154`, 2026-09-29). Empty when there is
+    no cluster or no extractor: unknown is not dead."""
+    if cluster is None:
+        return CfgDeadSites()
+    recs = enumerate_fns(target_src_dir)
+    if recs is None:
+        return CfgDeadSites()
+    return dead_sites_among(recs, target_src_dir, cluster,
+                            mod_records=mod_records)
+
+
+def dead_sites_among(
+    recs: Sequence[dict[str, Any]],
+    target_src_dir: Path,
+    cluster: Any,
+    *,
+    mod_records: Callable[[Path], list[ModRecord] | None],
+) -> CfgDeadSites:
+    """`cluster_dead_sites` over records the caller already enumerated from
+    `target_src_dir` — the frontier filter reads the oracle keys off the same
+    enumeration, so the tree is read once per filter."""
+    if cluster is None:
+        return CfgDeadSites()
+    seen: set[tuple[str, str]] = set()
+    live: set[tuple[str, str]] = set()
+    for r in recs:
+        file_rel, fn_name = str(r.get("file", "")), str(r.get("fn_name", ""))
+        key = (file_rel, fn_name)
+        seen.add(key)
+        if key in live:
+            continue
+        if fn_belongs_to_cluster(target_src_dir, file_rel, fn_name, cluster,
+                                 list(r.get("cfg_predicates") or []),
+                                 mod_records=mod_records):
+            live.add(key)
+    return CfgDeadSites(frozenset(seen - live))
 
 
 def scan_unimplemented_for_cluster(

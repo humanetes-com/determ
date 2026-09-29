@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.phase_c_engine import (
     PhaseCFillEngine,
 )
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.enums import FillUnit, RouteOrder
 from pipeline_core.domain.models import (
     ClusterFillResult,
@@ -122,6 +123,8 @@ class FakeFill:
         return self.s.get("cluster_blocks", [])
     def fn_container_index(self, *a: Any) -> dict[tuple[str, str], str]: return {}
     def fn_belongs_to_cluster(self, *a: Any, **k: Any) -> bool: return True
+    def cluster_dead_sites(self, *a: Any) -> CfgDeadSites:
+        return CfgDeadSites(frozenset(self.s.get("dead_sites", ())))
     def cluster_filter_type_members(self, records: Any, cluster: Any) -> Any: return []
     def is_gen_tests_file(self, name: str) -> bool: return False
     def leaf_first_fn_order(self, tuples: Any, counts: Any) -> Any: return tuples
@@ -522,11 +525,14 @@ def test_collect_refill_targets_only_filled_frontier_fns(tmp_path: Path) -> None
     # only wrongfn + stubfn have failing tests; stubfn is still a stub → excluded.
     tests = FailureFrontier.of_direct({FnLocator("src/a.rs", "wrongfn"): {"t1"},
                                        FnLocator("src/a.rs", "stubfn"): {"t2"}})
-    out = eng._collect_refill_targets(tmp_path, stubs, keys, tests)
+    out = eng._collect_refill_targets(tmp_path, stubs, keys, tests,
+                                      every_stub_key=frozenset())
     assert [(s.fn_name, s.refill) for s in out] == [("wrongfn", True)]
     # No frontier map (legacy fn_walk driver) → never produces refill targets.
-    assert eng._collect_refill_targets(tmp_path, stubs, None, None) == []
-    assert eng._collect_refill_targets(tmp_path, stubs, keys, None) == []
+    assert eng._collect_refill_targets(tmp_path, stubs, None, None,
+                                      every_stub_key=frozenset()) == []
+    assert eng._collect_refill_targets(tmp_path, stubs, keys, None,
+                                      every_stub_key=frozenset()) == []
 
 
 def test_collect_refill_targets_dispatch_projection_does_not_stamp(
@@ -542,7 +548,8 @@ def test_collect_refill_targets_dispatch_projection_does_not_stamp(
     keys = {FnLocator("src/a.rs", "wrongfn")}
     tests = FailureFrontier.of_dispatch(
         {FnLocator("src/a.rs", "wrongfn"): {"t1"}})
-    assert eng._collect_refill_targets(tmp_path, [], keys, tests) == []
+    assert eng._collect_refill_targets(tmp_path, [], keys, tests,
+                                      every_stub_key=frozenset()) == []
 
 
 def test_collect_refill_targets_dispatch_stamps_free_fn(tmp_path: Path) -> None:
@@ -557,7 +564,8 @@ def test_collect_refill_targets_dispatch_stamps_free_fn(tmp_path: Path) -> None:
     keys = {FnLocator("src/error.rs", "vtable")}
     tests = FailureFrontier.of_dispatch(
         {FnLocator("src/error.rs", "vtable"): {"test_downcast"}})
-    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    out = eng._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset())
     assert [(s.fn_name, s.refill) for s in out] == [("vtable", True)]
 
 
@@ -574,7 +582,8 @@ def test_collect_refill_targets_dispatch_stamps_oversized_block(
     eng = _engine(FakeFill(fns=fns), FillUnit.FN)
     keys = {FnLocator("src/a.rs", f"m{i}") for i in range(13)}
     tests = FailureFrontier.of_dispatch({k: {"t"} for k in keys})
-    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    out = eng._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset())
     assert len(out) == 13 and all(s.refill for s in out)
 
 
@@ -589,7 +598,8 @@ def test_refill_target_key_matching_no_fn_is_reported(tmp_path: Path) -> None:
     keys = {FnLocator("src/a.rs", "realfn"), FnLocator("nowhere.rs", "ghostfn")}
     tests = FailureFrontier.of_direct({FnLocator("src/a.rs", "realfn"): {"t1"},
                                        FnLocator("nowhere.rs", "ghostfn"): {"t2"}})
-    out = eng._collect_refill_targets(tmp_path, [], keys, tests)
+    out = eng._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset())
     assert [s.fn_name for s in out] == ["realfn"]
     assert "phase_c.refill.dangling_keys" in fake.events
     assert any("nowhere.rs::ghostfn" in m and "match no enumerated fn" in m
@@ -611,12 +621,14 @@ def test_collect_refill_targets_file_primary_stamps_dispatch_only_constructor(
     keys = {loc}
     tests = FailureFrontier.of_dispatch({loc: {"test_boxed_str"}})
     default = _engine(FakeFill(fns=fns), FillUnit.FN)
-    assert default._collect_refill_targets(tmp_path, [], keys, tests) == [], (
+    assert default._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset()) == [], (
         "negative control: default order on a coverable block omits the "
         "dispatch-only constructor")
     primary = _engine(FakeFill(fns=fns), FillUnit.FN,
                       route_order=RouteOrder.FILE_PRIMARY)
-    out = primary._collect_refill_targets(tmp_path, [], keys, tests)
+    out = primary._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset())
     assert [(s.fn_name, s.refill) for s in out] == [
         ("construct_from_boxed", True)]
 
@@ -637,9 +649,11 @@ def test_collect_refill_targets_stamps_crash_blamed_without_tests(
     keys = {loc}
     tests = FailureFrontier.of_direct(
         {FnLocator("src/error.rs", "other"): {"t"}})
-    assert eng._collect_refill_targets(tmp_path, [], keys, tests) == []
+    assert eng._collect_refill_targets(
+        tmp_path, [], keys, tests, every_stub_key=frozenset()) == []
     out = eng._collect_refill_targets(
-        tmp_path, [], keys, tests, crash_blamed=frozenset({loc}))
+        tmp_path, [], keys, tests, crash_blamed=frozenset({loc}),
+        every_stub_key=frozenset())
     assert [(s.fn_name, s.refill) for s in out] == [
         ("into_boxed_dyn_error", True)]
 
@@ -846,24 +860,21 @@ def test_cfg_dead_stub_is_refused_at_dispatch(tmp_path: Path) -> None:
     every A/B/C arm spent 90-147 s filling `src/lib.rs::cap_limit` into a
     build that never compiles it (the same run's file route refused the
     identical target as `not_in_cluster_cfg`). The dispatch refusal keys on
-    the same `cluster_inactive_stub_names` verdict the splice uses."""
+    the same `cluster_dead_sites` verdict the splice uses."""
     ws = _mk_ws(tmp_path)
     dead = {"file": "src/lib.rs", "fn_name": "cap_limit",
             "sig_text": "fn cap_limit()"}
-    fake = FakeFill(stub_tuples=[])
-    # Call sequence: cluster_inactive_stub_names scans (every, then active —
-    # the verdict says cap_limit is inactive), then the per-fn route's plan
-    # scan and the pass scan both return the record anyway (the observed
+    # The verdict says cap_limit is dead; the per-fn route's plan scan and
+    # the pass scan both return the record anyway (the observed
     # record-source drift that produced the live fill). The dispatch filter
     # must refuse it.
-    seq: list[list[dict[str, Any]]] = [[dead], [], [dead], [dead]]
-    fake.scan_stub_records = (  # type: ignore[method-assign]
-        lambda d, c: list(seq.pop(0)) if seq else [])
+    fake = FakeFill(stub_tuples=[], stub_records=[dead],
+                    dead_sites=[("src/lib.rs", "cap_limit")])
     out = _engine(fake, FillUnit.FN).run(
         ws, ws / "src", [], "m", "stable", cluster=_cluster(),
         cluster_env={}, skip_end_pass_test=True)
     assert "phase_c.dispatch.cfg_dead_refused" in fake.events
-    assert any("refused 1 dispatch(es) at cfg-dead stub(s)" in m and
+    assert any("refused 1 dispatch(es) at cfg-dead site(s)" in m and
                "src/lib.rs::cap_limit" in m for m in fake.logs)
     assert out.fns_filled == 0 and out.attempts == 0  # no call was spent
 
@@ -874,10 +885,7 @@ def test_cfg_live_stub_is_not_refused_at_dispatch(tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
     live = {"file": "src/lib.rs", "fn_name": "answer",
             "sig_text": "fn answer()"}
-    fake = FakeFill(stub_tuples=[], run=(0, ""))
-    seq: list[list[dict[str, Any]]] = [[live], [live], [live]]
-    fake.scan_stub_records = (  # type: ignore[method-assign]
-        lambda d, c: list(seq.pop(0)) if seq else [])
+    fake = FakeFill(stub_tuples=[], run=(0, ""), stub_records=[live])
     _engine(fake, FillUnit.FN).run(
         ws, ws / "src", [], "m", "stable", cluster=_cluster(),
         cluster_env={}, skip_end_pass_test=True)

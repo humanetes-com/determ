@@ -75,7 +75,6 @@ from pipeline_core.domain.fill_class import (
     class_for_kept,
     tests_could_not_run,
 )
-from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.joint_write import (
     JointAdmission,
     JointUnit,
@@ -175,8 +174,7 @@ def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
     """The fns of `rel_file` this cluster never compiles (`ctx.cfg_dead`),
     in the retro gate's vocabulary: a conviction blocked on one of them can
     never see it fill, so it must not keep the record alive."""
-    rel = norm_src_rel(rel_file)
-    return frozenset(fn for f, fn in ctx.cfg_dead if f == rel)
+    return ctx.cfg_dead.fns_in(rel_file)
 
 # Attributed leaves whose source is sliced for pins — the impl routes' cap.
 _ATTRIBUTED_TEST_LEAF_CAP = 12

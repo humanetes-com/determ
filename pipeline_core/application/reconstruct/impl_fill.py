@@ -119,6 +119,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMus
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
 from pipeline_core.domain.cfg import cluster_cfg_set, filter_cfg_inactive_branches
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.coverage_slice import entered_by_test
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
@@ -463,6 +464,9 @@ class ImplFillDeps:
     cargo_err_sig_from_diagnostics: Callable[..., frozenset[str]]
     check_graceful_stop: Callable[[str], None]
     cluster_filter_type_members: Callable[..., list[TypeRecord]]
+    # `(target_src_dir, cluster) -> CfgDeadSites`: the sites this cluster
+    # never compiles, stub or filled (`cluster_membership.cluster_dead_sites`).
+    cluster_dead_sites: Callable[..., CfgDeadSites]
     collect_crate_macros: Callable[..., str]
     collect_impl_blocks_for_cluster: Callable[..., list[ImplBlock] | None]
     collect_sibling_filled_bodies: Callable[..., str]
@@ -535,52 +539,31 @@ class ImplFillDeps:
     parse_ok: Callable[[Path], bool] | None = None
 
 
-def cluster_inactive_stub_names(
+def cluster_active_stub_count(
     target_src_dir: Path, cluster: BuildCluster | None,
     scan_records: Callable[..., list[dict[str, Any]] | None],
-) -> frozenset[tuple[str, str]]:
-    """The ``(file, fn_name)`` stubs this cluster's cfg-set never compiles.
+) -> int | None:
+    """The number of stubs the cluster compiles — what the regression gate's
+    crash-only branch needs (`stub_free`). ``None`` when there is no cluster
+    or no scan: unknown is not zero, and the gate keeps its crash-only keep
+    on unknown.
 
-    Read as the DIFFERENCE between every stub record and the cluster-active
-    ones, so the cfg evaluation stays in `cluster_membership`, which owns it,
-    and this consults its verdict instead of deriving a second one.
-
-    Listed only when EVERY stub occurrence of the name in that file is
-    inactive. `error.rs::provide` occurs three times under different gates, and
-    refusing on the first inactive occurrence would block the ACTIVE one — the
-    same conservative direction `fn_belongs_to_cluster` takes when a predicate
-    is undecidable: better a wasted call than a fn nothing can fill."""
-    return cluster_stub_census(target_src_dir, cluster, scan_records)[0]
-
-
-def cluster_stub_census(
-    target_src_dir: Path, cluster: BuildCluster | None,
-    scan_records: Callable[..., list[dict[str, Any]] | None],
-) -> tuple[frozenset[tuple[str, str]], int | None]:
-    """`cluster_inactive_stub_names`' verdict AND the number of stubs the
-    cluster DOES compile, from the same two scans — the second figure is what
-    the regression gate's crash-only branch needs (`stub_free`), and taking it
-    here costs no further scan. ``None`` when no scan is available: unknown is
-    not zero, and the gate keeps its crash-only keep on unknown."""
+    Which sites the cluster never compiles is NOT read off the stub records
+    here any more: a stub difference forgets a dead fn once a route fills it.
+    That verdict is `cluster_membership.cluster_dead_sites`, over every fn
+    record."""
     if cluster is None:
-        return frozenset(), None
-    every = scan_records(target_src_dir, None)
-    if every is None:      # extractor unavailable — no verdict to enforce
-        return frozenset(), None
-    active_recs = scan_records(target_src_dir, cluster) or []
-    active = {(_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
-              for r in active_recs}
-    inactive = frozenset(
-        key for key in ((_norm_src_rel(r.get("file", "")), r.get("fn_name", ""))
-                        for r in every)
-        if key not in active)
-    return inactive, len(active_recs)
+        return None
+    active_recs = scan_records(target_src_dir, cluster)
+    if active_recs is None:   # extractor unavailable
+        return None
+    return len(active_recs)
 
 
 def cluster_scoped_splice(
     splice: Callable[..., SpliceOutcome],
     *,
-    inactive: frozenset[tuple[str, str]],
+    inactive: CfgDeadSites,
     target_src_dir: Path,
     log: Callable[[str], None],
 ) -> Callable[..., SpliceOutcome]:
@@ -599,7 +582,12 @@ def cluster_scoped_splice(
     call site, because the call sites are the reason this leaked: the per-fn
     route, the free-fn reroute and the frontier scan all consult membership,
     and the two impl-routed splices did not. A filter written per site is the
-    same fix three times and a fourth site silently omits it."""
+    same fix three times and a fourth site silently omits it.
+
+    `inactive` is the cluster's dead SITES, stub or filled
+    (`cluster_membership.cluster_dead_sites`): a dead fn some route already
+    filled is refused the same as a stub, so a body the build never compiles
+    cannot land by first landing one."""
     if not inactive:
         return splice
 
@@ -610,7 +598,7 @@ def cluster_scoped_splice(
         except ValueError:
             rel = _norm_src_rel(Path(file_path).name)
         if (rel, fn_name) in inactive:
-            log(f"  [phase-c/impl] refused `{rel}::{fn_name}` — every stub "
+            log(f"  [phase-c/impl] refused `{rel}::{fn_name}` — every "
                 "occurrence is cfg-gated out of this cluster, so a body here "
                 "is one this build never compiles and the seed would pass on "
                 "unverified.")
@@ -1004,7 +992,8 @@ def prepare_impl_fill(
     # Rebound BEFORE any nested route defines itself, so every splice this
     # module performs — block, file-first, free-fn reroute, last-resort — goes
     # through the cluster's own membership verdict exactly once.
-    _cfg_dead_pairs, _active_stub_count = cluster_stub_census(
+    _cfg_dead_pairs = deps.cluster_dead_sites(target_src_dir, cluster)
+    _active_stub_count = cluster_active_stub_count(
         target_src_dir, cluster, _scan_unimplemented_records_for_cluster)
     # The cluster-active tree holds no hollow body as this call begins: the
     # regression gate's crash-only keep has no hollow sibling to defer to,
@@ -1019,8 +1008,7 @@ def prepare_impl_fill(
     def _cfg_dead_fns(file_rel: str) -> frozenset[str]:
         """The fns of `file_rel` this cluster never compiles — handed to the
         retro gate so a conviction blocked on one of them can expire."""
-        rel = _norm_src_rel(file_rel)
-        return frozenset(fn for f, fn in _cfg_dead_pairs if f == rel)
+        return _cfg_dead_pairs.fns_in(file_rel)
     # This tree's splice+cargo lock (per-tree: parallel clusters don't share).
     _splice_check_lock = _splice_lock_for(target_src_dir)
     # Guards the plain-Python aggregate counters (`impls_failed`, `errors`)

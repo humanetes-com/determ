@@ -34,7 +34,7 @@ def _deps(*, run=None, check_diag=None, parse_ok=None, unattributed=False,
     # `unattributed`: the compile frontier resolves to nothing, so the retry
     # aborts `unattributed_compile_errors` instead of asking the model.
     _frontier = (lambda diags, pd: {}) if unattributed else _unused
-    _filter = (lambda fr, pd: fr) if unattributed else _unused
+    _filter = (lambda fr, pd, **_k: fr) if unattributed else _unused
     return Task3RetryDeps(
         cargo=Task3Cargo(
             env=lambda: {},
@@ -162,6 +162,8 @@ def test_the_prompt_says_what_the_cluster_name_means(tmp_path: Path) -> None:
     class _C:
         def __init__(self, name: str) -> None:
             self.name, self.toolchain, self.env_extra = name, "", {}
+            self.active_cfg, self.excluded_cfg = [], []
+            self.default_features: list[str] = []
 
     deps = _deps(run=lambda *a, **k: (101, _failed(1)))
     from dataclasses import replace
@@ -192,7 +194,7 @@ def test_the_prompt_says_what_the_cluster_name_means(tmp_path: Path) -> None:
         build_test_reverse_map=lambda files, root: {},
         attribute_failures=lambda *a, **kw: type(
             "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
-        filter_test_targets=lambda fr, root: fr,
+        filter_test_targets=lambda fr, root, **_k: fr,
         expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
     )
     deps = replace(deps, enumerator=enum, retry_fix=fix, attribution=attr)
@@ -226,6 +228,7 @@ def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
                      excluded: list[str]) -> None:
             self.name, self.toolchain, self.env_extra = name, "", {}
             self.active_cfg, self.excluded_cfg = active, excluded
+            self.default_features: list[str] = []
 
     deps = _deps(run=lambda *a, **k: (101, _failed(1)))
     from dataclasses import replace
@@ -255,7 +258,7 @@ def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
         build_test_reverse_map=lambda files, root: {},
         attribute_failures=lambda *a, **kw: type(
             "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
-        filter_test_targets=lambda fr, root: fr,
+        filter_test_targets=lambda fr, root, **_k: fr,
         expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
     )
     deps = replace(deps, enumerator=enum, retry_fix=fix, attribution=attr)

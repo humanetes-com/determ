@@ -2994,6 +2994,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if hard_cap <= 0:
             return False
         tag = "[skeleton-merge]"
+        # The merged tree's cfg identity: the atoms every cluster agrees on.
+        # The fill prompts read it, and the frontier is admitted under it.
+        _merged_view = merged_view_cluster(clusters)
         if plateau_exit_disabled(max_stalls):
             self.tel.log(f"  {tag} post-merge plateau exit DISABLED "
                          f"(POST_MERGE_MAX_STALLS={max_stalls}); the hard cap "
@@ -3305,6 +3308,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
             _attr = self.cargo.attribute_failures(
                 output, project_dir, recently_filled, test_reverse_map, "merged",
+                cluster=_merged_view,
             )
             frontier, kind = _attr.frontier, _attr.kind
             # A crashed binary prints no FAILED lines, so its tests convict
@@ -3331,6 +3335,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         "silent_binaries": list(gap.silent_binaries),
                         "fns_added": len(new_keys),
                     })
+            # The crashed binaries' keys come from the reverse map, after
+            # attribution's filter: admit the whole frontier once more under
+            # the merged view, so a site no cluster compiles is never cut
+            # into `eligible`.
+            frontier = self.cargo.admit_frontier(frontier, project_dir,
+                                                 cluster=_merged_view)
             eligible = {k: v for k, v in frontier.items()
                         if k not in permanently_exhausted}
             # Stall on pass_count is the sole real terminator. A non-empty
@@ -3408,7 +3418,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 # a multi-variant macro, the cluster filter on advertised types
                 # — resolved to nothing for this whole stage. The merged
                 # identity asserts only the predicates every cluster agrees on.
-                cluster=merged_view_cluster(clusters),
+                cluster=_merged_view,
                 check_cmd="cargo check",
                 cluster_env=self.cargo.env(),
                 max_passes=1,

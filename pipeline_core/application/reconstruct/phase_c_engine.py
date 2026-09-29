@@ -38,9 +38,6 @@ from pipeline_core.application.reconstruct.fill_scheduler import (
     FillExecutionDeps,
     execute_fill,
 )
-from pipeline_core.application.reconstruct.impl_fill import (
-    cluster_inactive_stub_names,
-)
 from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels,
     match_records_to_order,
@@ -57,6 +54,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import cluster_cfg_set
+from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
@@ -73,7 +71,6 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     UnitEvidence,
 )
-from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.joint_write import DEFAULT_JOINT_MAX
 from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import (
@@ -192,9 +189,21 @@ class PhaseCFillEngine:
         tdd_frontier_keys: set[FnLocator] | None,
         tdd_frontier_tests: FailureFrontier | None,
         crash_blamed: frozenset[FnLocator] | None = None,
+        *,
+        every_stub_key: frozenset[FnLocator],
     ) -> list[Stub]:
         """Frontier fns that are already FILLED (not stubs) but have a failing
         attributed test → behavioral re-fill targets (`refill=True`).
+
+        "Filled" is read against ``every_stub_key`` — every stub in the tree,
+        under no cluster — never against ``stubs`` alone, which the pass has
+        already narrowed to the cluster's cfg-set and the frontier. Absence
+        from that narrowed list is not evidence of a body: a stub this
+        cluster never compiles is absent from it too, and was admitted here
+        as a re-fill (run `473471-33301154`, 2026-09-29, `src/nightly.rs::fmt`
+        ×2, `refill: true`, 31.6 min). A filled body at a cfg-dead site is
+        still returned; the caller refuses stubs and re-fills together
+        against one dead-site set (`_per_fn_targets`).
         Empty unless the TDD outer loop supplied both the frontier keys and the
         failing-test map (i.e. `driver=tdd`); the legacy `fn_walk` driver has its
         own internal test-fix loop and passes neither.
@@ -214,7 +223,7 @@ class PhaseCFillEngine:
         if not (tdd_frontier_keys and tdd_frontier_tests):
             return []
         crashed = crash_blamed or frozenset()
-        _stub_keys = {s.key for s in stubs}
+        _stub_keys = set(every_stub_key) | {s.key for s in stubs}
         _records = [Stub.from_dict(r)
                     for r in self.ws.enumerate_fns(target_src_dir) or []]
         containers_by_key: dict[FnLocator, list[str]] = {}
@@ -277,6 +286,38 @@ class PhaseCFillEngine:
             self.tel.emit("phase_c.refill.dangling_keys",
                           data={"keys": _dangling[:50]})
         return out
+
+    def _every_stub_key(self, target_src_dir: Path) -> frozenset[FnLocator]:
+        """Every stub of the tree under no cluster filter — what "not a
+        stub" is read against when the re-fill collector infers a body."""
+        recs = self.ws.scan_stub_records(target_src_dir, None)
+        if recs is not None:
+            return frozenset(Stub.from_dict(r).key for r in recs)
+        return frozenset(FnLocator(f, fn) for f, fn in self.ws.scan_stub_tuples(
+            target_src_dir, None).unit_list())
+
+    def _per_fn_targets(
+        self, target_src_dir: Path, stubs: list[Stub],
+        tdd_frontier_keys: set[FnLocator] | None,
+        tdd_frontier_tests: FailureFrontier | None,
+        *,
+        crash_blamed: frozenset[FnLocator],
+        is_cfg_dead: Callable[[FnLocator], bool],
+    ) -> tuple[list[Stub], list[Stub], list[Stub]]:
+        """The per-fn route's `(stubs, re-fills, refused)`: the re-fills the
+        collector admits, then ONE cfg-dead refusal over stubs and re-fills
+        together. The route plan and every pass read their targets here, so
+        a site the cluster never compiles cannot be a target of either,
+        whether or not a body sits in it."""
+        refills = self._collect_refill_targets(
+            target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
+            crash_blamed=crash_blamed,
+            every_stub_key=self._every_stub_key(target_src_dir))
+        dead = [s for s in (*stubs, *refills) if is_cfg_dead(s.key)]
+        if not dead:
+            return stubs, refills, []
+        return ([s for s in stubs if not is_cfg_dead(s.key)],
+                [r for r in refills if not is_cfg_dead(r.key)], dead)
 
     def run(
         self,
@@ -432,14 +473,13 @@ class PhaseCFillEngine:
         # narrowing had carried it) and the body went into a build that never
         # compiles it — the same run in which the file route refused the
         # identical target as `not_in_cluster_cfg`. Dispatch consults the
-        # same verdict now, at the same source of truth.
-        _cfg_dead: frozenset[tuple[str, str]] = frozenset()
-        if cluster is not None:
-            _cfg_dead = cluster_inactive_stub_names(
-                target_src_dir, cluster, self.ws.scan_stub_records)
+        # same verdict now, at the same source of truth. The verdict is a
+        # property of the SITE (`cluster_membership.cluster_dead_sites`), not
+        # of the stub: a dead fn some route already filled is still dead.
+        _cfg_dead = self.ws.cluster_dead_sites(target_src_dir, cluster)
 
         def _is_cfg_dead(key: FnLocator) -> bool:
-            return (norm_src_rel(key.file), key.fn_name) in _cfg_dead
+            return key in _cfg_dead
 
         _impl_payoff = None
         _fill_hist = FillClassHistogram()
@@ -619,7 +659,7 @@ class PhaseCFillEngine:
         culprits_of: Callable[[str], Collection[FnLocator]] | None,
         dispatch_ranks: dict[FnLocator, int] | None,
         behaviour_specs: tuple[BehaviourSpec, ...],
-        _cfg_dead: frozenset[tuple[str, str]],
+        _cfg_dead: CfgDeadSites,
         _is_cfg_dead: Callable[[FnLocator], bool],
         _dispatched: set[FnLocator],
         _reverted: set[FnLocator],
@@ -708,22 +748,6 @@ class PhaseCFillEngine:
             # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
-            # Same cfg verdict the splice enforces, applied before any call is
-            # spent (see `_cfg_dead` above) — a stub this cluster never
-            # compiles is refused at dispatch, not after a 90-147 s fill.
-            _dead_here = [s for s in stubs if _is_cfg_dead(s.key)]
-            if _dead_here:
-                self.tel.log(
-                    f"  [phase-c/per-fn] cluster {cluster_name}: refused "
-                    f"{len(_dead_here)} dispatch(es) at cfg-dead stub(s) — "
-                    "every occurrence is gated out of this cluster's build: "
-                    + ", ".join(sorted(f"{s.file}::{s.fn_name}"
-                                       for s in _dead_here)))
-                self.tel.emit("phase_c.dispatch.cfg_dead_refused", data={
-                    "cluster": cluster_name,
-                    "fns": sorted(f"{s.file}::{s.fn_name}"
-                                  for s in _dead_here)})
-                stubs = [s for s in stubs if not _is_cfg_dead(s.key)]
             # behavioral RE-FILL targets: frontier fns that are NOT
             # stubs (already filled with a compiling-but-wrong body) yet have a
             # failing attributed test. Under `driver=tdd` these were previously
@@ -731,9 +755,26 @@ class PhaseCFillEngine:
             # them as `refill=True` Stubs so the SAME fill unit corrects them,
             # guarded by the regression ratchet. Only when the outer loop passes
             # the frontier's failing-test map.
-            _refill_recs = self._collect_refill_targets(
+            # Then the cfg verdict the splice enforces, applied before any call
+            # is spent (see `_cfg_dead` above), to stubs AND re-fills from the
+            # same set — a site this cluster never compiles is refused at
+            # dispatch, not after a 90-147 s fill.
+            stubs, _refill_recs, _dead_here = self._per_fn_targets(
                 target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
-                crash_blamed=crash_blamed or frozenset())
+                crash_blamed=crash_blamed or frozenset(),
+                is_cfg_dead=_is_cfg_dead)
+            if _dead_here:
+                self.tel.log(
+                    f"  [phase-c/per-fn] cluster {cluster_name}: refused "
+                    f"{len(_dead_here)} dispatch(es) at cfg-dead site(s) — "
+                    "every occurrence is gated out of this cluster's build: "
+                    + ", ".join(sorted(f"{s.file}::{s.fn_name}"
+                                       + (" (re-fill)" if s.refill else "")
+                                       for s in _dead_here)))
+                self.tel.emit("phase_c.dispatch.cfg_dead_refused", data={
+                    "cluster": cluster_name,
+                    "fns": sorted(f"{s.file}::{s.fn_name}"
+                                  for s in _dead_here)})
             # The re-fill list was computed from the PREVIOUS iteration's test
             # run, and the impl/file routes have already written bodies this
             # call — so a target's failing test may already be fixed. Re-fills
@@ -1502,16 +1543,16 @@ class _PerFnRoute:
                          kw["target_src_dir"], kw["cluster"]).unit_list()]
         if keys is not None:
             stubs = [st for st in stubs if st.key in keys]
-        # A cfg-dead stub is refused by the pass itself, with its own event
-        # (`phase_c.dispatch.cfg_dead_refused`): it stays a reason to open
-        # the run and never a target the run may write.
-        live = [st for st in stubs if not kw["is_cfg_dead"](st.key)]
-        refills = eng._collect_refill_targets(
-            kw["target_src_dir"], live, keys, kw["tdd_frontier_tests"],
-            crash_blamed=kw["crash_blamed"] or frozenset())
+        # A cfg-dead site — stub or filled — is refused by the pass itself,
+        # with its own event (`phase_c.dispatch.cfg_dead_refused`): it stays
+        # a reason to open the run and never a target the run may write.
+        live, refills, dead = eng._per_fn_targets(
+            kw["target_src_dir"], stubs, keys, kw["tdd_frontier_tests"],
+            crash_blamed=kw["crash_blamed"] or frozenset(),
+            is_cfg_dead=kw["is_cfg_dead"])
         stub_locs = frozenset(st.key for st in live)
         targets = stub_locs | frozenset(r.key for r in refills)
-        if not targets and not stubs:
+        if not targets and not dead:
             return []
         frontier: FailureFrontier | None = kw["tdd_frontier_tests"]
         unit_tests = tuple(

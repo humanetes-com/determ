@@ -63,7 +63,7 @@ def _run(monkeypatch, tmp_path: Path, *, implicated, events, dispatched,
             {_LIB: {"t1"}, _OTHER: {"t1"}}),
         build_test_reverse_map=lambda *a, **k: {},
         # The real filter: a gen_tests fn is the ORACLE and may never be filled.
-        filter_test_targets=lambda frontier, src: {
+        filter_test_targets=lambda frontier, src, **_k: {
             k: v for k, v in frontier.items() if ".gen_tests_" not in k.file},
         check_graceful_stop=lambda *a, **k: None,
         check_auto_operator=lambda *a, **k: None,

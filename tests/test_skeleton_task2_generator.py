@@ -154,10 +154,14 @@ class FakeAdapter:
     def attribute_failures(self, test_output: str, src_dir: Path,
                            recently_filled: list[tuple[str, str]],
                            test_reverse_map: dict[str, set[tuple[str, str]]],
-                           cluster_name: str) -> AttributionResult:
+                           cluster_name: str, *, cluster: Any) -> AttributionResult:
         fr, kind = (self.attribute_seq.pop(0) if self.attribute_seq
                     else ({}, FailureKind.NO_FRONTIER))
         return AttributionResult(fr, FailureKind(kind), dict(fr))
+
+    def admit_frontier(self, frontier: Any, src_dir: Path, *,
+                       cluster: Any) -> Any:
+        return dict(frontier)
 
     # --- FillEngine ---
     def run_phase_c_tdd(self, **kw: Any) -> ClusterFillResult:

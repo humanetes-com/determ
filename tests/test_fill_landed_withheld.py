@@ -164,3 +164,39 @@ def test_a_carved_piece_of_a_carved_run_still_names_the_planned_run() -> None:
     second, _ = withhold_landed(first, {_B})
     assert second is not None and second.plan_key == planned.key
     assert second.targets == {_C}
+
+
+def test_the_line_names_every_open_target_after_opens_on_the_other(
+        tmp_path: Path) -> None:
+    """The plan's sentence: the names after `opens on the other N:` are the
+    complete open set — every one, including a name that sorts past the
+    fourth — and no withheld name; the withheld name appears only in the
+    withheld clause. Run `473471-33301154` (2026-09-29, fill 6) printed the
+    held names after `opens on the other 6`."""
+    opens = [FnLocator("src/q.rs", n) for n in ("c", "d", "e", "f", "g")]
+    last = FnLocator("src/z.rs", "zz")
+    _seen, log, events, _out = _fill(tmp_path, _per_fn(_A, *opens, last))
+    line = next(ln for ln in log if "withheld until the sweep grades" in ln)
+    head, sep, open_clause = line.partition("opens on the other 6: ")
+    assert sep, line
+    want = sorted(f"{u.file}::{u.fn_name}" for u in (*opens, last))
+    assert open_clause.split(", ") == want
+    assert "src/p.rs::a" not in open_clause
+    assert "withheld: src/p.rs::a;" in head
+    ev = next(d for e, d in events if e == "phase_c.fill.landed_withheld")
+    assert ev["open"] == want
+
+    # NEGATIVE CONTROL: the previous writer's tail, `f"{what}: {names}"`
+    # with `what = "opens on the other N"`, puts the held names in the open
+    # clause and none of the open ones.
+    old_tail = f"opens on the other {len(want)}: src/p.rs::a"
+    _h, _s, old_open = old_tail.partition(f"opens on the other {len(want)}: ")
+    assert old_open.split(", ") != want and "src/p.rs::a" in old_open
+
+
+def test_a_fully_withheld_run_prints_deferred_and_no_open_clause(
+        tmp_path: Path) -> None:
+    _seen, log, _events, _out = _fill(tmp_path, _per_fn(_A, _B))
+    line = next(ln for ln in log if "withheld until the sweep grades" in ln)
+    assert "deferred: src/p.rs::a, src/p.rs::b" in line
+    assert "opens on the other" not in line

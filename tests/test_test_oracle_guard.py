@@ -36,7 +36,7 @@ def test_filter_test_targets_drops_test_keys(monkeypatch: pytest.MonkeyPatch) ->
         ("src/lib.rs", "cap_limit"): {"default_cap_limit"},       # production → kept
         ("src/lib.rs", "extra_cap_limit"): {"extra_cap_limit"},   # test oracle → dropped
     }
-    out = pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj"))
+    out = pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj"), cluster=None)
     assert ("src/lib.rs", "cap_limit") in out
     assert ("src/lib.rs", "extra_cap_limit") not in out
 
@@ -46,5 +46,24 @@ def test_filter_test_targets_noop_without_tests(monkeypatch: pytest.MonkeyPatch)
     install_fake_extractor(
         monkeypatch, fns=[{"file": "src/lib.rs", "fn_name": "f", "cfg_predicates": []}])
     frontier = {("src/lib.rs", "f"): {"t"}}
-    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj")) == frontier
-    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets({}, Path("/proj")) == {}
+    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets(frontier, Path("/proj"), cluster=None) == frontier
+    assert pipeline._APP.phase_c_tdd_deps.filter_test_targets({}, Path("/proj"), cluster=None) == {}
+
+
+def test_filter_test_targets_drops_a_site_the_cluster_never_compiles(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The same composed filter drops a site the cluster's cfg-set decidably
+    excludes, stub or filled — run `473471-33301154` (2026-09-29) admitted a
+    cfg-dead locator to `stable`'s frontier because the filter had no cluster.
+    Negative control: the no-cluster reading keeps it."""
+    from pathlib import Path
+    from types import SimpleNamespace
+    install_fake_extractor(monkeypatch, fns=[
+        {"file": "src/lib.rs", "fn_name": "live", "cfg_predicates": []},
+        {"file": "src/lib.rs", "fn_name": "gated", "cfg_predicates": ["feat_x"]}])
+    frontier = {("src/lib.rs", "live"): {"t"}, ("src/lib.rs", "gated"): {"t"}}
+    filt = pipeline._APP.phase_c_tdd_deps.filter_test_targets
+    cluster = SimpleNamespace(name="c", cfg_true=[], cfg_false=["feat_x"])
+    assert filt(frontier, Path("/proj"), cluster=cluster) == {
+        ("src/lib.rs", "live"): {"t"}}
+    assert filt(frontier, Path("/proj"), cluster=None) == frontier

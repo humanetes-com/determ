@@ -27,6 +27,13 @@ _TAG = "  [phase-c/per-fn] cluster "
 _MARK_SKIPPED = ": skipped "
 _MARK_TAIL = " stub(s) not active in this cluster's cfg-set"
 _OF = " of "
+# The frontier-admission form: what one TDD iteration's frontier, pairs,
+# session hops and measured-owner admits proposed at sites the cluster never
+# compiles. A different population from the stub scan, so a different tag
+# and noun: the health detector's "filter emptied" reading is about the stub
+# scan, and a frontier line must never be read as one.
+_FRONTIER_TAG = "  [phase-c/tdd] cluster "
+_FRONTIER_TAIL = " frontier unit(s) not active in this cluster's cfg-set"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +44,9 @@ class ClusterMembershipReport:
     cluster_name: str
     total: int
     skipped: tuple[str, ...] = ()
+    # True for the TDD iteration's frontier-admission report; False for the
+    # stub scan's.
+    frontier: bool = False
 
     @property
     def kept(self) -> int:
@@ -51,8 +61,10 @@ class ClusterMembershipReport:
         return self.total > 0 and self.kept == 0
 
     def log_line(self) -> str:
-        return (f"{_TAG}{self.cluster_name}{_MARK_SKIPPED}"
-                f"{len(self.skipped)}{_OF}{self.total}{_MARK_TAIL}: "
+        tag, tail = ((_FRONTIER_TAG, _FRONTIER_TAIL) if self.frontier
+                     else (_TAG, _MARK_TAIL))
+        return (f"{tag}{self.cluster_name}{_MARK_SKIPPED}"
+                f"{len(self.skipped)}{_OF}{self.total}{tail}: "
                 f"{', '.join(sorted(self.skipped))}")
 
     @classmethod
@@ -64,11 +76,14 @@ class ClusterMembershipReport:
         resurrect the exact ambiguity this type exists to remove. A stale-format
         segment therefore yields no reading at all, which is the honest answer.
         """
+        frontier = _FRONTIER_TAIL in line
+        tag, tail = ((_FRONTIER_TAG, _FRONTIER_TAIL) if frontier
+                     else (_TAG, _MARK_TAIL))
         i = line.find(_MARK_SKIPPED)
-        j = line.find(_MARK_TAIL)
+        j = line.find(tail)
         if i < 0 or j <= i:
             return None
-        c = line.rfind(_TAG, 0, i)
+        c = line.rfind(tag, 0, i)
         if c < 0:
             return None
         counts = line[i + len(_MARK_SKIPPED):j].split(_OF)
@@ -77,9 +92,9 @@ class ClusterMembershipReport:
         n_skipped, total = int(counts[0].strip()), int(counts[1].strip())
         names = tuple(
             n for n in (s.strip() for s in
-                        line[j + len(_MARK_TAIL):].lstrip(":").split(","))
+                        line[j + len(tail):].lstrip(":").split(","))
             if n
         )
         if len(names) != n_skipped:
             return None
-        return cls(line[c + len(_TAG):i], total, names)
+        return cls(line[c + len(tag):i], total, names, frontier=frontier)

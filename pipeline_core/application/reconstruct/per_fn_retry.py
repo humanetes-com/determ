@@ -39,7 +39,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
-from pipeline_core.domain.cluster_plan import cfg_world_rules
+from pipeline_core.domain.cluster_plan import cfg_world_rules, merged_view_cluster
 from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.reconstruction import SpliceOutcome
@@ -272,6 +272,11 @@ def run_task3_inline_retry(
     # use whatever cluster is stale-set, so a cluster-cfg-specific compile error
     # (e.g. nightly-only) would not reproduce and BUILD mode would silently bail.
     _cluster_label = cluster.name if cluster is not None else "task3"
+    # The frontier's admission filter runs under the merged view: the retry
+    # rewrites one tree every cluster compiles, so a site is dropped only
+    # when no baked cluster compiles it.
+    _repair_cluster = merged_view_cluster(
+        all_clusters or ([cluster] if cluster is not None else []))
     if cluster is not None:
         _parts = ["cargo"]
         if cluster.toolchain:
@@ -499,7 +504,7 @@ def run_task3_inline_retry(
                 cluster_name=_cluster_label,
                 test_texts=_texts,
                 unrepairable_tests=_unrepairable,
-            ).frontier, project_dir)
+            ).frontier, project_dir, cluster=_repair_cluster)
         # Then follow callee edges, so a defect the failing test does not name
         # is reachable at all. Three hops is what this crate needs and where it
         # saturates: replayed against the merged tree and the 2026-08-05 output,
@@ -513,7 +518,8 @@ def run_task3_inline_retry(
         if _hops_max > 0 and frontier:
             widened, hops = deps.attribution.expand_frontier_by_calls(
                 frontier, project_dir, max_hops=_hops_max, cap=_cap)
-            widened = deps.attribution.filter_test_targets(widened, project_dir)
+            widened = deps.attribution.filter_test_targets(
+                widened, project_dir, cluster=_repair_cluster)
             if len(widened) > len(frontier):
                 deps.log(f"  [task3-retry] frontier {len(frontier)} → "
                          f"{len(widened)} fn(s) over {_hops_max} call hop(s).")
@@ -578,7 +584,8 @@ def run_task3_inline_retry(
                 if not diags:
                     return {"summary": "auto_import_repair", "abort": False}
         frontier = deps.attribution.filter_test_targets(
-            deps.attribution.frontier_from_diags(diags, project_dir), project_dir)
+            deps.attribution.frontier_from_diags(diags, project_dir), project_dir,
+            cluster=_repair_cluster)
         refs: list[FnLocator] = list(frontier.keys())
         if not refs:
             return {"abort": True, "reason": "unattributed_compile_errors"}

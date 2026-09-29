@@ -268,6 +268,11 @@ class GenerateFixLoopDeps:
     enumerate_fns_via_extractor: Any
     extract_tdd_frontier: Any
     filter_test_targets: Any
+    # () -> the cfg identity this repair runs under: the merged view (the
+    # atoms every baked cluster agrees on), since the fix loop edits one tree
+    # every cluster compiles. The frontier's admission filter drops the sites
+    # it never compiles.
+    repair_cluster: Callable[[], Any]
     fix_diag: Any
     frontier_from_diags: Any
     gotchas_for_error: Any
@@ -589,16 +594,19 @@ def generate_fix_loop(
                 fr_path, file_rel=file_rel, fn_name=fn_name, container=container)),
         gotchas_block_fn=_gotchas_block_for,
         tests_block_fn=lambda names: _tests_for_names(set(names)))
+    _repair_cluster = deps.repair_cluster()
+
     def _behavior_frontier_filtered(output: str) -> tuple[Any, Any]:
         fr, srcs = deps.behavior_frontier(output, project_dir, existing_test_files)
-        return deps.filter_test_targets(fr, project_dir), srcs
+        return deps.filter_test_targets(fr, project_dir,
+                                        cluster=_repair_cluster), srcs
     _frontiers = FrontierBuilderAdapter(
         compile_frontier_fn=lambda output: deps.filter_test_targets(
             deps.compile_error_frontier(output, project_dir, check_cmd, env, timeout),
-            project_dir),
+            project_dir, cluster=_repair_cluster),
         tdd_frontier_fn=lambda output: deps.filter_test_targets(
             as_dispatch(deps.extract_tdd_frontier(output, project_dir)),
-            project_dir),
+            project_dir, cluster=_repair_cluster),
         behavior_frontier_fn=_behavior_frontier_filtered)
 
     _fix_session = FixSession.for_check_cmd(

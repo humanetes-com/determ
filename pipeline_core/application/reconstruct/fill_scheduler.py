@@ -460,6 +460,22 @@ def _schedule_inputs(deps: FillExecutionDeps,
     return inputs
 
 
+def _withheld_clauses(withheld: Sequence[str], open_names: Sequence[str], *,
+                      deferred: bool) -> str:
+    """The tail of the withheld-targets line: the held names after
+    `withheld:` (or `deferred:` when nothing opens), and EVERY name the run
+    opens on after `opens on the other N:`. The open clause is not capped:
+    a wake reads it as what the run is spending its share on, and on run
+    `473471-33301154` (2026-09-29, fill 6) the open set was six names with
+    the cfg-dead one sorting last, so a four-name head would have hidden
+    it. The previous line printed the held names after `opens on the other
+    N`, telling the reader the run spent its share on units it withheld."""
+    if deferred:
+        return f"deferred: {names_of(withheld)}"
+    return (f"withheld: {names_of(withheld)}; "
+            f"opens on the other {len(open_names)}: {', '.join(open_names)}")
+
+
 def _withhold_landed_wave(
     wave: Sequence[ScheduledRun], landed: set[FnLocator], *,
     deps: FillExecutionDeps, started: str,
@@ -478,19 +494,17 @@ def _withhold_landed_wave(
             opened.append(w)
             continue
         names = sorted(f"{u.file}::{u.fn_name}" for u in held)
-        what = ("deferred" if run_now is None
-                else f"opens on the other {len(run_now.targets)}")
+        open_names = (sorted(f"{u.file}::{u.fn_name}" for u in run_now.targets)
+                      if run_now is not None else [])
         deps.log(
             f"  [phase-c/schedule] fill {deps.iteration}: {w.run.label} — "
             f"{len(held)} target(s) an earlier run of this fill kept a body "
             "for are withheld until the sweep grades them; "
-            f"{what}: {names_of(names)}")
+            + _withheld_clauses(names, open_names, deferred=run_now is None))
         deps.emit("phase_c.fill.landed_withheld", data={
             "cluster": deps.cluster, "iter": deps.iteration,
             "run": w.run.label, "withheld": names,
-            "deferred": run_now is None,
-            "open": (sorted(f"{u.file}::{u.fn_name}" for u in run_now.targets)
-                     if run_now is not None else [])})
+            "deferred": run_now is None, "open": open_names})
         if run_now is None:
             row = replace(
                 _row_for(w, None, None, deps=deps, started=started,
