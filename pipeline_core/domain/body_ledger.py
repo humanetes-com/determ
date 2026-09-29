@@ -45,8 +45,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from pipeline_core.domain.assertion_position import TestKey, outcomes_of
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.domain.test_report import compare_panic_sites
 
 GATE_VERSION = "bl1"
 """Bumped when the layout gate's meaning changes.
@@ -55,6 +55,23 @@ An entry whose `gate_ver` is not this one is never re-seeded. Bumping costs a
 re-derivation of the affected units and can never cost a bad splice, which is
 the right direction for a gate whose failure mode is a tree that does not
 build."""
+
+COMPARATOR_VERSION = "pos1"
+"""The meaning of an earlier-panic comparison a grade was earned under.
+
+A different field from `gate_ver`, on purpose: `reseed_allowed` refuses any
+`gate_ver != GATE_VERSION` before it reads the state, so bumping the gate
+would keep the rows this exists to release refused, and would refuse every
+proven row written under `bl1` as well.
+
+`pos1` is the typed assertion position (`assertion_position`): a position
+exists only inside the failing test's own body, keyed by binary and test.
+Rows with no comparator were graded by line order over any file, which on
+run `273278-22529e44` (2026-09-29) refuted ten landings on `src/` stub sites
+(`src/context.rs` 43|50 -> 23) with no test lost. A REFUTED row whose
+evidence is position-only (`regressed`, no `lost`) and whose comparator is
+not this one is reseedable (`LedgerEntry.refutation_superseded`); no row is
+edited."""
 
 
 class BodyState(StrEnum):
@@ -85,9 +102,14 @@ class BodyState(StrEnum):
     anything": a unit whose tests are all still red has not been shown to be
     right."""
     REFUTED = "refuted"
-    """The attributed tests ran under those same conditions and regressed.
-    Never re-seeded. This is not a conviction and the retro gate must not read
-    it: it says one BODY was wrong, not that a unit is hard."""
+    """The attributed tests ran under those same conditions and regressed:
+    a test that passed now fails (delta `lost`), or — with no convicting test
+    gained — a convicting test red before and after stopped at an earlier
+    assertion position of its own body (delta `regressed`).
+    Never re-seeded, unless the refutation was position-only and its
+    comparator is superseded (`LedgerEntry.refutation_superseded`). This
+    is not a conviction and the retro gate must not read it: it says one
+    BODY was wrong, not that a unit is hard."""
     FLAT = "flat"
     """A graded try with an empty verdict delta on the tests that convicted
     the dispatch. Two writers, one claim:
@@ -114,8 +136,8 @@ class BodyState(StrEnum):
     PROVEN/UNMEASURED/ADVANCED only."""
     ADVANCED = "advanced"
     """The convicting tests ran and all still fail, and at least one of them
-    now panics at a LATER line of the same test file than at the sweep
-    before the landing (`compare_panic_sites`): every assertion before the
+    now stops at a LATER assertion position of its own body than at the
+    sweep before the landing (`assertion_position`): every assertion before the
     new panic passes under this body. Not FLAT — the try moved the test,
     and a FLAT row is what retires a unit from dispatch
     (`flat_standing_unchanged`) and what the prompt's try history lists as
@@ -228,6 +250,18 @@ class LedgerEntry:
     # the field existed — `flat_standing_unchanged` reads that as
     # premise-unrecorded and refuses, exactly as it does for `convicting`.
     evidence_fp: str = ""
+    # The RAW bodies this landing replaced, in occurrence order, read off the
+    # extractor's records before the fill. What the sweep puts back when it
+    # grades the landing REFUTED on an earlier panic (`classify`, delta
+    # `(test, "regressed")`): such a landing was kept by nothing but a name
+    # set, and no other mechanism reverts it — the batch ratchet sees an
+    # unchanged pass count. Empty for a unit that did not exist before the
+    # landing and on every row written before the field.
+    prior_bodies: tuple[str, ...] = ()
+    # The `COMPARATOR_VERSION` an earlier-panic comparison was made under
+    # when this row was graded. "" on every row graded before the typed
+    # position existed.
+    comparator: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -244,6 +278,9 @@ class LedgerEntry:
             "oracle_fp": self.oracle_fp,
             "convicting": list(self.convicting),
             "evidence_fp": self.evidence_fp,
+            **({"prior_bodies": list(self.prior_bodies)}
+               if self.prior_bodies else {}),
+            **({"comparator": self.comparator} if self.comparator else {}),
         }
 
     @staticmethod
@@ -293,6 +330,9 @@ class LedgerEntry:
                 # Missing on pre-field rows: "" reads as premise-unrecorded
                 # and `flat_standing_unchanged` refuses to exclude on it.
                 evidence_fp=str(raw.get("evidence_fp") or ""),
+                prior_bodies=tuple(
+                    str(b) for b in (raw.get("prior_bodies") or ())),
+                comparator=str(raw.get("comparator") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -306,6 +346,24 @@ class LedgerEntry:
         (`nightly 0/124 for 8.7 h`)."""
         return self.state in (BodyState.PROVEN, BodyState.UNMEASURED,
                               BodyState.ADVANCED)
+
+    @property
+    def refutation_superseded(self) -> bool:
+        """A REFUTED row whose only evidence is an earlier position (a
+        `regressed` delta and no `lost`), graded under a comparator that is
+        no longer the current one. The grade was a claim of the old
+        comparison, not of the tests' verdicts; it no longer refuses the
+        body. A `gained` beside it does not keep it refuted — under the
+        current rule a gain outranks the position. A row that lost a test
+        stays refuted under any comparator.
+
+        Run `273278-22529e44`: all ten refuted rows are position-only, eight
+        of them with `gained` deltas; regraded on the recorded capture pair
+        under `pos1` they are eight `proven` and two `flat`."""
+        kinds = {k for _t, k in self.verdict_delta}
+        return (self.state is BodyState.REFUTED
+                and self.comparator != COMPARATOR_VERSION
+                and "regressed" in kinds and "lost" not in kinds)
 
 
 # --- identity ----------------------------------------------------------------
@@ -496,6 +554,7 @@ def rows_for_units(
     oracle_fp: str,
     convicting_of: Mapping[tuple[str, str], Iterable[str]] | None = None,
     evidence_of: Mapping[tuple[str, str], str] | None = None,
+    prior_of: Mapping[tuple[str, str], Sequence[str]] | None = None,
 ) -> list[LedgerEntry]:
     """One row per `(file, fn_name)` in `units`, built from the extractor's
     per-fn `records` as they stand NOW — the one construction both audit arms
@@ -551,8 +610,26 @@ def rows_for_units(
             # computes it: over the tree as the landing left it for a body
             # that landed, so the landing cannot move its own premise; at
             # dispatch for a row whose body did not move.
-            evidence_fp=str((evidence_of or {}).get((file, fn_name), ""))))
+            evidence_fp=str((evidence_of or {}).get((file, fn_name), "")),
+            # The bodies a landing replaced (see `LedgerEntry.prior_bodies`);
+            # the caller reads them off the records taken before the fill.
+            prior_bodies=tuple((prior_of or {}).get((file, fn_name), ()))))
     return rows
+
+
+def raw_bodies_of(
+    records: Iterable[Mapping[str, Any]], units: Iterable[tuple[str, str]],
+) -> dict[tuple[str, str], tuple[str, ...]]:
+    """`(file, fn_name) -> RAW body texts` in record order for `units`, from
+    the extractor's per-fn records — the shape `rows_for_units` stores and
+    `fn_reseed.splice_bodies` writes back. A unit with no record is absent."""
+    wanted = set(units)
+    out: dict[tuple[str, str], tuple[str, ...]] = {}
+    for r in records:
+        key = (str(r.get("file") or ""), str(r.get("fn_name") or ""))
+        if key in wanted:
+            out[key] = (*out.get(key, ()), str(r.get("body_text") or ""))
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -607,9 +684,9 @@ def reseed_allowed(
     a splice."""
     if entry.gate_ver != GATE_VERSION:
         return GateDecision(False, f"gate {entry.gate_ver} != {GATE_VERSION}")
-    if entry.state is BodyState.REFUTED:
+    if entry.state is BodyState.REFUTED and not entry.refutation_superseded:
         return GateDecision(False, "refuted")
-    if not entry.reseedable:
+    if not (entry.reseedable or entry.refutation_superseded):
         return GateDecision(False, f"state {entry.state}")
     if not entry.oracle_fp or entry.oracle_fp != oracle_fp:
         return GateDecision(False, "oracle moved")
@@ -644,10 +721,12 @@ class SweepView:
     failed: frozenset[str] = frozenset()
     intact: bool = True
     epoch: int = 0
-    #: bare test name -> (file, line) of the panic a failing test printed.
-    #: Absent for a failure that printed no location; never defaulted, since
-    #: a sentinel line would read as movement.
-    panic_sites: Mapping[str, tuple[str, int]] = field(default_factory=dict)
+    #: (binary, test) -> assertion position of a failing test
+    #: (`assertion_position.assertion_positions`), computed per binary
+    #: before any collapse onto the bare name. Absent for a failure with no
+    #: position; never defaulted, since a sentinel line would read as
+    #: movement.
+    positions: Mapping[TestKey, int] = field(default_factory=dict)
 
     @property
     def ran(self) -> frozenset[str]:
@@ -657,7 +736,7 @@ class SweepView:
     def of_sweep(
         cls, *, passed: Iterable[str], failed: Iterable[str],
         vanished: Iterable[str], intact: bool, epoch: int,
-        panic_sites: Mapping[str, tuple[str, int]],
+        positions: Mapping[TestKey, int],
     ) -> SweepView:
         """The ledger's view of a sweep whose failed set the score has already
         padded with crash-vanished tests.
@@ -678,7 +757,7 @@ class SweepView:
         gone = frozenset(vanished)
         return cls(passed=frozenset(passed),
                    failed=frozenset(t for t in failed if t not in gone),
-                   intact=intact, epoch=epoch, panic_sites=panic_sites)
+                   intact=intact, epoch=epoch, positions=positions)
 
 
 def judgment_attributed(
@@ -744,8 +823,13 @@ def classify(
     failing at `before`). Passing siblings cannot mint `proven`. Convicting
     tests that ran and all still fail are `flat`: a graded try with an empty
     delta, not `unmeasured` (the tests ran) and not `proven` — unless one of
-    them now panics at a later line of the same file than it did at `before`,
-    which is `advanced` (delta entries `(test, "advanced")`)."""
+    them now stops at a later assertion position of its own body, which is
+    `advanced` (delta entries `(test, "advanced")`). One that stops at an
+    EARLIER position is `refuted` (delta entries `(test, "regressed")`) —
+    but only when no convicting test passes: a verdict outranks a position
+    (`TestOutcomes.refuses`, the rule every keep reads). Run
+    `273278-22529e44` (2026-09-29) refuted eight landings that each turned
+    convicting tests green, on line order over `src/` stub sites."""
     names = frozenset(attributed)
     if not names or not (names & after.ran):
         return BodyState.UNMEASURED, ()
@@ -774,15 +858,22 @@ def classify(
     if convicting:
         if not (convicting & after.ran):
             return BodyState.UNMEASURED, delta
+        outcomes = outcomes_of(
+            convicting, before_passed=before.passed,
+            before_failed=before.failed, after_passed=after.passed,
+            after_failed=after.failed, before_positions=before.positions,
+            after_positions=after.positions)
+        # The decided rule: an earlier position refuses only when no
+        # convicting test gained (`lost` already returned above). Run
+        # `24951-a72c4642` (2026-09-29) is the all-red case this grade
+        # exists for, graded `flat` before it.
+        if outcomes.refuses:
+            return BodyState.REFUTED, delta + tuple(
+                (t, "regressed") for t in outcomes.earlier_tests)
         if not (convicting & after.passed):
-            _regressed, advanced = compare_panic_sites(
-                {t: site for t, site in before.panic_sites.items()
-                 if t in convicting},
-                {t: site for t, site in after.panic_sites.items()
-                 if t in convicting})
-            if advanced:
+            if outcomes.later:
                 return BodyState.ADVANCED, delta + tuple(
-                    (t, "advanced") for t, _f, _a, _b in advanced)
+                    (t, "advanced") for t in outcomes.later_tests)
             return BodyState.FLAT, delta
         return BodyState.PROVEN, delta
     if not (names & after.passed):

@@ -83,7 +83,7 @@ def test_wellformed_suite_round_trips_and_stays_quiet(tmp_path, sink):
         specs=(
             BehaviourSpec(
                 behaviour_id="b1",
-                given="let e = anyhow!(\"x\");",
+                setup="let e = anyhow!(\"x\");",
                 when="e.to_string()",
                 source_ref="tests/test_context.rs:12",
                 provenance=BehaviourProvenance.HARVESTED,

@@ -16,12 +16,19 @@ from collections.abc import Collection, Mapping, Sequence
 
 from pipeline_core.domain import behaviour as _behaviour
 from pipeline_core.domain.authored_layout import component_uids
-from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.behaviour import BehaviourSpec, example_when
+from pipeline_core.domain.behaviour_book import (
+    RULES_PER_PROMPT,
+    AimedUnit,
+    render_rules,
+    rules_for_units,
+)
 from pipeline_core.domain.behaviour_select import (
     IDENTITY_MUST_CAP,
     IdentityMustInput,
     behaviour_class_name,
     class_rank,
+    coerce_identity_unit,
     select_identity_must,
 )
 from pipeline_core.domain.language_driver import language_driver
@@ -333,8 +340,66 @@ def identity_must_instruction(
     return "MUST: " + "; ".join(thens)
 
 
+# Upper bound on `behaviour_must_instruction`'s text, enforced by dropping
+# rules from the end: the slice session reserves this much of turn 0 before
+# it knows which rules a packed slice will carry (turn 0 is sized before the
+# slice is chosen, and a turn 0 over its cap drops tests).
+BEHAVIOUR_MUST_MAX_CHARS = 3000
+
+
+def behaviour_must_instruction(
+    specs: Sequence[BehaviourSpec],
+    *,
+    fn_names: Collection[str] = (),
+    units: Sequence[IdentityMustInput] = (),
+    cap: int = IDENTITY_MUST_CAP,
+    rules_cap: int = RULES_PER_PROMPT,
+) -> str:
+    """The instruction every fill builder carries from the behaviour book:
+    the identity MUST (`identity_must_instruction`) and the book's RULES
+    aimed at the same units (`behaviour_book.rules_for_units`), in the one
+    slot the builders render as instruction — `BlockFillPlan.behaviour_must`
+    on the file-first plan line, the `behaviour_must` section field of the
+    per-impl, per-fn and fix builders, and the slice session's turn 0.
+
+    Every fill site calls this and nothing else, so a builder cannot carry
+    the identity half and drop the rules (the 2026-09-28 plan put rules
+    beside `identity_must` in three builders and none in the session route,
+    which the schedule opens as its own runs). Aiming is by the units' own
+    declaration: a rule reaches the unit that implements its feature or
+    that its sentence names, and the identity examples' rules reach the
+    constructors the identity half already admits. Empty when neither half
+    has anything for these units."""
+    picked = select_identity_must(specs, fn_names=fn_names, units=units, cap=cap)
+    parts: list[str] = []
+    if picked:
+        parts.append("MUST: " + "; ".join(_fmt_outcome(s.then) for s in picked))
+    aimed = ([AimedUnit(u.name, u.container) for u in (coerce_identity_unit(x) for x in units)]
+             or [AimedUnit(n) for n in fn_names if n])
+    rules = list(rules_for_units(specs, aimed, identity_ids=[s.behaviour_id for s in picked],
+                                 cap=rules_cap))
+    by_id = {s.behaviour_id: s for s in specs}
+    head = "\n".join(parts)
+    while rules:
+        text = "\n".join([*parts, render_rules(rules, by_id)])
+        if len(text) <= BEHAVIOUR_MUST_MAX_CHARS:
+            return text
+        rules.pop()
+    return head[:BEHAVIOUR_MUST_MAX_CHARS]
+
+
+def _is_bare_binding(when: str) -> bool:
+    w = when.strip()
+    return bool(w) and all(c.isalnum() or c == "_" for c in w)
+
+
 def _fmt_behaviour_line(spec: BehaviourSpec) -> str:
-    when = spec.when.strip() or spec.given.strip() or spec.behaviour_id
+    # A when that only reads a binding (`test`, handed to `assert_err`) says
+    # nothing without the setup that binds it; show the example's code.
+    when = example_when(spec)
+    if spec.setup.strip() and (spec.via or _is_bare_binding(spec.when)):
+        when = f"{spec.setup.strip()}\n{when}"
+    when = when or spec.behaviour_id
     then = _fmt_outcome(spec.then)
     if "\n" in when:
         return f"- when:{_fenced(when)}\n  then {then}"

@@ -1037,13 +1037,11 @@ def test_crash_only_revert_without_blame_still_burns_the_old_way(
 def test_crash_evidence_refill_is_kept_on_non_regression(
         tmp_path: Path) -> None:
     from dataclasses import replace
-    from types import SimpleNamespace
 
     from pipeline_core.domain.models import FnLocator
     from pipeline_core.domain.test_report import U2Decision, U2Verdict
     ws = _mk_ws(tmp_path)
-    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
-                               ignored_names=frozenset())
+    baseline = _baseline_passing("t_pass")
     reject = U2Verdict(U2Decision.REJECT,
                        self_failures=frozenset({"t_latent"}),
                        detail="Your body ABORTED the test binary")
@@ -1062,12 +1060,10 @@ def test_the_same_rejection_without_evidence_still_reverts(
         tmp_path: Path) -> None:
     """Control 1: no crash evidence → the strict gate stands (the pre-fix
     revert reproduces)."""
-    from types import SimpleNamespace
 
     from pipeline_core.domain.test_report import U2Decision, U2Verdict
     ws = _mk_ws(tmp_path)
-    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
-                               ignored_names=frozenset())
+    baseline = _baseline_passing("t_pass")
     reject = U2Verdict(U2Decision.REJECT,
                        self_failures=frozenset({"t_latent"}), detail="red")
     fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
@@ -1082,13 +1078,11 @@ def test_a_real_regression_reverts_even_with_crash_evidence(
     """Control 2: a self-failure that was PASSING at baseline is a true
     regression — the evidence buys no keep."""
     from dataclasses import replace
-    from types import SimpleNamespace
 
     from pipeline_core.domain.models import FnLocator
     from pipeline_core.domain.test_report import U2Decision, U2Verdict
     ws = _mk_ws(tmp_path)
-    baseline = SimpleNamespace(passed_names=frozenset({"t_pass"}),
-                               ignored_names=frozenset())
+    baseline = _baseline_passing("t_pass")
     reject = U2Verdict(U2Decision.REJECT,
                        self_failures=frozenset({"t_pass"}), detail="red")
     ctx = replace(_ctx(ws), crash_evidence={
@@ -1672,3 +1666,12 @@ def test_control_without_the_transcript_attempt_two_is_a_whole_document(
     (t1, _c1), (t2, c2) = fake.s["turns"]
     assert isinstance(t1, str) and isinstance(t2, str)
     assert not c2.messages
+
+
+def _baseline_passing(*names: str):  # type: ignore[no-untyped-def]
+    """A real baseline reading: `names` passing in one completed binary, no
+    panic sites (every keep reads it through `judge_refill`)."""
+    from pipeline_core.domain.test_results import BinaryResult, TestStateReading
+    return TestStateReading((BinaryResult(
+        label="tests/t.rs", completed=True, passed=frozenset(names),
+        failed=frozenset(), pass_count=len(names)),))

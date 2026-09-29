@@ -16,8 +16,10 @@ from pipeline_core.domain.behaviour import (
     BehaviourProvenance,
     BehaviourSpec,
     BehaviourSubKind,
+    ExampleOrigin,
     FenceDirective,
     ObservableOutcome,
+    OriginKind,
     StaticAssertKind,
 )
 from pipeline_core.domain.rust_scan import (
@@ -237,10 +239,11 @@ def harvest_layout_pin_behaviours(
     for i, outcome in enumerate(classify_layout_assertions(test_src)):
         out.append(BehaviourSpec(
             behaviour_id=f"static::{source_file}::{i}",
-            given="", when=outcome.static_expr, then=outcome,
+            setup="", when=outcome.static_expr, then=outcome,
             provenance=BehaviourProvenance.HARVESTED,
             subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
-            cfg_cluster=cfg_cluster, source_ref=source_file))
+            cfg_cluster=cfg_cluster, source_ref=source_file,
+            origin=ExampleOrigin(OriginKind.STATIC_PIN, source_file, "", i)))
     return out
 
 

@@ -471,7 +471,7 @@ def build_per_impl_prompt(
         sigs={m.fn_name: (m.sig_text or "") for m in _recipe_members})
     recipe_part = (f"{recipe_text}\n\n" if recipe_text else "")
     identity_part = (
-        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+        f"{sections.behaviour_must}\n\n" if sections.behaviour_must.strip() else "")
     coverage_part = instruction_opener(
         file_rel, (m.fn_name for m in (*stub_members, *refill_members)))
     own_file_block = (

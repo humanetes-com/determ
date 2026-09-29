@@ -160,7 +160,16 @@ from pipeline_core.monitor.render import (
     progress_bar as _bar,
 )
 from pipeline_core.monitor.render import (
+    schedule_row as _schedule_row,
+)
+from pipeline_core.monitor.render import (
     score_row as _score_row,
+)
+from pipeline_core.monitor.schedule_health import (  # noqa: E402
+    cached_schedule_health as _schedule_health,
+)
+from pipeline_core.monitor.schedule_health import (  # noqa: E402
+    schedule_health_line as _schedule_health_line,
 )
 from pipeline_core.monitor.vllm_status import (  # noqa: E402
     vllm_status_rows as _vllm_status,
@@ -390,6 +399,12 @@ def _phase_c_panel_rows(state: dict[str, Any], width: int) -> list[str]:
     _oracle = _oracle_row(state)
     if _oracle:
         rows.append(_oracle)
+    # What the fill schedule has bought this run (cashed / spent minutes,
+    # re-buys, delayed payers, the dry streak); red `BURN` = GPU spent with
+    # no verdict moving.
+    _sched = _schedule_row(_schedule_health_line(_schedule_health(EVENTS_LOG)))
+    if _sched:
+        rows.append(_sched)
     # Intra-iteration progress (render.iteration_progress_rows): pace bar
     # (elapsed vs median iteration length — moves every refresh), fills
     # counter with last-fill age, frontier context; plus a `bodies` bar only

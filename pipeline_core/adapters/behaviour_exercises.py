@@ -183,7 +183,7 @@ def exercises_by_coverage(
         if cmd is not None:
             rc, _out, err = counted(cmd, project_dir, spec_env, timeout)
         else:
-            # `program_for`, not `spec.given`: a capture in the constrained
+            # `program_for`, not `spec.setup`: a capture in the constrained
             # shape stores SETUP statements, not a whole program, so passing
             # `given` straight to `cargo run --example` would fail every probe
             # here with `rc != 0` -> "not attributed" -> continue, and the only

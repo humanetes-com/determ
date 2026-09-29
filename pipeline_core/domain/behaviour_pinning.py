@@ -38,7 +38,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
-from .behaviour import BehaviourSpec
+from .behaviour import BehaviourSpec, example_code
 from .rust_scan import fn_name_on_line, is_test_attr_line
 
 _STRING_KINDS = frozenset({
@@ -748,8 +748,7 @@ def _matches_file(spec: BehaviourSpec, fn_names: Collection[str], pub_items: Col
             return True
     if not pub_items:
         return False
-    text = spec.given + "\n" + spec.when
-    words = set(_idents_in(text))
+    words = set(_idents_in(example_code(spec)))
     return any(p in words for p in pub_items)
 
 
@@ -760,8 +759,8 @@ def select_behaviours_for_file(
     already_pinned: Collection[str],
 ) -> tuple[BehaviourSpec, ...]:
     """The UNPINNED, pinnable specs relevant to one file: `exercises` names a fn
-    of the file (any `::` segment), or the given/when text uses a pub item of
-    the file as a whole word."""
+    of the file (any `::` segment), or the example's code
+    (:func:`example_code`) uses a pub item of the file as a whole word."""
     pinned = set(already_pinned)
     fns = set(file_fn_names)
     pubs = set(file_pub_items)
@@ -776,12 +775,20 @@ def _rust_literal(value: str) -> str:
 
 def _render_one(spec: BehaviourSpec) -> str:
     assert spec.then is not None
-    klass = getattr(spec, "klass", None)
-    label = getattr(klass, "name", None) or _kind_name(spec)
-    lines = [f"- [{label}] {spec.behaviour_id}"]
-    if spec.given.strip():
-        lines.append("  given: " + " ".join(spec.given.split())[:400])
-    lines.append("  when: " + " ".join(spec.when.split())[:400])
+    # No class label: `BehaviourClass` is the verifier's category (how an
+    # observable is compared), internal to census and ranking. What the model
+    # needs is the rule the example illustrates, rendered next.
+    lines = [f"- {spec.behaviour_id}"]
+    # The rule first: the test is asked to pin an EXAMPLE of it, and a
+    # generated test that pins the rule's other cases is worth more than a
+    # copy of this one. The setup is the slice the when needs (never the
+    # whole harvested test, which this line used to squash to 400 chars).
+    for rule in spec.rules:
+        lines.append("  rule: " + " ".join(rule.sentence.split()))
+    if spec.setup.strip():
+        lines.append("  setup: " + " ".join(spec.setup.split())[:400])
+    when = " ".join(spec.when.split())[:400]
+    lines.append(f"  when: {spec.via}({when}, …)" if spec.via else "  when: " + when)
     if _kind_name(spec) == _IDENTITY_KIND:
         lines.append(f"  then: `.is::<{spec.then.value}>()` is {'true' if spec.then.ok else 'false'}"
                      f" (equivalently `.downcast_ref::<{spec.then.value}>()`"

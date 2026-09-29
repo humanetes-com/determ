@@ -227,7 +227,7 @@ def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) ->
     """The compiles-but-wrong builder had no slot. A constructor of Error
     with an identity Then puts MUST on the prompt; Display::fmt with the
     same suite (coverage would have matched the leaf `fmt`) does not.
-    Empty identity_must is the byte-identical control in
+    Empty behaviour_must is the byte-identical control in
     test_behavior_fix_prompt_exact."""
     from pipeline_core.domain.behaviour import (
         BehaviourSpec,
@@ -238,7 +238,7 @@ def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) ->
 
     pin = BehaviourSpec(
         behaviour_id="pin",
-        given="",
+        setup="",
         when='err.is::<&str>()',
         then=ObservableOutcome.type_identity("&str", True),
         subkind=BehaviourSubKind.OUTCOME,

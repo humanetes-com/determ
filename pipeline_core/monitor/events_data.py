@@ -395,6 +395,10 @@ def phase_c_state() -> dict[str, Any]:
         # converging" signal: passing/failing tests over iterations.
         "tdd_iter": 0, "tdd_pass": None, "tdd_fail": None, "tdd_frontier": None,
         "tdd_stall": None, "tdd_kind": None, "tdd_pass_hist": [],
+        # The pass count the newest in-fill keep measured (`phase_c.fill.reading`),
+        # None until one lands after the last sweep. The sweep's `tdd_pass`
+        # moves only at an iteration boundary, hours apart in a long fill.
+        "tdd_fill_pass": None,
         "tdd_max_stalls": None,
         # The oracle the last sweep COUNTED (`oracle_size` = pass + fail) and
         # the oracle the tree declares (`oracle_static`). The score bar is
@@ -615,7 +619,15 @@ def phase_c_state() -> dict[str, Any]:
         elif ev == "phase_c.pass.test":
             out["last_test_rc"] = d.get("rc")
             out["last_test_failed"] = len(d.get("failed_tests") or [])
+        elif ev == "phase_c.fill.reading":
+            # A regressed reading belongs to a keep the gate reverts, so it
+            # is not what the next sweep will read.
+            # Written flat (fields beside `event`), not under `data`.
+            r = d or e
+            if not r.get("regressed") and isinstance(r.get("pass_count"), int):
+                out["tdd_fill_pass"] = r["pass_count"]
         elif ev == "phase_c.tdd.iter":
+            out["tdd_fill_pass"] = None
             out["driver"] = "tdd"
             out["tdd_max_stalls"] = d.get("max_stalls", out["tdd_max_stalls"])
             _tcl = d.get("cluster") or out["cluster"]

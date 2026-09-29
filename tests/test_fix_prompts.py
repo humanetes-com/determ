@@ -568,14 +568,14 @@ def test_file_fill_first_pass_write_carries_identity_must() -> None:
     )
     out = _file_fill([BlockFillPlan(
         "impl Error", ("construct_from_adhoc", "msg"), (),
-        identity_must=must)])
+        behaviour_must=must)])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
     assert line.startswith(
         "  in `impl Error` -> write: construct_from_adhoc, msg")
     assert "never a wrapper's" in line
     assert "`is::<&str>()`" in line
-    # NEGATIVE CONTROL: today's `_plan_line` (no identity_must field) is a
+    # NEGATIVE CONTROL: today's `_plan_line` (no behaviour_must field) is a
     # write: list and nothing else — the instruction the first-pass fill
     # actually read.
     bare = _file_fill([BlockFillPlan(

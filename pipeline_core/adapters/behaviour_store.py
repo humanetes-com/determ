@@ -29,6 +29,21 @@ def save_behaviour_suite(project_dir: Path, suite: BehaviourSuite) -> Path:
     return p
 
 
+def write_feature_files(project_dir: Path, cfg_cluster: str, files: dict[str, str]) -> Path:
+    """Write the book's Gherkin view to ``.skeleton/_features_<cluster>/``,
+    replacing whatever a previous pass wrote there (the view is generated;
+    a stale file would describe a book that no longer exists). Returns the
+    directory."""
+    d = Path(project_dir) / _SKELETON_DIR / f"_features_{cfg_cluster}"
+    d.mkdir(parents=True, exist_ok=True)
+    for old in d.glob("*.feature"):
+        if old.name not in files:
+            old.unlink()
+    for name, text in files.items():
+        (d / name).write_text(text, encoding="utf-8")
+    return d
+
+
 def load_behaviour_suite(project_dir: Path, cfg_cluster: str) -> BehaviourSuite:
     """Read a cluster's baked behaviour suite. Absent → empty suite, silently;
     present-but-unusable → empty suite, LOUDLY.
@@ -52,9 +67,25 @@ def load_behaviour_suite(project_dir: Path, cfg_cluster: str) -> BehaviourSuite:
     except OSError as exc:
         return _unreadable(p, cfg_cluster, exc)
     try:
-        return BehaviourSuite.from_dict(json.loads(raw))
+        suite = BehaviourSuite.from_dict(json.loads(raw))
     except Exception as exc:  # invalid JSON, or JSON that is not a suite
         return _unreadable(p, cfg_cluster, exc)
+    if suite.is_legacy:
+        # Read as it was written, so a tree baked before the format change
+        # keeps working; never converted. The next strip bake re-harvests it
+        # in the current shape, keeps its probe rows (`merge_suites`) and
+        # builds the book (`BakeArtifactsDeps.build_book`). `redo.sh --full`
+        # resets to the augmented tag and takes that same path, so naming it
+        # promised a different outcome than it delivers.
+        log(f"  [behaviour] ‼ {p} is behaviour-suite format {suite.format_version} "
+            f"(every test example carries its whole test item as setup, no "
+            f"rules) — the next strip bake (a restart from the augmented "
+            f"tag re-runs it) re-harvests it in the current format, keeps "
+            f"its probe rows and builds the behaviour book")
+        emit("behaviour.suite.legacy",
+             data={"path": str(p), "cfg_cluster": cfg_cluster,
+                   "format": suite.format_version})
+    return suite
 
 
 def _unreadable(path: Path, cfg_cluster: str, exc: BaseException) -> BehaviourSuite:

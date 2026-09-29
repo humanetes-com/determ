@@ -27,7 +27,7 @@ def _suite(cluster: str) -> BehaviourSuite:
     """Carries one layout pin: without a harvested pin the component is GATED
     ("refusing to author blind") and the compile gate is never reached."""
     pin = BehaviourSpec(
-        behaviour_id="static::repr::0", given="", when="size_of::<Error>()",
+        behaviour_id="static::repr::0", setup="", when="size_of::<Error>()",
         then=ObservableOutcome.static_assertion(
             StaticAssertKind.SIZE, "assert_eq!(size_of::<Error>(), size_of::<usize>())"),
         subkind=BehaviourSubKind.OUTCOME)

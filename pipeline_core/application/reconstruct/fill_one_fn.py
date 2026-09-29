@@ -131,7 +131,7 @@ from pipeline_core.domain.retro_gate import (
     tree_premise_absent,
 )
 from pipeline_core.domain.std_api_sigs import std_api_def
-from pipeline_core.domain.test_report import U2Decision
+from pipeline_core.domain.test_report import U2Decision, judge_refill
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.domain.verdict import (
     Disposition,
@@ -155,7 +155,7 @@ from pipeline_core.ports.fill_engine import (
     TestLinker,
 )
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
-from pipeline_core.prompts.layout_authoring import identity_must_instruction
+from pipeline_core.prompts.layout_authoring import behaviour_must_instruction
 from pipeline_core.prompts.per_fn import (
     build_per_fn_fix_prompt,
     build_per_fn_prompt,
@@ -867,7 +867,7 @@ class FillOneFn:
                         usage_examples=select_usage_examples(
                             ctx.behaviour_specs, fn_name=fn_name,
                             container=container, char_budget=1200),
-                        identity_must=identity_must_instruction(
+                        behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
                                 fn_name, container, sig_text),))),
@@ -952,7 +952,7 @@ class FillOneFn:
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
                         coupled=_coupled_section(),
-                        identity_must=identity_must_instruction(
+                        behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
                                 fn_name, container, sig_text),))),
@@ -1231,9 +1231,14 @@ class FillOneFn:
                     # next sweep judge the joint tree. The regression gate
                     # below still runs, and the batch ratchet's snapshot
                     # predates this fill, so a breach claws it back then.
+                    # The file route's bar exactly, panic sites included
+                    # (`judge_refill`): an attributed test that now fails at
+                    # an earlier line is fewer assertions passed, and is not
+                    # kept here either.
                     if (_crash_evidence and _attempt_baseline_test is not None
-                            and not (_v.self_failures
-                                     & _attempt_baseline_test.passed_names)):
+                            and judge_refill(
+                                _evidence.tests, _attempt_baseline_test,
+                                _v).non_regression):
                         _written = [FnLocator(rel_file, fn_name), *(
                             FnLocator(u.file, u.fn_name) for u, _pre in joint.live)]
                         if SameCrashJudge(

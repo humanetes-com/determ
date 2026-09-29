@@ -134,7 +134,7 @@ def test_a_legacy_blob_capture_still_runs_but_can_never_replay() -> None:
         stdout="a\nb",
     )
     assert blob.klass is BehaviourClass.OTHER
-    assert program_for(blob) == blob.given
+    assert program_for(blob) == blob.setup
     assert render_replay_test(blob, fn_name="t") == ""
     assert replayable([blob]) == []
 

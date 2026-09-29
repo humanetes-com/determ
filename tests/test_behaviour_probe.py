@@ -174,7 +174,7 @@ def test_probe_spec_is_synthesized_stdout_outcome_classified():
     assert s.behaviour_id == "probe::stable::Error::msg::0"
     assert s.provenance is BehaviourProvenance.SYNTHESIZED
     assert s.then.kind is OutcomeKind.NORMALIZED_STDOUT and s.then.value == "x"
-    assert s.given == "fn main() {}" and s.when == "Error::msg"
+    assert s.setup == "fn main() {}" and s.when == "Error::msg"
     assert s.klass is BehaviourClass.OTHER and s.is_positive_oracle
 
 

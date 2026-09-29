@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from pipeline_core.domain.last_error import (
     CRASH_HEAD_MARK,
@@ -27,6 +27,9 @@ from pipeline_core.domain.last_error import (
 )
 from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reference_floor import doc_test_line
+
+if TYPE_CHECKING:
+    from pipeline_core.domain.assertion_position import TestKey
 
 
 class ClusterStatus(StrEnum):
@@ -1424,6 +1427,17 @@ class TestStateReading:
     __test__ = False  # domain VO, not a pytest class (silences collection warning)
 
     binaries: tuple[BinaryResult, ...]
+    #: (binary, test) -> the line of the failing test's OWN body it stopped
+    #: at, for the failures that have an assertion position at all
+    #: (`assertion_position.assertion_positions`: a panic in `src/`, in a
+    #: helper or in a closure has none). Read off the same capture as
+    #: `binaries` (`test_report.reading_of_capture`). It lives on the reading
+    #: so that every keep decision comparing an attempt to this baseline has
+    #: the positions without a second parse: until 2026-09-29 the impl, pair
+    #: and per-fn keeps judged "non-regression" on names alone (run
+    #: `24951-a72c4642`: a pair keep moved `test_altdebug` from failing at
+    #: `tests/test_fmt.rs:91` to `:90` and was kept).
+    positions: Mapping[TestKey, int] = field(default_factory=dict)
 
     @property
     def pass_count(self) -> int:

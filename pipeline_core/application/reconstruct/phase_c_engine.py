@@ -112,7 +112,7 @@ from pipeline_core.ports.fill_engine import (
     WorkspaceModel,
 )
 from pipeline_core.prompts.context import PerFnFixSections
-from pipeline_core.prompts.layout_authoring import identity_must_instruction
+from pipeline_core.prompts.layout_authoring import behaviour_must_instruction
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.prompts.retry_turn import (
     BODY_OUTPUT,
@@ -1290,7 +1290,7 @@ class PhaseCFillEngine:
                                         invariants=invariants_section,
                                         retrospective_guidance="", siblings="", crate_idioms="",
                                         bound_methods=_ctx.bound_methods_section,
-                                        identity_must=identity_must_instruction(
+                                        behaviour_must=behaviour_must_instruction(
                                             behaviour_specs,
                                             units=(IdentityMustUnit(
                                                 fn, container_for_fn, sig_t),))),

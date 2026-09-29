@@ -26,9 +26,9 @@ from pipeline_core.domain.behaviour import (
 
 
 def _outcome_spec(
-    then: ObservableOutcome, *, when: str = "x", given: str = "", cfg_cluster: str = "stable"
+    then: ObservableOutcome, *, when: str = "x", setup: str = "", cfg_cluster: str = "stable"
 ) -> BehaviourSpec:
-    return BehaviourSpec("b", given, when, then, subkind=BehaviourSubKind.OUTCOME, cfg_cluster=cfg_cluster)
+    return BehaviourSpec("b", setup, when, then, subkind=BehaviourSubKind.OUTCOME, cfg_cluster=cfg_cluster)
 
 
 def test_new_kinds_are_runtime_and_roundtrip():
@@ -119,10 +119,10 @@ def test_classify_precedence_table():
     assert classify_behaviour(_outcome_spec(ident, when="e.type_id()")) is BehaviourClass.IDENTITY
     assert classify_behaviour(_outcome_spec(ObservableOutcome.display("boom"))) is BehaviourClass.EXACT_FORMAT
     assert classify_behaviour(_outcome_spec(ObservableOutcome.alt_debug("X {\n}"))) is BehaviourClass.EXACT_FORMAT
-    bounded = _outcome_spec(ObservableOutcome.display("aaa"), given='let s = "a".repeat(3);\nassert_eq!(s.len(), 3);')
+    bounded = _outcome_spec(ObservableOutcome.display("aaa"), setup='let s = "a".repeat(3);\nassert_eq!(s.len(), 3);')
     assert classify_behaviour(bounded) is BehaviourClass.BOUNDED_RESOURCE
     commented = _outcome_spec(
-        ObservableOutcome.display("x"), given="// the message is capped at the limit\nlet s = f();"
+        ObservableOutcome.display("x"), setup="// the message is capped at the limit\nlet s = f();"
     )
     assert classify_behaviour(commented) is BehaviourClass.BOUNDED_RESOURCE
     assert (
@@ -136,13 +136,13 @@ def test_classify_precedence_table():
 
 def test_cfg_world_needs_a_non_default_cluster_and_a_gate():
     gated = _outcome_spec(
-        ObservableOutcome.rendered("x"), given="#[cfg(error_generic_member_access)]\nfn t() {}", cfg_cluster="nightly"
+        ObservableOutcome.rendered("x"), setup="#[cfg(error_generic_member_access)]\nfn t() {}", cfg_cluster="nightly"
     )
     assert classify_behaviour(gated, default_cluster="stable") is BehaviourClass.CFG_WORLD
     # same text on the default cluster: not another world
     assert classify_behaviour(gated, default_cluster="nightly") is BehaviourClass.OTHER
     # non-default cluster but nothing gated in the text: undetectable → OTHER
-    plain = _outcome_spec(ObservableOutcome.rendered("x"), given="fn t() {}", cfg_cluster="nightly")
+    plain = _outcome_spec(ObservableOutcome.rendered("x"), setup="fn t() {}", cfg_cluster="nightly")
     assert classify_behaviour(plain, default_cluster="stable") is BehaviourClass.OTHER
 
 

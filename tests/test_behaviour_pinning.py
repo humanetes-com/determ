@@ -46,7 +46,7 @@ def _identity(bid: str, type_text: str, ok: bool) -> SimpleNamespace:
     """A TYPE_IDENTITY spec by kind NAME — the module compares names, so it
     runs whether or not `OutcomeKind.TYPE_IDENTITY` has landed."""
     then = SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY"), value=type_text, ok=ok)
-    return SimpleNamespace(behaviour_id=bid, given="", when=f"e.is::<{type_text}>()",
+    return SimpleNamespace(behaviour_id=bid, setup="", via="", rules=(), helpers=(), when=f"e.is::<{type_text}>()",
                            then=then, exercises=frozenset())
 
 
@@ -170,7 +170,7 @@ def test_kind_names_are_read_not_identities() -> None:
     """A spec whose kind is `ALT_DEBUG_STRING` by NAME (the vocabulary another
     change adds) pins like any string kind."""
     then = SimpleNamespace(kind=SimpleNamespace(name="ALT_DEBUG_STRING"), value="Custom {\n    a: 1,\n}", ok=False)
-    spec = SimpleNamespace(behaviour_id="alt", given="", when="", then=then, exercises=frozenset())
+    spec = SimpleNamespace(behaviour_id="alt", setup="", via="", rules=(), helpers=(), when="", then=then, exercises=frozenset())
     block = '#[test]\nfn t() { assert_eq!(format!("{:#?}", v), "Custom {\\n    a: 1,\\n}"); }'
     assert behaviours_pinned_by(block, [spec]) == {"alt"}
     assert OutcomeKind.DEBUG_STRING.name == "DEBUG_STRING"
@@ -323,7 +323,7 @@ def test_select_without_pub_items_needs_an_exercises_hit() -> None:
 
 def test_identity_empty_value_is_not_pinnable_and_false_polarity_renders() -> None:
     empty = SimpleNamespace(
-        behaviour_id="e", given="", when="e.is::<T>()",
+        behaviour_id="e", setup="", via="", rules=(), helpers=(), when="e.is::<T>()",
         then=SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY"), value="  ", ok=True),
         exercises=frozenset())
     assert not is_pinnable(empty)

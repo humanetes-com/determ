@@ -221,7 +221,7 @@ def _control_prompt(**overrides):
 
 def _identity_spec(bid="b-identity"):
     return BehaviourSpec(
-        bid, given='let e = Error::msg("x");', when="e.is::<&str>()",
+        bid, setup='let e = Error::msg("x");', when="e.is::<&str>()",
         then=ObservableOutcome.downcast_ok(True),
         exercises=frozenset({"src/error.rs::msg::Error"}),
         subkind=BehaviourSubKind.OUTCOME, source_ref="tests/test_downcast.rs:12")
@@ -229,7 +229,7 @@ def _identity_spec(bid="b-identity"):
 
 def _display_spec(bid="b-display", text="x"):
     return BehaviourSpec(
-        bid, given='let e = Error::msg("x");', when="e.to_string()",
+        bid, setup='let e = Error::msg("x");', when="e.to_string()",
         then=ObservableOutcome.display(text), subkind=BehaviourSubKind.OUTCOME)
 
 

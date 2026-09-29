@@ -316,3 +316,14 @@ def test_split_falls_back_to_tabs_when_too_narrow(monkeypatch) -> None:
     assert plain[0].startswith("┌─ GPU")
     assert any(r.startswith("┌─ Legend") for r in plain)
     assert not any("┐ ┌" in r for r in plain)   # no second column
+
+
+def test_score_row_shows_the_in_fill_reading_ahead_of_the_sweep() -> None:
+    """Run 24951-a72c4642: the sweep read 175 while the fill's keeps measured
+    182; the row named only 175."""
+    base = {"tdd_pass": 175, "tdd_oracle": 184, "tdd_fail": 9}
+    row = m._plain(_render.score_row({**base, "tdd_fill_pass": 182}))
+    assert "175/184 passing" in row and "(on next sweep 182)" in row
+    # negative controls: no reading, or one equal to the sweep, adds nothing
+    for extra in ({}, {"tdd_fill_pass": None}, {"tdd_fill_pass": 175}):
+        assert "next sweep" not in m._plain(_render.score_row({**base, **extra}))

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.tasks.task0d import Task0dDeps, run_task0d
 from pipeline_core.domain.behaviour import BehaviourSuite, OutcomeKind
@@ -52,6 +53,7 @@ class _World:
         self.probes_run: list[tuple[str, str]] = []
         self.prompts: list[str] = []
         self.misses: list[tuple[str, list[dict[str, str]]]] = []
+        self.features: dict[str, dict[str, str]] = {}
         self.done = set(done)
         self.probe_ok = probe_ok
         self.reply = reply
@@ -107,6 +109,11 @@ class _World:
             "run_probe": run_probe,
             "exercises_by_coverage": lambda pd, cl, specs, recs: self.exercises,
             "record_misses": lambda pd, c, m: self.misses.append((c, list(m))),
+            # The book's rule calls are their own stage with their own knob;
+            # these pins are about the probe stage, so the book is built
+            # without sentences (no model call) unless a test asks for it.
+            "BOOK_BUDGET": BookBudget(rules=False),
+            "write_features": lambda pd, c, files: self.features.__setitem__(c, dict(files)),
         }
         kw.update(over)
         return Task0dDeps(**kw)  # type: ignore[arg-type]

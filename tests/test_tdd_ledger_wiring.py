@@ -20,6 +20,7 @@ import pytest
 
 from pipeline_core.adapters.oracle_fingerprint import cluster_oracle_fp
 from pipeline_core.domain.body_ledger import (
+    COMPARATOR_VERSION,
     BodyState,
     LedgerEntry,
     LedgerKey,
@@ -114,7 +115,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
          answer_lost_fns: tuple[tuple[str, str], ...] = (),
          fill_write: Any = None, fill_hook: Any = None,
          env: dict[str, str] | None = None,
-         reset_returns: list[str] | None = None) -> None:
+         reset_returns: list[str] | None = None,
+         cargo: Any = None) -> None:
     from pipeline_core.application.reconstruct.phase_c_tdd import run_phase_c_tdd
     monkeypatch.setenv("TDD_MAX_STALLS", max_stalls)
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
@@ -130,6 +132,8 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
     src = tmp_path / "src"
 
     def _cargo(*_a: Any, **_k: Any) -> tuple[int, str]:
+        if cargo is not None:
+            return cargo()
         return 101, _SWEEP
 
     def _enumerate(_src: Any, **_kw: Any) -> list[dict[str, Any]]:
@@ -1111,3 +1115,130 @@ def test_a_wave_row_is_written_once_when_the_fill_returns(
     assert len(landed) == 1, [(r.state, r.run_id) for r in ledger["rows"]]
     assert any(ev == "phase_c.ledger.judged" for ev, _ in events), (
         "the sweep after the fill judges the wave's row like any landing")
+
+
+_SWEEP_RED_AT = """\
+     Running tests/t.rs (target/debug/deps/t-0123)
+
+running 2 tests
+test t1 ... {t1}
+test t2 ... FAILED
+
+failures:
+
+---- t2 stdout ----
+
+thread 't2' panicked at tests/t.rs:{line}:5:
+assertion `left == right` failed
+
+failures:
+    t2
+
+test result: FAILED. {passed} passed; {failed} failed; 0 ignored"""
+
+# The oracle file the positions are read from: `t2`'s own body spans lines
+# 5..25, so lines 10 and 20 are both assertion positions of that test.
+_ORACLE_T = "\n".join(
+    ["// oracle"] * 4 + ["fn t2() {"] + ["    assert!(check());"] * 19
+    + ["}", "fn t1() {}"])
+
+
+def _site_regression_run(monkeypatch, tmp_path: Path, *, hack_line: int,
+                         t1_needs_hack: bool = False,
+                         ) -> tuple[dict, list[tuple[str, dict]], list[str], Path]:
+    """A filled `depth` rewritten once by the fill; `t2` is red before and
+    after, and panics at line 20 on the old body and at `hack_line` on the
+    rewrite. The cargo stub reads the tree, so a restore is measured.
+    `t1_needs_hack`: `t1` (not attributed to `depth`) passes only with the
+    rewrite on the tree, so undoing it loses a passing test."""
+    src = _tree(tmp_path, _LAYOUT_TWO)
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests" / "t.rs").write_text(_ORACLE_T, encoding="utf-8")
+    ledger: dict = {"rows": []}
+    events: list[tuple[str, dict]] = []
+    logs: list[str] = []
+    wrote = [0]
+
+    def _write(src_: Path) -> None:
+        if wrote[0]:
+            return
+        wrote[0] += 1
+        text = (src_ / "a.rs").read_text(encoding="utf-8")
+        (src_ / "a.rs").write_text(
+            text.replace("\n        self.ptr\n    ",
+                         "\n        self.ptr + HACK\n    ", 1),
+            encoding="utf-8")
+
+    def _cargo() -> tuple[int, str]:
+        hacked = "HACK" in (src / "a.rs").read_text(encoding="utf-8")
+        t1_ok = hacked or not t1_needs_hack
+        return 101, _SWEEP_RED_AT.format(
+            line=hack_line if hacked else 20,
+            t1="ok" if t1_ok else "FAILED",
+            passed=1 if t1_ok else 0, failed=1 if t1_ok else 2)
+
+    _run(monkeypatch, tmp_path, ledger=ledger, events=events, logs=logs,
+         stubbed=False, layout=_LAYOUT_TWO, fill_write=_write, cargo=_cargo)
+    return ledger, events, logs, src
+
+
+def test_a_landing_that_fails_its_test_earlier_is_refuted_and_reverted_at_the_sweep(
+        monkeypatch, tmp_path: Path) -> None:
+    """Plan sentence: a landing whose convicting test was red before and
+    after, now at an earlier line of the same file, is graded `refuted` at
+    the sweep and the body it replaced is put back, with the tree re-swept.
+    Control: the same rewrite read at the SAME line is `flat` and stays on
+    the tree — the pre-fix grade, and no revert."""
+    ledger, events, logs, src = _site_regression_run(
+        monkeypatch, tmp_path, hack_line=10)
+    rows: list[LedgerEntry] = ledger["rows"]
+    refuted = [r for r in rows if r.state is BodyState.REFUTED
+               and r.key.fn_name == "depth"]
+    assert refuted and ("t2", "regressed") in refuted[0].verdict_delta
+    assert refuted[0].prior_bodies == ("\n        self.ptr\n    ",)
+    text = (src / "a.rs").read_text(encoding="utf-8")
+    assert "HACK" not in text and "self.ptr\n" in text
+    ev = [d for e, d in events if e == "phase_c.ledger.site_regression"]
+    assert ev and ev[0]["reverted"] == ["src/a.rs::depth"]
+    assert any("REVERTED to the bodies they replaced" in ln for ln in logs)
+    assert refuted[0].comparator == COMPARATOR_VERSION
+
+    control = tmp_path / "control"
+    control.mkdir()
+    c_ledger, c_events, _c_logs, c_src = _site_regression_run(
+        monkeypatch, control, hack_line=20)
+    c_rows: list[LedgerEntry] = c_ledger["rows"]
+    assert any(r.state is BodyState.FLAT and r.key.fn_name == "depth"
+               for r in c_rows)
+    assert "HACK" in (c_src / "a.rs").read_text(encoding="utf-8")
+    assert not any(e == "phase_c.ledger.site_regression" for e, _ in c_events)
+
+
+def test_a_site_revert_that_loses_a_passing_test_is_rolled_back(
+        monkeypatch, tmp_path: Path) -> None:
+    """Plan sentence: the revert is a candidate change judged by the same
+    outcome rule, with the pre-revert sweep as its baseline; a revert whose
+    re-sweep loses passing tests is rolled back in the same transaction —
+    the rewrite stays on the tree, no REFUTED row is appended, and the log
+    says so. Control: with the judgment removed, the revert stands and the
+    pass count drops (the run `273278-22529e44` shape, 37 -> 19)."""
+    ledger, events, logs, src = _site_regression_run(
+        monkeypatch, tmp_path, hack_line=10, t1_needs_hack=True)
+    assert "HACK" in (src / "a.rs").read_text(encoding="utf-8")
+    assert not any(r.state is BodyState.REFUTED and r.key.fn_name == "depth"
+                   for r in ledger["rows"])
+    ev = [d for e, d in events if e == "phase_c.ledger.site_regression"]
+    assert ev and ev[0]["reverted"] == [] and ev[0]["rolled_back"]
+    assert any("site revert rolled back — the restored tree loses 1 passing"
+               in ln for ln in logs)
+
+    from pipeline_core.application.reconstruct import site_revert
+    monkeypatch.setattr(site_revert, "judge_revert",
+                        lambda pre, after: (True, None))
+    control = tmp_path / "control"
+    control.mkdir()
+    _c_ledger, c_events, _c_logs, c_src = _site_regression_run(
+        monkeypatch, control, hack_line=10, t1_needs_hack=True)
+    assert "HACK" not in (c_src / "a.rs").read_text(encoding="utf-8")
+    c_ev = [d for e, d in c_events if e == "phase_c.ledger.site_regression"]
+    assert c_ev and c_ev[0]["pass_after"] < c_ev[0]["pass_before"]

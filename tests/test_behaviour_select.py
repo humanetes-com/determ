@@ -45,7 +45,7 @@ from pipeline_core.prompts.language_catalog import catalog_driver
 def _spec(bid, when, *, exercises=frozenset(), fence=FenceDirective.RUN):
     return BehaviourSpec(
         behaviour_id=bid,
-        given="",
+        setup="",
         when=when,
         then=None,
         subkind=BehaviourSubKind.ASSERTION,
@@ -99,7 +99,7 @@ def test_select_empty_when_nothing_matches():
     assert capped.count("chain()") == 1
     empty_code = BehaviourSpec(
         behaviour_id="e",
-        given="",
+        setup="",
         when="",
         then=None,
         subkind=BehaviourSubKind.ASSERTION,
@@ -115,10 +115,10 @@ def test_select_empty_when_nothing_matches():
 # ---------------------------------------------------------------------------
 
 
-def _outcome(bid, when, then, *, given="", exercises=frozenset(), fence=FenceDirective.RUN):
+def _outcome(bid, when, then, *, setup="", exercises=frozenset(), fence=FenceDirective.RUN):
     return BehaviourSpec(
         behaviour_id=bid,
-        given=given,
+        setup=setup,
         when=when,
         then=then,
         subkind=BehaviourSubKind.OUTCOME,
@@ -205,7 +205,7 @@ def test_cap_of_40_on_the_error_component_shape_drops_the_whole_bounded_resource
     bounded = [
         BehaviourSpec(
             behaviour_id=f"buf-{i}",
-            given="",
+            setup="",
             when="Error::msg(x).to_string()",
             then=ObservableOutcome.display("x" * 40),
             subkind=BehaviourSubKind.OUTCOME,
@@ -439,7 +439,7 @@ def test_identity_must_does_not_match_container_or_display_or_given_fmt() -> Non
     fmt_given = _outcome(
         "fmt-given", "err.is::<MyErr>()",
         ObservableOutcome.type_identity("MyErr", True),
-        given="use std::fmt::{self, Display}; impl Display for MyErr { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, \"e\") } }",
+        setup="use std::fmt::{self, Display}; impl Display for MyErr { fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result { write!(f, \"e\") } }",
         exercises=frozenset({"src/error.rs::new"}),
     )
     picked = select_identity_must(

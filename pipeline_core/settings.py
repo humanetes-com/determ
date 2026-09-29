@@ -142,6 +142,15 @@ class Settings:
     # contract: movers are withdrawn, harvest Display counts as exact-format
     # coverage, and the ask is Display, Debug, or alternate.
     behaviour_pin_env_debug: bool = True
+    # The behaviour book's t0d rule calls. Off (`BEHAVIOUR_BOOK_RULES=0`)
+    # still builds the glossary and features and writes the Gherkin view,
+    # with no sentence and no model call. The other three bound the calls:
+    # per chunk of examples one draft call, one ablation call, and one check
+    # call per honoured draft.
+    behaviour_book_rules: bool = True
+    behaviour_book_max_features: int = 24
+    behaviour_book_examples_per_prompt: int = 24
+    behaviour_book_drafts_per_reply: int = 6
     # Who is the language expert in fill and layout prompts. generic (default):
     # the fill model; the pipeline is the gate. catalog: the pre-2026-09-09
     # std-trait tutorials, Display/Debug name-set, standard derive set, and
@@ -190,6 +199,11 @@ class Settings:
                 os.getenv("TASK0D_CLASSES_PER_CLUSTER", "4")),
             behaviour_capture_split=os.getenv("BEHAVIOUR_CAPTURE_SPLIT", "1").strip() == "1",
             behaviour_pin_env_debug=os.getenv("BEHAVIOUR_PIN_ENV_DEBUG", "1").strip() == "1",
+            behaviour_book_rules=os.getenv("BEHAVIOUR_BOOK_RULES", "1").strip() == "1",
+            behaviour_book_max_features=int(os.getenv("BEHAVIOUR_BOOK_MAX_FEATURES", "24")),
+            behaviour_book_examples_per_prompt=int(
+                os.getenv("BEHAVIOUR_BOOK_EXAMPLES_PER_PROMPT", "24")),
+            behaviour_book_drafts_per_reply=int(os.getenv("BEHAVIOUR_BOOK_DRAFTS_PER_REPLY", "6")),
             language_driver=LanguageDriverKind.coerce(
                 os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC),
         )

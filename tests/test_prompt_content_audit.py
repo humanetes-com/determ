@@ -247,7 +247,7 @@ def test_per_impl_and_per_fn_prompts_carry_identity_must_as_instruction() -> Non
              "retrospective_guidance": "", "bound_methods": ""}
     with_must = build_per_impl_prompt(
         block, [], [], "anyhow", "stable",
-        PerImplSections(**empty, identity_must=must), fr_path=None)
+        PerImplSections(**empty, behaviour_must=must), fr_path=None)
     without = build_per_impl_prompt(
         block, [], [], "anyhow", "stable",
         PerImplSections(**empty), fr_path=None)
@@ -268,7 +268,7 @@ def test_per_impl_and_per_fn_prompts_carry_identity_must_as_instruction() -> Non
         "module_name": "anyhow", "cluster_name": "stable",
         "file_rel": "src/error.rs", "fr_path": None}
     fn_with = build_per_fn_prompt(
-        **fn_common, sections=PerFnSections(**fn_empty, identity_must=must))
+        **fn_common, sections=PerFnSections(**fn_empty, behaviour_must=must))
     fn_without = build_per_fn_prompt(
         **fn_common, sections=PerFnSections(**fn_empty))
     sig_at = fn_with.index("fn msg<M>(message: M) -> Self")

@@ -14,7 +14,7 @@ from pipeline_core.domain.behaviour_oracle import BehaviourOracleReport, summari
 
 def _assert_spec(bid, *, exercises=frozenset()):
     return BehaviourSpec(
-        behaviour_id=bid, given="", when="run();", then=None,
+        behaviour_id=bid, setup="", when="run();", then=None,
         subkind=BehaviourSubKind.ASSERTION, fence=FenceDirective.RUN,
         exercises=exercises)
 
@@ -55,7 +55,7 @@ def test_mismatch_collects_suspect_units():
 def test_only_positive_specs_run():
     # a compile_fail behaviour is negative → excluded from the positive oracle.
     neg = BehaviourSpec(
-        behaviour_id="neg", given="", when="x", then=None,
+        behaviour_id="neg", setup="", when="x", then=None,
         subkind=BehaviourSubKind.ASSERTION, fence=FenceDirective.COMPILE_FAIL)
     ran: list[str] = []
     run_behaviour_oracle(

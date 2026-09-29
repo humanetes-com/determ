@@ -302,6 +302,42 @@ def reseed(
     return outcome
 
 
+def restore_prior(
+    *, rows: Sequence[LedgerEntry], src_dir: Path, writer: TreeWriter,
+    check_builds: BuildCheck | None = None,
+    validate_parse: ParseValidator | None = None,
+) -> tuple[list[LedgerEntry], str]:
+    """Put back the bodies each row's landing replaced (`prior_bodies`), as
+    ONE transaction: all of them hold together or none is written.
+
+    The caller is the sweep, for landings it graded REFUTED because a
+    convicting test now panics at an earlier line — a regression the fill's
+    keep did not catch and the batch ratchet cannot see (the pass count did
+    not move). One transaction because those landings came from one fill and
+    were judged by one reading; restoring half of them would leave a tree
+    no reading describes. Returns `(restored rows, reason)`; `reason` is ""
+    on success and says why nothing was written otherwise. A row without
+    `prior_bodies` (a unit that did not exist before its landing, or a row
+    written before the field) is not restorable and is left out."""
+    take = [r for r in rows if r.prior_bodies]
+    if not take:
+        return [], "no row carries the bodies its landing replaced"
+    txn = TreeTxn(src_dir, validate_parse=validate_parse,
+                  build_check=check_builds)
+    spliced, refused = writer.splice(
+        {FnLocator(r.key.file, r.key.fn_name): r.prior_bodies for r in take},
+        txn)
+    if refused:
+        txn.rollback()
+        return [], "; ".join(f"{k.file}::{k.fn_name}: {why}"
+                             for k, why in refused)
+    verdict = txn.close()
+    if not verdict.ok:
+        return [], verdict.reason
+    done = set(spliced)
+    return [r for r in take if FnLocator(r.key.file, r.key.fn_name) in done], ""
+
+
 def _tally(outcome: ReseedOutcome, kept: Sequence[LedgerEntry]) -> None:
     outcome.proven = sum(1 for e in kept if e.state is BodyState.PROVEN)
     outcome.unmeasured = len(kept) - outcome.proven

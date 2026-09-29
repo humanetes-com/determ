@@ -15,7 +15,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
-from functools import wraps
+from functools import partial, wraps
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
@@ -28,9 +28,16 @@ from pipeline_core.application.reconstruct.body_reseed import (
     ReseedOutcome,
     TreeWriter,
     reseed,
+    restore_prior,
 )
+from pipeline_core.application.reconstruct.cargo_runner import oracle_test_source
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
+from pipeline_core.application.reconstruct.site_revert import (
+    SiteRevertPorts,
+    SiteSweep,
+    revert_site_regressions,
+)
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     breach_withheld,
     closure_stub_sites,
@@ -43,6 +50,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 )
 from pipeline_core.application.reconstruct.tree_txn import guard_tree_boundary
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
+from pipeline_core.domain.assertion_position import assertion_positions
 from pipeline_core.domain.attribution import (
     AttributionResult,
     FailureFrontier,
@@ -53,6 +61,7 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
+    COMPARATOR_VERSION,
     BodyState,
     LedgerEntry,
     LedgerKey,
@@ -63,6 +72,7 @@ from pipeline_core.domain.body_ledger import (
     flat_standing_unchanged,
     judgment_attributed,
     latest_by_unit,
+    raw_bodies_of,
     rebuy_by_grade,
     rebuy_hits,
     rows_for_units,
@@ -1051,6 +1061,9 @@ def run_phase_c_tdd(
     # that must refuse to answer across a destruction epoch.
     _ledger_rows: list[LedgerEntry] = []
     _ledger_before: SweepView | None = None
+    # The oracle test files assertion positions are read from (the cluster
+    # tree's `tests` symlink into the sealed workspace oracle).
+    _oracle_source = oracle_test_source(target_src_dir)
     _ledger_cache: list[LedgerEntry] | None = None
 
     def _ledger_entries() -> list[LedgerEntry]:
@@ -2238,11 +2251,199 @@ def run_phase_c_tdd(
         # instead leaves the baseline pinned to the pre-fill tree, so the next
         # real breach reverts the good fill too and the loop re-fills it
         # forever at zero payoff.
+        def _sweep_view_of(output_: str, failed_: Iterable[str],
+                           vanished_: Iterable[str],
+                           reconciled_: bool, *,
+                           _epoch: int = _destruction_epoch) -> SweepView:
+            """The ledger's view of one sweep capture. `failed_` is the
+            sweep's reconciled failing set (crash-vanished names included,
+            which `of_sweep` takes back out)."""
+            _report_v = parse_test_output(output_)
+            return SweepView.of_sweep(
+                passed=(bare_test_name(t_) for t_ in _report_v.passed),
+                failed=(bare_test_name(t_) for t_ in failed_),
+                vanished=vanished_,
+                intact=reconciled_, epoch=_epoch,
+                # Where each failing test panicked: the one reading that can
+                # tell a body which got a test past an assertion from one that
+                # moved nothing, when both leave the verdict vector identical.
+                positions=assertion_positions(output_, _oracle_source))
+
+        def _grade_landing(row_: LedgerEntry, before_: SweepView,
+                           after_: SweepView, *, _iter: int = iter_n,
+                           _epoch: int = _destruction_epoch) -> LedgerEntry:
+            """One landed row judged against the sweep before and after it."""
+            _unit_g = FnLocator(row_.key.file, row_.key.fn_name)
+            # The reverse map is attribution proper; an escalation-only
+            # unit (producer escalation, owner-map admission) is absent
+            # from it, and judging on it alone graded every such landing
+            # UNMEASURED with its premise erased (`judgment_attributed`
+            # carries the run). The row's own premise is joined in.
+            _attributed_g = judgment_attributed({
+                bare_test_name(_t) for _t, _units in test_reverse_map.items()
+                if _unit_g in _units}, row_)
+            _now_g = (body_sha(deps.tree_writer.bodies(_unit_g, target_src_dir))
+                      if deps.tree_writer is not None else "")
+            _state_g, _delta_g = classify(
+                row_, attributed=_attributed_g, before=before_, after=after_,
+                body_now_sha=_now_g)
+            # The oracle is stamped HERE, at the grade, not carried
+            # from the landing: an adopted backfilled row arrives with
+            # no oracle at all, and a verdict is a claim about the tests
+            # that were run to reach it. So is the convicting premise —
+            # the same `names & before.failed` the classification is
+            # scoped to — which is what lets a flat exclusion later tell
+            # "same evidence, do not re-buy" from "a new test convicts
+            # this unit now".
+            return replace(
+                row_, state=_state_g, comparator=COMPARATOR_VERSION,
+                verdict_delta=_delta_g, iteration=_iter,
+                epoch=_epoch,
+                run_id=row_.run_id or deps.run_id,
+                oracle_fp=_oracle_fp(_iter),
+                convicting=tuple(sorted(_attributed_g & before_.failed)))
+
         _tree_sha = tree_content_sha(_src_root)
         # Reconciliation of the FINAL reading of this iter (the ratchet may
         # have re-swept above); every consumer below — snapshot, checkpoint,
         # floor, refill charge, next iter's re-admission — reads this one.
         _rec = _sweep_reconciliation(output, pass_count, fail_count)
+        # THE SITE-REGRESSION REVERT. A landing whose convicting tests were
+        # red before it and are red now, none of them gained, one of them
+        # stopped at an EARLIER assertion position of its own test body,
+        # lost assertions — and nothing else reverts it: the batch ratchet
+        # above sees an unchanged pass count. Run `24951-a72c4642`
+        # (2026-09-29): a pair keep moved `test_altdebug` from
+        # `tests/test_fmt.rs:91` to `:90`; the sweep graded it `flat`, and
+        # the earlier panic cut the implementer the test really reaches out
+        # of the coverage owner map for three iterations.
+        #
+        # The revert is localized and judged (`site_revert`): run
+        # `273278-22529e44` (same day) reverted ten landings by attribution
+        # and the re-sweep read 19 against the fill's 37, with no comparison
+        # of the two. Only the rows whose undo moves a position back are
+        # reverted; the revert stands only if the re-sweep keeps every test
+        # the pre-revert sweep passed and its pass count. A refused revert is
+        # rolled back byte for byte BEFORE anything below reads the tree: no
+        # REFUTED row is appended, the coverage binding stays (it describes
+        # the tree that is back), and every variable read off the re-sweep
+        # keeps the pre-revert reading, so `snapshot_due` and the durable
+        # checkpoint cannot store the dipped tree.
+        if (_ledger_rows and _ledger_before is not None
+                and deps.tree_writer is not None
+                and deps.ledger_append is not None and _rec.reconciled):
+            _view_r = _sweep_view_of(output, cur_failed, _oracle.vanished,
+                                     _rec.reconciled)
+            _regr_r = [
+                g for g in (_grade_landing(r_, _ledger_before, _view_r)
+                            for r_ in _ledger_rows)
+                if g.state is BodyState.REFUTED
+                and any(k_ == "regressed" for _t, k_ in g.verdict_delta)]
+            if _regr_r:
+                _checker_r = deps.check_tree_builds
+
+                def _restore_r(rows_: Sequence[LedgerEntry], *,
+                               _chk: Any = _checker_r,
+                               _writer: TreeWriter = deps.tree_writer,
+                               ) -> tuple[list[LedgerEntry], str]:
+                    return restore_prior(
+                        rows=rows_, src_dir=target_src_dir, writer=_writer,
+                        check_builds=(None if _chk is None else
+                                      partial(_chk, project_dir, cluster)),
+                        validate_parse=deps.parse_ok)
+
+                def _log_ledger_r(it_: int, m_: str) -> None:
+                    deps.log(f"  {tag} [phase-c/ledger] iter {it_}: {m_}")
+
+                def _sweep_r() -> SiteSweep:
+                    rc_, out_ = deps.run_cargo(test_cmd, target_src_dir,
+                                               cluster_env, timeout=test_timeout)
+                    pc_, fc_, _ig = parse_test_counts(out_)
+                    sw_ = _reconcile(rc_, out_, pc_, fc_, parse_failed_tests(out_))
+                    return SiteSweep(rc_, out_, pc_, _sweep_view_of(
+                        out_, sw_.failed, sw_.oracle.vanished,
+                        _sweep_reconciliation(out_, pc_, sw_.fail_count).reconciled))
+
+                _res_r = revert_site_regressions(
+                    SiteRevertPorts(
+                        restore=_restore_r,
+                        snapshot=lambda: snapshot_src_tree(_src_root),
+                        rollback=lambda snap_: (
+                            None if snap_ is None else restore_src_tree(snap_)),
+                        sweep=_sweep_r,
+                        log=partial(_log_ledger_r, iter_n)),
+                    rows=_regr_r, before=_ledger_before,
+                    pre=SiteSweep(rc, output, pass_count, _view_r))
+                _units_r = sorted(f"{g.key.file}::{g.key.fn_name}"
+                                  for g in _regr_r)
+                _moved_r = sorted({t_ for g in _regr_r
+                                   for t_, k_ in g.verdict_delta
+                                   if k_ == "regressed"})
+                _cand_keys_r = {(g.key.file, g.key.fn_name)
+                                for g in _res_r.candidates}
+                if _res_r.final is None:
+                    if _res_r.rolled_back:
+                        # The rows' refutation is contradicted by the
+                        # measurement of their undo: they are not graded by
+                        # this sweep at all (no REFUTED row keeps the bodies
+                        # off a future reseed).
+                        _ledger_rows = [r_ for r_ in _ledger_rows
+                                        if (r_.key.file, r_.key.fn_name)
+                                        not in _cand_keys_r]
+                    deps.log(
+                        f"  {tag} [phase-c/ledger] iter {iter_n}: "
+                        f"{len(_regr_r)} landing(s) made {', '.join(_moved_r)} "
+                        f"fail at an earlier assertion ({', '.join(_units_r)}) "
+                        f"— NOT reverted: {_res_r.why} "
+                        f"({_res_r.probes} localizing sweep(s)).")
+                    deps.emit("phase_c.ledger.site_regression", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "units": _units_r, "tests": _moved_r,
+                        "reverted": [], "why": _res_r.why,
+                        "rolled_back": _res_r.rolled_back,
+                        "probes": _res_r.probes,
+                        "pass_before": pass_count})
+                else:
+                    _restored_r = list(_res_r.reverted)
+                    deps.ledger_append(project_dir, _restored_r)
+                    if _ledger_cache is not None:
+                        _ledger_cache.extend(_restored_r)
+                    _gone_r = {(r_.key.file, r_.key.fn_name)
+                               for r_ in _restored_r}
+                    _ledger_rows = [r_ for r_ in _ledger_rows
+                                    if (r_.key.file, r_.key.fn_name)
+                                    not in _gone_r]
+                    _back_r = sorted(f"{r_.key.file}::{r_.key.fn_name}"
+                                     for r_ in _restored_r)
+                    _pass_pre_r = pass_count
+                    rc, output = _res_r.final.rc, _res_r.final.output
+                    _hung = _hung_of(rc, output)
+                    _log_hung(_hung)
+                    pass_count, fail_count, _ignored = parse_test_counts(output)
+                    cur_failed = parse_failed_tests(output)
+                    _sweep = _reconcile(rc, output, pass_count, fail_count,
+                                        cur_failed)
+                    fail_count, cur_failed, _oracle = (
+                        _sweep.fail_count, _sweep.failed, _sweep.oracle)
+                    _tree_sha = tree_content_sha(_src_root)
+                    _rec = _sweep_reconciliation(output, pass_count, fail_count)
+                    bind_coverage_slice(None)
+                    deps.log(
+                        f"  {tag} [phase-c/ledger] iter {iter_n}: "
+                        f"{len(_restored_r)} of {len(_regr_r)} landing(s) "
+                        f"graded refuted on an earlier assertion "
+                        f"({', '.join(_moved_r)}) were localized as the cause "
+                        f"in {_res_r.probes} sweep(s) and REVERTED to the "
+                        f"bodies they replaced: {', '.join(_back_r)}; the "
+                        f"re-sweep reads {pass_count} against {_pass_pre_r} "
+                        "before the revert.")
+                    deps.emit("phase_c.ledger.site_regression", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "units": _units_r, "tests": _moved_r,
+                        "reverted": _back_r, "why": "",
+                        "rolled_back": False, "probes": _res_r.probes,
+                        "pass_before": _pass_pre_r,
+                        "pass_after": pass_count})
         if _batch_ratchet \
                 and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha):
             _snap = snapshot_src_tree(_src_root)
@@ -2353,53 +2554,12 @@ def run_phase_c_tdd(
         # `_measure.failed` carries the crash-vanished names the score counts
         # as failing; `of_sweep` takes them back out, so a test whose binary
         # aborted judges `unmeasured` rather than `lost`.
-        _sweep_view = SweepView.of_sweep(
-            passed=(bare_test_name(t_) for t_ in _measure.passed),
-            failed=(bare_test_name(t_) for t_ in _measure.failed),
-            vanished=_oracle.vanished,
-            intact=_rec.reconciled, epoch=_destruction_epoch,
-            # Where each failing test panicked: the one reading that can
-            # tell a body which got a test past an assertion from one that
-            # moved nothing, when both leave the verdict vector identical.
-            panic_sites={
-                bare_test_name(f_.test_name): (f_.panic_file, f_.panic_line)
-                for f_ in parse_test_output(output).failures
-                if f_.panic_file and f_.panic_line is not None})
+        _sweep_view = _sweep_view_of(output, _measure.failed, _oracle.vanished,
+                                     _rec.reconciled)
         if _ledger_rows and deps.ledger_append is not None:
-            _judged: list[LedgerEntry] = []
-            for _row in _ledger_rows:
-                _unit = FnLocator(_row.key.file, _row.key.fn_name)
-                # The reverse map is attribution proper; an escalation-only
-                # unit (producer escalation, owner-map admission) is absent
-                # from it, and judging on it alone graded every such landing
-                # UNMEASURED with its premise erased (`judgment_attributed`
-                # carries the run). The row's own premise is joined in.
-                _attributed = judgment_attributed({
-                    bare_test_name(_t) for _t, _units in test_reverse_map.items()
-                    if _unit in _units}, _row)
-                _now = (body_sha(deps.tree_writer.bodies(_unit, target_src_dir))
-                        if deps.tree_writer is not None else "")
-                _state, _delta = classify(
-                    _row, attributed=_attributed,
-                    before=_ledger_before or _sweep_view, after=_sweep_view,
-                    body_now_sha=_now)
-                # The oracle is stamped HERE, at the grade, not carried
-                # from the landing: an adopted backfilled row arrives with
-                # no oracle at all, and a verdict is a claim about the tests
-                # that were run to reach it. So is the convicting premise —
-                # the same `names & before.failed` the classification is
-                # scoped to — which is what lets a flat exclusion later tell
-                # "same evidence, do not re-buy" from "a new test convicts
-                # this unit now".
-                _judged.append(replace(
-                    _row, state=_state,
-                    verdict_delta=_delta, iteration=iter_n,
-                    epoch=_destruction_epoch,
-                    run_id=_row.run_id or deps.run_id,
-                    oracle_fp=_oracle_fp(iter_n),
-                    convicting=tuple(sorted(
-                        _attributed
-                        & (_ledger_before or _sweep_view).failed))))
+            _judged: list[LedgerEntry] = [
+                _grade_landing(_row, _ledger_before or _sweep_view, _sweep_view)
+                for _row in _ledger_rows]
             deps.ledger_append(project_dir, _judged)
             if _ledger_cache is not None:
                 _ledger_cache.extend(_judged)
@@ -5923,6 +6083,7 @@ def run_phase_c_tdd(
             _written: dict[FnLocator, str] = _wave_written,
             _evidence: Callable[..., dict[tuple[str, str], str]] = (
                 _landing_evidence),
+            _recs_prior: list[Any] | None = _recs_before,
         ) -> int:
             if (deps.ledger_append is None or deps.enumerate_fns is None
                     or _before is None):
@@ -5950,7 +6111,10 @@ def run_phase_c_tdd(
                                       for t in _elig.get(k, ()))
                             & bare_failed_w)
                         for k in landed_now},
-                    evidence_of=_evidence(landed_now, recs_now))
+                    evidence_of=_evidence(landed_now, recs_now),
+                    prior_of=raw_bodies_of(
+                        _recs_prior or [],
+                        [(k.file, k.fn_name) for k in landed_now]))
                 fresh = [r for r in rows_w
                          if _written.get(FnLocator(r.key.file, r.key.fn_name))
                          != r.body_sha]
@@ -6383,7 +6547,10 @@ def run_phase_c_tdd(
                     file_fp=_fps, run_id=deps.run_id, iteration=iter_n,
                     epoch=_destruction_epoch, oracle_fp=_oracle_fp(iter_n),
                     convicting_of=_convicting_of,
-                    evidence_of=_landing_evidence(_batch_landed, _recs_after))
+                    evidence_of=_landing_evidence(_batch_landed, _recs_after),
+                    prior_of=raw_bodies_of(
+                        _recs_before or [],
+                        [(k.file, k.fn_name) for k in _batch_landed]))
                 # A row the wave writer already appended for this exact body
                 # is not written twice; a body a later wave moved again is a
                 # new row, as it should be.

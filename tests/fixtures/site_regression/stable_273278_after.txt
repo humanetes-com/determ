@@ -1,0 +1,1817 @@
+     Running unittests src/lib.rs (target/debug/deps/anyhow-c9b1e5666f3583f4)
+
+running 3 tests
+test fmt::gen_tests_3::no_digits ... ok
+test fmt::gen_tests_3::one_digit ... ok
+test fmt::gen_tests_3::two_digits ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/behaviour_stable_gen_1.rs (target/debug/deps/behaviour_stable_gen_1-1e3adb19a6bd5195)
+
+running 4 tests
+test behaviour_probe_stable_downcast_finds_original_type_0 ... FAILED
+test behaviour_probe_stable_chain_length_counts_contexts_0 ... FAILED
+test behaviour_probe_stable_boxed_error_shows_inner_display_0 ... FAILED
+test behaviour_probe_stable_msg_displays_exact_string_0 ... FAILED
+
+failures:
+
+---- behaviour_probe_stable_downcast_finds_original_type_0 stdout ----
+
+thread 'behaviour_probe_stable_downcast_finds_original_type_0' (421046) panicked at src/error.rs:145:3:
+not implemented
+
+---- behaviour_probe_stable_chain_length_counts_contexts_0 stdout ----
+
+thread 'behaviour_probe_stable_chain_length_counts_contexts_0' (421045) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- behaviour_probe_stable_boxed_error_shows_inner_display_0 stdout ----
+
+thread 'behaviour_probe_stable_boxed_error_shows_inner_display_0' (421044) panicked at src/error.rs:145:3:
+not implemented
+
+---- behaviour_probe_stable_msg_displays_exact_string_0 stdout ----
+
+thread 'behaviour_probe_stable_msg_displays_exact_string_0' (421047) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    behaviour_probe_stable_boxed_error_shows_inner_display_0
+    behaviour_probe_stable_chain_length_counts_contexts_0
+    behaviour_probe_stable_downcast_finds_original_type_0
+    behaviour_probe_stable_msg_displays_exact_string_0
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test behaviour_stable_gen_1`
+     Running tests/compiletest.rs (target/debug/deps/compiletest-831b1a6c326caf4a)
+
+running 1 test
+test ui ... ignored, requires nightly
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/context_gen_1.rs (target/debug/deps/context_gen_1-22e998db358bc043)
+
+running 6 tests
+test option_context_some_path ... ok
+test option_context_none_path ... FAILED
+test option_with_context_some_path ... ok
+test option_with_context_none_path ... FAILED
+test result_with_context_err_path ... FAILED
+test result_with_context_ok_path ... ok
+
+failures:
+
+---- option_context_none_path stdout ----
+
+thread 'option_context_none_path' (421050) panicked at src/error.rs:157:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- option_with_context_none_path stdout ----
+
+thread 'option_with_context_none_path' (421052) panicked at src/error.rs:157:3:
+not implemented
+
+---- result_with_context_err_path stdout ----
+
+thread 'result_with_context_err_path' (421054) panicked at src/context.rs:23:13:
+not implemented
+
+
+failures:
+    option_context_none_path
+    option_with_context_none_path
+    result_with_context_err_path
+
+test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test context_gen_1`
+     Running tests/context_gen_2.rs (target/debug/deps/context_gen_2-7acfd2cf5a1f4fe9)
+
+running 5 tests
+test with_context_closure_is_lazy_on_ok ... ok
+test with_context_err_applies_context ... FAILED
+test with_context_err_chain_length ... FAILED
+test with_context_err_with_anyhow_inner ... FAILED
+test with_context_ok_returns_value ... ok
+
+failures:
+
+---- with_context_err_applies_context stdout ----
+
+thread 'with_context_err_applies_context' (421058) panicked at src/context.rs:23:13:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- with_context_err_chain_length stdout ----
+
+thread 'with_context_err_chain_length' (421059) panicked at src/context.rs:23:13:
+not implemented
+
+---- with_context_err_with_anyhow_inner stdout ----
+
+thread 'with_context_err_with_anyhow_inner' (421060) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    with_context_err_applies_context
+    with_context_err_chain_length
+    with_context_err_with_anyhow_inner
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test context_gen_2`
+     Running tests/context_gen_3.rs (target/debug/deps/context_gen_3-6283644957845570)
+
+running 3 tests
+test option_context_some_returns_inner ... ok
+test option_context_none_yields_error_with_message ... FAILED
+test option_context_none_with_owned_string_context ... FAILED
+
+failures:
+
+---- option_context_none_yields_error_with_message stdout ----
+
+thread 'option_context_none_yields_error_with_message' (421064) panicked at src/error.rs:157:3:
+not implemented
+
+---- option_context_none_with_owned_string_context stdout ----
+
+thread 'option_context_none_with_owned_string_context' (421063) panicked at src/error.rs:157:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    option_context_none_with_owned_string_context
+    option_context_none_yields_error_with_message
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test context_gen_3`
+     Running tests/context_gen_4.rs (target/debug/deps/context_gen_4-e49e35c1fddcd76a)
+
+running 6 tests
+test option_with_context_formatted_message ... FAILED
+test option_with_context_none_lazy_closure ... FAILED
+test option_with_context_error_has_no_source ... FAILED
+test option_with_context_some_closure_not_evaluated ... ok
+test option_with_context_some_returns_ok ... ok
+test option_with_context_none_returns_error_with_message ... FAILED
+
+failures:
+
+---- option_with_context_formatted_message stdout ----
+
+thread 'option_with_context_formatted_message' (421068) panicked at src/error.rs:157:3:
+not implemented
+
+---- option_with_context_none_lazy_closure stdout ----
+
+thread 'option_with_context_none_lazy_closure' (421069) panicked at src/error.rs:157:3:
+not implemented
+
+---- option_with_context_error_has_no_source stdout ----
+
+thread 'option_with_context_error_has_no_source' (421067) panicked at src/error.rs:157:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- option_with_context_none_returns_error_with_message stdout ----
+
+thread 'option_with_context_none_returns_error_with_message' (421070) panicked at src/error.rs:157:3:
+not implemented
+
+
+failures:
+    option_with_context_error_has_no_source
+    option_with_context_formatted_message
+    option_with_context_none_lazy_closure
+    option_with_context_none_returns_error_with_message
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test context_gen_4`
+     Running tests/context_gen_5.rs (target/debug/deps/context_gen_5-ddfa596bb1b7c282)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ensure_gen_1.rs (target/debug/deps/ensure_gen_1-e657ee0bf9e9659b)
+
+running 1 test
+test test_not_debug_dispatch ... FAILED
+
+failures:
+
+---- test_not_debug_dispatch stdout ----
+
+thread 'test_not_debug_dispatch' (421075) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_not_debug_dispatch
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ensure_gen_1`
+     Running tests/ensure_gen_2.rs (target/debug/deps/ensure_gen_2-5d81c16cb338b83c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_1.rs (target/debug/deps/error_gen_1-5abfe49952768b91)
+
+running 5 tests
+test test_error_mut_via_deref_mut_msg ... FAILED
+test test_construct_from_display_literal ... FAILED
+test test_error_mut_via_deref_mut_std ... FAILED
+test test_reallocate_into_boxed_dyn_error_without_backtrace_basic ... FAILED
+test test_reallocate_with_std_error ... FAILED
+
+failures:
+
+---- test_error_mut_via_deref_mut_msg stdout ----
+
+thread 'test_error_mut_via_deref_mut_msg' (421079) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_construct_from_display_literal stdout ----
+
+thread 'test_construct_from_display_literal' (421078) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_mut_via_deref_mut_std stdout ----
+
+thread 'test_error_mut_via_deref_mut_std' (421080) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_reallocate_into_boxed_dyn_error_without_backtrace_basic stdout ----
+
+thread 'test_reallocate_into_boxed_dyn_error_without_backtrace_basic' (421081) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_reallocate_with_std_error stdout ----
+
+thread 'test_reallocate_with_std_error' (421082) panicked at src/error.rs:145:3:
+not implemented
+
+
+failures:
+    test_construct_from_display_literal
+    test_error_mut_via_deref_mut_msg
+    test_error_mut_via_deref_mut_std
+    test_reallocate_into_boxed_dyn_error_without_backtrace_basic
+    test_reallocate_with_std_error
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test error_gen_1`
+     Running tests/error_gen_10.rs (target/debug/deps/error_gen_10-7df5926dbd43cca7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_11.rs (target/debug/deps/error_gen_11-b7b2264db3c212a1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_2.rs (target/debug/deps/error_gen_2-903b229e536f0541)
+
+running 3 tests
+test test_error_impl_source_some_via_boxed ... FAILED
+test test_error_impl_source_none_via_boxed ... FAILED
+test test_from_boxed_executed ... FAILED
+
+failures:
+
+---- test_error_impl_source_some_via_boxed stdout ----
+
+thread 'test_error_impl_source_some_via_boxed' (421087) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_impl_source_none_via_boxed stdout ----
+
+thread 'test_error_impl_source_none_via_boxed' (421086) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_from_boxed_executed stdout ----
+
+thread 'test_from_boxed_executed' (421088) panicked at src/error.rs:170:3:
+not implemented
+
+
+failures:
+    test_error_impl_source_none_via_boxed
+    test_error_impl_source_some_via_boxed
+    test_from_boxed_executed
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test error_gen_2`
+     Running tests/error_gen_3.rs (target/debug/deps/error_gen_3-5aaf59c959b411d3)
+
+running 7 tests
+test test_alt_debug_formatting_exercises_error_impl_paths ... FAILED
+test test_backtrace_after_context_wrap ... FAILED
+test test_backtrace_from_new_error ... FAILED
+test test_backtrace_method_is_callable ... FAILED
+test test_debug_formatting_simple_message_error ... FAILED
+test test_backtrace_on_boxed_error ... FAILED
+test test_debug_formatting_with_context_chain ... FAILED
+
+failures:
+
+---- test_alt_debug_formatting_exercises_error_impl_paths stdout ----
+
+thread 'test_alt_debug_formatting_exercises_error_impl_paths' (421090) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_backtrace_after_context_wrap stdout ----
+
+thread 'test_backtrace_after_context_wrap' (421091) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_backtrace_from_new_error stdout ----
+
+thread 'test_backtrace_from_new_error' (421092) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_backtrace_method_is_callable stdout ----
+
+thread 'test_backtrace_method_is_callable' (421093) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_debug_formatting_simple_message_error stdout ----
+
+thread 'test_debug_formatting_simple_message_error' (421095) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_backtrace_on_boxed_error stdout ----
+
+thread 'test_backtrace_on_boxed_error' (421094) panicked at src/error.rs:170:3:
+not implemented
+
+---- test_debug_formatting_with_context_chain stdout ----
+
+thread 'test_debug_formatting_with_context_chain' (421096) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_alt_debug_formatting_exercises_error_impl_paths
+    test_backtrace_after_context_wrap
+    test_backtrace_from_new_error
+    test_backtrace_method_is_callable
+    test_backtrace_on_boxed_error
+    test_debug_formatting_simple_message_error
+    test_debug_formatting_with_context_chain
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test error_gen_3`
+     Running tests/error_gen_4.rs (target/debug/deps/error_gen_4-1a7a6f14ffa34710)
+
+running 5 tests
+test test_backtrace_exercises_no_backtrace_vtable ... FAILED
+test test_context_std_error_path ... FAILED
+test test_deref_mut_via_source ... FAILED
+test test_reallocate_into_boxed_dyn_error_without_backtrace_basic ... FAILED
+test test_reallocate_into_boxed_dyn_error_without_backtrace_io ... FAILED
+
+failures:
+
+---- test_backtrace_exercises_no_backtrace_vtable stdout ----
+
+thread 'test_backtrace_exercises_no_backtrace_vtable' (421098) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_context_std_error_path stdout ----
+
+thread 'test_context_std_error_path' (421099) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_deref_mut_via_source stdout ----
+
+thread 'test_deref_mut_via_source' (421100) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_reallocate_into_boxed_dyn_error_without_backtrace_basic stdout ----
+
+thread 'test_reallocate_into_boxed_dyn_error_without_backtrace_basic' (421101) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_reallocate_into_boxed_dyn_error_without_backtrace_io stdout ----
+
+thread 'test_reallocate_into_boxed_dyn_error_without_backtrace_io' (421102) panicked at src/error.rs:145:3:
+not implemented
+
+
+failures:
+    test_backtrace_exercises_no_backtrace_vtable
+    test_context_std_error_path
+    test_deref_mut_via_source
+    test_reallocate_into_boxed_dyn_error_without_backtrace_basic
+    test_reallocate_into_boxed_dyn_error_without_backtrace_io
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test error_gen_4`
+     Running tests/error_gen_5.rs (target/debug/deps/error_gen_5-0d03e91f9aae1a15)
+
+running 5 tests
+test test_context_error_backtrace_propagates_to_inner ... FAILED
+test test_error_debug_alt_debug_for_simple_msg ... FAILED
+test test_msg_error_backtrace_is_callable_and_display_stable ... FAILED
+test test_from_boxed_backtrace_and_display_variants ... FAILED
+test test_new_std_error_backtrace_and_chain ... FAILED
+
+failures:
+
+---- test_context_error_backtrace_propagates_to_inner stdout ----
+
+thread 'test_context_error_backtrace_propagates_to_inner' (421104) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_error_debug_alt_debug_for_simple_msg stdout ----
+
+thread 'test_error_debug_alt_debug_for_simple_msg' (421105) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_msg_error_backtrace_is_callable_and_display_stable stdout ----
+
+thread 'test_msg_error_backtrace_is_callable_and_display_stable' (421107) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_from_boxed_backtrace_and_display_variants stdout ----
+
+thread 'test_from_boxed_backtrace_and_display_variants' (421106) panicked at src/error.rs:170:3:
+not implemented
+
+---- test_new_std_error_backtrace_and_chain stdout ----
+
+thread 'test_new_std_error_backtrace_and_chain' (421108) panicked at src/error.rs:145:3:
+not implemented
+
+
+failures:
+    test_context_error_backtrace_propagates_to_inner
+    test_error_debug_alt_debug_for_simple_msg
+    test_from_boxed_backtrace_and_display_variants
+    test_msg_error_backtrace_is_callable_and_display_stable
+    test_new_std_error_backtrace_and_chain
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test error_gen_5`
+     Running tests/error_gen_6.rs (target/debug/deps/error_gen_6-0cc704508cf3ccdf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_7.rs (target/debug/deps/error_gen_7-54b86b8075bd56de)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_8.rs (target/debug/deps/error_gen_8-5faea0c3676c2026)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/error_gen_9.rs (target/debug/deps/error_gen_9-dcf5ed120da25426)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/fmt_gen_1.rs (target/debug/deps/fmt_gen_1-2d696245eda7d864)
+
+running 1 test
+test test_debug_backtrace_is_rendered ... FAILED
+
+failures:
+
+---- test_debug_backtrace_is_rendered stdout ----
+
+thread 'test_debug_backtrace_is_rendered' (421114) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_debug_backtrace_is_rendered
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test fmt_gen_1`
+     Running tests/fmt_gen_2.rs (target/debug/deps/fmt_gen_2-cc443fab93a09141)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lib_gen_1.rs (target/debug/deps/lib_gen_1-6dda1d889ba6ece8)
+
+running 5 tests
+test test_ok_i32_returns_ok_variant ... ok
+test test_ok_string_preserves_value ... ok
+test test_ok_unit_returns_ok_variant ... ok
+test test_ok_vec_roundtrip ... ok
+test test_ok_with_explicit_type_is_ok ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lib_gen_2.rs (target/debug/deps/lib_gen_2-36d08b549de914fa)
+
+running 3 tests
+test test_example ... ok
+test test_private_format_err_interpolated_branch ... FAILED
+test test_private_format_err_literal_branch ... FAILED
+
+failures:
+
+---- test_private_format_err_interpolated_branch stdout ----
+
+thread 'test_private_format_err_interpolated_branch' (421124) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_private_format_err_literal_branch stdout ----
+
+thread 'test_private_format_err_literal_branch' (421125) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_private_format_err_interpolated_branch
+    test_private_format_err_literal_branch
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test lib_gen_2`
+     Running tests/lib_gen_3.rs (target/debug/deps/lib_gen_3-eb3732a89046967a)
+
+running 2 tests
+test test_example ... ok
+test test_private_format_err_dynamic_interpolation_branch_creates_string_error ... FAILED
+
+failures:
+
+---- test_private_format_err_dynamic_interpolation_branch_creates_string_error stdout ----
+
+thread 'test_private_format_err_dynamic_interpolation_branch_creates_string_error' (421128) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_private_format_err_dynamic_interpolation_branch_creates_string_error
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test lib_gen_3`
+     Running tests/lib_gen_4.rs (target/debug/deps/lib_gen_4-6caea5453f270e6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lib_gen_5.rs (target/debug/deps/lib_gen_5-1f5964329c9e8e4e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_1.rs (target/debug/deps/ptr_gen_1-712367a497ecf084)
+
+running 3 tests
+test test_example ... ok
+test test_error_msg_public_api_reaches_ptr ... FAILED
+test test_error_context_uses_internal_pointers ... FAILED
+
+failures:
+
+---- test_error_msg_public_api_reaches_ptr stdout ----
+
+thread 'test_error_msg_public_api_reaches_ptr' (421133) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_context_uses_internal_pointers stdout ----
+
+thread 'test_error_context_uses_internal_pointers' (421132) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_error_context_uses_internal_pointers
+    test_error_msg_public_api_reaches_ptr
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_1`
+     Running tests/ptr_gen_10.rs (target/debug/deps/ptr_gen_10-258be9fc6d9fc0c0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_11.rs (target/debug/deps/ptr_gen_11-cb1ddb668467b80c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_12.rs (target/debug/deps/ptr_gen_12-7674bfb71dc1c4d8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_2.rs (target/debug/deps/ptr_gen_2-8fb10870c3f2f392)
+
+running 10 tests
+test test_anyhow_macro_literal_and_format ... FAILED
+test test_context_trait_on_result_ok_and_err ... FAILED
+test test_error_chain_iteration_order ... FAILED
+test test_error_chain_len_and_size_hint ... FAILED
+test test_error_downcast_ref_failure ... FAILED
+test test_error_downcast_ref_custom_type ... FAILED
+test test_error_from_boxed_roundtrip ... FAILED
+test test_error_msg_context_chain_display ... FAILED
+test test_error_msg_display_and_debug ... FAILED
+test test_root_cause_reaches_leaf ... FAILED
+
+failures:
+
+---- test_anyhow_macro_literal_and_format stdout ----
+
+thread 'test_anyhow_macro_literal_and_format' (421139) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_context_trait_on_result_ok_and_err stdout ----
+
+thread 'test_context_trait_on_result_ok_and_err' (421140) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_chain_iteration_order stdout ----
+
+thread 'test_error_chain_iteration_order' (421141) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_chain_len_and_size_hint stdout ----
+
+thread 'test_error_chain_len_and_size_hint' (421142) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_downcast_ref_failure stdout ----
+
+thread 'test_error_downcast_ref_failure' (421144) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_downcast_ref_custom_type stdout ----
+
+thread 'test_error_downcast_ref_custom_type' (421143) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_from_boxed_roundtrip stdout ----
+
+thread 'test_error_from_boxed_roundtrip' (421145) panicked at src/error.rs:170:3:
+not implemented
+
+---- test_error_msg_context_chain_display stdout ----
+
+thread 'test_error_msg_context_chain_display' (421146) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_msg_display_and_debug stdout ----
+
+thread 'test_error_msg_display_and_debug' (421147) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_root_cause_reaches_leaf stdout ----
+
+thread 'test_root_cause_reaches_leaf' (421148) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_anyhow_macro_literal_and_format
+    test_context_trait_on_result_ok_and_err
+    test_error_chain_iteration_order
+    test_error_chain_len_and_size_hint
+    test_error_downcast_ref_custom_type
+    test_error_downcast_ref_failure
+    test_error_from_boxed_roundtrip
+    test_error_msg_context_chain_display
+    test_error_msg_display_and_debug
+    test_root_cause_reaches_leaf
+
+test result: FAILED. 0 passed; 10 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_2`
+     Running tests/ptr_gen_3.rs (target/debug/deps/ptr_gen_3-8cc904277756501c)
+
+running 6 tests
+test test_example ... ok
+test test_ptr_cast_via_from_boxed_and_context ... FAILED
+test test_ptr_own_via_error_msg_and_context_chain ... FAILED
+test test_ptr_chain_iteration_order_and_len ... FAILED
+test test_ptr_mut_via_downcast_mut_changes_value ... FAILED
+test test_ptr_ref_via_downcast_ref_success ... FAILED
+
+failures:
+
+---- test_ptr_cast_via_from_boxed_and_context stdout ----
+
+thread 'test_ptr_cast_via_from_boxed_and_context' (421151) panicked at src/error.rs:170:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_ptr_own_via_error_msg_and_context_chain stdout ----
+
+thread 'test_ptr_own_via_error_msg_and_context_chain' (421154) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_ptr_chain_iteration_order_and_len stdout ----
+
+thread 'test_ptr_chain_iteration_order_and_len' (421152) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_ptr_mut_via_downcast_mut_changes_value stdout ----
+
+thread 'test_ptr_mut_via_downcast_mut_changes_value' (421153) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_ptr_ref_via_downcast_ref_success stdout ----
+
+thread 'test_ptr_ref_via_downcast_ref_success' (421155) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_ptr_cast_via_from_boxed_and_context
+    test_ptr_chain_iteration_order_and_len
+    test_ptr_mut_via_downcast_mut_changes_value
+    test_ptr_own_via_error_msg_and_context_chain
+    test_ptr_ref_via_downcast_ref_success
+
+test result: FAILED. 1 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_3`
+     Running tests/ptr_gen_4.rs (target/debug/deps/ptr_gen_4-0d2e3cafa55ef273)
+
+running 5 tests
+test test_error_backtrace_callable_and_display_consistent ... FAILED
+test test_error_chain_double_ended_iteration ... FAILED
+test test_error_context_lazy_closure_is_evaluated_once_on_err ... FAILED
+test test_error_downcast_mut_changes_message ... FAILED
+test test_error_is_checks_type_identity_positive_and_negative ... FAILED
+
+failures:
+
+---- test_error_backtrace_callable_and_display_consistent stdout ----
+
+thread 'test_error_backtrace_callable_and_display_consistent' (421157) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_error_chain_double_ended_iteration stdout ----
+
+thread 'test_error_chain_double_ended_iteration' (421158) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_context_lazy_closure_is_evaluated_once_on_err stdout ----
+
+thread 'test_error_context_lazy_closure_is_evaluated_once_on_err' (421159) panicked at src/error.rs:157:3:
+not implemented
+
+---- test_error_downcast_mut_changes_message stdout ----
+
+thread 'test_error_downcast_mut_changes_message' (421160) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_is_checks_type_identity_positive_and_negative stdout ----
+
+thread 'test_error_is_checks_type_identity_positive_and_negative' (421161) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_error_backtrace_callable_and_display_consistent
+    test_error_chain_double_ended_iteration
+    test_error_context_lazy_closure_is_evaluated_once_on_err
+    test_error_downcast_mut_changes_message
+    test_error_is_checks_type_identity_positive_and_negative
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_4`
+     Running tests/ptr_gen_5.rs (target/debug/deps/ptr_gen_5-4ac2fda004c1b425)
+
+running 4 tests
+test test_example ... ok
+test test_ptr_clone_own_is_exercised_via_error_reconstruction ... FAILED
+test test_ptr_clone_mut_is_exercised_via_downcast_mut_chain ... FAILED
+test test_ptr_clone_ref_is_exercised_via_downcast_ref_chain ... FAILED
+
+failures:
+
+---- test_ptr_clone_own_is_exercised_via_error_reconstruction stdout ----
+
+thread 'test_ptr_clone_own_is_exercised_via_error_reconstruction' (421165) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_ptr_clone_mut_is_exercised_via_downcast_mut_chain stdout ----
+
+thread 'test_ptr_clone_mut_is_exercised_via_downcast_mut_chain' (421164) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_ptr_clone_ref_is_exercised_via_downcast_ref_chain stdout ----
+
+thread 'test_ptr_clone_ref_is_exercised_via_downcast_ref_chain' (421166) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_ptr_clone_mut_is_exercised_via_downcast_mut_chain
+    test_ptr_clone_own_is_exercised_via_error_reconstruction
+    test_ptr_clone_ref_is_exercised_via_downcast_ref_chain
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_5`
+     Running tests/ptr_gen_6.rs (target/debug/deps/ptr_gen_6-f54f340f4c51f687)
+
+running 5 tests
+test test_error_context_with_owned_string_and_display_alt ... FAILED
+test test_error_downcast_ref_idempotent_across_chain ... FAILED
+test test_error_from_boxed_and_context_preserves_chain ... FAILED
+test test_error_msg_display_and_chain_stability ... FAILED
+test test_example ... ok
+
+failures:
+
+---- test_error_context_with_owned_string_and_display_alt stdout ----
+
+thread 'test_error_context_with_owned_string_and_display_alt' (421168) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_error_downcast_ref_idempotent_across_chain stdout ----
+
+thread 'test_error_downcast_ref_idempotent_across_chain' (421169) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_from_boxed_and_context_preserves_chain stdout ----
+
+thread 'test_error_from_boxed_and_context_preserves_chain' (421170) panicked at src/error.rs:170:3:
+not implemented
+
+---- test_error_msg_display_and_chain_stability stdout ----
+
+thread 'test_error_msg_display_and_chain_stability' (421171) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_error_context_with_owned_string_and_display_alt
+    test_error_downcast_ref_idempotent_across_chain
+    test_error_from_boxed_and_context_preserves_chain
+    test_error_msg_display_and_chain_stability
+
+test result: FAILED. 1 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test ptr_gen_6`
+     Running tests/ptr_gen_7.rs (target/debug/deps/ptr_gen_7-8d77884662067d05)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_8.rs (target/debug/deps/ptr_gen_8-eff04c4b0802a1bc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ptr_gen_9.rs (target/debug/deps/ptr_gen_9-0a55deb44131bbce)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/test_autotrait.rs (target/debug/deps/test_autotrait-d3cc84656e7ea6d4)
+
+running 5 tests
+test test_ref_unwind_safe ... ok
+test test_sync ... ok
+test test_send ... ok
+test test_unpin ... ok
+test test_unwind_safe ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/test_backtrace.rs (target/debug/deps/test_backtrace-65adbed03295c499)
+
+running 1 test
+test test_backtrace ... ignored, requires nightly
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/test_boxed.rs (target/debug/deps/test_boxed-7a0fb39e1aea1b4b)
+
+running 3 tests
+test test_boxed_anyhow ... FAILED
+test test_boxed_str ... FAILED
+test test_boxed_thiserror ... FAILED
+
+failures:
+
+---- test_boxed_anyhow stdout ----
+
+thread 'test_boxed_anyhow' (421184) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_boxed_str stdout ----
+
+thread 'test_boxed_str' (421185) panicked at src/error.rs:170:3:
+not implemented
+
+---- test_boxed_thiserror stdout ----
+
+thread 'test_boxed_thiserror' (421186) panicked at src/error.rs:473:9:
+not implemented
+
+
+failures:
+    test_boxed_anyhow
+    test_boxed_str
+    test_boxed_thiserror
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_boxed`
+     Running tests/test_chain.rs (target/debug/deps/test_chain-dad2c363c84c8180)
+
+running 5 tests
+test test_clone ... FAILED
+test test_default ... FAILED
+test test_iter ... FAILED
+test test_len ... FAILED
+test test_rev ... FAILED
+
+failures:
+
+---- test_clone stdout ----
+
+thread 'test_clone' (421188) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_default stdout ----
+
+thread 'test_default' (421189) panicked at src/chain.rs:53:9:
+not implemented
+
+---- test_iter stdout ----
+
+thread 'test_iter' (421190) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_len stdout ----
+
+thread 'test_len' (421191) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_rev stdout ----
+
+thread 'test_rev' (421192) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_clone
+    test_default
+    test_iter
+    test_len
+    test_rev
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_chain`
+     Running tests/test_context.rs (target/debug/deps/test_context-dc4588f67e2545a7)
+
+running 8 tests
+test test_downcast_high ... FAILED
+test test_downcast_low ... FAILED
+test test_downcast_mid ... FAILED
+test test_downcast_mut ... FAILED
+test test_inference ... ok
+test test_downcast_ref ... FAILED
+test test_root_cause ... FAILED
+test test_unsuccessful_downcast ... FAILED
+
+failures:
+
+---- test_downcast_high stdout ----
+
+thread 'test_downcast_high' (421194) panicked at src/context.rs:23:13:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_downcast_low stdout ----
+
+thread 'test_downcast_low' (421195) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_downcast_mid stdout ----
+
+thread 'test_downcast_mid' (421196) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_downcast_mut stdout ----
+
+thread 'test_downcast_mut' (421197) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_downcast_ref stdout ----
+
+thread 'test_downcast_ref' (421198) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_root_cause stdout ----
+
+thread 'test_root_cause' (421200) panicked at src/context.rs:23:13:
+not implemented
+
+---- test_unsuccessful_downcast stdout ----
+
+thread 'test_unsuccessful_downcast' (421201) panicked at src/context.rs:23:13:
+not implemented
+
+
+failures:
+    test_downcast_high
+    test_downcast_low
+    test_downcast_mid
+    test_downcast_mut
+    test_downcast_ref
+    test_root_cause
+    test_unsuccessful_downcast
+
+test result: FAILED. 1 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_context`
+     Running tests/test_convert.rs (target/debug/deps/test_convert-b71116d19440ebf0)
+
+running 4 tests
+test test_convert ... FAILED
+test test_question_mark ... ok
+test test_convert_send_sync ... FAILED
+test test_convert_send ... FAILED
+
+failures:
+
+---- test_convert stdout ----
+
+thread 'test_convert' (421203) panicked at src/error.rs:145:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_convert_send_sync stdout ----
+
+thread 'test_convert_send_sync' (421205) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_convert_send stdout ----
+
+thread 'test_convert_send' (421204) panicked at src/error.rs:145:3:
+not implemented
+
+
+failures:
+    test_convert
+    test_convert_send
+    test_convert_send_sync
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_convert`
+     Running tests/test_downcast.rs (target/debug/deps/test_downcast-9716f141f88fc74d)
+
+running 7 tests
+test test_as_ref ... FAILED
+test test_downcast ... FAILED
+test test_downcast_mut ... FAILED
+test test_large_alignment ... FAILED
+test test_downcast_ref ... FAILED
+test test_drop ... FAILED
+test test_unsuccessful_downcast ... FAILED
+
+failures:
+
+---- test_as_ref stdout ----
+
+thread 'test_as_ref' (421208) panicked at src/error.rs:473:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_downcast stdout ----
+
+thread 'test_downcast' (421209) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_downcast_mut stdout ----
+
+thread 'test_downcast_mut' (421210) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_large_alignment stdout ----
+
+thread 'test_large_alignment' (421213) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_downcast_ref stdout ----
+
+thread 'test_downcast_ref' (421211) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_drop stdout ----
+
+thread 'test_drop' (421212) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_unsuccessful_downcast stdout ----
+
+thread 'test_unsuccessful_downcast' (421214) panicked at src/error.rs:473:9:
+not implemented
+
+
+failures:
+    test_as_ref
+    test_downcast
+    test_downcast_mut
+    test_downcast_ref
+    test_drop
+    test_large_alignment
+    test_unsuccessful_downcast
+
+test result: FAILED. 0 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_downcast`
+     Running tests/test_ensure.rs (target/debug/deps/test_ensure-908380b711856a47)
+
+running 18 tests
+test test_as ... FAILED
+test test_atom ... FAILED
+test test_closure ... FAILED
+test test_high_precedence_binary_operator ... FAILED
+test test_if ... FAILED
+test test_loop ... FAILED
+test test_low_precedence_binary_operator ... FAILED
+test test_low_precedence_control_flow ... ok
+test test_macro ... FAILED
+test test_match ... FAILED
+test test_pat ... FAILED
+test test_path ... FAILED
+test test_raw_addr ... FAILED
+test test_recursion ... FAILED
+test test_too_long ... FAILED
+test test_trailer ... FAILED
+test test_unary ... FAILED
+test test_whitespace ... FAILED
+
+failures:
+
+---- test_as stdout ----
+
+thread 'test_as' (421216) panicked at src/ensure.rs:55:5:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_atom stdout ----
+
+thread 'test_atom' (421217) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_closure stdout ----
+
+thread 'test_closure' (421218) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_high_precedence_binary_operator stdout ----
+
+thread 'test_high_precedence_binary_operator' (421219) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_if stdout ----
+
+thread 'test_if' (421220) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_loop stdout ----
+
+thread 'test_loop' (421221) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_low_precedence_binary_operator stdout ----
+
+thread 'test_low_precedence_binary_operator' (421222) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_macro stdout ----
+
+thread 'test_macro' (421224) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_match stdout ----
+
+thread 'test_match' (421225) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_pat stdout ----
+
+thread 'test_pat' (421226) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_path stdout ----
+
+thread 'test_path' (421227) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_raw_addr stdout ----
+
+thread 'test_raw_addr' (421228) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_recursion stdout ----
+
+thread 'test_recursion' (421229) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_too_long stdout ----
+
+thread 'test_too_long' (421230) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_trailer stdout ----
+
+thread 'test_trailer' (421231) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_unary stdout ----
+
+thread 'test_unary' (421232) panicked at src/ensure.rs:55:5:
+not implemented
+
+---- test_whitespace stdout ----
+
+thread 'test_whitespace' (421233) panicked at src/ensure.rs:55:5:
+not implemented
+
+
+failures:
+    test_as
+    test_atom
+    test_closure
+    test_high_precedence_binary_operator
+    test_if
+    test_loop
+    test_low_precedence_binary_operator
+    test_macro
+    test_match
+    test_pat
+    test_path
+    test_raw_addr
+    test_recursion
+    test_too_long
+    test_trailer
+    test_unary
+    test_whitespace
+
+test result: FAILED. 1 passed; 17 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_ensure`
+     Running tests/test_ffi.rs (target/debug/deps/test_ffi-65c170da26cfac09)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/test_fmt.rs (target/debug/deps/test_fmt-f8b8e1c5898b0456)
+
+running 4 tests
+test test_altdebug ... FAILED
+test test_debug ... FAILED
+test test_altdisplay ... FAILED
+test test_display ... FAILED
+
+failures:
+
+---- test_altdebug stdout ----
+
+thread 'test_altdebug' (421236) panicked at src/error.rs:473:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_debug stdout ----
+
+thread 'test_debug' (421238) panicked at src/error.rs:473:9:
+not implemented
+
+---- test_altdisplay stdout ----
+
+thread 'test_altdisplay' (421237) panicked at src/error.rs:473:9:
+not implemented
+
+---- test_display stdout ----
+
+thread 'test_display' (421239) panicked at src/error.rs:473:9:
+not implemented
+
+
+failures:
+    test_altdebug
+    test_altdisplay
+    test_debug
+    test_display
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_fmt`
+     Running tests/test_macros.rs (target/debug/deps/test_macros-44eb3c35208df084)
+
+running 5 tests
+test test_brace_escape ... FAILED
+test test_ensure_nonbool ... ok
+test test_ensure ... FAILED
+test test_temporaries ... ok
+test test_messages ... FAILED
+
+failures:
+
+---- test_brace_escape stdout ----
+
+thread 'test_brace_escape' (421241) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_ensure stdout ----
+
+thread 'test_ensure' (421242) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_messages stdout ----
+
+thread 'test_messages' (421244) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_brace_escape
+    test_ensure
+    test_messages
+
+test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_macros`
+     Running tests/test_repr.rs (target/debug/deps/test_repr-0d87c61a8682539c)
+
+running 4 tests
+test test_autotraits ... ok
+test test_error_size ... ok
+test test_null_pointer_optimization ... ok
+test test_drop ... FAILED
+
+failures:
+
+---- test_drop stdout ----
+
+thread 'test_drop' (421248) panicked at src/error.rs:145:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    test_drop
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_repr`
+     Running tests/test_source.rs (target/debug/deps/test_source-6b909f420ecbd52e)
+
+running 5 tests
+test test_anyhow_from_anyhow ... FAILED
+test test_fmt_source ... FAILED
+test test_io_source ... FAILED
+test test_literal_source ... FAILED
+test test_variable_source ... FAILED
+
+failures:
+
+---- test_anyhow_from_anyhow stdout ----
+
+thread 'test_anyhow_from_anyhow' (421252) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_fmt_source stdout ----
+
+thread 'test_fmt_source' (421253) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_io_source stdout ----
+
+thread 'test_io_source' (421254) panicked at src/error.rs:473:9:
+not implemented
+
+---- test_literal_source stdout ----
+
+thread 'test_literal_source' (421255) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_variable_source stdout ----
+
+thread 'test_variable_source' (421256) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_anyhow_from_anyhow
+    test_fmt_source
+    test_io_source
+    test_literal_source
+    test_variable_source
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test test_source`
+     Running tests/wrapper_gen_1.rs (target/debug/deps/wrapper_gen_1-36d669f7f4053fc8)
+
+running 2 tests
+test test_boxed_error_debug_executed ... FAILED
+test test_message_error_debug_executed ... FAILED
+
+failures:
+
+---- test_boxed_error_debug_executed stdout ----
+
+thread 'test_boxed_error_debug_executed' (421258) panicked at src/error.rs:170:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_message_error_debug_executed stdout ----
+
+thread 'test_message_error_debug_executed' (421259) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_boxed_error_debug_executed
+    test_message_error_debug_executed
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_1`
+     Running tests/wrapper_gen_10.rs (target/debug/deps/wrapper_gen_10-7f21dc3bf4497994)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wrapper_gen_2.rs (target/debug/deps/wrapper_gen_2-d8c7a324b222ffaf)
+
+running 3 tests
+test test_display_error_debug_delegates_to_display ... FAILED
+test test_display_error_debug_with_custom_display ... FAILED
+test test_display_error_inside_anyhow_error ... FAILED
+
+failures:
+
+---- test_display_error_debug_delegates_to_display stdout ----
+
+thread 'test_display_error_debug_delegates_to_display' (421262) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_display_error_debug_with_custom_display stdout ----
+
+thread 'test_display_error_debug_with_custom_display' (421263) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_display_error_inside_anyhow_error stdout ----
+
+thread 'test_display_error_inside_anyhow_error' (421264) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_display_error_debug_delegates_to_display
+    test_display_error_debug_with_custom_display
+    test_display_error_inside_anyhow_error
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_2`
+     Running tests/wrapper_gen_3.rs (target/debug/deps/wrapper_gen_3-eb2bc06e44e6483b)
+
+running 5 tests
+test test_boxed_error_display_via_from_boxed ... FAILED
+test test_error_display_chain_via_context ... FAILED
+test test_error_display_for_display_only_like_wrapper ... FAILED
+test test_message_error_display_and_debug_via_error_msg ... FAILED
+test test_message_error_alt_display_and_debug_variants ... FAILED
+
+failures:
+
+---- test_boxed_error_display_via_from_boxed stdout ----
+
+thread 'test_boxed_error_display_via_from_boxed' (421266) panicked at src/error.rs:170:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_error_display_chain_via_context stdout ----
+
+thread 'test_error_display_chain_via_context' (421267) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_error_display_for_display_only_like_wrapper stdout ----
+
+thread 'test_error_display_for_display_only_like_wrapper' (421268) panicked at src/error.rs:145:3:
+not implemented
+
+---- test_message_error_display_and_debug_via_error_msg stdout ----
+
+thread 'test_message_error_display_and_debug_via_error_msg' (421270) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_message_error_alt_display_and_debug_variants stdout ----
+
+thread 'test_message_error_alt_display_and_debug_variants' (421269) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_boxed_error_display_via_from_boxed
+    test_error_display_chain_via_context
+    test_error_display_for_display_only_like_wrapper
+    test_message_error_alt_display_and_debug_variants
+    test_message_error_display_and_debug_via_error_msg
+
+test result: FAILED. 0 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_3`
+     Running tests/wrapper_gen_4.rs (target/debug/deps/wrapper_gen_4-8df0e399b498c0eb)
+
+running 3 tests
+test test_boxed_error_source_delegates_through_boxed_error ... FAILED
+test test_example ... ok
+test test_boxed_error_source_none_for_error_without_source ... FAILED
+
+failures:
+
+---- test_boxed_error_source_delegates_through_boxed_error stdout ----
+
+thread 'test_boxed_error_source_delegates_through_boxed_error' (421272) panicked at src/error.rs:170:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_boxed_error_source_none_for_error_without_source stdout ----
+
+thread 'test_boxed_error_source_none_for_error_without_source' (421273) panicked at src/error.rs:170:3:
+not implemented
+
+
+failures:
+    test_boxed_error_source_delegates_through_boxed_error
+    test_boxed_error_source_none_for_error_without_source
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_4`
+     Running tests/wrapper_gen_5.rs (target/debug/deps/wrapper_gen_5-de9d97de533ab66b)
+
+running 3 tests
+test test_display_error_debug_exercises_display_error_debug_impl_multi_step ... FAILED
+test test_display_error_debug_exercises_display_error_debug_impl_numeric ... FAILED
+test test_display_error_debug_exercises_display_error_debug_impl_runtime_format ... FAILED
+
+failures:
+
+---- test_display_error_debug_exercises_display_error_debug_impl_multi_step stdout ----
+
+thread 'test_display_error_debug_exercises_display_error_debug_impl_multi_step' (421276) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_display_error_debug_exercises_display_error_debug_impl_numeric stdout ----
+
+thread 'test_display_error_debug_exercises_display_error_debug_impl_numeric' (421277) panicked at src/error.rs:151:3:
+not implemented
+
+---- test_display_error_debug_exercises_display_error_debug_impl_runtime_format stdout ----
+
+thread 'test_display_error_debug_exercises_display_error_debug_impl_runtime_format' (421278) panicked at src/error.rs:151:3:
+not implemented
+
+
+failures:
+    test_display_error_debug_exercises_display_error_debug_impl_multi_step
+    test_display_error_debug_exercises_display_error_debug_impl_numeric
+    test_display_error_debug_exercises_display_error_debug_impl_runtime_format
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_5`
+     Running tests/wrapper_gen_6.rs (target/debug/deps/wrapper_gen_6-8b4c76ed14be2dae)
+
+running 3 tests
+test test_boxed_error_debug_via_as_ref ... FAILED
+test test_example ... ok
+test test_boxed_error_debug_via_deref ... FAILED
+
+failures:
+
+---- test_boxed_error_debug_via_as_ref stdout ----
+
+thread 'test_boxed_error_debug_via_as_ref' (421280) panicked at src/error.rs:170:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- test_boxed_error_debug_via_deref stdout ----
+
+thread 'test_boxed_error_debug_via_deref' (421281) panicked at src/error.rs:170:3:
+not implemented
+
+
+failures:
+    test_boxed_error_debug_via_as_ref
+    test_boxed_error_debug_via_deref
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test wrapper_gen_6`
+     Running tests/wrapper_gen_7.rs (target/debug/deps/wrapper_gen_7-0cac7c4a75e88593)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wrapper_gen_8.rs (target/debug/deps/wrapper_gen_8-513b5bb0cd8f55c2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wrapper_gen_9.rs (target/debug/deps/wrapper_gen_9-fc580e8f399dca69)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests anyhow
+
+running 25 tests
+test src/lib.rs - (line 182) ... ok
+test src/lib.rs - Chain (line 283) ... ok
+test src/error.rs - error::Error::into_boxed_dyn_error (line 391) ... ok
+test src/lib.rs - Result (line 309) ... ok
+test src/error.rs - error::Error::reallocate_into_boxed_dyn_error_without_backtrace (line 427) ... ok
+test src/lib.rs - (line 170) ... ok
+test src/error.rs - error::Error::chain (line 278) ... ok
+test src/error.rs - error::Error::from_boxed (line 91) ... ok
+test src/context.rs - context::Option<T> (line 62) ... ok
+test src/lib.rs - Context (line 424) ... FAILED
+test src/macros.rs - macros::anyhow (line 133) ... ok
+test src/error.rs - error::Error::context (line 187) ... ok
+test src/lib.rs - Context (line 360) ... ok
+test src/lib.rs - Result (line 323) ... ok
+test src/lib.rs - (line 55) ... ok
+test src/macros.rs - macros::ensure (line 117) ... ok
+test src/error.rs - error::Error::downcast_ref (line 331) ... FAILED
+test src/lib.rs - (line 152) ... ok
+test src/lib.rs - (line 23) ... ok
+test src/macros.rs - macros::bail (line 32) ... ok
+test src/error.rs - error::Error::msg (line 48) ... ok
+test src/lib.rs - Context (line 464) ... FAILED
+test src/lib.rs - (line 99) ... FAILED
+test src/macros.rs - macros::bail (line 14) ... ok
+test src/macros.rs - macros::ensure (line 128) ... ok
+
+failures:
+
+---- src/lib.rs - Context (line 424) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (421948) panicked at src/error.rs:473:9:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/error.rs - error::Error::downcast_ref (line 331) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (421955) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/lib.rs - Context (line 464) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (421962) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+---- src/lib.rs - (line 99) stdout ----
+Test executable failed (exit status: 101).
+
+stderr:
+
+thread 'main' (421964) panicked at src/error.rs:151:3:
+not implemented
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+
+failures:
+    src/error.rs - error::Error::downcast_ref (line 331)
+    src/lib.rs - (line 99)
+    src/lib.rs - Context (line 424)
+    src/lib.rs - Context (line 464)
+
+test result: FAILED. 21 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+error: doctest failed, to rerun pass `--doc`
+error: 37 targets failed:
+    `--test behaviour_stable_gen_1`
+    `--test context_gen_1`
+    `--test context_gen_2`
+    `--test context_gen_3`
+    `--test context_gen_4`
+    `--test ensure_gen_1`
+    `--test error_gen_1`
+    `--test error_gen_2`
+    `--test error_gen_3`
+    `--test error_gen_4`
+    `--test error_gen_5`
+    `--test fmt_gen_1`
+    `--test lib_gen_2`
+    `--test lib_gen_3`
+    `--test ptr_gen_1`
+    `--test ptr_gen_2`
+    `--test ptr_gen_3`
+    `--test ptr_gen_4`
+    `--test ptr_gen_5`
+    `--test ptr_gen_6`
+    `--test test_boxed`
+    `--test test_chain`
+    `--test test_context`
+    `--test test_convert`
+    `--test test_downcast`
+    `--test test_ensure`
+    `--test test_fmt`
+    `--test test_macros`
+    `--test test_repr`
+    `--test test_source`
+    `--test wrapper_gen_1`
+    `--test wrapper_gen_2`
+    `--test wrapper_gen_3`
+    `--test wrapper_gen_4`
+    `--test wrapper_gen_5`
+    `--test wrapper_gen_6`
+    `--doc`

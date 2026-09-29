@@ -37,24 +37,33 @@ turbofish generics and escaped quotes.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from pipeline_core.domain.behaviour import (
     BehaviourProvenance,
     BehaviourSpec,
     BehaviourSubKind,
+    ExampleOrigin,
     FenceDirective,
     ObservableOutcome,
+    OriginKind,
     OutcomeKind,
     classified,
+)
+from pipeline_core.domain.example_setup import (
+    IMPORTS_KEY_SUFFIX,
+    helper_closure,
+    item_index,
+    mod_declarations,
+    setup_slice,
+    use_block,
 )
 from pipeline_core.domain.generation import is_claimed_pipeline_gen_test
 from pipeline_core.domain.refill_evidence import test_item_source
 from pipeline_core.domain.rust_idents import fn_decl_names
 from pipeline_core.domain.rust_scan import attributed_test_fn_names
 
-GIVEN_CAP = 2000
 # Sibling-name marker kept for callers that skip `*.gen_tests_*.rs` by
 # substring. Integration files use `{stem}_gen_{N}.rs` — see
 # `is_pipeline_gen_test_name`.
@@ -469,6 +478,7 @@ class _Found:
     pos: int
     when: str
     then: ObservableOutcome
+    via: str = ""
 
 
 def _find_assert_eq(item: str, sc: _Scan, consts: dict[str, str]) -> list[_Found]:
@@ -574,7 +584,7 @@ def _find_helper_calls(
         value = _literal_value(args[-1], consts)
         if value is None:
             continue
-        out.append(_Found(s, _compact(args[0]), ObservableOutcome.display(value)))
+        out.append(_Found(s, _compact(args[0]), ObservableOutcome.display(value), via=ident))
     return out
 
 
@@ -598,16 +608,41 @@ def _trim_item(item: str) -> str:
     return "\n".join(lines)
 
 
+def _sibling_files(source_file: str, test_src: str,
+                   siblings: Mapping[str, str]) -> list[tuple[str, str]]:
+    """`(path, text)` of the modules `test_src` declares with `mod NAME;`,
+    looked up as `<dir>/NAME/mod.rs` or `<dir>/NAME.rs` among `siblings`."""
+    base = source_file.rsplit("/", 1)[0] if "/" in source_file else ""
+    out: list[tuple[str, str]] = []
+    for name in mod_declarations(test_src):
+        for cand in (f"{base}/{name}/mod.rs", f"{base}/{name}.rs"):
+            cand = cand.lstrip("/")
+            if cand in siblings:
+                out.append((cand, siblings[cand]))
+                break
+    return out
+
+
 def harvest_test_assertion_behaviours(
     test_src: str, *, source_file: str, cfg_cluster: str = "default",
     default_cluster: str | None = None,
+    siblings: Mapping[str, str] | None = None,
 ) -> list[BehaviourSpec]:
-    """OUTCOME behaviours, one per distinct observable each `#[test]` item in
+    """OUTCOME examples, one per distinct observable each `#[test]` item in
     `test_src` asserts (forms (a)–(c) in the module docstring). Per item the
     findings are deduped by (when, then), ordered by source position and
-    numbered; `given` is the test item source (capped at GIVEN_CAP chars),
-    `source_ref` = `<file>::<test>`, id = `testassert::<file>::<test>::<i>`,
+    numbered; `source_ref` = `<file>::<test>`, id =
+    `testassert::<file>::<test>::<i>`, origin `TEST(file, test, i)`,
     provenance HARVESTED, fence RUN, `klass` by `classify_behaviour`.
+
+    `setup` is the def-use slice of the item before the assertion
+    (`example_setup.setup_slice`), never the item: storing the item once per
+    assertion was 193.8 KB of copies on the 2026-09-28 anyhow suite and
+    handed prompts the whole test again. The file-level items the example
+    calls — a fn outside the test, a type, the asserting helper (`via`) — are
+    `helper_keys` with their text attached, resolved in this file and in the
+    modules it declares with `mod NAME;` (looked up in `siblings`, the other
+    test files by path); the suite stores each once.
 
     A `source_file` naming a pipeline-generated test (`*.gen_tests_*.rs`, or
     a `tests/{stem}_gen_{N}.rs` that carries the writer origin marker)
@@ -621,6 +656,13 @@ def harvest_test_assertion_behaviours(
         return []
     consts = string_consts(test_src)
     helpers = asserting_helper_names(test_src)
+    index = item_index([(source_file, test_src),
+                        *_sibling_files(source_file, test_src, siblings or {})])
+    # The file's `use` lines are what its examples' names resolve to (the
+    # crate's `Error` or std's, the crate's `Ok` or the prelude's); stored
+    # once per file like any helper.
+    imports = use_block(test_src)
+    import_helper = ((f"{source_file}{IMPORTS_KEY_SUFFIX}", imports),) if imports else ()
     out: list[BehaviourSpec] = []
     seen_tests: set[str] = set()
     for test_name in attributed_test_fn_names(test_src):
@@ -636,20 +678,26 @@ def harvest_test_assertion_behaviours(
                  + _find_helper_calls(item, sc, consts, helpers - {test_name}))
         found.sort(key=lambda f: f.pos)
         seen: set[tuple[str, ObservableOutcome]] = set()
-        given = item if len(item) <= GIVEN_CAP else item[:GIVEN_CAP]
         i = 0
         for f in found:
             key = (f.when, f.then)
             if key in seen:
                 continue
             seen.add(key)
+            setup = setup_slice(item, f.pos, observers=helpers)
+            resolved = import_helper + helper_closure(
+                f"{setup}\n{f.when}", index, extra=(f.via,) if f.via else ())
             spec = BehaviourSpec(
                 behaviour_id=f"testassert::{source_file}::{test_name}::{i}",
-                given=given, when=f.when, then=f.then,
+                setup=setup, when=f.when, then=f.then,
                 provenance=BehaviourProvenance.HARVESTED,
                 subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN,
                 cfg_cluster=cfg_cluster,
-                source_ref=f"{source_file}::{test_name}")
+                source_ref=f"{source_file}::{test_name}",
+                origin=ExampleOrigin(OriginKind.TEST, source_file, test_name, i),
+                via=f.via,
+                helper_keys=tuple(k for k, _ in resolved),
+                helpers=tuple(t for _, t in resolved))
             out.append(classified(spec, default_cluster=default_cluster or cfg_cluster))
             i += 1
     return out

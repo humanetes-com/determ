@@ -486,6 +486,14 @@ def score_row(state: dict[str, Any]) -> str | None:
         return None
     pct = min(100.0, passed / oracle * 100)
     seg = [f"{passed}/{oracle} passing ({pct:.0f}%)"]
+    # The bar and this number are the last SWEEP's. A keep inside the running
+    # fill measures the tree too (`phase_c.fill.reading`), and on run
+    # `24951-a72c4642` (2026-09-29) that read 182 for an hour while the row
+    # said 175; the sweep that makes it official is a fill away.
+    ahead = state.get("tdd_fill_pass")
+    if isinstance(ahead, int) and ahead != passed:
+        note = f"(on next sweep {ahead})"
+        seg.append(green(note) if ahead > passed else red(note))
     hist = state.get("tdd_pass_hist") or []
     if len(hist) >= 2:
         delta = hist[-1] - hist[-2]
@@ -516,6 +524,15 @@ def oracle_row(state: dict[str, Any]) -> str | None:
     static = state.get("tdd_oracle_static")
     return (f"           oracle   {dim(f'{static} declared')}  "
             f"{yellow(gap.rendered)}")
+
+
+def schedule_row(line: str | None) -> str | None:
+    """The schedule-yield row (:mod:`pipeline_core.monitor.schedule_health`):
+    dim while the run is paying, red once the line carries `BURN`."""
+    if not line:
+        return None
+    body = red(line) if line.rstrip().endswith("BURN") else dim(line)
+    return "           schedule " + body
 
 
 def cut_rate_row(rate: CutRate, knobs: CutStopKnobs) -> str | None:

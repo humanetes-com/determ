@@ -29,7 +29,7 @@ from pipeline_core.domain.oracle_field_paths import FieldPath
 
 def _pin(kind: StaticAssertKind, expr: str) -> BehaviourSpec:
     return BehaviourSpec(
-        behaviour_id=f"static::{expr}", given="", when=expr,
+        behaviour_id=f"static::{expr}", setup="", when=expr,
         then=ObservableOutcome.static_assertion(kind, expr),
         provenance=BehaviourProvenance.HARVESTED,
         subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN)
@@ -189,7 +189,7 @@ def test_non_static_assertion_behaviours_are_ignored() -> None:
     # in must be skipped silently rather than rendered as a bogus const assert.
     from pipeline_core.domain.behaviour import OutcomeKind
     spec = BehaviourSpec(
-        behaviour_id="rt", given="", when="x",
+        behaviour_id="rt", setup="", when="x",
         then=ObservableOutcome(kind=OutcomeKind.DISPLAY_STRING, value="boom"),
         provenance=BehaviourProvenance.HARVESTED,
         subkind=BehaviourSubKind.OUTCOME, fence=FenceDirective.RUN)

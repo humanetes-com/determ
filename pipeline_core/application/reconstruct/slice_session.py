@@ -49,6 +49,7 @@ from pipeline_core.application.reconstruct.unit_conversation import (
     TranscriptBound,
     UnitConversation,
 )
+from pipeline_core.domain.assertion_position import TestKey, outcomes_of, positions_for
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.attribution import (
     container_key,
@@ -214,6 +215,32 @@ class _JudgedState:
 
 def _leaf(name: str) -> str:
     return name.rsplit("::", 1)[-1]
+
+
+def _red_target_positions(
+    reading: TestStateReading, tests: Sequence[str],
+) -> dict[TestKey, int]:
+    """The assertion positions of each of `tests` that `reading` saw
+    failing."""
+    red = {_leaf(n) for n in reading.failed_names}
+    return positions_for(reading.positions,
+                         [t for t in tests if _leaf(t) in red])
+
+
+def _earlier_targets(
+    baseline: TestStateReading, after: TestStateReading, tests: Sequence[str],
+) -> tuple[str, ...]:
+    """Targets red at the session's baseline and in `after` that stopped at
+    an earlier assertion position, when no target went green — the decided
+    rule (`TestOutcomes.refuses`) over the session's targets. Read by the
+    turn judge and by the peel, so a peeled subset is held to the bar the
+    turn was. Both keep their suite-net early return above this."""
+    outcomes = outcomes_of(
+        tests, before_passed=baseline.passed_names,
+        before_failed=baseline.failed_names, after_passed=after.passed_names,
+        after_failed=after.failed_names, before_positions=baseline.positions,
+        after_positions=after.positions)
+    return () if outcomes.gained else outcomes.earlier_tests
 
 
 def _admit_from_file_requests(
@@ -463,6 +490,10 @@ def run_slice_session(
             targets.append(TargetStatus(
                 t, False, said or "(no captured section — the binary may have aborted)",
                 observed.get(t) or observed.get(leaf, "")))
+        # A target that moved to an earlier line of the same file is a loss
+        # the name sets cannot show (`TurnReading.earlier`).
+        positions_now = _red_target_positions(after, slice_.tests)
+        earlier = _earlier_targets(baseline, after, slice_.tests)
         hung = tuple(cmp.hung_tests)
         if after is not None:
             hung = tuple(dict.fromkeys(
@@ -475,7 +506,8 @@ def run_slice_session(
             crashed=tuple(cmp.newly_crashed), hung=hung,
             pass_delta=cmp.net_pass_delta,
             newly_green=tuple(sorted(cmp.newly_green)),
-            executed_shrank=cmp.cur_executed < cmp.base_executed)
+            executed_shrank=cmp.cur_executed < cmp.base_executed,
+            positions=positions_now, earlier=earlier)
         return reading, after
 
     try:
@@ -921,7 +953,11 @@ def _peel(
         if after is None or baseline is None:
             continue
         cmp = compare_readings(baseline, after)
-        if not cmp.regressed:
+        # The turn judge's bar (`TurnReading.regressed`): a strict net gain
+        # forgives; otherwise a target failing earlier than at baseline is
+        # a loss like a newly-red test.
+        _earlier = _earlier_targets(baseline, after, slice_.tests)
+        if not cmp.regressed and not (_earlier and cmp.net_pass_delta <= 0):
             ports.log(f"  [phase-c/session] {label}: peeled {len(reverted)} unit(s) — "
                       f"the remaining {len(remaining) + len(unrestored)} hold "
                       "with no previously-passing test red.")

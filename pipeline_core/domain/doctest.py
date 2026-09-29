@@ -22,7 +22,9 @@ from pipeline_core.domain.behaviour import (
     BehaviourProvenance,
     BehaviourSpec,
     BehaviourSubKind,
+    ExampleOrigin,
     FenceDirective,
+    OriginKind,
 )
 from pipeline_core.domain.layout_pins import classify_layout_assertions
 
@@ -135,10 +137,11 @@ def harvest_doctest_behaviours(
         n += 1
         bid = f"doctest::{source_file}::{blk.start_line}"
         out.append(BehaviourSpec(
-            behaviour_id=bid, given="", when=blk.code, then=None,
+            behaviour_id=bid, setup="", when=blk.code, then=None,
             provenance=BehaviourProvenance.HARVESTED,
             subkind=BehaviourSubKind.ASSERTION, fence=blk.fence,
-            cfg_cluster=cfg_cluster, source_ref=f"{source_file}:{blk.start_line}"))
+            cfg_cluster=cfg_cluster, source_ref=f"{source_file}:{blk.start_line}",
+            origin=ExampleOrigin(OriginKind.DOCTEST, source_file, "", blk.start_line)))
     return out
 
 
@@ -154,9 +157,10 @@ def harvest_static_assertions(
         for i, outcome in enumerate(classify_layout_assertions(blk.code)):
             out.append(BehaviourSpec(
                 behaviour_id=f"static::{source_file}::{blk.start_line}::{i}",
-                given="", when=blk.code, then=outcome,
+                setup="", when=blk.code, then=outcome,
                 provenance=BehaviourProvenance.HARVESTED,
                 subkind=BehaviourSubKind.OUTCOME, fence=blk.fence,
                 cfg_cluster=cfg_cluster,
-                source_ref=f"{source_file}:{blk.start_line}"))
+                source_ref=f"{source_file}:{blk.start_line}",
+                origin=ExampleOrigin(OriginKind.STATIC_PIN, source_file, str(blk.start_line), i)))
     return out

@@ -171,8 +171,16 @@ def build_slice_session_prompt(
     executed: Collection[FnSite] | None = None,
     installable: Mapping[FnSite, str] | None = None,
     crash_evidence: str = "",
+    behaviour_must: str = "",
 ) -> str:
     """Turn 0 of a session over `slice_`.
+
+    `behaviour_must` is the behaviour book's instruction for the slice's
+    editable units (`behaviour_must_instruction`) — the identity MUST and
+    the rules aimed at them — the same text the file, per-impl and per-fn
+    builders carry in their instruction slot. The schedule opens sessions
+    as their own runs, so a rule only those builders carried would be
+    absent from every session turn.
 
     `crash_evidence` is the localizer's rendered evidence for every crash
     blamed on an editable unit of the slice — the same blocks the file,
@@ -239,7 +247,7 @@ Crate: {module_name} | Cluster: {cluster_name} | Session budget: {max_turns} tur
 FAILING TESTS (the targets):
 
 {tests_part}
-{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
+{tag_block("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
 {tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", regression_body)}
 <RUST_GOTCHAS>
 {language_driver().gotchas_summary()}

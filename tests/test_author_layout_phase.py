@@ -34,7 +34,7 @@ def _surface():
 def _suite_with_pin():
     return BehaviourSuite(cfg_cluster="stable", specs=(
         BehaviourSpec(
-            behaviour_id="static::repr::0", given="", when="size_of",
+            behaviour_id="static::repr::0", setup="", when="size_of",
             then=ObservableOutcome.static_assertion(
                 StaticAssertKind.SIZE,
                 "assert_eq!(size_of::<Error>(), size_of::<ErrorImpl>())"),
@@ -60,7 +60,7 @@ def _suite_pinning_public_type_only():
     # never the private `ErrorImpl` it feeds.
     return BehaviourSuite(cfg_cluster="stable", specs=(
         BehaviourSpec(
-            behaviour_id="static::test_repr.rs::0", given="", when="size_of",
+            behaviour_id="static::test_repr.rs::0", setup="", when="size_of",
             then=ObservableOutcome.static_assertion(
                 StaticAssertKind.SIZE,
                 "assert_eq!(mem::size_of::<Error>(), mem::size_of::<usize>());"),
@@ -93,7 +93,7 @@ def test_pin_selector_does_not_leak_across_unrelated_public_types():
     surface = classify_private_surface(types, [], cfg_cluster="stable")
     suite = BehaviourSuite(cfg_cluster="stable", specs=(
         BehaviourSpec(
-            behaviour_id="static::test_other.rs::0", given="", when="size_of",
+            behaviour_id="static::test_other.rs::0", setup="", when="size_of",
             then=ObservableOutcome.static_assertion(
                 StaticAssertKind.SIZE,
                 "assert_eq!(mem::size_of::<Other>(), mem::size_of::<usize>());"),

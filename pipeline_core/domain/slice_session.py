@@ -30,6 +30,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.assertion_position import TestKey, TestOutcomes, compare_positions
 from pipeline_core.domain.attribution import container_key, locator_of, site_label
 from pipeline_core.domain.fill_schedule import RouteRun
 from pipeline_core.domain.impl_routing import norm_src_rel
@@ -804,6 +805,14 @@ class TurnReading:
     #: A completed binary reported fewer verdicts than at baseline — oracle
     #: corruption, never traded away at any price (the sweep's rule).
     executed_shrank: bool = False
+    #: (binary, test) -> the assertion position each still-red target
+    #: stopped at this turn (`assertion_position`); what `judge_against_best`
+    #: orders two red states by. A target with no position is absent.
+    positions: Mapping[TestKey, int] = field(default_factory=dict)
+    #: Targets red at the session's baseline and at this turn that stopped at
+    #: an EARLIER assertion position, when no target went green — the
+    #: decided rule every keep reads (`TestOutcomes.refuses`).
+    earlier: tuple[str, ...] = ()
 
     @property
     def targets_green(self) -> bool:
@@ -829,7 +838,8 @@ class TurnReading:
             return True
         if self.pass_delta > 0:
             return False
-        return bool(self.pass_delta < 0 or self.newly_red or self.crashed)
+        return bool(self.pass_delta < 0 or self.newly_red or self.crashed
+                    or self.earlier)
 
     @property
     def green_targets(self) -> frozenset[str]:
@@ -867,11 +877,17 @@ class BestStateVerdict:
     executed_shrank: bool = False
     #: `(best's pass_delta, this turn's)` when the net fell below the best's.
     delta_below: tuple[int, int] | None = None
+    #: Targets red in both states that stopped at an earlier assertion
+    #: position than in the best state, when this turn turned no target
+    #: green that the best had red: fewer assertions passed than the best
+    #: had, which no name set shows (`TestOutcomes.refuses`).
+    earlier_than_best: tuple[str, ...] = ()
 
     @property
     def holds(self) -> bool:
         return not (self.lost_targets or self.red_beyond or self.crashed_beyond
-                    or self.executed_shrank or self.delta_below is not None)
+                    or self.executed_shrank or self.delta_below is not None
+                    or self.earlier_than_best)
 
     def losses(self) -> str:
         """The lost evidence, for the log line and the transcript."""
@@ -887,19 +903,31 @@ class BestStateVerdict:
         if self.delta_below is not None:
             best, now = self.delta_below
             parts.append(f"dropped the net verdict count from {best:+d} to {now:+d}")
+        if self.earlier_than_best:
+            parts.append("made " + ", ".join(self.earlier_than_best)
+                         + " fail at an earlier assertion")
         return "; ".join(parts)
 
 
 def judge_against_best(new: TurnReading, best: TurnReading) -> BestStateVerdict:
     """Compare a judged turn with the best judged state (see
-    :class:`BestStateVerdict` for the order and why)."""
+    :class:`BestStateVerdict` for the order and why).
+
+    The earlier clause is the decided rule (`TestOutcomes.refuses`): a
+    target that stopped earlier than in the best state refuses only when
+    this turn gained no target over the best."""
+    earlier, _later = compare_positions(best.positions, new.positions)
+    outcomes = TestOutcomes(
+        gained=frozenset(new.green_targets - best.green_targets),
+        earlier=earlier)
     return BestStateVerdict(
         lost_targets=tuple(sorted(best.green_targets - new.green_targets)),
         red_beyond=tuple(sorted(set(new.newly_red) - set(best.newly_red))),
         crashed_beyond=tuple(sorted(set(new.crashed) - set(best.crashed))),
         executed_shrank=new.executed_shrank and not best.executed_shrank,
         delta_below=((best.pass_delta, new.pass_delta)
-                     if new.pass_delta < best.pass_delta else None))
+                     if new.pass_delta < best.pass_delta else None),
+        earlier_than_best=(outcomes.earlier_tests if outcomes.refuses else ()))
 
 
 def render_restored_note(verdict: BestStateVerdict, best_turn: int) -> str:

@@ -45,7 +45,7 @@ def _surface():
 
 def _pin():
     return BehaviourSpec(
-        behaviour_id="static::repr::0", given="", when="size_of::<Error>()",
+        behaviour_id="static::repr::0", setup="", when="size_of::<Error>()",
         then=ObservableOutcome.static_assertion(
             StaticAssertKind.SIZE, "assert_eq!(size_of::<Error>(), size_of::<usize>())"),
         subkind=BehaviourSubKind.OUTCOME,
@@ -997,11 +997,11 @@ def test_behaviour_suite_reaches_the_authoring_prompt_and_is_logged():
     per component says how many and of which class. Control: without a suite
     the prompt carries no such section and nothing is logged."""
     identity = BehaviourSpec(
-        behaviour_id="b-identity", given='let e = Error::msg("x");',
+        behaviour_id="b-identity", setup='let e = Error::msg("x");',
         when="e.is::<&str>()", then=ObservableOutcome.downcast_ok(True),
         subkind=BehaviourSubKind.OUTCOME)
     unrelated = BehaviourSpec(
-        behaviour_id="b-other", given="", when="other()",
+        behaviour_id="b-other", setup="", when="other()",
         then=ObservableOutcome.display("o"), subkind=BehaviourSubKind.OUTCOME)
     d = _Deps(_GOOD, [True])
     res = author_layout(_surface(), module_name="anyhow", public_surface="pub struct Error;",
@@ -1036,14 +1036,14 @@ def test_authoring_log_names_classes_the_cap_omitted():
     clause (asserted in test_behaviour_suite_reaches_the_authoring_prompt)."""
     exact = [
         BehaviourSpec(
-            behaviour_id=f"fmt-{i}", given="",
+            behaviour_id=f"fmt-{i}", setup="",
             when=f"let e = ErrorImpl; format!(\"{{e}}\") {i}",
             then=ObservableOutcome.display(str(i)),
             subkind=BehaviourSubKind.OUTCOME)
         for i in range(40)]
     bounded = [
         BehaviourSpec(
-            behaviour_id=f"buf-{i}", given="",
+            behaviour_id=f"buf-{i}", setup="",
             when=f"let e = ErrorImpl; e.to_string().len() < {40 + i}",
             then=ObservableOutcome.display("x"),
             subkind=BehaviourSubKind.OUTCOME,
@@ -1082,7 +1082,7 @@ def test_authoring_warns_loudly_when_the_cap_drops_identity_behaviours():
     does, the cap is the thing to raise, not the log to quieten."""
     identity = [
         BehaviourSpec(
-            behaviour_id=f"id-{i}", given="",
+            behaviour_id=f"id-{i}", setup="",
             when=f"let e = ErrorImpl; e.downcast_ref::<T{i}>()",
             then=ObservableOutcome.downcast_ok(True),
             subkind=BehaviourSubKind.OUTCOME)

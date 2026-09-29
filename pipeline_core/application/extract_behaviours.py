@@ -43,6 +43,8 @@ def harvest_behaviour_suite(
     ``default_cluster`` names the crate's default cluster for the CFG_WORLD
     class (None = this cluster). Deterministic: specs sorted + deduped by id."""
     by_id: dict[str, BehaviourSpec] = {}
+    test_sources = list(test_sources)
+    siblings = dict(test_sources)
     for rel, text in sources:
         for spec in harvest_doctest_behaviours(
                 text, source_file=rel, cfg_cluster=cfg_cluster):
@@ -56,7 +58,7 @@ def harvest_behaviour_suite(
             by_id.setdefault(spec.behaviour_id, spec)
         for spec in harvest_test_assertion_behaviours(
                 text, source_file=rel, cfg_cluster=cfg_cluster,
-                default_cluster=default_cluster):
+                default_cluster=default_cluster, siblings=siblings):
             by_id.setdefault(spec.behaviour_id, spec)
     # Every tier's spec gets its class here, once: the doc-fence and layout-pin
     # harvesters predate `klass` and construct specs with the default OTHER,
@@ -64,4 +66,8 @@ def harvest_behaviour_suite(
     # pins histogrammed as OTHER instead of LAYOUT_PIN.
     home = default_cluster or cfg_cluster
     specs = tuple(classified(by_id[k], default_cluster=home) for k in sorted(by_id))
-    return BehaviourSuite(cfg_cluster=cfg_cluster, specs=specs)
+    # The test-file helpers each example calls, stored ONCE per suite: the
+    # examples carry keys, the suite the text.
+    helpers = {k: t for s in specs for k, t in zip(s.helper_keys, s.helpers, strict=True)}
+    return BehaviourSuite(cfg_cluster=cfg_cluster, specs=specs,
+                          helpers=tuple(sorted(helpers.items())))

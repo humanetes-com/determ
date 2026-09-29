@@ -16,15 +16,27 @@ structure reader), never approximated here.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
 from typing import Protocol
 
+from pipeline_core.domain.assertion_position import (
+    PositionMove,
+    Positions,
+    TestKey,
+    TestOutcomes,
+    TestSource,
+    assertion_positions,
+    compare_positions,
+    positions_for,
+)
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
+    TestStateReading,
     binary_output_sections,
+    parse_binary_results,
     parse_failed_tests,
     split_test_stdout_sections,
     strip_libtest_qualifier,
@@ -812,6 +824,11 @@ class U2Verdict:
     # The same-crash keep reads native crashes from it; a summary string
     # is not that capture.
     capture: str = ""
+    # The assertion positions of that capture (`assertion_positions`), keyed
+    # by binary and test: what a keep compares with the baseline reading's.
+    # A failure with no position (a panic in `src/`, a helper, a closure)
+    # is absent, so no keep can order it.
+    positions: Mapping[TestKey, int] = field(default_factory=dict)
 
     @classmethod
     def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
@@ -847,23 +864,14 @@ class U2Verdict:
                crash: CrashPanics | None = None,
                external_stub_sites: frozenset[tuple[str, int]] = frozenset(),
                capture: str = "",
+               positions: Mapping[TestKey, int] | None = None,
                ) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
                    detail=detail, no_verdict=no_verdict,
                    self_passed=self_passed, self_failure_sites=sites,
                    aborted=aborted, crash=crash,
                    external_stub_sites=external_stub_sites,
-                   capture=capture)
-
-    @property
-    def panic_sites(self) -> dict[str, tuple[str, int]]:
-        """test name -> (panic file, panic line) for the self-failures that
-        printed one. A failure with no location is ABSENT rather than defaulted:
-        the comparison this feeds treats a missing site as unmeasured, and a
-        sentinel line number would read as movement."""
-        return {f.test_name: (f.panic_file, f.panic_line)
-                for f in self.self_failure_sites
-                if f.panic_file and f.panic_line is not None}
+                   capture=capture, positions=dict(positions or {}))
 
     @property
     def blocking_fns(self) -> frozenset[FnSite]:
@@ -887,33 +895,61 @@ class JointImprovement:
     subset observed PASSING in the fill's own scoped run: banking demands
     POSITIVE evidence (a test absent from both readings is unmeasured, not
     fixed — counting absence as progress fabricated improvement). ``new_failures``
-    — self-failures outside the baseline-failing set. Banks iff something
-    resolved AND nothing new broke."""
+    — self-failures the baseline saw passing (or ignored). Banks iff something
+    resolved AND nothing newly red."""
 
     baseline_failing: frozenset[str]
     resolved: frozenset[str]
     new_failures: frozenset[str]
-    #: (test, file, line before, line after) for attributed tests whose panic
-    #: moved WITHIN one file. `regressed` is an EARLIER line — strictly fewer
-    #: assertions passed than before the fill; `advanced` is a later one.
-    regressed_sites: tuple[tuple[str, str, int, int], ...] = ()
-    advanced_sites: tuple[tuple[str, str, int, int], ...] = ()
+    #: Attributed tests red before and after whose assertion POSITION moved
+    #: (`assertion_position.compare_positions`): `regressed` stopped at an
+    #: earlier line of its own test body, `advanced` at a later one. A panic
+    #: in `src/`, a helper or a closure has no position and is in neither.
+    regressed_sites: tuple[PositionMove, ...] = ()
+    advanced_sites: tuple[PositionMove, ...] = ()
 
     @property
     def unresolved(self) -> frozenset[str]:
         return self.baseline_failing - self.resolved
 
     @property
+    def outcomes(self) -> TestOutcomes:
+        """This attempt in the one outcome model every keep reads."""
+        return TestOutcomes(gained=self.resolved, lost=self.new_failures,
+                            earlier=self.regressed_sites,
+                            later=self.advanced_sites)
+
+    @property
     def banks(self) -> bool:
-        return bool(self.resolved) and not self.new_failures
+        """A joint rewrite that shrank its own failing set and is still a
+        non-regression; the file and impl routes accept when this is true."""
+        return bool(self.resolved) and self.non_regression
+
+    @property
+    def non_regression(self) -> bool:
+        """The decided rule (`TestOutcomes.refuses`): nothing newly red,
+        and no attributed test stopped at an earlier assertion position
+        unless another attributed test went green. The one definition every
+        refill keep reads (`judge_refill`); a keep on names alone is how run
+        `24951-a72c4642` (2026-09-29) kept a pair write that turned
+        `test_altdebug`'s passing first assertion red while the test, red
+        before and after, left the name set unchanged."""
+        return not self.outcomes.refuses
+
+    @property
+    def refused_on_position(self) -> bool:
+        """Refused by the earlier-position clause alone: nothing newly red,
+        nothing resolved, and an attributed test stopped earlier."""
+        return (not self.new_failures and not self.resolved
+                and bool(self.regressed_sites))
 
     @property
     def site_movement(self) -> str:
         """One line for the log, or "" when nothing moved. A sweep that reports
         a byte-identical verdict vector while panic lines moved later is not
         flat, and the vector cannot see it."""
-        def _fmt(rows: tuple[tuple[str, str, int, int], ...]) -> str:
-            return ", ".join(f"{t} {f}:{a}->{b}" for t, f, a, b in rows[:3])
+        def _fmt(rows: tuple[PositionMove, ...]) -> str:
+            return ", ".join(m.render() for m in rows[:3])
         parts = []
         if self.advanced_sites:
             parts.append(f"{len(self.advanced_sites)} test(s) panic LATER "
@@ -931,48 +967,12 @@ class JointImprovement:
                 f"{len(self.unresolved)} (resolved: {shown})")
 
 
-def compare_panic_sites(
-    before: Mapping[str, tuple[str, int]],
-    after: Mapping[str, tuple[str, int]],
-) -> tuple[tuple[tuple[str, str, int, int], ...],
-           tuple[tuple[str, str, int, int], ...]]:
-    """(regressed, advanced) — attributed tests whose panic moved to an
-    EARLIER / LATER line of the SAME file.
-
-    Why order within one file and not "a site the pre-fill tree did not have".
-    Every panic site on this crate's 13 failures is an ASSERTION LINE in a test
-    file, never a site in `src/` (measured 2026-08-21 in a scratch copy:
-    `tests/test_downcast.rs:17:56`, `tests/test_context.rs:103:5`,
-    `tests/test_boxed.rs:26:14`, …). A body that makes
-    `err.is::<HighLevel>()` at `test_context.rs:103` pass and then fails
-    `downcast_ref` at `:105` has moved the panic to a line the pre-fill tree
-    did NOT have — so the "new site" formulation would refuse the one thing
-    that is unambiguous progress. Order is the gradient: later is strictly more
-    assertions passed, earlier is strictly fewer.
-
-    A test missing from either reading, or one whose panic moved to a DIFFERENT
-    file, is unmeasured and appears in neither list. Two files cannot be
-    ordered against each other, and calling that a regression would charge a
-    body for a comparison nobody made."""
-    regressed: list[tuple[str, str, int, int]] = []
-    advanced: list[tuple[str, str, int, int]] = []
-    for test, (bf, bl) in sorted(before.items()):
-        site = after.get(test)
-        if site is None:
-            continue
-        af, al = site
-        if af != bf or al == bl:
-            continue
-        (regressed if al < bl else advanced).append((test, bf, bl, al))
-    return tuple(regressed), tuple(advanced)
-
-
 def assess_joint_improvement(
     attributed: frozenset[str],
     baseline_passed: frozenset[str],
     baseline_ignored: frozenset[str],
     verdict: U2Verdict,
-    baseline_sites: Mapping[str, tuple[str, int]] | None = None,
+    baseline_positions: Positions | None = None,
 ) -> JointImprovement:
     """Build the :class:`JointImprovement` for a joint fill judged REJECT by
     the absolute U2 gate. ``attributed − passed − ignored`` (rather than the
@@ -981,16 +981,56 @@ def assess_joint_improvement(
     not passing. Resolution comes only from ``verdict.self_passed`` — the
     same scoped run that produced the failures."""
     baseline_failing = attributed - baseline_passed - baseline_ignored
-    # Scoped to the attributed tests: a panic that moved in a test this unit
-    # does not answer for is somebody else's measurement.
-    _before = {t: site for t, site in (baseline_sites or {}).items()
-               if t in attributed}
-    regressed, advanced = compare_panic_sites(_before, verdict.panic_sites)
+    # Scoped to the attributed tests red before and after: a position that
+    # moved in a test this unit does not answer for is somebody else's
+    # measurement, and a test that went green has no position to compare.
+    _red = baseline_failing & verdict.self_failures
+    regressed, advanced = compare_positions(
+        positions_for(baseline_positions or {}, _red),
+        positions_for(verdict.positions, _red))
     return JointImprovement(
         baseline_failing=frozenset(baseline_failing),
         resolved=frozenset(verdict.self_passed & baseline_failing),
-        new_failures=frozenset(verdict.self_failures - baseline_failing),
+        # By PRIOR state, like everything else here: a self-failure is new
+        # only when the baseline saw it passing (or ignored it). The file
+        # route used to count any self-failure outside `attributed` as new
+        # and the per-fn keep did not; one rule for both since 2026-09-29.
+        new_failures=frozenset(
+            verdict.self_failures & (baseline_passed | baseline_ignored)),
         regressed_sites=regressed, advanced_sites=advanced)
+
+
+def judge_refill(
+    attributed: Iterable[str],
+    baseline: TestStateReading,
+    verdict: U2Verdict,
+) -> JointImprovement:
+    """How a refill attempt's scoped run compares to the in-lock baseline —
+    the ONE judgment every keep site (file, impl, pair, per-fn) reads, via
+    `.non_regression` and `.banks`.
+
+    It takes the baseline READING rather than its parts so that no caller
+    can judge without the positions: the reading carries them
+    (`TestStateReading.positions`, filled by `reading_of_capture`). Before
+    this function the four keep sites each built "non-regression" from their
+    own flags, and three of them (impl, pair, per-fn) omitted the site
+    clause the file route had carried since 2026-08-20."""
+    return assess_joint_improvement(
+        frozenset(attributed), baseline.passed_names,
+        baseline.ignored_names, verdict, baseline.positions)
+
+
+def reading_of_capture(
+    out: str, *, sources: TestSource, timed_out: bool = False,
+) -> TestStateReading:
+    """A :class:`TestStateReading` of one raw `cargo test` capture, with the
+    per-binary verdicts AND the assertion position of every failure that has
+    one. The constructor every regression baseline goes through, so the
+    positions a keep compares against come from the same capture as the
+    names. `sources` reads the oracle test files; it is required so that no
+    reading can be built with positions nobody placed."""
+    return TestStateReading(parse_binary_results(out or "", timed_out=timed_out),
+                            positions=assertion_positions(out or "", sources))
 
 
 def cap_at_line_boundary(text: str, cap: int) -> str:

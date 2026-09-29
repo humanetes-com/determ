@@ -22,9 +22,10 @@ from collections.abc import Iterable
 from pipeline_core.domain.behaviour import (
     RUNTIME_OUTCOME_KINDS,
     BehaviourSpec,
+    example_code,
 )
 
-# label → pattern; searched over given, when and the Then's value.
+# label → pattern; searched over the example's code and the Then's value.
 DEFECT_OBSERVABLES: dict[str, re.Pattern[str]] = {
     "identity of Error::msg payload (is::<&str> / downcast::<&str>)":
         re.compile(r"(is|downcast(?:_ref|_mut)?)\s*::\s*<\s*&\s*str\s*>"),
@@ -43,7 +44,7 @@ DEFECT_OBSERVABLE_SHORT_NAMES: tuple[tuple[str, str], ...] = (
 
 
 def _spec_text_matches(spec: BehaviourSpec, rx: re.Pattern[str]) -> bool:
-    if rx.search(spec.given) or rx.search(spec.when):
+    if rx.search(example_code(spec)):
         return True
     return spec.then is not None and bool(rx.search(spec.then.value or ""))
 

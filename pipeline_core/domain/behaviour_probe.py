@@ -25,11 +25,15 @@ from pipeline_core.domain.behaviour import (
     BehaviourProvenance,
     BehaviourSpec,
     BehaviourSubKind,
+    ExampleOrigin,
     FenceDirective,
     ObservableOutcome,
+    OriginKind,
     OutcomeKind,
     classified,
+    example_code,
     has_resource_boundary,
+    is_probe_id,
 )
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.language_driver import language_driver
@@ -312,7 +316,7 @@ def render_probe_program(
     glob and still compiles.
 
     Also what `exercises_by_coverage` re-runs — before this existed it re-ran
-    `spec.given` directly, so a `given` that stopped being a whole program
+    the stored setup directly, so a setup that stopped being a whole program
     would have made every probe's exercises run fail `rc != 0` and be dropped
     with a log line."""
     kind = observe_kind(observe, when)
@@ -630,12 +634,16 @@ def _cfg_excluded(rec: FnRecord, cfg_set: CfgSet | None) -> bool:
     return any(cfg_set.evaluate(pred) is False for pred in rec.cfg_predicates)
 
 
-def _is_public_crate_fn(
+def is_public_crate_fn(
     rec: FnRecord,
     reachable_files: frozenset[str] | None,
     type_files: Mapping[str, str] | None,
     cfg_set: CfgSet | None,
 ) -> bool:
+    """True when an example crate can call `rec`: exactly `pub`, not a test,
+    not under an aux dir or a hidden/cfg-dead module, and — when reachability
+    is known — its self type (for a method) or its file (for a free fn) is
+    reachable through a public chain of `mod` declarations."""
     if not (rec.is_pub and rec.is_exactly_pub) or rec.is_test:
         return False
     if set(Path(rec.file).parts) & _AUX_DIRS:
@@ -739,11 +747,13 @@ def probe_targets(
     type_files: Mapping[str, str] | None = None,
     cfg_set: CfgSet | None = None,
 ) -> tuple[str, ...]:
-    """The externally-callable fns NO harvested spec names in its given/when
-    (whole-word on the bare fn name), as prompt labels, sorted, capped at
-    `max_targets`. A fn named anywhere in the suite is already observed by
-    something that ran against the original; the probe budget goes to the
-    rest.
+    """The externally-callable fns NO harvested example names in its code
+    (:func:`example_code` — helpers, setup, when; whole-word on the bare fn
+    name), as prompt labels, sorted, capped at `max_targets`. A fn an example
+    runs is already observed by something that ran against the original; the
+    probe budget goes to the rest. A fn named only in a test statement no
+    harvested assertion depends on is NOT observed and stays a target (before
+    2026-09-29 every example carried its whole test item, which counted it).
 
     `reachable_files` is `module_reachability.externally_reachable_files`
     over the same records — the files behind a PUBLIC chain of `mod`
@@ -768,10 +778,10 @@ def probe_targets(
     stable) cannot compile in that cluster's probe and is skipped."""
     if max_targets <= 0:
         return ()
-    texts = [f"{s.given}\n{s.when}" for s in specs]
+    texts = [example_code(s) for s in specs]
     labels: set[str] = set()
     for rec in fn_records:
-        if not _is_public_crate_fn(rec, reachable_files, type_files, cfg_set):
+        if not is_public_crate_fn(rec, reachable_files, type_files, cfg_set):
             continue
         if any(contains_word(t, rec.fn_name) for t in texts):
             continue
@@ -790,7 +800,7 @@ def probe_behaviour_id(cfg_cluster: str, unit: str, n: int) -> str:
 
 
 def is_probe_spec(spec: BehaviourSpec) -> bool:
-    return spec.behaviour_id.startswith("probe::")
+    return is_probe_id(spec.behaviour_id)
 
 
 def probe_coverage_class(spec: BehaviourSpec) -> str:
@@ -837,7 +847,7 @@ def probe_spec(
     it, and t1.5's cap discards it. Prefer :func:`captured_spec`."""
     spec = BehaviourSpec(
         behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
-        given=program,
+        setup=program,
         when=unit,
         then=ObservableOutcome.stdout(normalize_stdout(stdout)),
         provenance=BehaviourProvenance.SYNTHESIZED,
@@ -845,6 +855,7 @@ def probe_spec(
         fence=FenceDirective.RUN,
         cfg_cluster=cfg_cluster,
         source_ref=f"probe::{unit}",
+        origin=ExampleOrigin(OriginKind.PROBE, "", unit, n),
     )
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
 
@@ -881,7 +892,7 @@ def captured_spec(
         then = ObservableOutcome.display(text)
     spec = BehaviourSpec(
         behaviour_id=probe_behaviour_id(cfg_cluster, unit, n),
-        given=probe.given.rstrip(),
+        setup=probe.given.rstrip(),
         when=probe.when,
         then=then,
         provenance=BehaviourProvenance.SYNTHESIZED,
@@ -889,6 +900,7 @@ def captured_spec(
         fence=FenceDirective.RUN,
         cfg_cluster=cfg_cluster,
         source_ref=f"probe::{unit}",
+        origin=ExampleOrigin(OriginKind.PROBE, "", unit, n),
     )
     return classified(spec, default_cluster=default_cluster or cfg_cluster)
 
@@ -898,15 +910,15 @@ def program_for(spec: BehaviourSpec, *, crate: str = "") -> str:
     free-form capture, a rendered one for the constrained shape.
 
     `exercises_by_coverage` re-runs this. Before it existed that caller passed
-    `spec.given` straight to `cargo run --example`, so a `given` that stopped
+    the stored text straight to `cargo run --example`, so a setup that stopped
     being a whole program would have failed every probe's exercises run with a
     log line and no other trace."""
     if spec.then is not None and spec.then.kind is OutcomeKind.NORMALIZED_STDOUT:
-        return spec.given
+        return spec.setup
     observe = {OutcomeKind.DEBUG_STRING: "debug", OutcomeKind.ALT_DEBUG_STRING: "alt_debug"}.get(
         spec.then.kind if spec.then else OutcomeKind.DISPLAY_STRING, "display"
     )
-    return render_probe_program(spec.given, spec.when, observe, crate=crate)
+    return render_probe_program(spec.setup, spec.when, observe, crate=crate)
 
 
 def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
@@ -918,7 +930,7 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
     expected value is the OBSERVED one — never a model's guess — which is the
     whole reason the capture route exists beside t0c's.
 
-    `required_env` is written as `set_var` BEFORE `given` so construction-time
+    `required_env` is written as `set_var` BEFORE the setup so construction-time
     capture (`backtrace!()` in constructors) and format-time reads both see
     it, and the reconstruction sweep's `cargo test` does not have to inherit
     the host env."""
@@ -928,7 +940,7 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
     env_lines = "".join(
         f"    std::env::set_var({rust_string_literal(k)}, {rust_string_literal(v)});\n" for k, v in spec.required_env
     )
-    body = spec.given.rstrip()
+    body = spec.setup.rstrip()
     setup = (body + "\n") if body else ""
     if then.kind is OutcomeKind.TYPE_IDENTITY:
         check = f"    assert!({spec.when});" if then.ok else f"    assert!(!({spec.when}));"

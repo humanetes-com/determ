@@ -17,7 +17,7 @@ from pipeline_core.prompts.behaviour_synthesis import build_behaviour_synthesis_
 def _spec(bid, exercises):
     return BehaviourSpec(
         behaviour_id=bid,
-        given="",
+        setup="",
         when="x",
         then=None,
         subkind=BehaviourSubKind.ASSERTION,

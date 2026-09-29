@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.application.strip_bake import (
     BakeArtifactsDeps,
@@ -41,7 +42,7 @@ def _deps(logs: list[str], saved: dict[str, BehaviourSuite],
         saved[suite.cfg_cluster] = suite
         return pd / "_b.json"
 
-    kw = {}
+    kw: dict[str, Any] = {}
     if earlier is not None:
         kw["load_behaviour_suite"] = lambda pd, c: earlier
     return BakeArtifactsDeps(
@@ -134,3 +135,56 @@ def test_suite_roundtrips_through_json_with_klass(tmp_path: Path) -> None:
     p = save_behaviour_suite(tmp_path, suite)
     assert json.loads(p.read_text())["specs"][0]["klass"] == "IDENTITY"
     assert load_behaviour_suite(tmp_path, "stable") == suite
+
+
+def test_the_bake_over_a_legacy_store_keeps_its_probes_and_builds_the_book(
+        tmp_path: Path) -> None:
+    """Run `273278-22529e44` (2026-09-29): an augmented restart's t0d returns
+    at the augmented check, so the only stage that re-harvests is this bake;
+    it discarded the format-1 store whole (four probe rows lost) and wrote a
+    format-2 suite with no book. Plan sentence: on a legacy store the bake
+    keeps the probe rows and calls the book. Negative control: with no book
+    builder wired the suite is saved with `features` empty — what that
+    launch wrote."""
+    from dataclasses import replace
+    _crate(tmp_path)
+    probe = BehaviourSpec(
+        "probe::stable::f::0", "fn main() { println!(\"{}\", f()); }", "f",
+        ObservableOutcome.stdout("golden"),
+        provenance=BehaviourProvenance.SYNTHESIZED, subkind=BehaviourSubKind.OUTCOME,
+        cfg_cluster="stable")
+    legacy_ta = BehaviourSpec(
+        "testassert::tests/t.rs::t::0", "#[test]\n" + _TEST, "f().to_string()",
+        ObservableOutcome.display("boom"), subkind=BehaviourSubKind.OUTCOME,
+        cfg_cluster="stable")
+    legacy = BehaviourSuite("stable", (probe, legacy_ta), format_version=1)
+    assert legacy.is_legacy
+    asked: list[str] = []
+
+    def book(pd: Path, mod: str, cl: BuildCluster, suite: BehaviourSuite,
+             src: Path) -> BehaviourSuite:
+        asked.append(f"{mod}:{cl.name}:{src.name}")
+        from pipeline_core.domain.behaviour import Feature
+        return replace(suite, features=(
+            Feature("f", "fn", ("probe::stable::f::0",)),))
+
+    logs: list[str] = []
+    saved: dict[str, BehaviourSuite] = {}
+    deps = replace(_deps(logs, saved, legacy), build_book=book)
+    assert bake_skeleton_artifacts(tmp_path, "m", deps)["ok"]
+    suite = saved["stable"]
+    ids = {s.behaviour_id for s in suite.specs}
+    assert "probe::stable::f::0" in ids
+    assert not suite.is_legacy
+    assert all("#[test]" not in s.setup for s in suite.specs
+               if s.behaviour_id.startswith("testassert::"))
+    assert asked == ["m:stable:src"] and suite.features
+    assert any("1 probe row(s) the harvest cannot re-measure are kept" in ln
+               for ln in logs)
+
+    control = tmp_path / "control"
+    control.mkdir()
+    _crate(control)
+    c_saved: dict[str, BehaviourSuite] = {}
+    assert bake_skeleton_artifacts(control, "m", _deps([], c_saved, legacy))["ok"]
+    assert not c_saved["stable"].features

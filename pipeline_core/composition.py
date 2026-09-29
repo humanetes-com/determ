@@ -71,6 +71,7 @@ from pipeline_core.adapters.behaviour_probe import (
 from pipeline_core.adapters.behaviour_store import (
     load_behaviour_suite,
     save_behaviour_suite,
+    write_feature_files,
 )
 from pipeline_core.adapters.body_ledger_store import (
     append_entries as _body_ledger_append,
@@ -358,6 +359,7 @@ from pipeline_core.adapters.workspace_scan import (
 )
 from pipeline_core.application import fix_loop as _fix_loop_mod
 from pipeline_core.application import test_count as _tc_app
+from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
@@ -593,7 +595,7 @@ from pipeline_core.application.tasks.task0c import (
 from pipeline_core.application.tasks.task0c import (
     task0c_behaviour_pass as _task0c_behaviour_pass_impl,
 )
-from pipeline_core.application.tasks.task0d import Task0dDeps
+from pipeline_core.application.tasks.task0d import Task0dDeps, build_book_from_source
 from pipeline_core.application.tasks.task1 import Task1Deps
 from pipeline_core.application.tasks.task1 import (
     filter_proc_macro_test_files as _filter_proc_macro_test_files,
@@ -1711,6 +1713,9 @@ def build_app(
         enumerate_uses=enumerate_uses,
         save_private_surface=save_private_surface,
         author_private_fields=cfg.layout_author_private_fields,
+        # Late-bound: `task0d_deps` is built below; the bake runs long after.
+        build_book=lambda pd, mod, cl, suite, src: build_book_from_source(
+            task0d_deps, pd, mod, cl, suite, src),
     )
 
     def _t0d_public_surface(pd: Path, _cluster: str) -> str:
@@ -1779,6 +1784,12 @@ def build_app(
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
         EXERCISES_ENABLED=settings.task0d_exercises,
         PIN_ENV_DEBUG=settings.behaviour_pin_env_debug,
+        BOOK_BUDGET=BookBudget(
+            rules=settings.behaviour_book_rules,
+            max_features=settings.behaviour_book_max_features,
+            examples_per_prompt=settings.behaviour_book_examples_per_prompt,
+            drafts_per_reply=settings.behaviour_book_drafts_per_reply),
+        write_features=write_feature_files,
     )
 
     model_notes_store = FileModelNotesStore(

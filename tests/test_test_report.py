@@ -6,7 +6,6 @@ from pipeline_core.domain.test_report import (
     BlameVerdict,
     FailureExcerpt,
     FailureKind,
-    TestFailure,
     TestRunReport,
     U2Decision,
     U2Verdict,
@@ -739,82 +738,73 @@ def test_failure_evidence_by_test_carries_panic_site_and_assertion() -> None:
     assert failure_evidence_by_test("") == {}
 
 
-# --- the panic-site gradient (slice C) --------------------------------------
-from pipeline_core.domain.test_report import (  # noqa: E402
-    compare_panic_sites,
+# --- the assertion-position gradient -----------------------------------------
+from pipeline_core.domain.assertion_position import (  # noqa: E402
+    PositionMove,
+    TestKey,
+    compare_positions,
 )
 
+_BIN = "tests/test_a.rs"
 
-def _reject_at(sites: dict[str, tuple[str, int]]) -> U2Verdict:
-    """A REJECT carrying panic locations, the shape the U2 gate now returns."""
+
+def _reject_at(positions: dict[str, int], binary: str = _BIN) -> U2Verdict:
+    """A REJECT carrying the assertion positions of its scoped capture."""
     return U2Verdict.reject(
-        frozenset(sites), "detail",
-        sites=tuple(TestFailure(test_name=t, kind=FailureKind.ASSERTION,
-                                panic_file=f, panic_line=ln, panic_col=1,
-                                body="")
-                    for t, (f, ln) in sorted(sites.items())))
+        frozenset(positions), "detail",
+        positions={TestKey(binary, t): ln for t, ln in positions.items()})
 
 
-def test_a_later_panic_line_in_the_same_test_is_progress_not_a_regression() -> None:
-    """Every panic site on this crate is an ASSERTION LINE in a test file, so a
-    body that passes one more assertion moves the panic to a line the pre-fill
-    tree did NOT have. The rule 199.8 first proposed — refuse any site the
-    baseline lacked — would have refused exactly that. Order within one file is
-    the gradient: `test_context.rs:103` -> `:105` is more assertions reached."""
-    regressed, advanced = compare_panic_sites(
-        {"test_downcast_high": ("tests/test_context.rs", 103)},
-        {"test_downcast_high": ("tests/test_context.rs", 105)})
-    assert regressed == ()
-    assert advanced == (("test_downcast_high", "tests/test_context.rs", 103, 105),)
+def test_a_later_position_in_the_same_test_is_progress_not_a_regression() -> None:
+    """A body that passes one more assertion moves the position to a line the
+    pre-fill tree did NOT have; order within the test's own body is the
+    gradient."""
+    k = TestKey(_BIN, "t")
+    earlier, later = compare_positions({k: 103}, {k: 105})
+    assert earlier == ()
+    assert later == (PositionMove(k, 103, 105),)
 
 
-def test_an_earlier_panic_line_is_a_regression_the_name_set_cannot_see() -> None:
-    """The 2026-08-20 shape: same verdict vector, strictly fewer assertions
-    reached. `new_failures` is empty in both directions because the test was
-    already red at baseline — which is why that regression was KEPT."""
+def test_an_earlier_position_is_a_regression_the_name_set_cannot_see() -> None:
+    """Same verdict vector, strictly fewer assertions reached. `new_failures`
+    is empty because the test was already red at baseline."""
     ji = assess_joint_improvement(
-        attributed=frozenset({"test_downcast_high"}),
+        attributed=frozenset({"t"}),
         baseline_passed=frozenset(),
         baseline_ignored=frozenset(),
-        verdict=_reject_at({"test_downcast_high": ("tests/test_context.rs", 103)}),
-        baseline_sites={"test_downcast_high": ("tests/test_context.rs", 124)})
-    assert ji.new_failures == frozenset()      # invisible to the old gate
-    assert ji.regressed_sites == (
-        ("test_downcast_high", "tests/test_context.rs", 124, 103),)
+        verdict=_reject_at({"t": 103}),
+        baseline_positions={TestKey(_BIN, "t"): 124})
+    assert ji.new_failures == frozenset()
+    assert ji.regressed_sites == (PositionMove(TestKey(_BIN, "t"), 124, 103),)
     assert "panic EARLIER" in ji.site_movement
+    assert not ji.non_regression
 
 
-def test_a_panic_that_moved_to_another_file_is_unmeasured() -> None:
-    """Two files cannot be ordered against each other, and charging a body for
-    a comparison nobody made is how a gate starts refusing progress."""
-    regressed, advanced = compare_panic_sites(
-        {"t": ("tests/test_a.rs", 90)}, {"t": ("tests/test_b.rs", 10)})
-    assert (regressed, advanced) == ((), ())
+def test_positions_in_two_binaries_do_not_compare() -> None:
+    """One name in two binaries is two tests; a key compares only with
+    itself."""
+    earlier, later = compare_positions(
+        {TestKey("tests/test_a.rs", "t"): 90},
+        {TestKey("tests/test_b.rs", "t"): 10})
+    assert (earlier, later) == ((), ())
 
 
-def test_a_failure_with_no_panic_location_is_absent_not_defaulted() -> None:
+def test_a_failure_with_no_position_is_absent_not_defaulted() -> None:
     """A sentinel line number would read as movement in whichever direction the
     sentinel sits."""
-    v = U2Verdict.reject(
-        frozenset({"t"}), "d",
-        sites=(TestFailure(test_name="t", kind=FailureKind.OTHER,
-                           panic_file=None, panic_line=None, panic_col=None,
-                           body=""),))
-    assert v.panic_sites == {}
-    regressed, advanced = compare_panic_sites({"t": ("tests/test_a.rs", 5)},
-                                              v.panic_sites)
-    assert (regressed, advanced) == ((), ())
+    v = U2Verdict.reject(frozenset({"t"}), "d")
+    assert v.positions == {}
+    assert compare_positions({TestKey(_BIN, "t"): 5}, v.positions) == ((), ())
 
 
-def test_site_comparison_is_scoped_to_the_units_attributed_tests() -> None:
-    """A panic that moved in a test this unit does not answer for is somebody
-    else's measurement."""
+def test_position_comparison_is_scoped_to_the_units_attributed_tests() -> None:
+    """A position that moved in a test this unit does not answer for is
+    somebody else's measurement."""
     ji = assess_joint_improvement(
         attributed=frozenset({"mine"}),
         baseline_passed=frozenset(),
         baseline_ignored=frozenset(),
-        verdict=_reject_at({"mine": ("tests/t.rs", 50),
-                            "theirs": ("tests/t.rs", 10)}),
-        baseline_sites={"mine": ("tests/t.rs", 50),
-                        "theirs": ("tests/t.rs", 99)})
+        verdict=_reject_at({"mine": 50, "theirs": 10}),
+        baseline_positions={TestKey(_BIN, "mine"): 50,
+                            TestKey(_BIN, "theirs"): 99})
     assert ji.regressed_sites == ()      # `theirs` moved earlier; not ours

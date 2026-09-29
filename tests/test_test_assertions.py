@@ -26,7 +26,6 @@ from pipeline_core.domain.doctest import (
 )
 from pipeline_core.domain.layout_pins import harvest_layout_pin_behaviours
 from pipeline_core.domain.test_assertions import (
-    GIVEN_CAP,
     asserting_helper_names,
     harvest_test_assertion_behaviours,
     outcome_kind_for,
@@ -285,18 +284,33 @@ def test_downcast_identity_ok_and_refused():
                for s in specs)
 
 
-def test_given_is_the_test_item_capped_and_ids_are_per_item():
+def test_setup_is_the_slice_the_assertion_needs_and_ids_are_per_item():
+    """The plan's claim: an example's setup is the bindings its `when` needs,
+    not the test item. `test_trailer` holds eight independent `let test = …;
+    assert_err(test, …)` cases; the one about `err.is::<&str>()` needs the
+    `let err` binding and ITS `let test`, and none of the other seven."""
     specs = _harvest("test_ensure.rs")
-    assert all(len(s.given) <= GIVEN_CAP for s in specs)
     by_test = {}
     for s in specs:
         by_test.setdefault(s.source_ref, []).append(s.behaviour_id)
     for ref, ids in by_test.items():
         name = ref.rsplit("::", 1)[1]
         assert ids == [f"testassert::tests/test_ensure.rs::{name}::{i}" for i in range(len(ids))]
-    trailer = next(s for s in specs if s.source_ref.endswith("::test_trailer"))
-    assert trailer.given.startswith("#[test]\nfn test_trailer()")
-    assert "#[test]" not in trailer.given[10:], "the next item's attribute is not part of this one"
+    trailer = [s for s in specs if s.source_ref.endswith("::test_trailer")]
+    is_str = next(s for s in trailer if "err.is::<&str>() == false" in s.then.value)
+    assert is_str.setup == ('let err = anyhow!("");\n'
+                            "let test = || Ok(ensure!(err.is::<&str>() == false));")
+    assert is_str.when == "test" and is_str.via == "assert_err"
+    assert all("#[test]" not in s.setup for s in specs)
+    # every assertion of the item used to carry the whole item: 8 copies
+    assert sum(len(s.setup) for s in trailer) < len(_fixture("test_ensure.rs")) // 20
+    # the result? case needs `result` as well as its own `test`
+    q = next(s for s in trailer if "result? == 2" in s.then.value)
+    assert q.setup == ("let result = Ok::<_, Error>(1);\n"
+                       "let test = || Ok(ensure!(result? == 2));")
+    # the asserting helper is a stored helper, not repeated per example
+    assert "tests/test_ensure.rs::assert_err" in is_str.helper_keys
+
 
 
 def test_generated_test_siblings_are_refused_by_name():

@@ -258,11 +258,11 @@ def test_a_test_lost_to_an_aborted_binary_is_unmeasured_not_refuted() -> None:
     e = _entry(state=BodyState.LANDED)
     before = SweepView.of_sweep(passed={"test_new", "test_conv"},
                                 failed=set(), vanished=(), intact=True,
-                                epoch=0, panic_sites={})
+                                epoch=0, positions={})
     # What the sweep hands over: both names counted failing, both vanished.
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_conv"},
                                vanished={"test_new", "test_conv"}, intact=True,
-                               epoch=0, panic_sites={})
+                               epoch=0, positions={})
     state, delta = classify(e, attributed={"test_new"}, before=before,
                             after=after, body_now_sha=e.body_sha)
     assert state is BodyState.UNMEASURED and delta == ()
@@ -279,7 +279,7 @@ def test_a_test_that_really_failed_beside_an_aborted_binary_still_refutes() -> N
     before, _ = _views(({"test_new"}, set()), (set(), set()))
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_gone"},
                                vanished={"test_gone"}, intact=True, epoch=0,
-                               panic_sites={})
+                               positions={})
     state, _ = classify(e, attributed={"test_new"}, before=before, after=after,
                         body_now_sha=e.body_sha)
     assert state is BodyState.REFUTED
@@ -898,41 +898,168 @@ test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
 """
 
 
+def _test_src(open_: int = 86, close: int = 97) -> str:
+    lines = ["// filler"] * 200
+    lines[open_ - 1] = "fn test_new() {"
+    for k in range(open_, close - 1):
+        lines[k] = "    assert!(check());"
+    lines[close - 1] = "}"
+    return "\n".join(lines)
+
+
+def _oracle(rel: str) -> str | None:
+    """The invented oracle: every `tests/*.rs` holds `test_new` at 86..97."""
+    return _test_src() if rel.startswith("tests/") else None
+
+
 def _red_at(line: int, *, file: str = "tests/test_x.rs") -> SweepView:
     """A sweep view built the way the loop builds it: the failing test's
-    panic site parsed out of the libtest capture."""
-    from pipeline_core.domain.test_report import parse_test_output
-    text = _LIBTEST_RED.format(line=line).replace("tests/test_x.rs:", f"{file}:")
-    sites = {f.test_name.rsplit("::", 1)[-1]: (f.panic_file, f.panic_line)
-             for f in parse_test_output(text).failures
-             if f.panic_file and f.panic_line is not None}
+    assertion position read off the libtest capture and the oracle file."""
+    from pipeline_core.domain.assertion_position import assertion_positions
+    text = _LIBTEST_RED.format(line=line).replace("tests/test_x.rs", file)
     return SweepView(frozenset(), frozenset({"test_new"}), True, 0,
-                     panic_sites=sites)
+                     positions=assertion_positions(text, _oracle))
 
 
 def test_a_convicting_test_that_now_fails_a_later_assertion_is_advanced() -> None:
     """Plan sentence: a landing whose convicting test still fails, but now
-    at a later line of the same test file, got the test past an assertion —
+    at a later line of its own test body, got the test past an assertion —
     `advanced`, not `flat`. It is re-seedable, it carries a non-empty delta
     (so the re-buy detector does not fire on it), and the flat exclusion
     does not retire it.
 
-    Negative controls: the same line, an earlier line, a different file and
-    a failure that printed no location all stay `flat` — the pre-change
-    grade for every one of them."""
+    Negative controls: the same line, another binary and a failure that
+    printed no location all stay `flat`. An EARLIER line is not flat — it
+    is `refuted` (below)."""
+    from pipeline_core.domain.assertion_position import TestKey
     e = _entry(state=BodyState.LANDED)
     before = _red_at(90)
-    assert before.panic_sites == {"test_new": ("tests/test_x.rs", 90)}
+    assert before.positions == {TestKey("tests/test_x.rs", "test_new"): 90}
     state, delta = classify(e, attributed={"test_new"}, before=before,
                             after=_red_at(91), body_now_sha=e.body_sha)
     assert state is BodyState.ADVANCED
     assert delta == (("test_new", "advanced"),)
     assert replace(e, state=state).reseedable
-    for after in (_red_at(90), _red_at(89), _red_at(95, file="tests/other.rs"),
+    for after in (_red_at(90), _red_at(95, file="tests/other.rs"),
                   SweepView(frozenset(), frozenset({"test_new"}), True, 0)):
         flat, flat_delta = classify(e, attributed={"test_new"}, before=before,
                                     after=after, body_now_sha=e.body_sha)
         assert flat is BodyState.FLAT and flat_delta == ()
+
+
+def test_a_gain_beside_an_earlier_panic_stands() -> None:
+    """The decided rule (2026-09-29): a verdict outranks a position. One
+    convicting test starting to pass makes the landing proven even though
+    another convicting test stops earlier. Run `273278-22529e44` refuted
+    eight landings with `gained` deltas on exactly this reading. Negative
+    control: the pre-rule grade ("an earlier panic refuses whatever the
+    others did") sees the same earlier move and would refute."""
+    from pipeline_core.domain.assertion_position import TestKey, compare_positions
+    e = _entry(state=BodyState.LANDED)
+    k = TestKey("tests/test_x.rs", "test_early")
+    before = SweepView(failed=frozenset({"test_gain", "test_early"}),
+                       positions={k: 91})
+    earlier = SweepView(passed=frozenset({"test_gain"}),
+                        failed=frozenset({"test_early"}), positions={k: 90})
+    state, delta = classify(e, attributed={"test_gain", "test_early"},
+                            before=before, after=earlier, body_now_sha=e.body_sha)
+    assert state is BodyState.PROVEN
+    assert ("test_gain", "gained") in delta
+    assert ("test_early", "regressed") not in delta
+    moved_earlier, _later = compare_positions(before.positions, earlier.positions)
+    assert moved_earlier            # what the pre-rule grade refuted on
+
+
+def test_a_convicting_test_that_now_fails_an_earlier_assertion_is_refuted() -> None:
+    """The 24951 shape: a landing whose convicting test was red before it and
+    is red after it, now at an EARLIER line of its own body, nothing gained —
+    `refuted` with a `(test, "regressed")` delta, never `flat`. Run
+    `24951-a72c4642` (2026-09-29) graded exactly this shape `flat`
+    (`:91` -> `:90`) and the flat row then excluded the unit.
+
+    Negative control: the same landing read at the SAME line stays `flat`."""
+    e = _entry(state=BodyState.LANDED)
+    before = _red_at(91)
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=_red_at(90), body_now_sha=e.body_sha)
+    assert state is BodyState.REFUTED
+    assert delta == (("test_new", "regressed"),)
+    assert not replace(e, state=state).reseedable
+    same, _d = classify(e, attributed={"test_new"}, before=before,
+                        after=_red_at(91), body_now_sha=e.body_sha)
+    assert same is BodyState.FLAT
+
+
+def test_a_stub_site_moving_earlier_in_src_is_not_a_position() -> None:
+    """The run `273278-22529e44` shape: filling a fn lets a test reach a
+    still-stubbed sibling declared earlier in the same `src/` file
+    (`43 -> 23`). That is progress; the site is in the crate, has no
+    assertion position, and grades `flat`, not `refuted`. Negative control:
+    the raw sites the pre-fix grade compared are in one file and ordered
+    earlier."""
+    from pipeline_core.domain.test_report import parse_test_output
+    e = _entry(state=BodyState.LANDED)
+
+    def _src_red(line: int) -> SweepView:
+        text = _LIBTEST_RED.format(line=line).replace(
+            "panicked at tests/test_x.rs", "panicked at src/context.rs")
+        return _red_at_capture(text)
+
+    before, after = _src_red(43), _src_red(23)
+    assert before.positions == {} and after.positions == {}
+    state, delta = classify(e, attributed={"test_new"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.FLAT and delta == ()
+    raw = [(f.panic_file, f.panic_line) for v in (43, 23)
+           for f in parse_test_output(_LIBTEST_RED.format(line=v).replace(
+               "panicked at tests/test_x.rs", "panicked at src/context.rs")).failures]
+    assert raw[0][0] == raw[1][0] and raw[1][1] < raw[0][1]
+
+
+def _red_at_capture(text: str) -> SweepView:
+    from pipeline_core.domain.assertion_position import assertion_positions
+    return SweepView(frozenset(), frozenset({"test_new"}), True, 0,
+                     positions=assertion_positions(text, _oracle))
+
+
+def test_a_position_only_refutation_under_a_superseded_comparator_is_reseedable(
+) -> None:
+    """A REFUTED row graded by line order (no comparator) whose delta is
+    only `regressed` no longer refuses the reseed; one that lost a test
+    does, and so does a position-only refutation under the current
+    comparator. No row is edited: the gate reads the fields."""
+    from pipeline_core.domain.body_ledger import COMPARATOR_VERSION, reseed_allowed
+    old = replace(_entry(state=BodyState.REFUTED),
+                  verdict_delta=(("t", "regressed"),), comparator="",
+                  oracle_fp="o", layout_fp="L")
+    assert old.refutation_superseded
+    assert reseed_allowed(old, file_fp="L", sig_sha="", oracle_fp="o").allowed
+    lost = replace(old, verdict_delta=(("t", "lost"), ("u", "regressed")))
+    assert not reseed_allowed(lost, file_fp="L", sig_sha="", oracle_fp="o").allowed
+    current = replace(old, comparator=COMPARATOR_VERSION)
+    assert not reseed_allowed(current, file_fp="L", sig_sha="",
+                              oracle_fp="o").allowed
+    back = type(old).from_dict(current.to_dict())
+    assert back is not None and back.comparator == COMPARATOR_VERSION
+
+
+def test_a_landing_row_carries_the_bodies_it_replaced() -> None:
+    """The sweep reverts a site-regressed landing to `prior_bodies`; the row
+    must round-trip them, and a row written before the field reads as ()."""
+    from pipeline_core.domain.body_ledger import LedgerEntry, raw_bodies_of
+    recs = [{"file": "src/a.rs", "fn_name": "f", "body_text": " old(); // c "},
+            {"file": "src/a.rs", "fn_name": "f", "body_text": " two() "},
+            {"file": "src/b.rs", "fn_name": "g", "body_text": " g() "}]
+    prior = raw_bodies_of(recs, [("src/a.rs", "f")])
+    assert prior == {("src/a.rs", "f"): (" old(); // c ", " two() ")}
+    e = replace(_entry(state=BodyState.LANDED),
+                prior_bodies=prior[("src/a.rs", "f")])
+    back = LedgerEntry.from_dict(e.to_dict())
+    assert back is not None and back.prior_bodies == e.prior_bodies
+    legacy = e.to_dict()
+    legacy.pop("prior_bodies")
+    old = LedgerEntry.from_dict(legacy)
+    assert old is not None and old.prior_bodies == ()
 
 
 def test_an_advanced_row_is_not_a_flat_exclusion_or_a_rebuy() -> None:

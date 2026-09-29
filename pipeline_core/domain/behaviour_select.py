@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
-from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective
+from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective, example_code, then_value_text
 from pipeline_core.domain.installable_fns import fn_decl_shape
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
@@ -41,7 +41,7 @@ _EXAMPLE_FENCES = frozenset(
 
 
 def _spec_code(spec: BehaviourSpec) -> str:
-    return f"{spec.given}\n{spec.when}".strip()
+    return example_code(spec)
 
 
 def is_relevant(spec: BehaviourSpec, *, fn_name: str, container: str) -> bool:
@@ -68,7 +68,10 @@ def select_usage_examples(
 ) -> str:
     """Render the relevant behaviours as a ``<USAGE_EXAMPLES>`` body, or "" when
     none match / budget is zero. Deterministic: harvested order, whole specs
-    only, capped by count and chars."""
+    only, capped by count and chars. Each block is the example's code
+    (:func:`example_code` — the helpers it calls, its setup slice, its when;
+    never the whole test item, which the prompt's test block already quotes)
+    and, when it has one, its Then."""
     if char_budget <= 0:
         return ""
     picked: list[str] = []
@@ -82,6 +85,9 @@ def select_usage_examples(
         if not code:
             continue
         block = f"// {spec.source_ref or spec.behaviour_id}\n{code}"
+        if spec.then is not None:
+            then = then_value_text(spec.then).replace("\n", "\\n")
+            block += f"\n// then: {spec.via + ' compares ' if spec.via else ''}{then!r}"
         if used + len(block) + 2 > char_budget and picked:
             break
         picked.append(block)
@@ -304,10 +310,11 @@ def identity_exercise_flood(specs: Sequence[BehaviourSpec]) -> frozenset[str]:
 def _identity_hits(spec: BehaviourSpec, names: Collection[str]) -> set[str]:
     """Requested fn names this spec actually localizes to.
 
-    Leaf `exercises` or a whole word in `when`. `given` is deliberately
-    omitted: it is the whole test (helper `fn fmt`, `use std::fmt`) and is
-    what made Display::fmt match identity probes whose `when` is
-    `err.is::<MyErr>()`."""
+    Leaf `exercises` or a whole word in `when`. The setup is deliberately
+    omitted: it was the whole test (helper `fn fmt`, `use std::fmt`) until
+    2026-09-29 and is what made Display::fmt match identity probes whose
+    `when` is `err.is::<MyErr>()`; a setup slice still names the bindings a
+    `when` reads, not the unit the Then localizes to."""
     wanted = {n for n in names if n}
     hits = _exercise_leaf_names(spec) & wanted
     hits |= {n for n in wanted if contains_word(spec.when, n)}
@@ -459,7 +466,7 @@ def identity_subject_from_specs(specs: Sequence[BehaviourSpec]) -> str:
     """The identity type the suite's ``when`` texts name, most common."""
     counts: Counter[str] = Counter()
     for spec in _identity_suite(specs):
-        for text in (spec.when, spec.given):
+        for text in (spec.when, spec.setup):
             name = identity_subject_from_when(text)
             if name:
                 counts[name] += 1
@@ -469,7 +476,7 @@ def identity_subject_from_specs(specs: Sequence[BehaviourSpec]) -> str:
     return counts.most_common(1)[0][0]
 
 
-def _coerce_unit(item: IdentityMustInput) -> IdentityMustUnit:
+def coerce_identity_unit(item: IdentityMustInput) -> IdentityMustUnit:
     """``IdentityMustUnit`` as-is; ``FnRecord`` via ``fn_name``/``sig_text``.
 
     A bare name used to become ``IdentityMustUnit(name=str(item))`` with
@@ -534,7 +541,7 @@ def select_identity_must(
     `ok=False`, harvest order within that. Dedupes by `(kind, value, ok)`
     so three `MyErr` probes do not spend the cap. Empty when none match.
     """
-    unit_list = [_coerce_unit(u) for u in units]
+    unit_list = [coerce_identity_unit(u) for u in units]
     constructor_miss = False
     if unit_list:
         subject = identity_subject_from_specs(specs)

@@ -1,7 +1,7 @@
 """Coverage instruction slot: dead body / dead region on the opener, not a section.
 
 Unbound (the walk / virgin-cluster case) every helper returns empty so a
-builder that concatenates this next to identity_must stays byte-identical.
+builder that concatenates this next to behaviour_must stays byte-identical.
 """
 from __future__ import annotations
 
@@ -59,7 +59,7 @@ def test_dead_region_sentence_attaches_to_a_body_that_ran() -> None:
 
 
 def test_plan_line_appends_coverage_must_on_the_instruction_slot() -> None:
-    """Not a tagged evidence section — the same slot identity_must uses."""
+    """Not a tagged evidence section — the same slot behaviour_must uses."""
     bare = BlockFillPlan("impl Error", (), ("construct_from_adhoc",))
     with_cov = BlockFillPlan(
         "impl Error", (), ("construct_from_adhoc",),

@@ -136,7 +136,7 @@ def build_per_fn_prompt(
     container_line = f"In: {container}\n" if container else ""
     recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     identity_part = (
-        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+        f"{sections.behaviour_must}\n\n" if sections.behaviour_must.strip() else "")
     coverage_part = instruction_opener(file_rel, (fn_name,))
     return f"""Implement ONE Rust function so its tests pass.
 
@@ -265,7 +265,7 @@ def build_per_fn_fix_prompt(
     container_line = f"In: {container}\n" if container else ""
     recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
     identity_part = (
-        f"{sections.identity_must}\n\n" if sections.identity_must.strip() else "")
+        f"{sections.behaviour_must}\n\n" if sections.behaviour_must.strip() else "")
     coverage_part = instruction_opener(file_rel, (fn_name,))
     types_block = tag_block("TYPES_IN_SCOPE", types_section)
     # Bound-provided method inventory (see initial builder) — surfaced on

@@ -308,8 +308,7 @@ from pipeline_core.domain.test_report import (
     U2Decision,
     U2TestGate,
     U2Verdict,
-    assess_joint_improvement,
-    parse_test_output,
+    judge_refill,
 )
 from pipeline_core.domain.test_results import (
     REGRESSED_ATTEMPT,
@@ -334,7 +333,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_file_fill_prompt,
     restrict_fill_plan,
 )
-from pipeline_core.prompts.layout_authoring import identity_must_instruction
+from pipeline_core.prompts.layout_authoring import BEHAVIOUR_MUST_MAX_CHARS, behaviour_must_instruction
 from pipeline_core.prompts.per_impl import sibling_rejected_note
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.retry_turn import (
@@ -391,21 +390,6 @@ def escalated_followup_think(grade_on: object) -> bool:
     and stub calls stay on today's no-think followup either way."""
     return bool(grade_on) and followup_think_env_on()
 
-
-def _panic_sites_of(raw: Sequence[str]) -> dict[str, tuple[str, int]]:
-    """test name -> (panic file, panic line) from a raw cargo-test capture.
-
-    The reading the regression gate returns carries names; the sites live only
-    in the text, which `measure_test_state`'s `raw_sink` hands back. Failures
-    that printed no location are absent rather than defaulted — the comparison
-    this feeds treats a missing site as unmeasured, and a sentinel would read
-    as movement."""
-    if not raw:
-        return {}
-    report = parse_test_output(raw[0])
-    return {f.test_name: (f.panic_file, f.panic_line)
-            for f in report.failures
-            if f.panic_file and f.panic_line is not None}
 
 def _audit_reply(
     log: Any, emit: Any, *, cluster: str, unit: str, route: str,
@@ -974,14 +958,15 @@ def prepare_impl_fill(
     # containers of the file, so conviction is container-qualified.
     _homonym_map: dict[tuple[str, str], tuple[str, ...]] = {}
 
-    def _identity_must(*items: IdentityMustInput) -> str:
-        """Identity Then for these units, or "" when the suite names none.
+    def _behaviour_must(*items: IdentityMustInput) -> str:
+        """The behaviour book's instruction for these units (identity MUST
+        and aimed rules), or "" when the book has nothing for them.
 
         Items are :class:`IdentityMustUnit` or :class:`FnRecord`.
         Names-only is the un-aimed path and is not used here —
         Display::fmt would get a MUST it cannot satisfy.
         """
-        return identity_must_instruction(behaviour_specs, units=items)
+        return behaviour_must_instruction(behaviour_specs, units=items)
 
     def _coverage_must(file_rel: str, *names: str) -> str:
         return coverage_must_for(file_rel, names)
@@ -1694,7 +1679,7 @@ def prepare_impl_fill(
             aimed=tuple(i.fn_name for i in _installable
                         if FnLocator(file_rel, i.fn_name) in _aimed_locs),
             bypass=_free_bypass, pins=_union_pins,
-            identity_must=_identity_must(
+            behaviour_must=_behaviour_must(
                 *(_unit_for(i.fn_name) for i in _installable),
                 *(_unit_for(x.fn_name, x.container) for x in _free_bypass)),
             coverage_must=_coverage_must(
@@ -1828,7 +1813,7 @@ def prepare_impl_fill(
             bypass=_bypass_for(b.container),
             pins=_block_pins[_impl_block_id(b.file, b.container)],
             wraps_pinned_type=_block_wraps[_impl_block_id(b.file, b.container)],
-            identity_must=_identity_must(
+            behaviour_must=_behaviour_must(
                 *b.stub_members, *b.refill_members,
                 *(_unit_for(x.fn_name, x.container)
                   for x in _bypass_for(b.container))),
@@ -1846,7 +1831,7 @@ def prepare_impl_fill(
         _extra_plans = [BlockFillPlan(
             _c, (), tuple(x.fn_name for x in _entries),
             bypass=tuple(_entries), pins=_pins_for_bypass(_entries),
-            identity_must=_identity_must(
+            behaviour_must=_behaviour_must(
                 *(_unit_for(x.fn_name, x.container) for x in _entries)),
             coverage_must=_coverage_must(
                 file_rel, *(x.fn_name for x in _entries)))
@@ -2102,15 +2087,9 @@ def prepare_impl_fill(
                 # happens to check right after. None ⇒ crate not
                 # test-runnable now → gate self-disables, verbatim revert
                 # unchanged.
-                _base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env, _base_raw)
+                    tdd_test_cmd, target_src_dir, cluster_env)
                 _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
-                # The pre-fill panic SITES. The reading carries names only, and
-                # without a site the non-regression keep below cannot tell the
-                # correct body from the one that walks downhill — both are red
-                # on the same tests.
-                _base_sites = _panic_sites_of(_base_raw)
                 containers = [b.container for b in fblocks]
                 # Route-only widening: `fblocks` is only this file's
                 # STILL-NEEDS-FILLING blocks, but the model sees the WHOLE file
@@ -2492,11 +2471,7 @@ def prepare_impl_fill(
                 _bank: JointImprovement | None = None
                 _joint: JointImprovement | None = None
                 if _u2_reject and _u2_file is not None and _baseline_test is not None:
-                    _joint = assess_joint_improvement(
-                        frozenset(_file_tests),
-                        _baseline_test.passed_names,
-                        _baseline_test.ignored_names,
-                        _u2_file, _base_sites)
+                    _joint = judge_refill(_file_tests, _baseline_test, _u2_file)
                     _bank = _joint if _joint.banks else None
                     if _joint.site_movement:
                         _log(f"  [phase-c/file] {glabel}: panic sites moved — "
@@ -2535,8 +2510,7 @@ def prepare_impl_fill(
                 # regression the name set cannot see.
                 _nonregr_keep_file = (rc == 0 and _u2_reject
                                       and _joint is not None
-                                      and not _joint.new_failures
-                                      and not _joint.regressed_sites)
+                                      and _joint.non_regression)
                 if _nonregr_keep_file and SameCrashJudge(
                         frozenset(crash_blamed or ()), culprits_of).refuses(
                         output=(_u2_file.capture if _u2_file is not None else ""),
@@ -2554,8 +2528,7 @@ def prepare_impl_fill(
                          + (" (crash-evidenced)" if _file_crash else "")
                          + "; judged at the next sweep in the joint tree.")
                 elif (rc == 0 and _u2_reject
-                        and _joint is not None and not _joint.new_failures
-                        and _joint.regressed_sites):
+                        and _joint is not None and _joint.refused_on_position):
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill REVERTED "
                          "— nothing newly red, but "
                          f"{_joint.site_movement}. Same verdict vector, fewer "
@@ -3402,7 +3375,7 @@ def prepare_impl_fill(
                     crashed_refill_names=_crashed_refill,
                     aimed_refill_names=_aimed_refill,
                     sibling_rejected=_steer.shared,
-                    identity_must=_identity_must(
+                    behaviour_must=_behaviour_must(
                         *block.stub_members, *block.refill_members),
                     own_file=_own_text),
                 fr_path=fr_path,
@@ -3487,11 +3460,9 @@ def prepare_impl_fill(
                 # THIS block is still an `unimplemented!()` stub are already
                 # in the baseline, so filling them green is never mistaken
                 # for a regression.
-                _impl_base_raw: list[str] = []
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env, _impl_base_raw)
+                    tdd_test_cmd, target_src_dir, cluster_env)
                 _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
-                _impl_base_sites = _panic_sites_of(_impl_base_raw)
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
                 # related container. Route by canonical impl-header identity
@@ -3663,13 +3634,11 @@ def prepare_impl_fill(
                 # vanished tests judged by prior state, previously-passing
                 # losses still revert via the regression gate below.
                 _bank_impl: JointImprovement | None = None
+                _joint_impl: JointImprovement | None = None
                 if (_u2_impl_reject and _u2_impl is not None
                         and _baseline_test is not None):
-                    _jb = assess_joint_improvement(
-                        frozenset(_block_tests),
-                        _baseline_test.passed_names,
-                        _baseline_test.ignored_names,
-                        _u2_impl, _impl_base_sites)
+                    _jb = judge_refill(_block_tests, _baseline_test, _u2_impl)
+                    _joint_impl = _jb
                     _bank_impl = _jb if _jb.banks else None
                     if _jb.site_movement:
                         _log(f"  [phase-c/impl] {block_id}: panic sites moved "
@@ -3761,11 +3730,19 @@ def prepare_impl_fill(
                 # at baseline — crash evidence or not. It used to require
                 # crash evidence here, so the same body was kept by the file
                 # route and reverted by this one.
+                # `non_regression` is the file route's bar exactly, panic
+                # sites included (`judge_refill`): an attributed test that
+                # now fails at an earlier line reverts here too.
                 _crash_keep = (
                     rc == 0 and _u2_impl_reject
-                    and _u2_impl is not None and _baseline_test is not None
-                    and not (_u2_impl.self_failures
-                             & _baseline_test.passed_names))
+                    and _joint_impl is not None
+                    and _joint_impl.non_regression)
+                if (rc == 0 and _u2_impl_reject and _joint_impl is not None
+                        and _joint_impl.refused_on_position):
+                    _log(f"  [phase-c/impl] GUARD {block_id}: re-fill REVERTED "
+                         "— nothing newly red, but "
+                         f"{_joint_impl.site_movement}. Same verdict vector, "
+                         "fewer assertions reached: the old bodies were closer.")
                 if _crash_keep and SameCrashJudge(
                         frozenset(crash_blamed or ()), culprits_of).refuses(
                         output=(_u2_impl.capture if _u2_impl is not None else ""),
@@ -3960,7 +3937,11 @@ def prepare_impl_fill(
                 # already cleared this file image against the pre-splice
                 # baseline, so it is a strictly better end state than the stubs
                 # if the loop later exhausts (see `_salvage` restore below).
-                if cur_metric.compiles:
+                # An earlier panic is not a better image than the bodies it
+                # replaced. Salvage would write it back at block exit, which
+                # undoes the revert the keep just took.
+                if cur_metric.compiles and not (
+                        _joint_impl is not None and _joint_impl.refused_on_position):
                     salvage.offer(
                         file_path.read_text(encoding="utf-8", errors="replace"),
                         cur_metric)
@@ -4794,7 +4775,7 @@ def prepare_impl_fill(
                     inferred_refill_names=_pair_ev.inferred_names,
                     crashed_refill_names=_pair_ev.crashed_names,
                     aimed_refill_names=_pair_ev.aimed_names,
-                    identity_must=_identity_must(
+                    behaviour_must=_behaviour_must(
                         *(m for b in (*halves, *_pair_extra)
                           for m in (*b.stub_members, *b.refill_members))),
                     last_error=_err,
@@ -5008,9 +4989,8 @@ def prepare_impl_fill(
             with _splice_check_lock:
                 _snaps = {b.file: capture(target_src_dir / b.file, None)
                           for b in (*halves, *_pair_extra)}
-                _pair_base_raw: list[str] = []
                 _pair_baseline = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env, _pair_base_raw)
+                    tdd_test_cmd, target_src_dir, cluster_env)
                 _pair_hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 _spliced_by_file: dict[str, list[str]] = {}
                 for b, _htxt, _hwc in _half_ctx:
@@ -5191,12 +5171,22 @@ def prepare_impl_fill(
                     # precedes the file-first dispatch).
                     _record_pair_regression(_rcmp, _rdetail)
                     return
-                _pair_nonregr = (
-                    _pair_u2 is not None
-                    and _pair_u2.decision is U2Decision.REJECT
-                    and _pair_baseline is not None
-                    and not (_pair_u2.self_failures
-                             & _pair_baseline.passed_names))
+                # The file route's bar exactly, panic sites included
+                # (`judge_refill`). Run `24951-a72c4642` (2026-09-29) kept a
+                # pair write here on names alone: `test_altdebug` went from
+                # failing at `tests/test_fmt.rs:91` to `:90`, and the earlier
+                # panic cut the implementer the test really reaches out of
+                # the coverage owner map for the rest of the run.
+                _pair_joint = (
+                    judge_refill(_pair_tests, _pair_baseline, _pair_u2)
+                    if (_pair_u2 is not None
+                        and _pair_u2.decision is U2Decision.REJECT
+                        and _pair_baseline is not None) else None)
+                if _pair_joint is not None and _pair_joint.site_movement:
+                    _log(f"  [phase-c/pair] {pair_id}: panic sites moved — "
+                         f"{_pair_joint.site_movement}")
+                _pair_nonregr = (_pair_joint is not None
+                                 and _pair_joint.non_regression)
                 if _pair_nonregr and SameCrashJudge(
                         frozenset(crash_blamed or ()), culprits_of).refuses(
                         output=(_pair_u2.capture if _pair_u2 is not None else ""),
@@ -5216,7 +5206,8 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/pair] GUARD {pair_id}: joint re-fill "
                          f"KEPT on non-regression ({len(_pair_u2.self_failures)} "
                          "convicting test(s) still failing, none passing at "
-                         "baseline) — judged at the next sweep.")
+                         "baseline, none panicking earlier) — judged at the "
+                         "next sweep.")
                 if (_pair_u2 is not None
                         and _pair_u2.decision is U2Decision.REJECT
                         and not _pair_nonregr):
@@ -5494,7 +5485,10 @@ def prepare_impl_fill(
                 # know which slice carries which; over-reserving costs a
                 # little packing, under-reserving a turn 0 over the cap.
                 crash_evidence=crash_evidence_for_units(
-                    crash_evidence or {}, None)))
+                    crash_evidence or {}, None),
+                # The behaviour instruction's bound, for the same reason:
+                # which rules a packed slice carries depends on its units.
+                behaviour_must=" " * BEHAVIOUR_MUST_MAX_CHARS))
             return SliceCosts(file_chars=file_chars, test_chars=test_chars,
                               fixed_chars=fixed, max_chars=max_chars,
                               types_chars=types_chars,
@@ -5706,7 +5700,8 @@ def prepare_impl_fill(
                 file_chars=_sl.file_chars or SESSION_FILE_CHARS,
                 installable=_installable_sites,
                 crash_evidence=crash_evidence_for_units(
-                    crash_evidence or {}, _sl.units))
+                    crash_evidence or {}, _sl.units),
+                behaviour_must=_behaviour_must(*_records.values()))
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:

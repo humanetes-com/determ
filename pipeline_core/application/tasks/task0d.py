@@ -28,7 +28,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSuite, merge_suites
+from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book, feature_files
+from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSuite, example_code, merge_suites
+from pipeline_core.domain.behaviour_book import glossary_entries, private_names
 from pipeline_core.domain.behaviour_census import (
     defect_observable_flags,
     klass_histogram,
@@ -132,13 +134,20 @@ class Task0dDeps:
     # Pin env-moving public Debug via two-world captures (BEHAVIOUR_PIN_ENV_DEBUG).
     # Off restores withdraw-the-mover, harvest-class ranking, and Display-or-Debug asks.
     PIN_ENV_DEBUG: bool = True
+    # The behaviour book's rule calls (BEHAVIOUR_BOOK_* in `.env`):
+    # `rules=False` still builds the glossary and features, with no sentence.
+    BOOK_BUDGET: BookBudget = BookBudget()
+    # (project_dir, cluster, {file name: text}) — the generated, read-only
+    # Gherkin view under `.skeleton/_features_<cluster>/`.
+    write_features: Callable[[Path, str, dict[str, str]], object] = lambda _p, _c, _f: None
 
 
 def _style_example(specs: tuple[BehaviourSpec, ...]) -> str:
-    """One harvested test item, for the prompt's EXAMPLE_USAGES style block."""
+    """One harvested example's code (helpers, setup, when), for the prompt's
+    EXAMPLE_USAGES style block."""
     for s in specs:
-        if is_test_assertion_spec(s) and s.given.strip():
-            return s.given
+        if is_test_assertion_spec(s) and s.setup.strip():
+            return example_code(s)
     return ""
 
 
@@ -325,6 +334,62 @@ def _fill_exercises(
     return out, sum(1 for s in out if s.exercises), cargo_n
 
 
+def _build_book(
+    deps: Task0dDeps,
+    project_dir: Path,
+    module_name: str,
+    cluster: BuildCluster,
+    suite: BehaviourSuite,
+    records: list[FnRecord],
+    mods: list[ModRecord],
+    types: list[TypeRecord],
+    sources: list[tuple[str, str]],
+) -> BehaviourSuite:
+    """Glossary from the original's public records and doc comments, the
+    features over the pass's final examples, rules drafted and checked by the
+    model within `deps.BOOK_BUDGET`; the Gherkin view written beside the
+    suite. Logs the one `behaviour-book:` reading and emits
+    `task0d.behaviour_book`."""
+    files = frozenset(r.file for r in records) | frozenset(t.file for t in types)
+    reachable = externally_reachable_files(mods, files) if mods else None
+    glossary = glossary_entries(
+        records, types, sources, reachable_files=reachable,
+        cfg_set=CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false)))
+    private = private_names(records, types, glossary, suite.specs)
+    book, reading = build_behaviour_book(
+        suite, crate=module_name, glossary=glossary, private=private,
+        ask=deps.ask, budget=deps.BOOK_BUDGET, log=deps.log)
+    deps.write_features(project_dir, cluster.name, feature_files(book))
+    deps.log(f"  [task0d] cluster {cluster.name}: {reading.line()}")
+    deps.emit("task0d.behaviour_book", cluster=cluster.name, **reading.payload())
+    return book
+
+
+def build_book_from_source(
+    deps: Task0dDeps,
+    project_dir: Path,
+    module_name: str,
+    cluster: BuildCluster,
+    suite: BehaviourSuite,
+    src_dir: Path,
+) -> BehaviourSuite:
+    """`_build_book` for a caller that holds the pre-strip source but not
+    t0d's enumerations: the strip bake. The book reads the ORIGINAL public
+    records and doc comments exactly as t0d's pass does (both run before
+    strip), plus the suite; never a post-strip tree.
+
+    Why the bake calls it: `_build_book` was reached only from
+    `run_task0d`, which returns at the augmented check, so a restart from
+    the augmented tag re-harvested the suite in the bake and never wrote a
+    book (run `273278-22529e44`, 2026-09-29: format 2, 227 specs,
+    `features` 0, `glossary` 0)."""
+    records = list(deps.enumerate_fns(src_dir) or [])
+    mods = list(deps.enumerate_mods(src_dir) or [])
+    types = list(deps.enumerate_types(src_dir) or [])
+    return _build_book(deps, project_dir, module_name, cluster, suite,
+                       records, mods, types, deps.read_sources(src_dir))
+
+
 def _reading_line(
     cluster: str,
     suite: BehaviourSuite,
@@ -388,7 +453,12 @@ def run_task0d(
             deps.log(f"  [task0d] cluster {cluster.name}: harvest FAILED: {e} — phase left open.")
             deps.mark_phase(project_dir, key, "failed", detail=str(e)[:200])
             continue
-        suite = merge_suites(deps.load_suite(project_dir, cluster.name), harvested)
+        earlier = deps.load_suite(project_dir, cluster.name)
+        if earlier.is_legacy and earlier.specs:
+            deps.log(f"  [task0d] cluster {cluster.name}: discarding the format-"
+                     f"{earlier.format_version} suite on disk ({len(earlier.specs)} "
+                     f"spec(s)) — re-baked in the current format, never converted.")
+        suite = merge_suites(earlier, harvested)
         records: list[FnRecord] = []
         mods: list[ModRecord] = []
         types: list[TypeRecord] = []
@@ -417,7 +487,7 @@ def run_task0d(
             try:
                 specs, filled, ex_cargo = _fill_exercises(deps, project_dir, cluster, suite.specs, records)
                 cargo_n += ex_cargo
-                suite = BehaviourSuite(cfg_cluster=cluster.name, specs=specs)
+                suite = suite.with_specs(specs)
             except Exception as e:
                 deps.log(f"  [task0d] cluster {cluster.name}: exercises failed (non-fatal, harvested suite kept): {e}")
         # Captures become REAL tests here, or they stay notes about the crate.
@@ -452,9 +522,7 @@ def run_task0d(
             misses.extend(emit_misses)
             if withdrawn:
                 dropped = set(withdrawn)
-                suite = BehaviourSuite(
-                    cfg_cluster=cluster.name, specs=tuple(s for s in suite.specs if s.behaviour_id not in dropped)
-                )
+                suite = suite.with_specs(s for s in suite.specs if s.behaviour_id not in dropped)
                 # Only THIS pass's captures count against this pass's
                 # reading; the emitter also withdraws specs merged in from a
                 # previous pass's suite.
@@ -463,9 +531,19 @@ def run_task0d(
                 by_id = {s.behaviour_id: s for s in suite.specs}
                 for spec in emitted:
                     by_id[spec.behaviour_id] = spec
-                suite = BehaviourSuite(cfg_cluster=cluster.name, specs=tuple(by_id[k] for k in sorted(by_id)))
+                suite = suite.with_specs(by_id[k] for k in sorted(by_id))
         except Exception as e:
             deps.log(f"  [task0d] cluster {cluster.name}: behaviour-test emission failed (non-fatal, suite kept): {e}")
+        # The book last: its features group the pass's FINAL examples, and a
+        # rule citing a capture the emitter withdrew would cite nothing.
+        # Additive like every stage after the harvest: a failure keeps the
+        # suite without a book, and says so.
+        try:
+            suite = _build_book(deps, project_dir, module_name, cluster, suite,
+                                records, mods, types, sources)
+        except Exception as e:
+            deps.log(f"  [task0d] cluster {cluster.name}: behaviour book failed "
+                     f"(non-fatal, suite kept without rules): {e}")
         deps.save_suite(project_dir, suite)
         # Written on every pass, empty list included: the file states what THIS
         # pass could not capture, so leaving the previous pass's file in place

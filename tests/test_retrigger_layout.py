@@ -61,7 +61,7 @@ def _suite_with_pin():
     # references it directly) so it needs a pin to be authorable at all.
     return BehaviourSuite(cfg_cluster="stable", specs=(
         BehaviourSpec(
-            behaviour_id="static::repr::0", given="", when="size_of",
+            behaviour_id="static::repr::0", setup="", when="size_of",
             then=ObservableOutcome.static_assertion(
                 StaticAssertKind.SIZE,
                 "assert_eq!(size_of::<Error>(), size_of::<ErrorImpl>())"),

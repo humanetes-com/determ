@@ -179,7 +179,7 @@ def _lib_specs() -> list[BehaviourSpec]:
 
 def _identity_spec() -> SimpleNamespace:
     then = SimpleNamespace(kind=SimpleNamespace(name="TYPE_IDENTITY"), value="MathError", ok=True)
-    return SimpleNamespace(behaviour_id="identity::math_error", given="", when="", then=then,
+    return SimpleNamespace(behaviour_id="identity::math_error", setup="", via="", rules=(), helpers=(), when="", then=then,
                            exercises=frozenset())
 
 

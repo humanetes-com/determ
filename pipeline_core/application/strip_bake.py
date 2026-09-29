@@ -82,6 +82,13 @@ class BakeArtifactsDeps:
     # wins) instead of overwriting. Default: nothing earlier (a fresh bake).
     load_behaviour_suite: Callable[[Path, str], BehaviourSuite] = (
         lambda _p, c: BehaviourSuite(cfg_cluster=c))
+    # The behaviour book (glossary, features, rules) over the merged suite,
+    # from the pre-strip source: `(project_dir, module, cluster, suite,
+    # src_dir) -> suite`. Called when the merged suite has no book — the
+    # augmented restart, whose t0d pass returns before its own book stage.
+    # None: no book (the suite is saved without rules, as before).
+    build_book: Callable[[Path, str, BuildCluster, BehaviourSuite, Path],
+                         BehaviourSuite] | None = None
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
@@ -276,13 +283,36 @@ def bake_skeleton_artifacts(
             # probe/exercises data only t0d has is kept (existing wins).
             earlier = d.load_behaviour_suite(project_dir, cluster.name)
             merged = merge_suites(earlier, suite)
+            if earlier.is_legacy and earlier.specs:
+                _kept = sum(1 for s in merged.specs
+                            if s.behaviour_id not in
+                            {x.behaviour_id for x in suite.specs})
+                d.log(f"  [bake-skeleton] cluster {cluster.name}: the format-"
+                      f"{earlier.format_version} suite on disk "
+                      f"({len(earlier.specs)} spec(s)) is re-harvested in the "
+                      f"current format; {_kept} probe row(s) the harvest "
+                      "cannot re-measure are kept.")
+            # The book, when the suite on disk has none: an augmented
+            # restart's t0d returns before its own book stage, so this bake
+            # is the only stage that sees the pre-strip source and the suite
+            # together. Additive: a failure keeps the suite without rules.
+            if (merged.specs and not merged.features
+                    and d.build_book is not None):
+                try:
+                    merged = d.build_book(project_dir, module_name, cluster,
+                                          merged, src_dir)
+                except Exception as e:
+                    d.log(f"  [bake-skeleton] cluster {cluster.name}: "
+                          f"behaviour book failed (non-fatal, suite kept "
+                          f"without rules): {e}")
             if merged.specs:
                 d.save_behaviour_suite(project_dir, merged)
                 d.log(f"  [bake-skeleton] cluster {cluster.name}: harvested "
                       f"{len(suite.specs)} behaviour(s), {len(earlier.specs)} "
                       f"already on disk from an earlier phase → "
                       f"{len(merged.specs)} in "
-                      f".skeleton/_behaviours_{cluster.name}.json")
+                      f".skeleton/_behaviours_{cluster.name}.json "
+                      f"({len(merged.features)} feature(s))")
         except Exception as e:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: behaviour harvest "
                   f"failed (non-fatal): {e}")

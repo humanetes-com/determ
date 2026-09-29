@@ -20,7 +20,7 @@ capturing; this module only names the language and enforces its invariants.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import Any
@@ -225,6 +225,52 @@ class ObservableOutcome:
         )
 
 
+_TRUE_WORDS = frozenset({"true", "some", "ok", "yes"})
+_FALSE_WORDS = frozenset({"false", "none", "err", "no"})
+
+
+def outcome_matches(observed: str, then: ObservableOutcome) -> bool:
+    """Does the text `observed` (a checker's predicted Then, or a capture)
+    satisfy `then` under the oracle's own comparison?
+
+    TYPE_IDENTITY / DOWNCAST_OK: the text is a truth word (`true`/`false`,
+    `Some`/`None`) equal to `ok`. CHAIN_SEQUENCE: one element per line, equal
+    in order. A `prefix` Then: the observation STARTS WITH the value and is
+    strictly longer — the same two assertions `render_replay_test` emits for
+    a replay, so a text this function accepts is a text the replay accepts.
+    Everything else: equal after dropping one trailing newline (what
+    `println!` adds). STATIC_ASSERTION is compile-time and matches nothing."""
+    text = observed[:-1] if observed.endswith("\n") else observed
+    kind = then.kind
+    if kind is OutcomeKind.STATIC_ASSERTION:
+        return False
+    if kind in (OutcomeKind.TYPE_IDENTITY, OutcomeKind.DOWNCAST_OK):
+        word = text.strip().strip("`").lower()
+        if word in _TRUE_WORDS:
+            return then.ok
+        if word in _FALSE_WORDS:
+            return not then.ok
+        return False
+    if kind is OutcomeKind.CHAIN_SEQUENCE:
+        return tuple(ln for ln in text.split("\n")) == then.chain
+    if then.prefix:
+        return text.startswith(then.value) and len(text) > len(then.value)
+    return text == then.value
+
+
+def then_value_text(then: ObservableOutcome) -> str:
+    """The Then as the text a reader (or a checker) is asked to produce: a
+    truth word for an identity or downcast, one element per line for a
+    chain, the value otherwise."""
+    if then.kind in (OutcomeKind.TYPE_IDENTITY, OutcomeKind.DOWNCAST_OK):
+        return "true" if then.ok else "false"
+    if then.kind is OutcomeKind.CHAIN_SEQUENCE:
+        return "\n".join(then.chain)
+    if then.kind is OutcomeKind.STATIC_ASSERTION:
+        return then.static_expr
+    return then.value
+
+
 class BehaviourProvenance(Enum):
     """Where a behaviour came from. HARVESTED = lifted verbatim from the real
     lib's doc-tests/examples/tests (zero hallucination). SYNTHESIZED = authored
@@ -296,16 +342,136 @@ class BehaviourClass(Enum):
     OTHER = auto()
 
 
+class OriginKind(Enum):
+    """What an example was lifted from."""
+
+    TEST = auto()  # one assertion of a `#[test]` item in `tests/`
+    DOCTEST = auto()  # one runnable doc-comment fence
+    STATIC_PIN = auto()  # a compile-time layout fact (doc fence or test file)
+    PROBE = auto()  # a model-authored capture run against the original
+
+
+@dataclass(frozen=True, slots=True)
+class ExampleOrigin:
+    """Where one example came from, typed. `file` is the source file; `name`
+    the test fn (TEST) or probe unit (PROBE); `index` the assertion number
+    within the test, the doc fence's line, or the pin's ordinal."""
+
+    kind: OriginKind
+    file: str = ""
+    name: str = ""
+    index: int = 0
+
+    @property
+    def key(self) -> str:
+        """The item this example belongs to: `file::test` for a test
+        assertion, `file:line` for a doc fence, `probe::unit` for a probe."""
+        if self.kind is OriginKind.TEST:
+            return f"{self.file}::{self.name}"
+        if self.kind is OriginKind.PROBE:
+            return f"probe::{self.name}"
+        if self.kind is OriginKind.STATIC_PIN:
+            return f"{self.file}:{self.name}" if self.name else self.file
+        return f"{self.file}:{self.index}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind.name, "file": self.file, "name": self.name, "index": self.index}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ExampleOrigin:
+        return cls(
+            kind=OriginKind[str(d["kind"])],
+            file=str(d.get("file", "")),
+            name=str(d.get("name", "")),
+            index=int(d.get("index", 0) or 0),
+        )
+
+    @classmethod
+    def from_behaviour_id(cls, bid: str) -> ExampleOrigin | None:
+        """The origin a legacy (format 1) id spells, or None. Ids are
+        `testassert::<file>::<test>::<i>`, `doctest::<file>::<line>`,
+        `static::<file>[::<line>]::<i>`, `probe::<cluster>::<unit>::<n>`."""
+        parts = bid.split("::")
+        head = parts[0] if parts else ""
+        try:
+            if head == "testassert" and len(parts) == 4:
+                return cls(OriginKind.TEST, parts[1], parts[2], int(parts[3]))
+            if head == "doctest" and len(parts) == 3:
+                return cls(OriginKind.DOCTEST, parts[1], "", int(parts[2]))
+            if head == "static" and len(parts) == 3:
+                return cls(OriginKind.STATIC_PIN, parts[1], "", int(parts[2]))
+            if head == "static" and len(parts) == 4:
+                return cls(OriginKind.STATIC_PIN, parts[1], parts[2], int(parts[3]))
+            if head == "probe" and len(parts) == 4:
+                return cls(OriginKind.PROBE, "", parts[2], int(parts[3]))
+        except ValueError:
+            return None
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class Rule:
+    """One sentence stating the observable invariant a set of examples
+    illustrates, in the crate's public vocabulary (the glossary). Authored at
+    t0d from the examples and the public docs, and KEPT only when a checker
+    given the sentence predicts every cited example's Then while the same
+    checker without it does not (`domain/behaviour_book.py`).
+
+    `terms` are the glossary names the sentence uses (computed, never
+    authored); `feature` is the public item the rule's examples are grouped
+    under. Neither names a private item: a sentence that did was dropped."""
+
+    rule_id: str
+    sentence: str
+    example_ids: tuple[str, ...]
+    feature: str
+    terms: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "rule_id": self.rule_id,
+            "sentence": self.sentence,
+            "example_ids": list(self.example_ids),
+            "feature": self.feature,
+            "terms": list(self.terms),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Rule:
+        return cls(
+            rule_id=str(d["rule_id"]),
+            sentence=str(d["sentence"]),
+            example_ids=tuple(str(x) for x in (d.get("example_ids") or [])),
+            feature=str(d.get("feature", "")),
+            terms=tuple(str(x) for x in (d.get("terms") or [])),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class BehaviourSpec:
-    """One frozen Given/When/Then over the public API. ``exercises`` (the set of
-    unit ids the behaviour touches, from return-type + construction token-scan)
-    is the localizer a mismatch escalates through: a diverging behaviour names
-    the fns that produced it, so the escalation targets bodies rather than the
-    whole crate."""
+    """One EXAMPLE: a frozen setup / when / then over the public API.
+    ``exercises`` (the set of unit ids the example executes, from coverage of
+    the original) is the localizer a mismatch escalates through: a diverging
+    behaviour names the fns that produced it, so the escalation targets bodies
+    rather than the whole crate.
+
+    ``setup`` is what ``when`` needs and nothing else. For a test assertion it
+    is the def-use slice of the test item before the assertion
+    (`domain/example_setup.py`), never the whole item; for a probe it is the
+    model's setup statements; a doc fence and a layout pin carry their whole
+    program in ``when``. ``helper_keys`` name the file-level items of the test
+    file the example calls (`bail_literal`, `f`, the asserting helper), stored
+    ONCE in :attr:`BehaviourSuite.helpers`; ``helpers`` is their text, filled
+    by the suite on load and never serialized per example. ``via`` is the
+    asserting helper the test routes the literal through (`assert_err`), so a
+    reader knows the Then is what that helper compares, not ``when`` itself.
+    ``rules`` are the kept rules citing this example, attached by the suite.
+
+    Every reader that wants "the code this example runs" calls
+    :func:`example_code`; nothing re-derives it."""
 
     behaviour_id: str
-    given: str  # PublicApiSetup — setup code
+    setup: str  # the statements `when` needs (see above)
     when: str  # PublicApiAction — the exercised call
     then: ObservableOutcome | None = None  # None for ASSERTION (the assert IS the Then)
     exercises: frozenset[str] = frozenset()
@@ -318,10 +484,15 @@ class BehaviourSpec:
     # Env the replay must run under. Empty = the value does not move with
     # OBSERVABLE_ENV_KEYS (verified under both the capture env and the
     # perturb). Non-empty is load-bearing: render_replay_test writes set_var
-    # from it before given, and the emitter verifies that test only as a pin
-    # of that world. A previous capture_env field was write-only and caught
-    # nothing; this one is consumed at render and at verify.
+    # from it before the setup, and the emitter verifies that test only as a
+    # pin of that world. A previous capture_env field was write-only and
+    # caught nothing; this one is consumed at render and at verify.
     required_env: tuple[tuple[str, str], ...] = ()
+    origin: ExampleOrigin | None = None
+    via: str = ""
+    helper_keys: tuple[str, ...] = ()
+    helpers: tuple[str, ...] = field(default=(), compare=False)
+    rules: tuple[Rule, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,
@@ -351,7 +522,7 @@ class BehaviourSpec:
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
             "behaviour_id": self.behaviour_id,
-            "given": self.given,
+            "setup": self.setup,
             "when": self.when,
             "then": self.then.to_dict() if self.then else None,
             "exercises": sorted(self.exercises),
@@ -364,18 +535,35 @@ class BehaviourSpec:
         }
         if self.required_env:
             d["required_env"] = dict(self.required_env)
+        if self.origin is not None:
+            d["origin"] = self.origin.to_dict()
+        if self.via:
+            d["via"] = self.via
+        if self.helper_keys:
+            d["helper_keys"] = list(self.helper_keys)
         return d
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> BehaviourSpec:
+    def from_dict(cls, d: dict[str, Any], *, legacy: bool = False) -> BehaviourSpec:
+        """`legacy` reads a format-1 row: its `given` (the whole test item for
+        a test assertion) becomes `setup` unchanged, and the origin is parsed
+        from the id. A legacy store is read so a tree baked before format 2
+        keeps working as it did; it is never written back in that shape."""
         raw_env = d.get("required_env") or ()
         if isinstance(raw_env, dict):
             required_env = tuple(sorted((str(k), str(v)) for k, v in raw_env.items()))
         else:
             required_env = tuple((str(a), str(b)) for a, b in raw_env)
+        bid = str(d["behaviour_id"])
+        origin_raw = d.get("origin")
+        if isinstance(origin_raw, dict):
+            origin: ExampleOrigin | None = ExampleOrigin.from_dict(origin_raw)
+        else:
+            origin = ExampleOrigin.from_behaviour_id(bid) if legacy else None
+        setup = str(d.get("given", "")) if legacy else str(d.get("setup", ""))
         return cls(
-            behaviour_id=str(d["behaviour_id"]),
-            given=str(d.get("given", "")),
+            behaviour_id=bid,
+            setup=setup,
             when=str(d.get("when", "")),
             then=(ObservableOutcome.from_dict(d["then"]) if d.get("then") is not None else None),
             exercises=frozenset(str(x) for x in (d.get("exercises") or [])),
@@ -386,7 +574,27 @@ class BehaviourSpec:
             source_ref=str(d.get("source_ref", "")),
             klass=BehaviourClass[str(d.get("klass", "OTHER"))],
             required_env=required_env,
+            origin=origin,
+            via=str(d.get("via", "")),
+            helper_keys=tuple(str(x) for x in (d.get("helper_keys") or [])),
         )
+
+
+def example_when(spec: BehaviourSpec) -> str:
+    """The when as a reader should see it: routed through the asserting
+    helper when there is one (`assert_err(test, …)` — the Then is what the
+    helper compares), else the expression itself."""
+    when = spec.when.strip()
+    return f"{spec.via}({when}, …)" if spec.via else when
+
+
+def example_code(spec: BehaviourSpec) -> str:
+    """Everything an example runs, as one text: the test-file helpers it
+    calls, its setup, its when. The one accessor every reader that matches
+    names against an example, or shows one, goes through — so no reader
+    reaches for a whole test item again."""
+    parts = [*spec.helpers, spec.setup, spec.when]
+    return "\n".join(p for p in (x.strip() for x in parts) if p)
 
 
 # --- classification ---------------------------------------------------------
@@ -526,9 +734,10 @@ def classify_behaviour(
     3. `when` has `.is_none()`/`.is_some()`, or the Then value is `None` /
        starts with `Some(`                    → OPTION_SEMANTICS
     4. DISPLAY / DEBUG / ALT_DEBUG            → BOUNDED_RESOURCE when the test
-       item text (`given`) carries a resource boundary
+       example's code (:func:`example_code` — its helpers, setup and
+       when, never the whole test item) carries a resource boundary
        (:func:`has_resource_boundary`), else EXACT_FORMAT
-    5. cfg_cluster ≠ `default_cluster` AND the given/when text carries a cfg
+    5. cfg_cluster ≠ `default_cluster` AND the example's code carries a cfg
        gate (`#[cfg(`, `cfg!(`, `#[rustversion`) → CFG_WORLD
     6. otherwise OTHER.
 
@@ -548,11 +757,11 @@ def classify_behaviour(
     ):
         return BehaviourClass.OPTION_SEMANTICS
     if then is not None and then.kind in FORMAT_OUTCOME_KINDS:
-        if has_resource_boundary(spec.given):
+        if has_resource_boundary(example_code(spec)):
             return BehaviourClass.BOUNDED_RESOURCE
         return BehaviourClass.EXACT_FORMAT
     if spec.cfg_cluster != default_cluster:
-        text = spec.given + "\n" + spec.when
+        text = example_code(spec)
         if any(m in text for m in _CFG_GATE_MARKERS):
             return BehaviourClass.CFG_WORLD
     return BehaviourClass.OTHER
@@ -563,26 +772,161 @@ def classified(spec: BehaviourSpec, *, default_cluster: str = "default") -> Beha
     return replace(spec, klass=classify_behaviour(spec, default_cluster=default_cluster))
 
 
+# The store's shape. 1 (no `format` key) held the whole test item in every
+# example's `given`; 2 holds the setup slice, the typed origin, the test-file
+# helpers once per suite, and the behaviour book (features, rules, glossary).
+SUITE_FORMAT = 2
+
+
+@dataclass(frozen=True, slots=True)
+class GlossaryEntry:
+    """One public name of the crate and the first sentence of its doc
+    comment: the vocabulary rules are written in. `kind` is `fn`, `macro`,
+    `struct`, `enum`, `trait` or `type`; `name` is how a user spells it
+    (`Error::msg`, `ensure!`, `Context::context`, `Error`)."""
+
+    name: str
+    kind: str
+    summary: str = ""
+
+    @property
+    def leaf(self) -> str:
+        """The name a call site spells: the last `::` segment, `!` dropped."""
+        return self.name.rsplit("::", 1)[-1].rstrip("!")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "kind": self.kind, "summary": self.summary}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> GlossaryEntry:
+        return cls(name=str(d["name"]), kind=str(d.get("kind", "")), summary=str(d.get("summary", "")))
+
+
+@dataclass(frozen=True, slots=True)
+class Feature:
+    """A public item and the examples grouped under it
+    (`behaviour_book.group_features`), plus the rules kept for it."""
+
+    item: str
+    kind: str
+    example_ids: tuple[str, ...]
+    rules: tuple[Rule, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "item": self.item,
+            "kind": self.kind,
+            "example_ids": list(self.example_ids),
+            "rules": [r.to_dict() for r in self.rules],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Feature:
+        return cls(
+            item=str(d["item"]),
+            kind=str(d.get("kind", "")),
+            example_ids=tuple(str(x) for x in (d.get("example_ids") or [])),
+            rules=tuple(Rule.from_dict(r) for r in (d.get("rules") or [])),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class BehaviourSuite:
-    """Every behaviour for one cfg-cluster (nightly ≠ stable — Hard Rule 8)."""
+    """Every example for one cfg-cluster (nightly ≠ stable — Hard Rule 8), the
+    test-file helpers they call (stored once, keyed `file::name`), and the
+    behaviour book built over them: features, their rules, the glossary.
+
+    ``specs`` as constructed or loaded carry their ``helpers`` and ``rules``
+    resolved from the suite's tables (:meth:`resolved`), so a reader holding
+    only the specs has both."""
 
     cfg_cluster: str
     specs: tuple[BehaviourSpec, ...] = field(default_factory=tuple)
+    helpers: tuple[tuple[str, str], ...] = ()
+    features: tuple[Feature, ...] = ()
+    glossary: tuple[GlossaryEntry, ...] = ()
+    format_version: int = SUITE_FORMAT
+
+    def __post_init__(self) -> None:
+        # The table is the union of what was handed in and what the specs
+        # carry: a suite rebuilt from specs alone (`BehaviourSuite(c, specs)`)
+        # must not lose the helper text on save.
+        table = {k: t for s in self.specs for k, t in zip(s.helper_keys, s.helpers, strict=False)}
+        table.update(dict(self.helpers))
+        object.__setattr__(self, "helpers", tuple(sorted(table.items())))
+        object.__setattr__(self, "specs", _resolve(self.specs, table, self.features))
 
     @property
     def positive_oracle_specs(self) -> tuple[BehaviourSpec, ...]:
         return tuple(s for s in self.specs if s.is_positive_oracle)
 
+    @property
+    def rules(self) -> tuple[Rule, ...]:
+        return tuple(r for f in self.features for r in f.rules)
+
+    @property
+    def is_legacy(self) -> bool:
+        return self.format_version < SUITE_FORMAT
+
+    def with_specs(self, specs: Iterable[BehaviourSpec]) -> BehaviourSuite:
+        """The same suite over `specs` (helpers, book and format kept)."""
+        return replace(self, specs=tuple(specs))
+
     def to_dict(self) -> dict[str, Any]:
-        return {"cfg_cluster": self.cfg_cluster, "specs": [s.to_dict() for s in self.specs]}
+        used = {k for s in self.specs for k in s.helper_keys}
+        return {
+            "format": self.format_version,
+            "cfg_cluster": self.cfg_cluster,
+            "specs": [s.to_dict() for s in self.specs],
+            "helpers": {k: v for k, v in sorted(self.helpers) if k in used},
+            "features": [f.to_dict() for f in self.features],
+            "glossary": [g.to_dict() for g in self.glossary],
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> BehaviourSuite:
+        version = int(d.get("format", 1) or 1)
+        legacy = version < SUITE_FORMAT
+        raw_helpers = d.get("helpers") or {}
         return cls(
             cfg_cluster=str(d.get("cfg_cluster", "default")),
-            specs=tuple(BehaviourSpec.from_dict(x) for x in (d.get("specs") or [])),
+            specs=tuple(BehaviourSpec.from_dict(x, legacy=legacy) for x in (d.get("specs") or [])),
+            helpers=tuple(sorted((str(k), str(v)) for k, v in raw_helpers.items())),
+            features=tuple(Feature.from_dict(f) for f in (d.get("features") or [])),
+            glossary=tuple(GlossaryEntry.from_dict(g) for g in (d.get("glossary") or [])),
+            format_version=version,
         )
+
+
+def _resolve(
+    specs: Sequence[BehaviourSpec], helpers: dict[str, str], features: Sequence[Feature],
+) -> tuple[BehaviourSpec, ...]:
+    """`specs` with `helpers` (text of their helper keys) and `rules` (the
+    kept rules citing them — the book's word, so a suite without features
+    attaches none) attached. Idempotent."""
+    by_example: dict[str, list[Rule]] = {}
+    for f in features:
+        for r in f.rules:
+            for eid in r.example_ids:
+                by_example.setdefault(eid, []).append(r)
+    out: list[BehaviourSpec] = []
+    for s in specs:
+        texts = tuple(helpers[k] for k in s.helper_keys if k in helpers) or s.helpers
+        rules = tuple(by_example.get(s.behaviour_id, ()))
+        if texts == s.helpers and rules == s.rules:
+            out.append(s)
+        else:
+            out.append(replace(s, helpers=texts, rules=rules))
+    return tuple(out)
+
+
+PROBE_ID_PREFIX = "probe::"
+
+
+def is_probe_id(behaviour_id: str) -> bool:
+    """A probe row: a program t0d ran on the ORIGINAL crate, its stdout
+    recorded as the Then."""
+    return behaviour_id.startswith(PROBE_ID_PREFIX)
 
 
 def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> BehaviourSuite:
@@ -591,12 +935,39 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
     overwrites a richer suite a prior phase (t0d) wrote: ids are deterministic
     per source, so a same-id spec from a later harvest of the same text is the
     same spec, and a spec only the earlier writer could produce (a probe with
-    a recorded stdout, an `exercises` set filled by coverage) survives."""
+    a recorded stdout, an `exercises` set filled by coverage) survives.
+
+    A legacy (format 1) `existing` is not a richer suite, it is an older
+    shape: its test-assertion rows carry the whole test item as setup, and
+    letting them win would keep that shape forever. Those rows are discarded
+    and re-harvested, never converted. Its PROBE rows are kept: their Thens
+    were printed by the original crate before strip, no later harvest can
+    re-measure them, and their shape did not change. Run `273278-22529e44`
+    (2026-09-29): an augmented restart's bake read the format-1 store, the
+    whole-store discard dropped its four probe rows (`231 already on disk
+    → 227`), and the rows were gone for good.
+    The helpers tables union (same key, same test file text); the book is the
+    existing one when it has features, else the incoming one's."""
+    if existing.is_legacy:
+        kept = {s.behaviour_id: s for s in existing.specs
+                if is_probe_id(s.behaviour_id)}
+        if not kept:
+            return incoming
+        for s in incoming.specs:
+            kept[s.behaviour_id] = s
+        return replace(incoming, specs=tuple(kept[k] for k in sorted(kept)))
     by_id: dict[str, BehaviourSpec] = {s.behaviour_id: s for s in existing.specs}
     for s in incoming.specs:
         by_id.setdefault(s.behaviour_id, s)
+    helpers = dict(incoming.helpers)
+    helpers.update(dict(existing.helpers))
+    has_book = bool(existing.features or existing.glossary)
     return BehaviourSuite(
-        cfg_cluster=incoming.cfg_cluster or existing.cfg_cluster, specs=tuple(by_id[k] for k in sorted(by_id))
+        cfg_cluster=incoming.cfg_cluster or existing.cfg_cluster,
+        specs=tuple(by_id[k] for k in sorted(by_id)),
+        helpers=tuple(sorted(helpers.items())),
+        features=existing.features if has_book else incoming.features,
+        glossary=existing.glossary if has_book else incoming.glossary,
     )
 
 

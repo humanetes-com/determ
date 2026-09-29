@@ -415,7 +415,7 @@ def instruction_opener(file_rel: str, names: Iterable[str]) -> str:
     """The same sentences as a prompt-opener paragraph, or empty.
 
     Unbound (or a unit the reading does not name) returns "" so a builder
-    that concatenates this next to `identity_must` stays byte-identical
+    that concatenates this next to `behaviour_must` stays byte-identical
     to a call that never knew about coverage.
     """
     text = instructions_for(file_rel, names)

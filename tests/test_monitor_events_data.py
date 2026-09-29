@@ -650,3 +650,27 @@ def test_cut_rate_reading_excludes_bookkeeping_rows(tmp_path, monkeypatch):
     _patch(monkeypatch, ev)
     got = ed.cut_rate_reading(CutStopKnobs())
     assert got.marks == () and got.seen == 0
+
+
+def test_fill_reading_sets_the_next_sweep_pass_and_a_sweep_clears_it(tmp_path) -> None:
+    """A regressed reading is a reverted keep and is ignored; the sweep's own
+    iter event resets the value to the sweep's measurement."""
+    import json
+
+    from pipeline_core.monitor import events_data as ed
+    log = tmp_path / "events.jsonl"
+    evs = [
+        {"ts": "2026-09-29T05:00:00+00:00", "run_id": "r", "event": "phase_c.tdd.iter",
+         "cluster": "stable", "iter": 1, "pass": 175},
+        {"ts": "2026-09-29T05:30:00+00:00", "run_id": "r",
+         "event": "phase_c.fill.reading", "pass_count": 182, "regressed": False},
+        {"ts": "2026-09-29T05:40:00+00:00", "run_id": "r",
+         "event": "phase_c.fill.reading", "pass_count": 181, "regressed": True},
+    ]
+    log.write_text("\n".join(json.dumps(e) for e in evs) + "\n")
+    ed.configure(events_log=str(log))
+    assert ed.phase_c_state()["tdd_fill_pass"] == 182
+    evs.append({"ts": "2026-09-29T06:30:00+00:00", "run_id": "r",
+                "event": "phase_c.tdd.iter", "cluster": "stable", "iter": 2, "pass": 182})
+    log.write_text("\n".join(json.dumps(e) for e in evs) + "\n")
+    assert ed.phase_c_state()["tdd_fill_pass"] is None

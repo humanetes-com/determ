@@ -263,3 +263,125 @@ def test_negative_control_the_instruction_alone_carries_no_measurement(
     last_error = first.split("<LAST_ERROR>", 1)[1].split("</LAST_ERROR>", 1)[0]
     assert "panicked at" not in last_error
     assert _OBSERVED not in last_error
+
+
+# --- where a failing test stopped: the assertion position ------------------
+#
+# Run `273278-22529e44` (2026-09-29, cluster `stable`): the earlier-panic
+# judgment ordered raw panic lines in any file; every site on that tree was a
+# `src/` stub, and a fill that let tests reach a stub declared earlier in the
+# same file was graded a regression. A position now exists only when the
+# panic is a line of the failing test's own body in its binary's own file
+# (`assertion_positions`). What that rests on in the real toolchain: libtest
+# prints the panic path relative to the package root exactly as cargo labels
+# the integration binary, and a `#[track_caller]` helper reports its caller's
+# line while a plain helper and a closure report their own.
+
+_POS_LIB = """pub fn early() -> u8 {
+    unimplemented!()
+}
+
+pub fn late() -> u8 {
+    early()
+}
+"""
+_POS_TESTS = """use pos::late;
+
+fn plain_helper(v: u8) {
+    assert_eq!(v, 1);
+}
+
+#[track_caller]
+fn caller_helper(v: u8) {
+    assert_eq!(v, 1);
+}
+
+#[test]
+fn direct() {
+    assert_eq!(1, 1);
+    assert_eq!(2, 3);
+}
+
+#[test]
+fn via_plain() {
+    plain_helper(2);
+}
+
+#[test]
+fn via_caller() {
+    caller_helper(2);
+}
+
+#[test]
+fn via_closure() {
+    let check = |v: u8| assert_eq!(v, 1);
+    check(2);
+}
+
+#[test]
+fn via_stub() {
+    assert_eq!(late(), 1);
+}
+"""
+_POS_OTHER = """#[test]
+fn direct() {
+    assert!(false);
+}
+"""
+
+
+def _pos_crate(tmp_path: Path) -> Path:
+    root = tmp_path / "pos"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(
+        '[package]\nname = "pos"\nversion = "0.1.0"\nedition = "2021"\n')
+    (root / "src" / "lib.rs").write_text(_POS_LIB)
+    (root / "tests" / "a.rs").write_text(_POS_TESTS)
+    (root / "tests" / "b.rs").write_text(_POS_OTHER)
+    return root
+
+
+def test_premise_libtest_prints_the_panic_path_as_cargo_labels_the_binary(
+        tmp_path: Path) -> None:
+    """The position reader matches the panic path to the `Running` label;
+    if cargo or libtest ever print either differently, positions vanish
+    and every earlier-assertion judgment goes silent."""
+    from pipeline_core.domain.test_report import parse_test_output
+    from pipeline_core.domain.test_results import binary_output_sections
+    root = _pos_crate(tmp_path)
+    _rc, out = _cargo("cargo test --offline --no-fail-fast", root, _env(root))
+    by_label = {s.label: parse_test_output(s.text) for s in
+                binary_output_sections(out)}
+    a = {f.test_name: f for f in by_label["tests/a.rs"].failures}
+    assert a["direct"].panic_file == "tests/a.rs", out
+    assert a["direct"].panic_line == 15
+    assert a["via_caller"].panic_line == 25          # the caller's line
+    assert a["via_plain"].panic_line == 4            # the helper's own line
+    assert a["via_stub"].panic_file == "src/lib.rs"
+
+
+def test_a_position_exists_only_inside_the_failing_tests_own_body(
+        tmp_path: Path) -> None:
+    """Contract, on real cargo output: the direct assertion and the
+    track_caller call have positions; the plain helper, the closure and the
+    `src/` stub have none; `direct` in two binaries is two keys. Negative
+    control: the raw sites the pre-fix judgment ordered include the stub
+    line in `src/` and the helper line above its caller."""
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        oracle_test_source,
+    )
+    from pipeline_core.domain.assertion_position import (
+        TestKey,
+        assertion_positions,
+    )
+    from pipeline_core.domain.test_report import parse_test_output
+    root = _pos_crate(tmp_path)
+    _rc, out = _cargo("cargo test --offline --no-fail-fast", root, _env(root))
+    pos = assertion_positions(out, oracle_test_source(root))
+    assert pos == {TestKey("tests/a.rs", "direct"): 15,
+                   TestKey("tests/a.rs", "via_caller"): 25,
+                   TestKey("tests/b.rs", "direct"): 3}, out
+    raw = {(f.panic_file, f.panic_line)
+           for f in parse_test_output(out).failures}
+    assert ("src/lib.rs", 2) in raw and ("tests/a.rs", 4) in raw

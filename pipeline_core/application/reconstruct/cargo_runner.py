@@ -25,6 +25,11 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.domain.assertion_position import (
+    TestSource,
+    assertion_positions,
+    is_oracle_test_path,
+)
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnSite
@@ -52,6 +57,7 @@ from pipeline_core.domain.test_report import (
     external_stub_sites_of,
     parse_test_output,
     partition_blame,
+    reading_of_capture,
     regressed_test_outputs,
     self_aborted_tests,
     stub_only_crash,
@@ -279,17 +285,50 @@ def measure_test_state(
         # section is a READING: that binary hung (marked so, its in-flight
         # test named) and the binaries after it never ran. A capture with no
         # section is a build that did not finish — inconclusive, as before.
-        hung = TestStateReading(parse_binary_results(out or "", timed_out=True))
+        hung = reading_of_capture(out or "", timed_out=True,
+                                  sources=oracle_test_source(cwd))
         if hung.binaries:
             return hung
         return None
-    reading = TestStateReading(parse_binary_results(out))
+    reading = reading_of_capture(out, sources=oracle_test_source(cwd))
     # No test-result sections AND a non-zero rc ⇒ the suite never executed
     # (the crate itself did not compile). Zero tests with rc==0 is a
     # legitimate empty baseline (pass_count 0, no failures).
     if not reading.binaries and rc != 0:
         return None
     return reading
+
+
+_ORACLE_TEXT: dict[tuple[str, int, int], str] = {}
+
+
+def oracle_test_source(root: Path) -> TestSource:
+    """The `TestSource` assertion positions read: an oracle test file by
+    the path a panic printed, relative to the cluster root `root`.
+
+    The cluster tree's `tests` is a symlink into the workspace oracle,
+    which the launch seals and refuses on drift, so reading through it is
+    reading the sealed file. `is_oracle_test_path` is the whole gate: a
+    site in the crate under reconstruction is never read. Cached by
+    (path, mtime, size) because every sweep and every refill judge asks
+    for the same few files."""
+    def _read(rel: str) -> str | None:
+        if not is_oracle_test_path(rel):
+            return None
+        path = root / rel
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        if key not in _ORACLE_TEXT:
+            try:
+                _ORACLE_TEXT[key] = path.read_text(encoding="utf-8",
+                                                   errors="replace")
+            except OSError:
+                return None
+        return _ORACLE_TEXT[key]
+    return _read
 
 
 def _read_under(root: Path, rel: str) -> str | None:
@@ -803,7 +842,9 @@ def u2_test_gate(
             sites=scoped.failures, aborted=frozenset(_aborted), crash=_panics,
             external_stub_sites=stub_sites_outside(
                 _panics.stub_sites, frozenset(unit_sites), _locate),
-            capture=out or "")
+            capture=out or "",
+            positions=assertion_positions(
+                out or "", oracle_test_source(target_src_dir)))
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —
@@ -826,7 +867,9 @@ def u2_test_gate(
     return U2Verdict.reject(
         frozenset(f.test_name for f in blame.self_failures), detail, unjudged,
         self_passed=frozenset(report.passed & fn_tests),
-        sites=blame.self_failures, capture=out or "")
+        sites=blame.self_failures, capture=out or "",
+        positions=assertion_positions(
+            out or "", oracle_test_source(target_src_dir)))
 
 
 def run_check_diag(

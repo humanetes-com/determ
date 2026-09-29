@@ -59,7 +59,7 @@ from pipeline_core.prompts.fix_prompts import (
     build_impl_fix_prompt,
     build_tdd_stub_fill_prompt,
 )
-from pipeline_core.prompts.layout_authoring import identity_must_instruction
+from pipeline_core.prompts.layout_authoring import behaviour_must_instruction
 from pipeline_core.prompts.pull_menu import pull_menu_section
 from pipeline_core.prompts.retry_turn import (
     AttemptFeedback,
@@ -510,13 +510,13 @@ def one_shot_fill(
                 trel, tsrc = behavior_srcs.get(tn, ("", ""))
                 if tsrc and len(tests_block) + len(tsrc) <= src_snip_cap:
                     tests_block += f"// {trel} :: {tn}\n{tsrc}\n\n"
-            must = identity_must_instruction(
+            must = behaviour_must_instruction(
                 behaviour_specs,
                 units=(IdentityMustUnit(fn, container, sig_text),))
             prompt = build_behavior_fix_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
                 sig_text=sig_text, cur_body=cur_body, tests_block=tests_block,
-                errs=errs, identity_must=must, container=container)
+                errs=errs, behaviour_must=must, container=container)
         else:
             prompt = build_tdd_stub_fill_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,

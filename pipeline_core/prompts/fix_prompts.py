@@ -219,13 +219,14 @@ class BlockFillPlan:
     # on `impl<A, B> BothDebug for (A, B)` -> `__dispatch_ensure`, which
     # builds a `SmallBuf` and wraps nothing.
     wraps_pinned_type: bool = False
-    # Identity Then from the behaviour suite (`identity_must_instruction` /
-    # `_fmt_outcome`), for first-pass `write:` as well as rewrite. Empty when
-    # no IDENTITY spec names this block's units. `typeid_pin_consequence`
+    # The behaviour book's instruction (`behaviour_must_instruction`: the
+    # identity Then via `_fmt_outcome` and the rules aimed at this block's
+    # units), for first-pass `write:` as well as rewrite. Empty when the book
+    # has nothing for them. `typeid_pin_consequence`
     # above fires only on escalated + wraps, which a stub cannot satisfy —
     # there is no body yet. Run `2932-cf516410` had the pin in the quoted
     # test and still wrapped because this slot was empty on `write:`.
-    identity_must: str = ""
+    behaviour_must: str = ""
     # Coverage sentences for this block's units (dead body / unreachable
     # lines). Empty when the sweep has no reading or none of the units
     # speak. Instruction slot, not an evidence section: a fill can carry
@@ -490,8 +491,9 @@ def _plan_line(p: BlockFillPlan) -> str:
                      "rewrite ONLY if it is wrong for its bounds, else leave it "
                      "unchanged): " + ", ".join(inferred))
     line = f"  {where} -> " + "; ".join(parts)
-    if p.identity_must:
-        line = line + " — " + p.identity_must
+    if p.behaviour_must:
+        # The rules part is several lines; keep them under this block's line.
+        line = line + " — " + p.behaviour_must.replace("\n", "\n      ")
     if p.coverage_must:
         line = line + " — " + p.coverage_must
     return line
@@ -639,12 +641,13 @@ def build_behavior_fix_prompt(
     cur_body: str,
     tests_block: str,
     errs: str,
-    identity_must: str = "",
+    behaviour_must: str = "",
     container: str = "",
 ) -> str:
     """Correct a fn that compiles but FAILS its tests (behaviour wrong).
 
-    `identity_must` is the TypeId instruction the first-pass builders carry.
+    `behaviour_must` is the behaviour book's instruction the first-pass
+    builders carry (the TypeId MUST and the aimed rules).
     A wrap that first-pass missed is exactly this path — the failing test
     source is already in the prompt; without this sentence the TypeId rule
     is evidence the 2026-08-26 constructor fills had and still wrapped.
@@ -654,7 +657,7 @@ def build_behavior_fix_prompt(
     ``container`` feeds the stub-time construction recipe (same default).
     """
     recipe_part = construction_recipe_prefix(fn_name, container, sig_text)
-    must_part = (f"{identity_must}\n\n" if identity_must.strip() else "")
+    must_part = (f"{behaviour_must}\n\n" if behaviour_must.strip() else "")
     must_part += instruction_opener(file_rel, (fn_name,))
     return (
         f"ONE Rust function compiles but FAILS its tests — "
