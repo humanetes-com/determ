@@ -12,6 +12,13 @@ The claims are the plan's, as its addendum (2026-09-29) corrected them:
   "public item the when calls last" puts them under nothing);
 - a rule is kept only when the checker needs it (control: the plan's check,
   "predicts every cited Then with the rule", keeps a restatement);
+- a chunk's drafts are judged as one set and each is kept for the examples
+  it is necessary for: a base and a suffix sentence that predict only
+  together are both kept (control: each checked alone keeps neither), two
+  drafts saying the same thing keep one, a set miss is recorded on the rule
+  and not a veto, and a set that gains nothing spends no leave-one-out call
+  (run `72627-751534fe`, 2026-09-30: `ensure!` held 103 of 197 checkable
+  examples and kept 0 rules in both books);
 - a rule reaches the unit that declares its feature and not the units that
   merely executed its examples (control: aiming by coverage `exercises`);
 - every fill site takes the book's instruction through one function (control:
@@ -21,6 +28,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book, feature_files
@@ -40,17 +49,23 @@ from pipeline_core.domain.behaviour import (
 from pipeline_core.domain.behaviour_book import (
     CRATE_FEATURE,
     AimedUnit,
+    ChunkJudgment,
+    CreditedRule,
     RuleDraft,
+    SiblingVisit,
     draft_refusal,
     feature_spellings,
     glossary_entries,
     group_features,
-    judge_draft,
+    judge_rule_set,
+    judge_visit,
     parse_predictions,
     parse_rule_drafts,
     private_names,
     render_feature,
     rules_for_units,
+    sentence_breaks,
+    sibling_visits,
 )
 from pipeline_core.domain.example_setup import setup_slice, top_level_items
 from pipeline_core.domain.models import FnRecord, TypeRecord
@@ -269,48 +284,158 @@ def _pool() -> dict[str, BehaviourSpec]:
     }
 
 
+class _Checker:
+    """A fake predict collaborator: `answer(rules, id)` gives the predicted
+    Then for one example under one rule set (None = the reply omits it);
+    every call is recorded as (rules, ids)."""
+
+    def __init__(self, answer: Callable[[frozenset[str], str], str | None]) -> None:
+        self.answer = answer
+        self.calls: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+
+    def __call__(self, rules: Sequence[str], ids: Sequence[str]) -> dict[str, str]:
+        self.calls.append((tuple(rules), tuple(ids)))
+        out: dict[str, str] = {}
+        for i in ids:
+            v = self.answer(frozenset(rules), i)
+            if v is not None:
+                out[i] = v
+        return out
+
+
 def test_a_rule_the_checker_can_ignore_is_dropped_and_one_it_needs_is_kept() -> None:
     pool = _pool()
     msg = pool["e1"].then.value  # type: ignore[union-attr]
     informative = RuleDraft("`ensure!` on a false comparison reports the condition as written and both sides.",
                             ("e1",))
     vacuous = RuleDraft("`Error::msg` builds an error.", ("e2",))
-    # informative: without the rule the checker got the text wrong
-    kept = judge_draft(informative, pool, with_rule={"e1": msg},
-                       without_rule={"e1": "Condition failed: v + v == 1"})
-    assert kept.kept
-    # vacuous: the checker predicts the identity from the when alone
-    dropped = judge_draft(vacuous, pool, with_rule={"e2": "true"}, without_rule={"e2": "true"})
-    assert not dropped.kept and dropped.reason.startswith("adds nothing")
+
+    def answer(rules: frozenset[str], i: str) -> str:
+        if i == "e2":
+            return "true"                     # the when alone decides the identity
+        return msg if informative.sentence in rules else "Condition failed: v + v == 1"
+
+    verdict = judge_rule_set([informative, vacuous], pool, predict=_Checker(answer))
+    assert [c.draft for c in verdict.kept] == [informative]
+    assert verdict.kept[0].credited == ("e1",)
+    assert [r for r in verdict.dropped if r.startswith("adds nothing")] == [verdict.dropped[0]]
 
     # NEGATIVE CONTROL: the plan's check ("predicts with the rule") keeps it.
     def plan_check(d: RuleDraft, with_rule: dict[str, str]) -> bool:
         return all(outcome_matches(with_rule.get(i, ""), pool[i].then) for i in d.covers)  # type: ignore[arg-type]
     assert plan_check(vacuous, {"e2": "true"})
 
-    # An ablation that did not answer is not a miss. The with-rule checker
-    # matched, and the old predicate counted the missing id as "predicted
-    # wrong", which keeps the draft.
-    unanswered = judge_draft(informative, pool, with_rule={"e1": msg}, without_rule={})
-    assert not unanswered.kept and unanswered.reason.startswith("ablation did not answer")
-    partial = judge_draft(
-        RuleDraft(informative.sentence, ("e1", "e2")), pool,
-        with_rule={"e1": msg, "e2": "true"}, without_rule={"e2": "true"})
-    assert not partial.kept and partial.reason.startswith("ablation did not answer")
+    # An ablation that did not answer is not a miss: the set matched, and
+    # reading the missing id as "predicted wrong" keeps the draft.
+    silent_ablation = _Checker(lambda rules, i: msg if rules else None)
+    unanswered = judge_rule_set([informative], pool, predict=silent_ablation)
+    assert not unanswered.kept and unanswered.dropped[0].startswith("ablation did not answer")
 
-    def absence_counts_as_a_miss(d: RuleDraft, with_rule: dict[str, str],
-                                 without_rule: dict[str, str]) -> bool:
-        cited = [pool[i] for i in d.covers]
-        if any(s.then is None or not outcome_matches(with_rule.get(s.behaviour_id, "\0"), s.then)
-               for s in cited):
-            return False
-        return any(s.then is not None
-                   and not outcome_matches(without_rule.get(s.behaviour_id, "\0"), s.then)
-                   for s in cited)
+    def absence_counts_as_a_miss(with_set: dict[str, str], ablation: dict[str, str]) -> bool:
+        return any(outcome_matches(with_set.get(i, "\0"), pool[i].then)  # type: ignore[arg-type]
+                   and not outcome_matches(ablation.get(i, "\0"), pool[i].then)  # type: ignore[arg-type]
+                   for i in informative.covers)
 
-    assert absence_counts_as_a_miss(
-        RuleDraft(informative.sentence, ("e1", "e2")),
-        {"e1": msg, "e2": "true"}, {"e2": "true"})
+    assert absence_counts_as_a_miss({"e1": msg}, {})
+
+
+def _ensure_pool() -> dict[str, BehaviourSpec]:
+    """Invented `ensure!`-shaped examples: two binary comparisons (message
+    carries ` (<left> vs <right>)`) and one plain condition."""
+    out = {}
+    for bid, cond, suffix in (("b1", "a == b", " (1 vs 2)"), ("b2", "x < y", " (3 vs 0)"),
+                              ("p1", "flag", "")):
+        out[bid] = _spec(bid, f"let test = || Ok(ensure!({cond}));", "test",
+                         ObservableOutcome.display(f"Condition failed: `{cond}`{suffix}"),
+                         via="assert_err")
+    return out
+
+
+BASE = RuleDraft("The message is `Condition failed: ` then the condition in backticks.",
+                 ("b1", "b2", "p1"))
+SUFFIX = RuleDraft("For a binary comparison the base message above is followed by both "
+                   "operand values in parentheses, separated by `vs`.", ("b1", "b2"))
+
+
+def _base_suffix_answer(pool: dict[str, BehaviourSpec]) -> Callable[[frozenset[str], str], str]:
+    def answer(rules: frozenset[str], i: str) -> str:
+        full = pool[i].then.value  # type: ignore[union-attr]
+        base = full.split(" (", 1)[0]
+        if BASE.sentence in rules and SUFFIX.sentence in rules:
+            return full
+        if BASE.sentence in rules:
+            return base
+        return "assertion failed: " + base.split("`")[1]
+    return answer
+
+
+def test_a_base_and_a_suffix_rule_that_predict_only_together_are_both_kept() -> None:
+    pool = _ensure_pool()
+    checker = _Checker(_base_suffix_answer(pool))
+    verdict = judge_rule_set([BASE, SUFFIX], pool, predict=checker)
+    kept = {c.draft.sentence: c.credited for c in verdict.kept}
+    assert kept == {BASE.sentence: ("b1", "b2", "p1"), SUFFIX.sentence: ("b1", "b2")}
+    assert not verdict.dropped and all(not c.refuted_on for c in verdict.kept)
+    # ablation + set + one leave-one-out per draft: <= |S| + 2
+    assert verdict.calls == len(checker.calls) == 4
+
+    # NEGATIVE CONTROL: each draft checked alone (the per-draft judge) keeps
+    # neither — the base alone misses both comparisons, the suffix alone
+    # predicts nothing.
+    alone = [judge_rule_set([d], pool, predict=_Checker(_base_suffix_answer(pool)))
+             for d in (BASE, SUFFIX)]
+    all_or_nothing_base = all(
+        outcome_matches(_base_suffix_answer(pool)(frozenset({BASE.sentence}), i), pool[i].then)  # type: ignore[arg-type]
+        for i in BASE.covers)
+    assert not all_or_nothing_base
+    assert not alone[1].kept
+    assert [c.credited for c in alone[0].kept] == [("p1",)]  # credit, not a veto
+    assert alone[0].kept[0].refuted_on == ("b1", "b2")
+
+
+def test_two_drafts_saying_the_same_thing_keep_one_copy() -> None:
+    pool = _ensure_pool()
+    twin = RuleDraft(BASE.sentence.replace("The message", "Its message"), BASE.covers)
+    verdict = judge_rule_set(
+        [BASE, twin], pool,
+        predict=_Checker(lambda rules, i: pool[i].then.value if rules else "no"))  # type: ignore[union-attr]
+    assert [c.draft for c in verdict.kept] == [BASE]
+    assert verdict.dropped == ("not necessary for its 3 gained example(s)",)
+
+    # A leave-one-out that did not answer credits nobody: silence is not a
+    # "matched without it" either.
+    def silent_loo(rules: frozenset[str], i: str) -> str | None:
+        if len(rules) == 1:
+            return None
+        return pool[i].then.value if rules else "no"  # type: ignore[union-attr]
+    silent = judge_rule_set([BASE, twin], pool, predict=_Checker(silent_loo))
+    assert not silent.kept
+    assert all(r.startswith("leave-one-out did not answer") for r in silent.dropped)
+
+
+def test_a_set_miss_is_recorded_on_the_rule_not_a_veto_and_projected_to_local_ids() -> None:
+    pool = _ensure_pool()
+
+    def slip(rules: frozenset[str], i: str) -> str:
+        full = pool[i].then.value  # type: ignore[union-attr]
+        if not rules:
+            return "no"
+        return full.replace("(", "") if i == "b2" else full   # the predictor drops a `(`
+    verdict = judge_rule_set([BASE], pool, predict=_Checker(slip))
+    assert [(c.credited, c.refuted_on) for c in verdict.kept] == [(("b1", "p1"), ("b2",))]
+    rule = Rule("r", BASE.sentence, ("b1", "p1"), "ensure!", refuted_on=("b2",))
+    assert Rule.from_dict(json.loads(json.dumps(rule.to_dict()))) == rule
+    assert "refuted_on" not in replace(rule, refuted_on=()).to_dict()
+
+
+def test_a_set_that_gains_nothing_spends_no_leave_one_out_call() -> None:
+    pool = _ensure_pool()
+    checker = _Checker(lambda rules, i: pool[i].then.value)  # type: ignore[union-attr]
+    verdict = judge_rule_set([BASE, SUFFIX], pool, predict=checker)
+    assert not verdict.kept and verdict.calls == len(checker.calls) == 2
+    assert all(r.startswith("adds nothing") for r in verdict.dropped)
+    refuting = judge_rule_set([BASE], pool, predict=_Checker(lambda rules, i: "no"))
+    assert refuting.dropped == ("refuted on 3 of its 3 example(s)",) and refuting.calls == 2
 
 
 def test_a_rule_naming_a_private_item_or_quoting_a_then_is_refused_before_the_check() -> None:
@@ -321,6 +446,123 @@ def test_a_rule_naming_a_private_item_or_quoting_a_then_is_refused_before_the_ch
     assert draft_refusal(RuleDraft(f"It says {msg}.", ("e1",)), pool, set()).startswith("quotes e1")
     assert draft_refusal(RuleDraft("Constructs a value.", ("e1",)), pool, {"construct"}) is None
     assert draft_refusal(RuleDraft("x", ("nope",)), pool, set()) == "cites no checkable example of its feature"
+
+
+def test_one_sentence_is_judged_whatever_its_length_and_two_are_refused() -> None:
+    pool = _pool()
+    # One sentence stating a whole format: code spans holding `.`, a macro
+    # spelled `name!` before a capital, a dotted abbreviation before one.
+    whole = ("When the condition of bail! Or `ensure!` is a binary comparison, e.g. Equality as "
+             "in `a == b`, the message is `Condition failed: ` followed by the condition as "
+             "written in backticks, a space, an opening parenthesis, the `Debug` rendering of "
+             "the left operand (for `std::fmt::Arguments` that is `the text. As printed`), a "
+             "space, `vs`, a space, the `Debug` rendering of the right operand, and a closing "
+             "parenthesis, with nothing after the closing parenthesis and no trailing period "
+             "or newline in any build.")
+    two = RuleDraft("It builds an error. The message is the condition.", ("e1",))
+    assert sentence_breaks(whole) == 0 and sentence_breaks(two.sentence) == 1
+    assert draft_refusal(RuleDraft(whole, ("e1",)), pool, set()) is None
+    assert draft_refusal(two, pool, set()) == "more than one sentence"
+    assert draft_refusal(RuleDraft('It says "no." Then it stops? Yes.', ("e1",)), pool, set()) \
+        == "more than one sentence"
+
+    # NEGATIVE CONTROL: the 400-character bound this replaced refuses the one
+    # sentence and admits the two.
+    def length_bound(d: RuleDraft) -> bool:
+        return len(d.sentence) > 400
+    assert length_bound(RuleDraft(whole, ("e1",))) and not length_bound(two)
+    from pipeline_core.domain.behaviour_book import drop_reason_class
+    assert drop_reason_class("more than one sentence") == "more than one sentence"
+
+
+WRONG = RuleDraft("The message is `Condition failed` then a space then the condition.", ("c1",))
+
+
+def test_a_feature_s_kept_sentences_visit_the_chunk_that_never_judged_them() -> None:
+    home = ChunkJudgment(("b1", "b2", "p1"), (BASE.sentence, SUFFIX.sentence), (
+        CreditedRule(BASE, ("b1", "b2", "p1")), CreditedRule(SUFFIX, ("b1", "b2"))))
+    flat = ChunkJudgment(("c1", "c2"), (WRONG.sentence,), ())
+    assert sibling_visits([home, flat]) == [
+        SiblingVisit(1, (BASE.sentence, SUFFIX.sentence), ("c1", "c2"))]
+    # a chunk whose set already carried every kept sentence is not asked again,
+    # whatever it left uncovered; nor is anything asked when nothing was kept
+    partial = ChunkJudgment(("b1", "b2", "p1"), home.judged, (CreditedRule(BASE, ("p1",)),))
+    assert sibling_visits([partial]) == []
+    assert sibling_visits([flat, flat]) == []
+    assert sibling_visits([home, ChunkJudgment(("c1",), (), ())])[0].example_ids == ("c1",)
+
+    # the visit's judgment is the set judge's: both halves necessary, both credited
+    pool = _ensure_pool()
+    checker = _Checker(_base_suffix_answer(pool))
+    credit, calls = judge_visit(SiblingVisit(0, (BASE.sentence, SUFFIX.sentence), ("b1", "p1")),
+                                pool, predict=checker)
+    assert credit == {BASE.sentence: ("b1", "p1"), SUFFIX.sentence: ("b1",)}
+    assert calls == len(checker.calls) and all(set(ids) <= {"b1", "p1"} for _r, ids in checker.calls)
+
+
+def _two_chunk_ensure_suite() -> tuple[BehaviourSuite, dict[str, BehaviourSpec]]:
+    specs = []
+    for n, (cond, suffix) in enumerate((("a == b", " (1 vs 2)"), ("x < y", " (3 vs 0)"), ("flag", ""),
+                                        ("c != d", " (4 vs 4)"), ("m > n", " (0 vs 9)"), ("ok", ""))):
+        specs.append(_spec(f"s{n}", f"let test = || Ok(ensure!({cond}));", "test",
+                           ObservableOutcome.display(f"Condition failed: `{cond}`{suffix}"),
+                           via="assert_err"))
+    return BehaviourSuite("stable", tuple(specs)), {s.behaviour_id: s for s in specs}
+
+
+def test_a_pair_drafted_in_one_chunk_is_credited_on_a_sibling_chunk_whose_draft_is_wrong() -> None:
+    suite, pool = _two_chunk_ensure_suite()
+    glossary = (GlossaryEntry("ensure!", "macro"),)
+    answer = _base_suffix_answer(pool)
+
+    def model(calls: list[str]) -> Callable[[str], str]:
+        def ask(prompt: str) -> str:
+            calls.append(prompt)
+            ids = re.findall(r'<EXAMPLE id="([^"]+)">', prompt)
+            if "TASK: state the observable RULES" in prompt:
+                if "s0" in ids:
+                    return (f'<RULE covers="s0,s1,s2">{BASE.sentence}</RULE>'
+                            f'<RULE covers="s0,s1">{SUFFIX.sentence}</RULE>')
+                return f'<RULE covers="s3,s4,s5">{WRONG.sentence}</RULE>'
+            rules = frozenset(re.findall(r"^\d+\. (.*)$", prompt, re.M))
+            if WRONG.sentence in rules:
+                return "".join(f'<THEN id="{i}">Condition failed x</THEN>' for i in ids)
+            return "".join(f'<THEN id="{i}">{answer(rules, i)}</THEN>' for i in ids)
+        return ask
+
+    calls: list[str] = []
+    book, reading = build_behaviour_book(
+        suite, crate="krate", glossary=glossary, private=set(), ask=model(calls),
+        budget=BookBudget(examples_per_prompt=3))
+    rules = {r.sentence: r.example_ids for r in book.features[0].rules}
+    assert rules == {BASE.sentence: ("s0", "s1", "s2", "s3", "s4", "s5"),
+                     SUFFIX.sentence: ("s0", "s1", "s3", "s4")}
+    assert reading.covered_examples == 6 and reading.sibling_examples == 3 and reading.kept == 2
+    assert "6/6 checkable examples covered (3 by a sibling chunk's rule; 0 predicted with no rule)" \
+        in reading.line()
+    assert reading.unaided_examples == 0 and book.features[0].unaided_ids == ()
+    assert reading.dropped == {"refuted on": 1}
+    # the wrong draft does not travel, and the sibling chunk's ablation is asked once
+    predicts = [p for p in calls if p.startswith("Predict what")]
+    visit = [p for p in predicts if 'id="s3"' in p and BASE.sentence in p]
+    assert all(WRONG.sentence not in p for p in visit)
+    assert sum(1 for p in predicts if "RULES (hold" not in p and 'id="s3"' in p) == 1
+    # the visit: the set, then one leave-one-out per travelling sentence
+    assert len(visit) == 2 and sum(1 for p in predicts if SUFFIX.sentence in p and 'id="s3"' in p) == 2
+
+    # NEGATIVE CONTROL: each chunk left with the drafts written from its own
+    # examples — the second chunk keeps nothing and half the feature is uncovered.
+    alone, flat = build_behaviour_book(
+        suite, crate="krate", glossary=glossary, private=set(), ask=model([]),
+        budget=BookBudget(examples_per_prompt=3, sibling_chunks=False))
+    assert flat.covered_examples == 3 and flat.sibling_examples == 0
+    assert {r.sentence: r.example_ids for r in alone.features[0].rules} == {
+        BASE.sentence: ("s0", "s1", "s2"), SUFFIX.sentence: ("s0", "s1")}
+    # lanes do not change the book
+    par, par_reading = build_behaviour_book(
+        suite, crate="krate", glossary=glossary, private=set(), ask=model([]),
+        budget=BookBudget(examples_per_prompt=3, lanes=4))
+    assert par.to_dict() == book.to_dict() and replace(par_reading, lanes=1) == replace(reading, lanes=1)
 
 
 def test_the_prefix_rule_is_the_replays() -> None:
@@ -354,7 +596,7 @@ def test_t0d_book_build_keeps_the_needed_rule_counts_the_rest_and_writes_the_vie
                         f'<RULE covers="{ensure_ids[0]}">It calls `construct`.</RULE>')
             return ""
         ids = re.findall(r'<EXAMPLE id="([^"]+)">', prompt)
-        right = "RULE (holds" in prompt and good in prompt
+        right = "RULES (hold together" in prompt and good in prompt
         return "".join(
             f'<THEN id="{i}">{pool[i].then.value if right else "wrong"}</THEN>'  # type: ignore[union-attr]
             for i in ids)
@@ -365,7 +607,8 @@ def test_t0d_book_build_keeps_the_needed_rule_counts_the_rest_and_writes_the_vie
     ensure = next(f for f in book.features if f.item == "ensure!")
     assert [r.sentence for r in ensure.rules] == [good]
     assert reading.kept == 1 and reading.features_asked == 1
-    assert reading.dropped == {"does not predict": 1, "names the private item": 1}
+    # "It is a macro." rides on the set but the set without it still predicts
+    assert reading.dropped == {"not necessary": 1, "names the private item": 1}
     assert "behaviour-book:" in reading.line() and "1 kept" in reading.line().replace("(", "")
     # the rule rides on the examples it cites, for every reader of the specs
     assert all(pool_s.rules and pool_s.rules[0].sentence == good
@@ -437,7 +680,7 @@ def test_a_qualified_call_is_its_own_feature_and_a_shared_leaf_is_not_every_spel
     def ask(prompt: str) -> str:
         if "TASK: state the observable RULES" in prompt:
             return f'<RULE covers="q">{sentence}</RULE>'
-        if "RULE (holds" in prompt:
+        if "RULES (hold together" in prompt:
             return '<THEN id="q">x</THEN>'
         return '<THEN id="q">no</THEN>'
 
@@ -586,7 +829,36 @@ def test_small_contracts() -> None:
     assert drop_reason_class("something new") == "something new"
     assert feature_file_name(Feature("(crate)", "crate", ())) == "crate.feature"
     pool = _pool()
-    assert draft_refusal(RuleDraft("x" * 500, ("e1",)), pool, set()) == "longer than one sentence"
-    miss = judge_draft(RuleDraft("s", ("e1",)), pool, with_rule={}, without_rule={})
-    assert not miss.kept and miss.reason.startswith("does not predict")
-    assert BookReading().line().endswith("dropped: none")
+    miss = judge_rule_set([RuleDraft("s", ("e1",))], pool, predict=_Checker(lambda _r, _i: None))
+    assert not miss.kept and miss.dropped[0].startswith("set did not answer")
+    assert judge_rule_set([], pool, predict=_Checker(lambda _r, _i: None)).calls == 0
+    assert BookReading().line().endswith("dropped: none; lanes=1; predict-temp=server")
+    assert "predict-temp=0;" in BookReading(predict_temperature=0.0).line() + ";"
+    for reason in ("refuted on 2 of its 3 example(s)", "not necessary for its 1 gained example(s)",
+                   "leave-one-out did not answer 1 of its 1 gained example(s)"):
+        assert drop_reason_class(reason) != reason
+
+
+def test_an_example_the_checker_predicts_with_no_rule_is_recorded_on_its_feature() -> None:
+    suite, pool = _two_chunk_ensure_suite()
+    glossary = (GlossaryEntry("ensure!", "macro"),)
+
+    def ask(prompt: str) -> str:
+        ids = re.findall(r'<EXAMPLE id="([^"]+)">', prompt)
+        if "TASK: state the observable RULES" in prompt:
+            return f'<RULE covers="{",".join(ids)}">{BASE.sentence}</RULE>'
+        rules = "RULES (hold together" in prompt
+        # with no rule the checker gets the two plain conditions right and nothing else
+        return "".join(
+            f'<THEN id="{i}">{pool[i].then.value if rules or i in ("s2", "s5") else "no"}</THEN>'  # type: ignore[union-attr]
+            for i in ids)
+
+    book, reading = build_behaviour_book(suite, crate="krate", glossary=glossary, private=set(),
+                                         ask=ask, budget=BookBudget(examples_per_prompt=3))
+    (feature,) = book.features
+    assert feature.unaided_ids == ("s2", "s5") and reading.unaided_examples == 2
+    assert "2 predicted with no rule" in reading.line()
+    assert not set(feature.unaided_ids) & {i for r in feature.rules for i in r.example_ids}
+    back = BehaviourSuite.from_dict(json.loads(json.dumps(book.to_dict())))
+    assert back.features[0].unaided_ids == ("s2", "s5")
+    assert "unaided_ids" not in Feature("f", "fn", ("a",)).to_dict()

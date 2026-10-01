@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Protocol
 
+from pipeline_core import phases
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.tasks.task0d import run_task0d
@@ -37,6 +38,7 @@ from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.workspace_layout import PRE_AUGMENT_TAG_PREFIX, plan_pre_augment_tags
+from pipeline_core.phases import phase_scope, phase_skipped
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,45 +622,46 @@ def lock_or_complete(
     return — `deps.sys_exit(0)` raises. The three call sites (t3 pass, no_files
     build-pass, fix-loop reverified pass) differ only in the message/label/tag
     arguments; the skeleton is identical."""
-    deps.commit_and_mark(
-        project_dir, f"task2-4/{module_name}", "done",
-        commit_message=commit_message, tag=tag, detail=detail, source_hash=src_hash,
-    )
-    deps.set_current(project_dir, set_current_label)
-    if is_multi_module:
-        deps.lock_module(project_dir, module_name, module_dir, module_manifest)
-        locked_modules.add(module_name)
-        deps.git_commit(project_dir, locked_commit_msg)
-    else:
-        # The SAME stub verdict as the multi-module final check in
-        # `run_pipeline` — single-module projects (the common case: anyhow,
-        # hardcrate, most real crates) complete HERE, not there, so without
-        # this the whole-tree check would never run for them.
-        #
-        # It used to be the same SCAN and not the same verdict: this path called
-        # the cfg-blind `scan_unimplemented_functions` and had no notion of a
-        # stub no baked cfg-set can compile, while the multi-module path did.
-        # A fully green `anyhow` therefore still exited 1 on the three
-        # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
-        # are byte-identical to the `unimplemented!()` upstream writes there.
-        _clusters = deps.load_baked_clusters(project_dir) or []
-        _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
-                     for c in _clusters]
-        # One pair PER SITE: at completion every hollow site is its own
-        # finding, and the inventory names that choice.
-        _verdict = classify_remaining_stubs(
-            deps.scan_unimplemented_functions(project_dir).site_preds(),
-            _cfg_sets, deps.reference_hollow(project_dir),
-            deps.augmentation_fn_records(project_dir))
-        _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
-        if not _clean:
+    with phase_scope("lock", module=module_name):
+        deps.commit_and_mark(
+            project_dir, f"task2-4/{module_name}", "done",
+            commit_message=commit_message, tag=tag, detail=detail, source_hash=src_hash,
+        )
+        deps.set_current(project_dir, set_current_label)
+        if is_multi_module:
+            deps.lock_module(project_dir, module_name, module_dir, module_manifest)
+            locked_modules.add(module_name)
+            deps.git_commit(project_dir, locked_commit_msg)
+        else:
+            # The SAME stub verdict as the multi-module final check in
+            # `run_pipeline` — single-module projects (the common case: anyhow,
+            # hardcrate, most real crates) complete HERE, not there, so without
+            # this the whole-tree check would never run for them.
+            #
+            # It used to be the same SCAN and not the same verdict: this path called
+            # the cfg-blind `scan_unimplemented_functions` and had no notion of a
+            # stub no baked cfg-set can compile, while the multi-module path did.
+            # A fully green `anyhow` therefore still exited 1 on the three
+            # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
+            # are byte-identical to the `unimplemented!()` upstream writes there.
+            _clusters = deps.load_baked_clusters(project_dir) or []
+            _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                         for c in _clusters]
+            # One pair PER SITE: at completion every hollow site is its own
+            # finding, and the inventory names that choice.
+            _verdict = classify_remaining_stubs(
+                deps.scan_unimplemented_functions(project_dir).site_preds(),
+                _cfg_sets, deps.reference_hollow(project_dir),
+                deps.augmentation_fn_records(project_dir))
+            _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
+            if not _clean:
+                if complete_commit_msg is not None:
+                    deps.git_commit(project_dir, complete_commit_msg)
+                deps.sys_exit(1)
+            deps.log(success_log)
             if complete_commit_msg is not None:
                 deps.git_commit(project_dir, complete_commit_msg)
-            deps.sys_exit(1)
-        deps.log(success_log)
-        if complete_commit_msg is not None:
-            deps.git_commit(project_dir, complete_commit_msg)
-        deps.sys_exit(0)
+            deps.sys_exit(0)
 
 
 def filter_module_test_files(
@@ -773,6 +776,10 @@ class RunDeps:
     # caller that wires none behaves as before the seal existed.
     oracle_drift: Callable[[Path, str], OracleDrift | None] = (
         lambda _p, _m: None)
+    # The `current:` writer of pipeline_state.md, bound once per run into the
+    # phase announcer (`pipeline_core.phases`) so a phase's entry and the state
+    # file's "where the run stands" line are written by the same call.
+    set_current: Callable[[Path, str], None] = lambda _p, _l: None
 
 
 def check_oracle_seal(deps: RunDeps, project_dir: Path,
@@ -965,6 +972,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     _src_hash = deps.source_hash(project_dir)
     deps.log(f"  Source hash: {_src_hash}")
     deps.log_state_summary(project_dir, _src_hash)
+    phases.bind_current(lambda label: deps.set_current(project_dir, label))
 
     readme_path = project_dir / "README.md"
     if readme_path.exists():
@@ -981,6 +989,8 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     # reconstruction itself exposes (build-probe/lint cfgs), whose task0c then
     # ran against half-broken generated code and stripped oracle gen_tests it
     # couldn't compile. Post-bake, the baked manifest is the only truth.
+    _ph_setup = phase_scope("setup").open()
+    _ph_setup.step("setup.cfg_scan")
     _clusters = deps.load_baked_clusters(project_dir)
     if _clusters:
         deps.log(f"\n  [cfg-scan] using {len(_clusters)} baked cluster(s) from "
@@ -997,12 +1007,15 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                     detail=f"{len(_clusters)} clusters: {', '.join(c.name for c in _clusters)}",
                     source_hash=_src_hash)
 
-    if deps.phase_valid(project_dir, "test_cmd"):
+    _ph_setup.step("setup.test_cmd")
+    _test_cmd_cached = deps.phase_valid(project_dir, "test_cmd")
+    if _test_cmd_cached:
         test_command = deps.read_state(project_dir)["phases"]["test_cmd"].get("detail", "")
         deps.log(f"Test command: {test_command} (from pipeline state)")
     else:
         test_command = deps.discover_test_command(readme_text, project_dir=project_dir)
         deps.mark_phase(project_dir, "test_cmd", "done", detail=test_command, source_hash=_src_hash)
+    _ph_setup.close("skipped" if _test_cmd_cached else "ok")
 
     # Normalize: strip leading ./ from the executable so we use the PATH binary.
     parts_check = deps.parse_cmd(test_command)
@@ -1028,6 +1041,10 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         coverage_strategy = ""
         deps.log("  [from-spec] Skipping task0a/0a-context/0b (FR+API are user-provided).")
     else:
+        _t0a_cached = (deps.phase_valid(project_dir, "task0a")
+                       and deps.phase_valid(project_dir, "task0a-context"))
+        _ph_t0a = phase_scope("t0a").open()
+        _ph_t0a.step("t0a.profile")
         profile_path = project_dir / deps.PROJECT_PROFILE_NAME
         project_profile = deps.task0_project_profile(profile_path, test_files, readme_text)
 
@@ -1036,7 +1053,9 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # which currently receives no project-level context. Works even without README.
         context_path = project_dir / deps.PROJECT_CONTEXT_NAME
         deps.emit("task.start", task="task0a")
+        _ph_t0a.step("t0a.context")
         project_context = deps.task0_project_context(context_path, test_files, readme_text, project_profile)
+        _ph_t0a.close("skipped" if _t0a_cached else "ok")
 
         # TASK 0b (discovery): produce coverage_strategy.md — import idioms, type construction
         # patterns, feature flags, test conventions. Injected into all TASK 0c, 1, and 2 prompts.
@@ -1044,6 +1063,9 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # exists from a prior run that predates state tracking (auto-backfill).
         strategy_path = project_dir / deps.COVERAGE_STRATEGY_NAME
         deps.emit("task.start", task="task0b")
+        _ph_t0b = phase_scope("t0b").open()
+        _ph_t0b.step("t0b.discovery")
+        _t0b_cached = True
         if deps.phase_valid(project_dir, "task0b"):
             coverage_strategy = strategy_path.read_text().strip() if strategy_path.exists() else ""
             deps.log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
@@ -1054,6 +1076,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                             detail=f"{len(coverage_strategy)} chars (existing artifact)")
             deps.log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
         else:
+            _t0b_cached = False
             coverage_strategy = deps.task0b_discovery(
                 strategy_path, project_dir, test_files, readme_text, project_profile,
                 clusters=_clusters,
@@ -1063,6 +1086,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                 commit_message="pipeline: task0b done",
                 detail=f"{len(coverage_strategy)} chars",
             )
+        _ph_t0b.close("skipped" if _t0b_cached else "ok")
 
     # TASK 0b: build dependency graph for bottom-up module integration.
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
@@ -1160,6 +1184,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             if deps.augment_store.is_module_augmented(project_dir, _t0d_module):
                 deps.log(f"  [task0d] '{_t0d_module}' already augmented — the "
                          "behaviour harvest runs only BEFORE task0c; skipping.")
+                phase_skipped("t0d", "already augmented", module=_t0d_module)
                 continue
             run_task0d(deps.task0d_deps, project_dir, _t0d_module, list(_clusters),
                        _module_dirs[_t0d_module] / "src")

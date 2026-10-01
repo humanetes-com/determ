@@ -426,3 +426,37 @@ def test_an_emitter_that_raises_is_non_fatal_and_the_suite_is_still_saved(tmp_pa
     assert w.saved["stable"].specs
     assert any("behaviour-test emission failed" in m for m in w.logs)
     assert w.committed and w.committed[0][1] == "done"
+
+
+def test_a_held_out_capture_reaches_no_emitted_test_no_saved_suite_and_no_book(tmp_path: Path) -> None:
+    """The split is applied when the capture is taken: before exercises,
+    emission and the book, so nothing downstream receives it."""
+    w = _World(reply=_REPLY)
+    held: dict[str, BehaviourSuite] = {}
+    emitted: list[tuple[str, ...]] = []
+
+    def emit_tests(pd: Path, c: str, specs: object, **_k: object) -> tuple[None, tuple[str, ...], list[dict[str, str]], tuple[()]]:
+        emitted.append(tuple(s.behaviour_id for s in specs))  # type: ignore[attr-defined]
+        return None, (), [], ()
+
+    over: dict[str, object] = {
+        "HELD_OUT_SHARE": 100,
+        "save_held_out": lambda pd, suite: held.__setitem__(suite.cfg_cluster, suite),
+        "emit_tests": emit_tests,
+    }
+    run_task0d(w.deps(**over), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    probe_ids = {s.behaviour_id for s in held["stable"].specs}
+    assert probe_ids and all(i.startswith("probe::stable::") for i in probe_ids)
+    suite = w.saved["stable"]
+    assert not probe_ids & {s.behaviour_id for s in suite.specs}
+    assert not probe_ids & {i for ids in emitted for i in ids}
+    assert not probe_ids & {i for f in suite.features for i in f.example_ids}
+    assert any("held out of the suite" in ln for ln in w.logs)
+    assert dict(w.events)["task0d.held_out"] == {"cluster": "stable", "held": 1, "share": 100}
+
+    # NEGATIVE CONTROL: share 0 (the pipeline before the split) emits the capture.
+    w0 = _World(reply=_REPLY)
+    emitted.clear()
+    run_task0d(w0.deps(emit_tests=emit_tests), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    assert probe_ids <= {i for ids in emitted for i in ids}
+    assert probe_ids <= {s.behaviour_id for s in w0.saved["stable"].specs}

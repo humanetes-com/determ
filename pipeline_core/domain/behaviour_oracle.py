@@ -42,6 +42,10 @@ class BehaviourOracleReport:
                      if o.verdict is BehaviourVerdict.MISMATCH)
 
     @property
+    def not_run(self) -> tuple[BehaviourOutcome, ...]:
+        return tuple(o for o in self.outcomes if o.verdict is BehaviourVerdict.NOT_RUN)
+
+    @property
     def all_hold(self) -> bool:
         return all(o.verdict is BehaviourVerdict.HOLD for o in self.outcomes)
 

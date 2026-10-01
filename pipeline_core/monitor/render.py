@@ -205,44 +205,6 @@ def _fmt_dur(seconds: float) -> str:
     return f"{seconds / 3600:.1f}h"
 
 
-PHASE_SEQ: tuple[str, ...] = (
-    "task0a", "task0b", "task0c", "strip", "task1",
-    "task2a", "task2b", "task2c", "task3", "task4",
-)
-
-
-def phase_bar_rows(done_keys: set[str], cur: str) -> list[str]:
-    """The whole-run phase strip: ✓done / ▶current / ·pending across t0a…t4,
-    plus the `current:` line's detail beneath it.
-
-    Pure — the pipeline_state.md read is `run_data.phase_progress`. The strip
-    one level down, inside t2a, is :func:`iteration_step_row`; the two share
-    this vocabulary deliberately, because they answer the same question at two
-    scales and an operator should not have to learn it twice.
-    """
-    done = set(done_keys)
-    # The combined reconstruct marker means the whole loop finished.
-    if "task2-4" in done:
-        done |= {"task2a", "task2b", "task2c", "task3", "task4"}
-    stage = cur.split("/", 1)[0].strip() if cur else ""
-    if stage in ("task2", "task2-4"):
-        stage = "task2c"
-    cells: list[str] = []
-    for p in PHASE_SEQ:
-        short = p.replace("task", "t")
-        if p == stage and p not in done:
-            cells.append(cyan("▶" + short))
-        elif p in done:
-            cells.append(green("✓" + short))
-        else:
-            cells.append(dim("·" + short))
-    rows = ["  phase    " + " ".join(cells)]
-    detail = cur.split("/", 2)[-1].strip() if cur.count("/") >= 1 else ""
-    if detail and detail != cur:
-        rows.append("           " + dim(detail))
-    return rows
-
-
 def iteration_step_row(state: dict[str, Any], now: float) -> str | None:
     """Where inside the TDD iteration the loop is, as a strip.
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.generation import Task1Request
+from pipeline_core.phases import phase_scope
 from pipeline_core.ports.reconstruct import (
     Analyst,
     Artifacts,
@@ -53,8 +54,10 @@ class RequirementsPhase:
             return True
 
         t1_valid = False
+        t1_cached = False
         t0 = time.monotonic()
         self._tel.emit("task.start", task="task1", module=module_name)
+        _ph = phase_scope("t1", module=module_name, attempt=iteration).open()
         for attempt in range(T1_MAX_RETRIES + 1):
             already_done = (self._gate.phase_valid(project_dir, f"task1/{module_name}")
                             and module_req_path.exists() and attempt == 0)
@@ -82,6 +85,7 @@ class RequirementsPhase:
             if ok:
                 self._tel.log("  TASK 1 output validated OK.")
                 t1_valid = True
+                t1_cached = already_done
                 self._gate.commit_and_mark(
                     project_dir, f"task1/{module_name}", "done",
                     commit_message=f"pipeline: task1 — {module_name}",
@@ -110,4 +114,5 @@ class RequirementsPhase:
                     api_surface=self._artifacts.load_api_surface(project_dir, module_name),
                 )
                 break  # do not set t1_valid; caller skips the module
+        _ph.close("skipped" if t1_cached else "ok" if t1_valid else "error")
         return t1_valid

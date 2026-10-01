@@ -30,6 +30,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from pipeline_core.adapters.discovery import is_gen_tests_file
+from pipeline_core.domain.behaviour import HELD_OUT_FILE_PREFIX, SUITE_FILE_PREFIX
 from pipeline_core.domain.body_ledger import oracle_fingerprint
 from pipeline_core.domain.oracle_guard import OracleDrift, oracle_drift
 
@@ -113,17 +114,23 @@ def oracle_tag(module: str) -> str:
     return f"{ORACLE_TAG_PREFIX}{module}"
 
 
+# The baked behaviour suites, and the held-out captures (their own prefix, so
+# no reader of the cluster suites opens them; sealed all the same, because an
+# edit to them moves the agreement reading as an edit to a test moves a score).
+_SEALED_SKELETON_PREFIXES = (SUITE_FILE_PREFIX, HELD_OUT_FILE_PREFIX)
+
+
 def _is_oracle_path(rel: str) -> bool:
     """The workspace half of `cluster_oracle_files`: `tests/**/*.rs` (build
     output under a `target/` excluded), the gen_tests siblings under `src/`,
-    and the baked behaviour suites."""
+    the baked behaviour suites and the held-out captures."""
     parts = rel.split("/")
     if parts[0] == "tests":
         return rel.endswith(".rs") and "target" not in parts[1:-1]
     if parts[0] == "src":
         return is_gen_tests_file(parts[-1])
-    return (len(parts) == 2 and parts[0] == ".skeleton"
-            and parts[1].startswith("_behaviours_") and parts[1].endswith(".json"))
+    return (len(parts) == 2 and parts[0] == ".skeleton" and parts[1].endswith(".json")
+            and parts[1].startswith(_SEALED_SKELETON_PREFIXES))
 
 
 def workspace_oracle_files(project_dir: Path) -> dict[str, str]:
@@ -145,7 +152,8 @@ def workspace_oracle_files(project_dir: Path) -> dict[str, str]:
                     out[rel] = p.read_text(encoding="utf-8", errors="replace")
     sk = root / ".skeleton"
     if sk.is_dir():
-        for p in sorted(sk.glob("_behaviours_*.json")):
+        for p in sorted(q for q in sk.glob("_*.json")
+                        if q.name.startswith(_SEALED_SKELETON_PREFIXES)):
             rel = p.relative_to(root).as_posix()
             with suppress(OSError):
                 out[rel] = p.read_text(encoding="utf-8", errors="replace")

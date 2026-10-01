@@ -294,6 +294,16 @@ def observe_kind(observe: str, when: str = "") -> OutcomeKind:
     return _OBSERVE_TO_KIND.get((observe or "").strip().lower(), OutcomeKind.DISPLAY_STRING)
 
 
+def other_observes(probe: CapturedProbe) -> tuple[str, ...]:
+    """The renderings `probe` was NOT asked under, in a fixed order: the
+    further observations one program can yield. None for an identity
+    predicate (a boolean has one rendering that means anything)."""
+    if identity_type_of(probe.when) is not None:
+        return ()
+    asked = observe_kind(probe.observe, probe.when)
+    return tuple(o for o in ("display", "debug", "alt_debug") if observe_kind(o, probe.when) is not asked)
+
+
 def render_probe_program(
     given: str,
     when: str,
@@ -964,7 +974,11 @@ def render_replay_test(spec: BehaviourSpec, *, fn_name: str) -> str:
         fmt = _KIND_TO_FMT.get(then.kind, "{}")
         lit = rust_string_literal(then.value)
         check = f'    assert_eq!(format!("{fmt}", {spec.when}), {lit});'
-    return f"#[test]\nfn {fn_name}() {{\n{env_lines}{setup}{check}\n}}\n"
+    # The rules this capture is an example of, above the test: a failing
+    # replay then shows, in the test source a fix prompt already quotes,
+    # the sentence the body has to satisfy and not only a value.
+    rules = "".join(f"// rule: {' '.join(r.sentence.split())}\n" for r in spec.rules)
+    return f"{rules}#[test]\nfn {fn_name}() {{\n{env_lines}{setup}{check}\n}}\n"
 
 
 def rust_string_literal(text: str) -> str:

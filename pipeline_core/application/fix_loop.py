@@ -64,7 +64,7 @@ from pipeline_core.application.reconstruct.write_gate import (
 )
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attribution import as_dispatch
-from pipeline_core.domain.behaviour import union_cluster_suites
+from pipeline_core.domain.behaviour import suite_cluster_of, union_cluster_suites
 from pipeline_core.domain.fix_report import FixReport
 from pipeline_core.domain.fix_session import FixSession
 from pipeline_core.domain.refine import FixProgress, FloorStall
@@ -649,17 +649,16 @@ def generate_fix_loop(
     if _load_suite is not None:
         _sk = project_dir / ".skeleton"
         if _sk.is_dir():
-            # Lexical glob puts nightly before stable. First-wins on
-            # behaviour_id alone would silently take nightly's Then; the
-            # helper keeps a shared id whose Then differs. See
-            # union_cluster_suites.
+            # Sorted puts nightly before stable. First-wins on behaviour_id
+            # alone would silently take nightly's Then; the helper keeps a
+            # shared id whose Then differs. See union_cluster_suites.
+            # `suite_cluster_of` decides which files are suites: these specs
+            # are prompt-visible, and the held-out captures stored beside the
+            # suites must never be among them.
             _behaviour_specs = union_cluster_suites([
-                _load_suite(
-                    project_dir,
-                    _path.name[len("_behaviours_"):-len(".json")],
-                )
-                for _path in sorted(_sk.glob("_behaviours_*.json"))
-            ])
+                _load_suite(project_dir, _name)
+                for _name in sorted(filter(None, (
+                    suite_cluster_of(_path.name) for _path in _sk.iterdir())))])
 
     _gen_fix_deps = GenerateFixDeps(
         unit=_fix_unit_deps,

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -42,6 +42,9 @@ from pipeline_core.domain.private_surface import (
 )
 from pipeline_core.domain.rust_name_scope import ModuleScopes
 from pipeline_core.domain.workspace_layout import SKIP_DIR_NAMES
+from pipeline_core.domain.world_book import book_is_current
+from pipeline_core.phases import phase_scope, phase_skipped
+from pipeline_core.phases import step as phase_step
 
 
 @dataclass(frozen=True)
@@ -82,13 +85,14 @@ class BakeArtifactsDeps:
     # wins) instead of overwriting. Default: nothing earlier (a fresh bake).
     load_behaviour_suite: Callable[[Path, str], BehaviourSuite] = (
         lambda _p, c: BehaviourSuite(cfg_cluster=c))
-    # The behaviour book (glossary, features, rules) over the merged suite,
-    # from the pre-strip source: `(project_dir, module, cluster, suite,
-    # src_dir) -> suite`. Called when the merged suite has no book — the
-    # augmented restart, whose t0d pass returns before its own book stage.
-    # None: no book (the suite is saved without rules, as before).
-    build_book: Callable[[Path, str, BuildCluster, BehaviourSuite, Path],
-                         BehaviourSuite] | None = None
+    # The behaviour book (glossary, features, rules), ONE for every world,
+    # over the merged suites, from the pre-strip source: `(project_dir,
+    # module, clusters, {cluster: suite}, src_dir) -> {cluster: suite}`.
+    # Called after the per-cluster loop when a merged suite has no book —
+    # the augmented restart, whose t0d pass returns before its own book
+    # stage. None: no book (the suites are saved without rules, as before).
+    build_book: Callable[[Path, str, Sequence[BuildCluster], Mapping[str, BehaviourSuite], Path],
+                         Mapping[str, BehaviourSuite]] | None = None
 
 
 def _behaviour_sources(src_dir: Path) -> list[tuple[str, str]]:
@@ -147,6 +151,37 @@ def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
     return out
 
 
+def _book_once(
+    project_dir: Path, module_name: str, clusters: Sequence[BuildCluster],
+    merged: Mapping[str, BehaviourSuite], src_dir: Path, d: BakeArtifactsDeps,
+) -> None:
+    """The book, unless every merged store already carries one built for
+    exactly these worlds together (`world_book.book_is_current`): an
+    augmented restart's t0d returns before its own book stage, so this bake
+    is the only stage that sees the pre-strip source and the suites
+    together. Built ONCE over every world's suite and projected into each
+    store — never once per cluster (run `72627-751534fe`, 2026-09-30: the
+    same 11 features asked twice, 10,090 s + 10,639 s, and the augmented
+    tag then held two books that disagreed, 2 rules kept against 3; a
+    "has no book" test would have kept both forever). Additive: a failure
+    keeps the suites as they were."""
+    if d.build_book is None or not merged or book_is_current(merged):
+        return
+    phase_step("bake.book")
+    try:
+        books = d.build_book(project_dir, module_name, clusters, merged, src_dir)
+    except Exception as e:
+        d.log(f"  [bake-skeleton] behaviour book failed (non-fatal, suites kept "
+              f"without rules): {e}")
+        return
+    for name, book in sorted(books.items()):
+        d.save_behaviour_suite(project_dir, book)
+        d.log(f"  [bake-skeleton] cluster {name}: behaviour book → "
+              f"{len(book.features)} feature(s), {len(book.rules)} rule(s), "
+              f"{len(book.glossary)} glossary name(s) in "
+              f".skeleton/_behaviours_{name}.json")
+
+
 def bake_skeleton_artifacts(
     project_dir: Path, module_name: str, deps: BakeArtifactsDeps,
 ) -> dict[str, Any]:
@@ -191,6 +226,7 @@ def bake_skeleton_artifacts(
     d.log(f"  [bake-skeleton] computed reference counts for {len(name_counts)} fn name(s).")
 
     baked: list[str] = []
+    merged_suites: dict[str, BehaviourSuite] = {}
     for cluster in clusters:
         skeleton_dir = skel_root / cluster.name
         if skeleton_dir.exists():
@@ -199,6 +235,7 @@ def bake_skeleton_artifacts(
         # Pass `src_dir` (NOT project_dir) so the extractor can never walk into
         # prior cluster outputs under `.skeleton/`. Output mirrors under
         # `skeleton_dir/src/`, matching the runnable-crate layout Phase A expects.
+        phase_step("bake.extract", cluster=cluster.name)
         res = d.extract_skeleton(src_dir, skeleton_dir / "src", cluster=None)
         if not res.ok:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: extractor FAILED: "
@@ -223,6 +260,7 @@ def bake_skeleton_artifacts(
                   f"{len(_stranded)} inline test mod(s) survived into the "
                   f"skeleton: {', '.join(_stranded)}. They remain writable by "
                   "the fill routes.")
+        phase_step("bake.surface", cluster=cluster.name)
         # F11 M1: classify the skeleton's private layout (public-frozen vs
         # private-replaceable) so the t1.5 phase knows what it may re-author.
         # Visibility is an observable structural fact, safe to use post-strip.
@@ -267,6 +305,7 @@ def bake_skeleton_artifacts(
         except Exception as e:
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private-surface "
                   f"classification failed (non-fatal): {e}")
+        phase_step("bake.harvest", cluster=cluster.name)
         # F10 t0d: harvest this cfg-cluster's behaviour oracle from live source
         # (pre-strip — behaviours are OBSERVABLE outcomes, the same
         # legality class as a test assertion, never bodies). Additive: a harvest
@@ -292,20 +331,8 @@ def bake_skeleton_artifacts(
                       f"({len(earlier.specs)} spec(s)) is re-harvested in the "
                       f"current format; {_kept} probe row(s) the harvest "
                       "cannot re-measure are kept.")
-            # The book, when the suite on disk has none: an augmented
-            # restart's t0d returns before its own book stage, so this bake
-            # is the only stage that sees the pre-strip source and the suite
-            # together. Additive: a failure keeps the suite without rules.
-            if (merged.specs and not merged.features
-                    and d.build_book is not None):
-                try:
-                    merged = d.build_book(project_dir, module_name, cluster,
-                                          merged, src_dir)
-                except Exception as e:
-                    d.log(f"  [bake-skeleton] cluster {cluster.name}: "
-                          f"behaviour book failed (non-fatal, suite kept "
-                          f"without rules): {e}")
             if merged.specs:
+                merged_suites[cluster.name] = merged
                 d.save_behaviour_suite(project_dir, merged)
                 d.log(f"  [bake-skeleton] cluster {cluster.name}: harvested "
                       f"{len(suite.specs)} behaviour(s), {len(earlier.specs)} "
@@ -318,6 +345,9 @@ def bake_skeleton_artifacts(
                   f"failed (non-fatal): {e}")
         baked.append(cluster.name)
 
+    _book_once(project_dir, module_name, clusters, merged_suites, src_dir, d)
+
+    phase_step("bake.manifest")
     try:
         manifest = {
             "module": module_name,
@@ -435,6 +465,9 @@ def strip_and_bake_module(
         return
     if d.phase_valid(project_dir, f"strip/{module_name}"):
         d.log(f"  '{module_name}' already stripped — skipping.")
+        phase_skipped("bake", "already stripped", module=module_name)
+        phase_skipped("layout", "already stripped", module=module_name)
+        phase_skipped("strip", "already stripped", module=module_name)
         return
     if crate_type != "proc-macro" and d.tarpaulin_bin.exists():
         _sentinel_path = d.module_augmented_path(project_dir, module_name)
@@ -451,61 +484,70 @@ def strip_and_bake_module(
     # API snapshot and the skeleton below are both derived from the canonical
     # shape (production code only) rather than from a file that still carries
     # its own oracle.
-    d.preserve_inline_tests(module_dir)
-    # Capture API surface BEFORE strip — structural ground truth for
-    # TASK 1. The .original_structure/ dir survives strip (lives at the
-    # project root, not under src/), so TASK 1 can read it post-strip.
-    d.capture_api_surface(project_dir, module_dir, module_name)
-    # Bake the skeleton + leaf-first ordering +
-    # cluster manifest from live source BEFORE strip. After
-    # strip these artefacts are the only source-derived inputs
-    # any downstream phase is allowed to read.
-    _bake_res = d.bake_skeleton_artifacts(project_dir, module_name)
-    if not _bake_res.get("ok"):
-        d.log(f"  [ABORT] skeleton bake failed for '{module_name}': "
-              f"{_bake_res.get('reason', 'unknown')} — refusing to strip.")
-        raise RuntimeError(
-            f"skeleton bake failed for {module_name}: "
-            f"{_bake_res.get('reason', 'unknown')}")
-    d.log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
-          f"{', '.join(_bake_res['clusters'])}")
+    with phase_scope("bake", module=module_name) as _bk:
+        _bk.step("bake.preserve")
+        d.preserve_inline_tests(module_dir)
+        # Capture API surface BEFORE strip — structural ground truth for
+        # TASK 1. The .original_structure/ dir survives strip (lives at the
+        # project root, not under src/), so TASK 1 can read it post-strip.
+        _bk.step("bake.api")
+        d.capture_api_surface(project_dir, module_dir, module_name)
+        # Bake the skeleton + leaf-first ordering +
+        # cluster manifest from live source BEFORE strip. After
+        # strip these artefacts are the only source-derived inputs
+        # any downstream phase is allowed to read.
+        _bake_res = d.bake_skeleton_artifacts(project_dir, module_name)
+        if not _bake_res.get("ok"):
+            d.log(f"  [ABORT] skeleton bake failed for '{module_name}': "
+                  f"{_bake_res.get('reason', 'unknown')} — refusing to strip.")
+            raise RuntimeError(
+                f"skeleton bake failed for {module_name}: "
+                f"{_bake_res.get('reason', 'unknown')}")
+        d.log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
+              f"{', '.join(_bake_res['clusters'])}")
     # F11 t1.5: author the private layout over the baked skeleton BEFORE the
     # augmentation commit below (so the rewrite is committed with the skeleton).
     # Degrade-safe: a failure here leaves the frozen skeleton untouched.
-    try:
-        d.run_layout_phase(project_dir, module_name)
-    except Exception as e:
-        d.log(f"  [t1.5] layout-authoring phase failed (non-fatal): {e}")
-    # The bake's outputs (.skeleton/) are tracked in git. When
-    # resuming from a task0c-augmented-{module} tag, the
-    # rebake produces byte-identical files → nothing to
-    # commit. That is success, not failure — the augmented
-    # state IS already captured by the existing tag.
-    _porc = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=project_dir, capture_output=True, text=True, timeout=10,
-    ).stdout.strip()
-    if _porc:
-        if not d.git_commit(project_dir,
-                            f"pipeline: task0c augmentation complete — "
-                            f"all unit tests added for {module_name}"):
-            d.log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
-            raise RuntimeError(f"augmentation commit failed for {module_name}")
-    else:
-        d.log("  [augmentation] tree already clean — augmented state preserved from prior run.")
-    d.git_tag(project_dir, f"task0c-augmented-{module_name}")
-    d.strip_module_source(project_dir, module_dir)
-    d.invalidate_structure()
-    # ATOMIC: commit the stripped tree FIRST, then mark state
-    # done. Reverse of the legacy order — protects against
-    # the lost-commit bug where a process dying between mark
-    # and commit lost the strip commit forever.
-    d.commit_and_mark(
-        project_dir,
-        f"strip/{module_name}",
-        "done",
-        commit_message=f"pipeline: stripped — {module_name}",
-        source_hash=src_hash,
-    )
-    d.seal_oracle(project_dir, module_name)
-    d.set_current(project_dir, f"strip/{module_name} / done")
+    with phase_scope("layout", module=module_name) as _t15:
+        try:
+            d.run_layout_phase(project_dir, module_name)
+        except Exception as e:
+            d.log(f"  [t1.5] layout-authoring phase failed (non-fatal): {e}")
+            _t15.close("error")
+    with phase_scope("strip", module=module_name) as _sp:
+        # The bake's outputs (.skeleton/) are tracked in git. When
+        # resuming from a task0c-augmented-{module} tag, the
+        # rebake produces byte-identical files → nothing to
+        # commit. That is success, not failure — the augmented
+        # state IS already captured by the existing tag.
+        _sp.step("strip.commit")
+        _porc = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=project_dir, capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if _porc:
+            if not d.git_commit(project_dir,
+                                f"pipeline: task0c augmentation complete — "
+                                f"all unit tests added for {module_name}"):
+                d.log(f"  [ABORT] augmentation commit failed for '{module_name}' — refusing to strip. Fix git state and retry.")
+                raise RuntimeError(f"augmentation commit failed for {module_name}")
+        else:
+            d.log("  [augmentation] tree already clean — augmented state preserved from prior run.")
+        d.git_tag(project_dir, f"task0c-augmented-{module_name}")
+        _sp.step("strip.source")
+        d.strip_module_source(project_dir, module_dir)
+        d.invalidate_structure()
+        # ATOMIC: commit the stripped tree FIRST, then mark state
+        # done. Reverse of the legacy order — protects against
+        # the lost-commit bug where a process dying between mark
+        # and commit lost the strip commit forever.
+        d.commit_and_mark(
+            project_dir,
+            f"strip/{module_name}",
+            "done",
+            commit_message=f"pipeline: stripped — {module_name}",
+            source_hash=src_hash,
+        )
+        _sp.step("strip.seal")
+        d.seal_oracle(project_dir, module_name)
+        d.set_current(project_dir, f"strip/{module_name} / done")

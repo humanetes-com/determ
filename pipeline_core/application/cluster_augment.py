@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.domain.models import BuildCluster, ModuleAugmentState
+from pipeline_core.phases import phase_scope
 from pipeline_core.ports.augment import (
     AugmentEngine,
     AugmentStore,
@@ -109,6 +110,7 @@ class ClusterAugmentor:
             tel.mark_phase(project_dir, f"task0c/{cluster.name}", "in_progress",
                            detail="starting", source_hash=src_hash)
             tel.set_current(project_dir, f"task0c/{cluster.name} / starting")
+            _ph = phase_scope("t0c", cluster=cluster.name).open()
 
             module_states: dict[str, ModuleAugmentState] = {}
             cluster_done: set[str] = set()
@@ -160,7 +162,9 @@ class ClusterAugmentor:
             # Pre-check: verify base library compiles under this cluster's env.
             # Handles E0554 (nightly feature on stable) by auto-installing nightly toolchain.
             precheck_ok = True
-            if cluster_done != set(modules):
+            _all_cached = cluster_done == set(modules)
+            if not _all_cached:
+                _ph.step("t0c.precheck")
                 pc_mod = next((m for m in modules if m not in cluster_done), modules[0])
                 precheck_ok = engine.pre_check(project_dir, pc_mod, cluster)
                 if not precheck_ok:
@@ -176,6 +180,8 @@ class ClusterAugmentor:
                                 store.mark_module_augmented(project_dir, m, 0.0)
                             cluster_done.add(m)
 
+            if precheck_ok and not _all_cached:
+                _ph.step("t0c.augment")
             while True:
                 # Pick next module not yet done for this cluster, highest coverage first.
                 pending = [m for m in modules if m not in cluster_done]
@@ -298,6 +304,7 @@ class ClusterAugmentor:
                 detail=f"{len(cluster_done)} modules",
                 source_hash=src_hash,
             )
+            _ph.close("error" if not precheck_ok else "skipped" if _all_cached else "ok")
 
         scope.set_active(None)
 

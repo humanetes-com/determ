@@ -16,8 +16,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from ..domain.phase_registry import PHASE_ENTER, PHASE_EXIT
 from ..domain.test_results import build_test_name_index, per_file_test_stats
 from ..log import emit, log
+
+PHASE_EVENTS = frozenset({PHASE_ENTER, PHASE_EXIT})
 
 
 class JsonlEventEmitter:
@@ -66,6 +69,15 @@ class JsonlEventEmitter:
             if event == "phase_c.verdict":
                 _vpath = Path(self._events_log()).with_name("verdicts.jsonl")
                 with open(_vpath, "a") as fh:
+                    fh.write(line)
+            # Phase announcements double into a small sibling file for the
+            # same reason: the monitor reads events.jsonl through an 8 MB tail
+            # window, and a run that fills for hours pushes its own setup and
+            # strip phases out of it. The phase record is a few hundred lines
+            # per run and is read whole.
+            if event in PHASE_EVENTS:
+                _ppath = Path(self._events_log()).with_name("phases.jsonl")
+                with open(_ppath, "a") as fh:
                     fh.write(line)
         except Exception:
             pass  # observability must never crash the pipeline

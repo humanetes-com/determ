@@ -4,6 +4,7 @@ refuses the pipeline's own generated test siblings by name."""
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -161,12 +162,12 @@ def test_the_bake_over_a_legacy_store_keeps_its_probes_and_builds_the_book(
     assert legacy.is_legacy
     asked: list[str] = []
 
-    def book(pd: Path, mod: str, cl: BuildCluster, suite: BehaviourSuite,
-             src: Path) -> BehaviourSuite:
-        asked.append(f"{mod}:{cl.name}:{src.name}")
+    def book(pd: Path, mod: str, cls: Sequence[BuildCluster],
+             suites: Mapping[str, BehaviourSuite], src: Path) -> dict[str, BehaviourSuite]:
+        asked.append(f"{mod}:{'+'.join(c.name for c in cls)}:{src.name}")
         from pipeline_core.domain.behaviour import Feature
-        return replace(suite, features=(
-            Feature("f", "fn", ("probe::stable::f::0",)),))
+        return {n: replace(s, features=(Feature("f", "fn", ("probe::stable::f::0",)),))
+                for n, s in suites.items()}
 
     logs: list[str] = []
     saved: dict[str, BehaviourSuite] = {}

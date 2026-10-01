@@ -419,22 +419,32 @@ class Rule:
 
     `terms` are the glossary names the sentence uses (computed, never
     authored); `feature` is the public item the rule's examples are grouped
-    under. Neither names a private item: a sentence that did was dropped."""
+    under. Neither names a private item: a sentence that did was dropped.
+
+    `example_ids` are the examples the rule is CREDITED with — the ones its
+    chunk's rule set predicts, the ablation misses, and the set without this
+    rule misses (`behaviour_book.judge_rule_set`). `refuted_on` are cited
+    examples the set answered and got wrong: recorded, not a veto of the
+    whole sentence."""
 
     rule_id: str
     sentence: str
     example_ids: tuple[str, ...]
     feature: str
     terms: tuple[str, ...] = ()
+    refuted_on: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "rule_id": self.rule_id,
             "sentence": self.sentence,
             "example_ids": list(self.example_ids),
             "feature": self.feature,
             "terms": list(self.terms),
         }
+        if self.refuted_on:
+            out["refuted_on"] = list(self.refuted_on)
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Rule:
@@ -444,6 +454,7 @@ class Rule:
             example_ids=tuple(str(x) for x in (d.get("example_ids") or [])),
             feature=str(d.get("feature", "")),
             terms=tuple(str(x) for x in (d.get("terms") or [])),
+            refuted_on=tuple(str(x) for x in (d.get("refuted_on") or [])),
         )
 
 
@@ -783,23 +794,55 @@ class GlossaryEntry:
     """One public name of the crate and the first sentence of its doc
     comment: the vocabulary rules are written in. `kind` is `fn`, `macro`,
     `struct`, `enum`, `trait` or `type`; `name` is how a user spells it
-    (`Error::msg`, `ensure!`, `Context::context`, `Error`)."""
+    (`Error::msg`, `ensure!`, `Context::context`, `Error`).
+
+    `worlds` is empty when every build world compiles the name, else the
+    worlds that do (`cfg_worlds.world_mark`). The book is drafted once over
+    every world's vocabulary, so a name only some builds have is shown once,
+    marked, instead of forking the whole book over it: on run
+    `72627-751534fe` (2026-09-30) the two clusters' book prompts differed by
+    exactly that one glossary line.
+
+    `signature` is a public fn's declaration as written (`FnRecord.sig_text`,
+    whitespace collapsed): the frozen public API the bake's surface already
+    shows every fill. Without it a rule sentence can invent a return shape:
+    a kept rule on run `72627-751534fe` said `Error::downcast` "yields Some"
+    when the vocabulary line gave only the doc sentence (it returns a
+    `Result`)."""
 
     name: str
     kind: str
     summary: str = ""
+    worlds: tuple[str, ...] = ()
+    signature: str = ""
 
     @property
     def leaf(self) -> str:
         """The name a call site spells: the last `::` segment, `!` dropped."""
         return self.name.rsplit("::", 1)[-1].rstrip("!")
 
+    def merged(self, other: GlossaryEntry) -> GlossaryEntry:
+        """This entry with each of `summary` and `signature` taken from
+        `other` where this one has none: two records (or two worlds) of one
+        name each contribute what they carry, first non-empty wins per field.
+        Replacing the whole entry by the one with a summary dropped the other
+        record's signature."""
+        return replace(self, summary=self.summary or other.summary,
+                       signature=self.signature or other.signature)
+
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "kind": self.kind, "summary": self.summary}
+        out: dict[str, Any] = {"name": self.name, "kind": self.kind, "summary": self.summary}
+        if self.worlds:
+            out["worlds"] = list(self.worlds)
+        if self.signature:
+            out["signature"] = self.signature
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> GlossaryEntry:
-        return cls(name=str(d["name"]), kind=str(d.get("kind", "")), summary=str(d.get("summary", "")))
+        return cls(name=str(d["name"]), kind=str(d.get("kind", "")), summary=str(d.get("summary", "")),
+                   worlds=tuple(str(w) for w in (d.get("worlds") or ())),
+                   signature=str(d.get("signature", "")))
 
 
 @dataclass(frozen=True, slots=True)
@@ -811,14 +854,22 @@ class Feature:
     kind: str
     example_ids: tuple[str, ...]
     rules: tuple[Rule, ...] = ()
+    # The examples the book's checker predicted with NO rule (its ablation
+    # answered them right): what any reader of the code would expect, so a
+    # test of one constrains a body least. Empty when the feature was not
+    # asked. Recorded, never a gate.
+    unaided_ids: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "item": self.item,
             "kind": self.kind,
             "example_ids": list(self.example_ids),
             "rules": [r.to_dict() for r in self.rules],
         }
+        if self.unaided_ids:
+            out["unaided_ids"] = list(self.unaided_ids)
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Feature:
@@ -827,6 +878,7 @@ class Feature:
             kind=str(d.get("kind", "")),
             example_ids=tuple(str(x) for x in (d.get("example_ids") or [])),
             rules=tuple(Rule.from_dict(r) for r in (d.get("rules") or [])),
+            unaided_ids=tuple(str(x) for x in (d.get("unaided_ids") or [])),
         )
 
 
@@ -846,6 +898,12 @@ class BehaviourSuite:
     features: tuple[Feature, ...] = ()
     glossary: tuple[GlossaryEntry, ...] = ()
     format_version: int = SUITE_FORMAT
+    # The build worlds the book was built for, together (`world_book`); empty
+    # for a book built over this cluster alone. A book whose worlds are not
+    # the workspace's is not the crate's one specification: run
+    # `72627-751534fe` (2026-09-30) left two per-cluster books over 227
+    # identical examples, 2 rules kept in one and 3 in the other.
+    book_worlds: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # The table is the union of what was handed in and what the specs
@@ -881,6 +939,7 @@ class BehaviourSuite:
             "helpers": {k: v for k, v in sorted(self.helpers) if k in used},
             "features": [f.to_dict() for f in self.features],
             "glossary": [g.to_dict() for g in self.glossary],
+            **({"book_worlds": list(self.book_worlds)} if self.book_worlds else {}),
         }
 
     @classmethod
@@ -895,6 +954,7 @@ class BehaviourSuite:
             features=tuple(Feature.from_dict(f) for f in (d.get("features") or [])),
             glossary=tuple(GlossaryEntry.from_dict(g) for g in (d.get("glossary") or [])),
             format_version=version,
+            book_worlds=tuple(str(w) for w in (d.get("book_worlds") or ())),
         )
 
 
@@ -923,6 +983,26 @@ def _resolve(
 PROBE_ID_PREFIX = "probe::"
 
 
+SUITE_FILE_PREFIX = "_behaviours_"
+HELD_OUT_FILE_PREFIX = "_heldout_"
+
+
+def suite_cluster_of(file_name: str) -> str | None:
+    """The cluster a `.skeleton/` file name is the baked suite of, else
+    None. The one rule for "this file is a cluster's suite": every reader
+    that enumerates suites on disk asks it, so an artefact stored beside
+    them under another prefix (the held-out captures) is never loaded as a
+    cluster, whatever a glob would have matched."""
+    if file_name.startswith(SUITE_FILE_PREFIX) and file_name.endswith(".json"):
+        return file_name[len(SUITE_FILE_PREFIX):-len(".json")] or None
+    return None
+
+
+def held_out_file_name(cfg_cluster: str) -> str:
+    """The file a cluster's held-out captures are stored in."""
+    return f"{HELD_OUT_FILE_PREFIX}{cfg_cluster}.json"
+
+
 def is_probe_id(behaviour_id: str) -> bool:
     """A probe row: a program t0d ran on the ORIGINAL crate, its stdout
     recorded as the Then."""
@@ -946,8 +1026,9 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
     (2026-09-29): an augmented restart's bake read the format-1 store, the
     whole-store discard dropped its four probe rows (`231 already on disk
     → 227`), and the rows were gone for good.
-    The helpers tables union (same key, same test file text); the book is the
-    existing one when it has features, else the incoming one's."""
+    The helpers tables union (same key, same test file text); the book (and
+    the worlds it was built for) is the existing one when it has features,
+    else the incoming one's."""
     if existing.is_legacy:
         kept = {s.behaviour_id: s for s in existing.specs
                 if is_probe_id(s.behaviour_id)}
@@ -968,6 +1049,7 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
         helpers=tuple(sorted(helpers.items())),
         features=existing.features if has_book else incoming.features,
         glossary=existing.glossary if has_book else incoming.glossary,
+        book_worlds=existing.book_worlds if has_book else incoming.book_worlds,
     )
 
 
@@ -1008,3 +1090,7 @@ class BehaviourVerdict(Enum):
 
     HOLD = auto()
     MISMATCH = auto()
+    # The behaviour's program did not build, panicked or timed out on the
+    # reconstruction: no observable to compare. Not a mismatch (nothing was
+    # printed) and not a hold.
+    NOT_RUN = auto()

@@ -97,6 +97,11 @@ def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
     return 8_192, 0  # huggingface / unrecognised → safe fallback
 
 
+def _optional_float(raw: str | None) -> float | None:
+    """An env float, None when unset or blank (the server default)."""
+    return float(raw) if raw and raw.strip() else None
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     backend: Backend
@@ -123,6 +128,10 @@ class Settings:
     # public-API programs per cluster, each one model batch plus one cargo run.
     behaviour_coverage_target: float = 0.0
     task0d_probe_max: int = 12
+    # Compositions of two public items t0d asks about per cluster: edges of
+    # the public API (one item's result type is another's receiver or
+    # argument) that no example asserts. `TASK0D_PROBE_EDGES=0` asks none.
+    task0d_probe_edges: int = 8
     task0d_exercises: bool = True
     # Blocks honoured per synthesis reply. The probe-target cap bounds how many
     # units are ASKED about; without this a single reply's block count bounded
@@ -151,6 +160,38 @@ class Settings:
     behaviour_book_max_features: int = 24
     behaviour_book_examples_per_prompt: int = 24
     behaviour_book_drafts_per_reply: int = 6
+    # Chunks of the book drafted and checked at once. Every chunk is
+    # independent (its ablation and checks read only its own examples), and
+    # the book ran one call at a time: 62 calls, 10,090 s on run
+    # `72627-751534fe` (2026-09-30). `BEHAVIOUR_BOOK_LANES`, else the
+    # pipeline's `PIPELINE_PARALLELISM`, else 1. 1 is the serial build.
+    behaviour_book_lanes: int = 1
+    # Sampling temperature of the book judge's calls (ablation, set,
+    # leave-one-out); drafting keeps the server default. None (unset or
+    # empty `BEHAVIOUR_BOOK_PREDICT_TEMPERATURE`) forwards no temperature.
+    # Left unset until `scripts/book_judge_replay.py`'s agreement line
+    # chooses a value. Printed as `predict-temp=` on the behaviour-book line.
+    behaviour_book_predict_temperature: float | None = None
+    # A feature's kept sentences are judged again on each of its chunks'
+    # uncovered examples (one set call, plus leave-one-out calls when it
+    # gains). `BEHAVIOUR_BOOK_SIBLING_CHUNKS=0` leaves each chunk with the
+    # rules drafted from its own examples. Read off the behaviour-book line
+    # (`N by a sibling chunk's rule`).
+    behaviour_book_sibling_chunks: bool = True
+    # Percent of t0d's own captures held out of the suite as the agreement
+    # reading (`domain/held_out.py`): never emitted as tests, never in a
+    # prompt or the book; run against the reconstruction when a cluster's
+    # fill closes and at task3, printed as `behaviour-agreement:`.
+    # `BEHAVIOUR_HELD_OUT_SHARE=0` holds nothing out and takes no reading.
+    behaviour_held_out_share: int = 25
+    # Kept rules of the behaviour book tested on new captures at t0d, after
+    # the book: per rule the model writes programs the sentence covers, the
+    # original prints their values, and the rule is confirmed, refuted or
+    # dropped on them. `BEHAVIOUR_RULE_PROBES=0` skips the stage;
+    # `BEHAVIOUR_RULE_PROBE_PROGRAMS` is the programs asked per rule (each
+    # costs two cargo runs).
+    behaviour_rule_probes: int = 8
+    behaviour_rule_probe_programs: int = 3
     # Who is the language expert in fill and layout prompts. generic (default):
     # the fill model; the pipeline is the gate. catalog: the pre-2026-09-09
     # std-trait tutorials, Display/Debug name-set, standard derive set, and
@@ -192,6 +233,7 @@ class Settings:
             fix_caps=FixLoopCaps.from_env(single_call),
             behaviour_coverage_target=float(os.getenv("BEHAVIOUR_COVERAGE_TARGET", "0")),
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
+            task0d_probe_edges=int(os.getenv("TASK0D_PROBE_EDGES", "8")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
             task0d_blocks_per_reply=int(
                 os.getenv("TASK0D_BLOCKS_PER_REPLY", "8")),
@@ -204,6 +246,16 @@ class Settings:
             behaviour_book_examples_per_prompt=int(
                 os.getenv("BEHAVIOUR_BOOK_EXAMPLES_PER_PROMPT", "24")),
             behaviour_book_drafts_per_reply=int(os.getenv("BEHAVIOUR_BOOK_DRAFTS_PER_REPLY", "6")),
+            behaviour_book_lanes=max(1, int(
+                os.getenv("BEHAVIOUR_BOOK_LANES") or os.getenv("PIPELINE_PARALLELISM") or "1")),
+            behaviour_book_predict_temperature=_optional_float(
+                os.getenv("BEHAVIOUR_BOOK_PREDICT_TEMPERATURE")),
+            behaviour_rule_probes=int(os.getenv("BEHAVIOUR_RULE_PROBES", "8")),
+            behaviour_rule_probe_programs=int(os.getenv("BEHAVIOUR_RULE_PROBE_PROGRAMS", "3")),
+            behaviour_held_out_share=max(0, min(100, int(
+                os.getenv("BEHAVIOUR_HELD_OUT_SHARE", "25")))),
+            behaviour_book_sibling_chunks=os.getenv(
+                "BEHAVIOUR_BOOK_SIBLING_CHUNKS", "1").strip() == "1",
             language_driver=LanguageDriverKind.coerce(
                 os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC),
         )

@@ -15,6 +15,59 @@ from pipeline_core.domain.behaviour import MAY_REPRESENTATION_NOTE
 from pipeline_core.prompts.sections import tag_block
 
 
+def _edges_prompt(module_name: str, cfg_cluster: str,
+                  edges: tuple[tuple[str, str, str, str], ...],
+                  public_surface: str, example_usages: str) -> str:
+    """The ask for COMPOSITIONS (`domain/use_cases.py`): per edge, a value
+    built with the first item, then the second item called on it and its
+    result rendered. `edges` are (first name, its declaration, second name,
+    its declaration). Same output form and rules as the unit and class asks:
+    the reply goes through the same parser and the same capture."""
+    lines = "".join(
+        f"- build with `{p}` (`{p_sig}`), then observe `{c}` (`{c_sig}`)\n"
+        for p, p_sig, c, c_sig in edges)
+    surface_block = tag_block("PUBLIC_API_SURFACE", public_surface)
+    examples_block = tag_block(
+        "EXAMPLE_USAGES", example_usages,
+        prefix="How this crate's public API is CALLED. Take the calls, never the "
+               "shape: these are the crate's own tests, so they assert — your "
+               "<GIVEN> and <WHEN> must not.\n```rust\n",
+        suffix="\n```")
+    return f"""Specify this crate's observable behaviour through its PUBLIC API.
+
+Crate: {module_name} | Cluster: {cfg_cluster}
+Goal: write ONE behaviour for each of these compositions of two public items.
+<GIVEN> builds a value using the first item (choose its inputs freely).
+<WHEN> is the second item called on that value, as ONE expression whose
+result is rendered; when the second item's result cannot be printed as it
+is, render what it yields.
+{lines}
+{surface_block}{examples_block}
+Output one block per behaviour, EXACTLY this form and nothing else:
+
+  <BEHAVIOUR name="snake_case_name">
+  <GIVEN>
+  // zero or more Rust statements building the values; no printing, no asserting
+  </GIVEN>
+  <WHEN>a SINGLE Rust expression</WHEN>
+  <OBSERVE>display|debug|alt_debug</OBSERVE>
+  </BEHAVIOUR>
+
+Rules:
+- PUBLIC API ONLY. You have no access to the crate's internals — treat it as a
+  black box. Never guess or transcribe how a function is implemented internally.
+- <WHEN> must evaluate to a RENDERED VALUE, never to a comparison (`==`, `!=`,
+  `<=`, `>=`, `.contains(` are REJECTED). The ONLY booleans allowed are
+  type-identity predicates: `x.is::<T>()` or `x.downcast_ref::<T>().is_some()`.
+- <WHEN> is ONE expression: never a statement, never a block, never a
+  `println!`, never an `assert`. <GIVEN> may not print and may not assert.
+- `{module_name}`'s public items are ALREADY imported (`use {module_name}::*;`
+  sits above the `fn main()` your <GIVEN> goes into). Any OTHER import goes at
+  the top of <GIVEN> as a normal `use` line.
+- You do NOT know the value. Never write it down; the harness prints it.
+"""
+
+
 def build_behaviour_synthesis_prompt(
     *,
     module_name: str,
@@ -24,6 +77,7 @@ def build_behaviour_synthesis_prompt(
     symbol_inventory: str,
     example_usages: str = "",
     target_classes: tuple[tuple[str, str], ...] = (),
+    target_edges: tuple[tuple[str, str, str, str], ...] = (),
 ) -> str:
     """Prompt the model for behaviours in the CONSTRAINED shape: setup
     statements, ONE expression, and the render kind. The harness prints the
@@ -44,6 +98,8 @@ def build_behaviour_synthesis_prompt(
     the model and never read back from the reply — measured 0 of 3 self-assigned
     classes correct against 4 of 4 when supplied, and `classified()` re-derives
     the class from kind and text at storage time regardless."""
+    if target_edges:
+        return _edges_prompt(module_name, cfg_cluster, target_edges, public_surface, example_usages)
     targets = ", ".join(target_units) or "(the crate's public API)"
     class_lines = "".join(f"- {k}: {d}\n" for k, d in target_classes)
     # Asked by CLASS, the model still needs CALLABLE NAMES: a class names what

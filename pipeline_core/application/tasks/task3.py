@@ -74,6 +74,11 @@ class Task3Deps:
     # inject a fake result through env_extra — that overlay is what dropped
     # -A warnings and skipped the toolchain on a live nightly cluster.
     cluster_env: Callable[[Any], dict[str, str]] | None = None
+    # (project_dir, cluster, pass count, expected count): the held-out
+    # agreement reading on the tree this phase just tested, printed beside
+    # its oracle tally (`application/behaviour_agreement.py`). Counts only;
+    # nothing it returns is read here. None takes no reading.
+    measure_agreement: Callable[[Path, Any, int, int], object] | None = None
 
 
 def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
@@ -326,6 +331,13 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
             f"{agg_fail} failed, {agg_ignored} ignored across "
             f"{len(per_cluster_results)} cluster(s) — "
             f"{'PASS' if all_pass else ('FAIL' if any_failed else 'INCOMPLETE')}.")
+
+        if deps.measure_agreement is not None:
+            _by_cluster = {c.name: c for c in clusters}
+            for _r in cluster_results:
+                if _r["cluster"] in _by_cluster:
+                    deps.measure_agreement(project_dir, _by_cluster[_r["cluster"]],
+                                           int(_r["pass"]), int(_r["expected"]))
 
         if all_pass:
             emit("test.pass", duration_ms=int(

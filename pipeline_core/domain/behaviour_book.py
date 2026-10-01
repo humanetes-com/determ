@@ -26,11 +26,12 @@ What this module holds, all pure:
   example lands somewhere by construction;
 - RULE drafting and checking — parse a model's `<RULE covers="…">` blocks,
   refuse a sentence that names a private item or restates a cited Then
-  verbatim, and keep a rule only when a checker given the sentence predicts
-  every cited Then AND the same checker without it misses at least one: a
-  sentence the checker can ignore is not an instruction (the ablation is the
-  control a plain "predict with the rule" check lacks — for an `assert_eq!`
-  the when already is the expression and the Then the literal);
+  verbatim, and judge a chunk's drafts as one set (`judge_rule_set`): a
+  rule is kept for the examples the set predicts, the checker without any
+  rule misses, and the set without that rule misses. A sentence the checker
+  can ignore is not an instruction (the ablation is the control a plain
+  "predict with the rule" check lacks — for an `assert_eq!` the when already
+  is the expression and the Then the literal);
 - AIMING — which rules a fill of given units carries, keyed on the unit's own
   declaration (name, container) the way the identity instruction is aimed,
   never on coverage `exercises` (coverage of the original put 55 of 85
@@ -75,7 +76,6 @@ RULES_PER_PROMPT = 3
 # A cited Then this long, quoted verbatim in a rule, is a restatement.
 _RESTATEMENT_MIN = 12
 _SUMMARY_CAP = 200
-_SENTENCE_CAP = 400
 
 _IDENT = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
@@ -185,7 +185,10 @@ def glossary_entries(
     (declared or implemented), `fn` for a free fn; a method of a trait the
     crate does not declare (`Display::fmt`) is the std vocabulary, not the
     crate's, and is left out. Macros: `#[macro_export]` `macro_rules!`.
-    Each entry carries the first sentence of its doc comment."""
+    Each entry carries the first sentence of its doc comment; a fn also
+    carries its declaration (`sig_text`). Two records of one spelling merge
+    field-wise (`GlossaryEntry.merged`), so the signature of the record
+    without a doc comment is not lost to the one with it."""
     src = dict(sources)
     types = [t for t in type_records
              if t.is_pub and t.is_exactly_pub and not t.mod_path and not t.external_path
@@ -211,9 +214,9 @@ def glossary_entries(
             continue
         text = _source_for(rec.file, src)
         summary = doc_summary_before(text, _byte_to_char(text, rec.sig_byte_start)) if text else ""
+        entry = GlossaryEntry(name, "fn", summary, signature=" ".join(rec.sig_text.split()))
         prior = out.get(name)
-        if prior is None or (not prior.summary and summary):
-            out[name] = GlossaryEntry(name, "fn", summary)
+        out[name] = entry if prior is None else prior.merged(entry)
     for rel, name, at in exported_macros(src.items()):
         out.setdefault(f"{name}!", GlossaryEntry(f"{name}!", "macro",
                                                  doc_summary_before(src[rel], at)))
@@ -608,20 +611,47 @@ def rule_terms(sentence: str, glossary: Sequence[GlossaryEntry]) -> tuple[str, .
     return tuple(sorted(out))
 
 
+# A sentence end inside prose: `.` or `?` closing a word (optionally inside a
+# closing quote or bracket), then space, then a capital opening the next
+# sentence. `!` is not one: in this prose `name!` spells a macro. Nor is the
+# last dot of a dotted abbreviation (`e.g.`).
+_SENTENCE_BREAK = re.compile(r"(?<=[^\W_])(?<!\.[^\W_])[.?][\"')\]]*\s+(?=[A-Z])")
+_CODE_SPAN = re.compile(r"`[^`]*`")
+
+
+def sentence_breaks(text: str) -> int:
+    """How many sentence ends `text` has before its last sentence: 0 for one
+    sentence, whatever its length.
+
+    Code spans are read as one word each, so a `.` inside one (a path, a
+    quoted message format) ends nothing. A break is a `.` or `?` that closes
+    a word and is followed by a capitalised word. The test errs toward one
+    sentence: a draft it misreads as one is still judged by the set on what
+    it predicts, a draft it misreads as several is dropped unjudged.
+
+    Why not a length. The bound here was 400 characters. On run
+    `72627-751534fe` (2026-09-30) five of 69 drafts exceeded it (413 to 471
+    chars), every one a single sentence stating a whole message format, and
+    four were one half of the largest feature's base + suffix pair; with
+    them judged, that feature's credited examples went 6 to 68 of 101 on the
+    nightly book."""
+    return len(_SENTENCE_BREAK.findall(_CODE_SPAN.sub("C", text)))
+
+
 def draft_refusal(
     draft: RuleDraft,
     examples: Mapping[str, BehaviourSpec],
     private: Collection[str],
 ) -> str | None:
     """Why a draft is dropped before the check, else None: it cites no
-    checkable example of its feature, it is too long to be one sentence, it
+    checkable example of its feature, it is more than one sentence, it
     names a private item, or it quotes a cited example's Then verbatim (a
     restatement predicts that example and nothing else)."""
     cited = [examples[i] for i in draft.covers if i in examples]
     if not cited:
         return "cites no checkable example of its feature"
-    if len(draft.sentence) > _SENTENCE_CAP:
-        return "longer than one sentence"
+    if sentence_breaks(draft.sentence):
+        return "more than one sentence"
     for name in sorted(private):
         if _mentions(draft.sentence, name):
             return f"names the private item `{name}`"
@@ -633,48 +663,234 @@ def draft_refusal(
     return None
 
 
+# `predict(rule sentences, example ids) -> {id: predicted Then}`: one call of
+# the checker. An empty sentence list is the ablation.
+Predict = Callable[[Sequence[str], Sequence[str]], Mapping[str, str]]
+
+
 @dataclass(frozen=True, slots=True)
-class RuleVerdict:
-    kept: bool
-    reason: str
+class CreditedRule:
+    """A draft the set judge keeps: the examples it is credited with and the
+    cited examples its set answered and got wrong."""
+
+    draft: RuleDraft
+    credited: tuple[str, ...]
+    refuted_on: tuple[str, ...] = ()
 
 
-def judge_draft(
-    draft: RuleDraft,
+@dataclass(frozen=True, slots=True)
+class SetVerdict:
+    """One chunk's judgment: the kept rules in draft order, one drop reason
+    per dropped draft, and the checker calls spent."""
+
+    kept: tuple[CreditedRule, ...]
+    dropped: tuple[str, ...]
+    calls: int
+
+
+def judge_rule_set(
+    drafts: Sequence[RuleDraft],
     examples: Mapping[str, BehaviourSpec],
     *,
-    with_rule: Mapping[str, str],
-    without_rule: Mapping[str, str],
-) -> RuleVerdict:
-    """Keep iff the checker GIVEN the sentence predicts every cited example's
-    Then and the checker WITHOUT it, having answered every one of them,
-    misses at least one. The first half is "the rule is true of its
-    examples"; the second is "the rule is what made them predictable".
+    predict: Predict,
+) -> SetVerdict:
+    """Judge a chunk's surviving drafts as ONE set, and keep each for what
+    it contributes to that set.
 
-    A cited id absent from `without_rule` is not a miss. An empty ablation
-    reply parses to `{}`, and reading the gap as "the ablation got it wrong"
-    keeps a restatement whenever the with-rule checker happened to be right.
-    """
-    cited = [examples[i] for i in draft.covers if i in examples]
-    missed = [s.behaviour_id for s in cited
-              if s.then is None or not outcome_matches(with_rule.get(s.behaviour_id, "\0"), s.then)]
-    if missed:
-        return RuleVerdict(False, f"does not predict {len(missed)} of its {len(cited)} example(s)")
-    unanswered = [s.behaviour_id for s in cited if s.behaviour_id not in without_rule]
-    if unanswered:
-        return RuleVerdict(
-            False, f"ablation did not answer {len(unanswered)} of its {len(cited)} example(s)")
-    informative = [s for s in cited
-                   if s.then is not None
-                   and not outcome_matches(without_rule[s.behaviour_id], s.then)]
-    if not informative:
-        return RuleVerdict(False, "adds nothing: every cited Then is predicted without it")
-    return RuleVerdict(True, f"predicts {len(cited)}, {len(informative)} only with it")
+    Calls: the ablation (no rule) and the set (every draft) over every
+    example of `examples`; then, only when the set GAINED an example (the
+    set answers it right, the ablation answers it wrong), one leave-one-out
+    call per draft citing a gained example, over those gained examples,
+    carrying the set without that draft. A draft alone in its set needs no
+    leave-one-out: the set without it is the ablation.
+
+    Credit. A draft is NECESSARY for a gained example when its leave-one-out
+    answered that example and got it wrong; every necessary draft is
+    credited. A gained example no citing draft is necessary for (two drafts
+    that say the same thing) is credited to its first citing draft in draft
+    order — only when every citing draft's leave-one-out answered it and got
+    it right, so duplicates keep one copy, not zero. A draft is kept iff it
+    is credited with at least one example; its `refuted_on` are the cited
+    examples the set answered wrong. A cited example the set answered wrong
+    is recorded, not a veto; a cited example no gain covers earns nothing.
+
+    Silence is never a miss. An empty reply parses to `{}`, and reading the
+    gap as "got it wrong" keeps a restatement (the ablation side) or credits
+    a draft its leave-one-out never judged. An id absent from the ablation,
+    the set or a leave-one-out is not a gain, not a refutation and not a
+    necessity.
+
+    Why a set. On run `72627-751534fe` (2026-09-30) the largest feature's
+    drafts split one message into a base sentence and a suffix sentence
+    ("the base message above"); each was checked alone, each predicted
+    nothing alone, and the feature kept 0 rules over 103 examples. And the
+    old verdict was all-or-nothing over up to 24 cited examples, so one
+    predictor slip convicted a correct sentence."""
+    order = list(examples)
+    cited = [tuple(dict.fromkeys(i for i in d.covers if i in examples)) for d in drafts]
+    sentences = [d.sentence for d in drafts]
+    if not drafts:
+        return SetVerdict((), (), 0)
+
+    def right(reply: Mapping[str, str], bid: str) -> bool | None:
+        """True/False when `reply` answered `bid`, None when it did not."""
+        then = examples[bid].then
+        if bid not in reply or then is None:
+            return None
+        return outcome_matches(reply[bid], then)
+
+    ablation = predict((), order)
+    with_set = predict(sentences, order)
+    calls = 2
+    gained = [i for i in order if right(with_set, i) is True and right(ablation, i) is False]
+    refuted = [tuple(i for i in c if right(with_set, i) is False) for c in cited]
+    gained_set = set(gained)
+    necessary: list[set[str]] = [set() for _ in drafts]
+    judged_right: list[set[str]] = [set() for _ in drafts]
+    loo_silent: list[set[str]] = [set() for _ in drafts]
+    for k, c in enumerate(cited):
+        mine = [i for i in c if i in gained_set]
+        if not mine:
+            continue
+        if len(drafts) == 1:
+            without: Mapping[str, str] = ablation
+        else:
+            without = predict(sentences[:k] + sentences[k + 1:], mine)
+            calls += 1
+        for i in mine:
+            verdict = right(without, i)
+            if verdict is False:
+                necessary[k].add(i)
+            elif verdict is True:
+                judged_right[k].add(i)
+            else:
+                loo_silent[k].add(i)
+    credited: list[set[str]] = [set(n) for n in necessary]
+    for i in gained:
+        citing = [k for k, c in enumerate(cited) if i in c]
+        if not citing or any(i in necessary[k] for k in citing):
+            continue
+        if all(i in judged_right[k] for k in citing):
+            credited[citing[0]].add(i)
+    kept: list[CreditedRule] = []
+    dropped: list[str] = []
+    for k, d in enumerate(drafts):
+        if credited[k]:
+            kept.append(CreditedRule(d, tuple(i for i in order if i in credited[k]), refuted[k]))
+            continue
+        dropped.append(_no_credit_reason(
+            cited[k], gained_set, refuted[k], loo_silent[k],
+            set_silent=[i for i in cited[k] if right(with_set, i) is None],
+            ablation_silent=[i for i in cited[k] if right(ablation, i) is None]))
+    return SetVerdict(tuple(kept), tuple(dropped), calls)
+
+
+def _no_credit_reason(
+    cited: Sequence[str],
+    gained: Collection[str],
+    refuted: Sequence[str],
+    loo_silent: Collection[str],
+    *,
+    set_silent: Sequence[str],
+    ablation_silent: Sequence[str],
+) -> str:
+    """Why a draft earned no credit, most specific first."""
+    n = len(cited)
+    mine = [i for i in cited if i in gained]
+    if mine and loo_silent:
+        return f"leave-one-out did not answer {len(loo_silent)} of its {len(mine)} gained example(s)"
+    if mine:
+        return f"not necessary for its {len(mine)} gained example(s)"
+    if refuted:
+        return f"refuted on {len(refuted)} of its {n} example(s)"
+    if set_silent:
+        return f"set did not answer {len(set_silent)} of its {n} example(s)"
+    if ablation_silent:
+        return f"ablation did not answer {len(ablation_silent)} of its {n} example(s)"
+    return "adds nothing: every cited Then is predicted without it"
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkJudgment:
+    """One chunk of a feature after its own set judgment: its examples, the
+    sentences its set carried (every surviving draft, kept or not), and the
+    rules it kept."""
+
+    example_ids: tuple[str, ...]
+    judged: tuple[str, ...]
+    kept: tuple[CreditedRule, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SiblingVisit:
+    """A second judgment owed to one chunk: the feature's kept sentences,
+    over the chunk's examples no rule is credited with yet."""
+
+    chunk: int
+    sentences: tuple[str, ...]
+    example_ids: tuple[str, ...]
+
+
+def sibling_visits(chunks: Sequence[ChunkJudgment]) -> list[SiblingVisit]:
+    """The chunks of one feature that are asked again, and with what.
+
+    A chunk judges only the drafts written from its own examples, so a
+    sentence that holds for the whole feature is credited only where it was
+    drafted. The feature's kept sentences (every chunk's, in chunk then
+    draft order, one copy of a repeated sentence) are therefore judged
+    together on each chunk's uncovered examples — only when they include a
+    sentence that chunk's set never carried: the same sentences over the
+    same examples is the question its own judgment already answered.
+
+    Only kept sentences travel. A draft its own chunk refuted contradicts
+    the kept ones on the same observable, and a set that carries both
+    predicts neither.
+
+    Run `72627-751534fe` (2026-09-30): the largest feature's five chunks
+    each drafted alone; one chunk's pair was credited 23 + 18 examples
+    while a sibling chunk of 24 examples, whose only draft left out the
+    backticks, kept nothing."""
+    sentences = tuple(dict.fromkeys(c.draft.sentence for ch in chunks for c in ch.kept))
+    out: list[SiblingVisit] = []
+    for n, ch in enumerate(chunks):
+        covered = {i for c in ch.kept for i in c.credited}
+        open_ids = tuple(i for i in ch.example_ids if i not in covered)
+        if open_ids and set(sentences) - set(ch.judged):
+            out.append(SiblingVisit(n, sentences, open_ids))
+    return out
+
+
+def judge_visit(
+    visit: SiblingVisit,
+    examples: Mapping[str, BehaviourSpec],
+    *,
+    predict: Predict,
+) -> tuple[dict[str, tuple[str, ...]], int]:
+    """`sentence -> the visit's examples it is credited with`, and the
+    checker calls spent. The judgment is `judge_rule_set`'s, every sentence
+    standing for every example of the visit: gain against the ablation,
+    necessity by leave-one-out, one copy of a duplicate, silence credits
+    nobody. A set miss here is recorded on no rule: no sentence cited these
+    examples, so the miss has no owner."""
+    pool = {i: examples[i] for i in visit.example_ids}
+    verdict = judge_rule_set([RuleDraft(s, visit.example_ids) for s in visit.sentences],
+                             pool, predict=predict)
+    return {c.draft.sentence: c.credited for c in verdict.kept}, verdict.calls
 
 
 @dataclass(frozen=True, slots=True)
 class BookReading:
-    """What one book build produced — the t0d reading line and event."""
+    """What one book build produced — the t0d reading line and event.
+
+    `lanes` is how many chunks ran at once. `worlds` are the build worlds
+    the one book serves; `residue_examples` / `residue_names` count the
+    examples and glossary names only some of them compile (the rest is the
+    core, asked once for all). `predict_temperature` is the sampling
+    temperature of the judge's calls (ablation, set, leave-one-out); None
+    is the server default, printed `server`. `sibling_examples` are the
+    covered examples credited to a rule drafted in another chunk of their
+    feature (`sibling_visits`). `unaided_examples` are the checkable examples
+    the checker predicted with no rule at all (`Feature.unaided_ids`)."""
 
     features: int = 0
     features_asked: int = 0
@@ -684,13 +900,28 @@ class BookReading:
     kept: int = 0
     dropped: Mapping[str, int] = field(default_factory=dict)
     skipped_features: int = 0
+    lanes: int = 1
+    worlds: tuple[str, ...] = ()
+    residue_examples: int = 0
+    residue_names: int = 0
+    predict_temperature: float | None = None
+    sibling_examples: int = 0
+    unaided_examples: int = 0
 
     def line(self) -> str:
         drop = ", ".join(f"{k} {v}" for k, v in sorted(self.dropped.items())) or "none"
+        where = (f"; worlds={'+'.join(self.worlds)} ({self.residue_examples} residue "
+                 f"example(s), {self.residue_names} residue name(s))" if self.worlds else "")
         return (f"behaviour-book: {self.features} features ({self.features_asked} asked, "
                 f"{self.skipped_features} over the cap), {self.proposed} rules "
                 f"({self.kept} kept), {self.covered_examples}/{self.checkable_examples} "
-                f"checkable examples covered; dropped: {drop}")
+                f"checkable examples covered ({self.sibling_examples} by a sibling chunk's rule; "
+                f"{self.unaided_examples} predicted with no rule); "
+                f"dropped: {drop}; lanes={self.lanes}; "
+                f"predict-temp={self._temp()}{where}")
+
+    def _temp(self) -> str:
+        return "server" if self.predict_temperature is None else f"{self.predict_temperature:g}"
 
     def payload(self) -> dict[str, object]:
         return {
@@ -699,14 +930,21 @@ class BookReading:
             "checkable_examples": self.checkable_examples,
             "covered_examples": self.covered_examples,
             "proposed": self.proposed, "kept": self.kept, "dropped": dict(self.dropped),
+            "lanes": self.lanes,
+            "worlds": list(self.worlds),
+            "residue_examples": self.residue_examples, "residue_names": self.residue_names,
+            "predict_temperature": self.predict_temperature,
+            "sibling_examples": self.sibling_examples,
+            "unaided_examples": self.unaided_examples,
         }
 
 
 def drop_reason_class(reason: str) -> str:
     """The histogram bucket of a drop reason (its text before any id)."""
-    for prefix in ("names the private item", "quotes", "does not predict",
+    for prefix in ("names the private item", "quotes", "refuted on", "not necessary",
+                   "leave-one-out did not answer", "set did not answer",
                    "ablation did not answer", "adds nothing", "cites no checkable",
-                   "longer than"):
+                   "more than one sentence"):
         if reason.startswith(prefix):
             return prefix
     return reason

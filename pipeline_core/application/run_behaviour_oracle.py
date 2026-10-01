@@ -51,5 +51,6 @@ def run_behaviour_oracle(
             f"{len(report.mismatches)} MISMATCH / {len(specs)} — compiles-but-"
             f"wrong; suspect units: {', '.join(sorted(report.suspect_units)) or '(none)'}")
     else:
-        log(f"  [behaviour-oracle] {suite.cfg_cluster}: all {len(specs)} behaviours hold.")
+        log(f"  [behaviour-oracle] {suite.cfg_cluster}: {len(report.holds)} of {len(specs)} "
+            f"behaviour(s) hold, {len(report.not_run)} did not run.")
     return report

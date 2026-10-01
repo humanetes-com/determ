@@ -10,14 +10,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pipeline_core.domain.behaviour import BehaviourSuite
+from pipeline_core.domain.behaviour import SUITE_FILE_PREFIX, BehaviourSuite
 from pipeline_core.log import emit, log
 
 _SKELETON_DIR = ".skeleton"
 
 
 def _suite_path(project_dir: Path, cfg_cluster: str) -> Path:
-    return Path(project_dir) / _SKELETON_DIR / f"_behaviours_{cfg_cluster}.json"
+    return Path(project_dir) / _SKELETON_DIR / f"{SUITE_FILE_PREFIX}{cfg_cluster}.json"
 
 
 def save_behaviour_suite(project_dir: Path, suite: BehaviourSuite) -> Path:

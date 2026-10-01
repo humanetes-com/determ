@@ -87,6 +87,8 @@ from ...domain.text import (
     trim_to_line,
 )
 from ...domain.workspace_layout import SKELETON_FILLED_DIR
+from ...phases import phase_scope, phase_skipped
+from ...phases import step as phase_step
 from ...ports.generator import (
     LLM,
     Cargo,
@@ -1069,6 +1071,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # vector, the same floor task2a closes a cluster on and task3 passes one
     # on. Omitted, the post-merge per-cluster sweep keeps the absolute rule.
     reference_measurement: Callable[[Path], ReferenceMeasurement | None] | None = None
+    # The held-out agreement reading on a cluster tree whose fill just
+    # closed (`application/behaviour_agreement.measure_agreement`, bound in
+    # composition). Counts only; its return is not read here. None: no
+    # reading.
+    agreement: Callable[..., object] | None = None
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
                                filled_dir: Path,
@@ -1446,9 +1453,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if (self.blueprint_deps is not None
                 and os.getenv("BLUEPRINT_PHASE", "1") != "0"):
             try:
-                self._ensure_blueprint(project_dir, module, clusters[0],
-                                       all_test_pairs, functional_req,
-                                       functional_req_path)
+                with phase_scope("t2a.blueprint", module=module):
+                    self._ensure_blueprint(project_dir, module, clusters[0],
+                                           all_test_pairs, functional_req,
+                                           functional_req_path)
             except Exception as e:
                 self.tel.log(f"  [blueprint] generation failed ({e}) — "
                              "continuing without a blueprint.")
@@ -1478,6 +1486,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.log("  [skeleton] task2a (per-cluster reconstruction) already done — "
                          "skipping (fills persist in .skeleton-filled/).")
             cluster_summaries = [{"cluster": c.name, "ok": True} for c in clusters]
+            phase_skipped("t2a", "checkpoint valid", module=module)
         else:
             self.tel.set_current(project_dir,
                                  f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
@@ -1548,9 +1557,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         cluster_summaries.append({"cluster": cluster.name, "ok": True,
                                                   "skipped_checkpoint": True})
                         donor_dirs.append(_fd)
+                        phase_skipped("t2a", "checkpoint valid",
+                                      cluster=cluster.name, module=module)
                         continue
                 self.tel.set_current(project_dir, f"task2a/{module} / {_position}")
-                _summary = _run_one_cluster(cluster, list(donor_dirs))
+                with phase_scope("t2a", cluster=cluster.name, module=module) as _ph:
+                    _summary = _run_one_cluster(cluster, list(donor_dirs))
+                    if not _summary.get("ok"):
+                        _ph.close("error")
                 cluster_summaries.append(_summary)
                 _pc = _summary.get("phase_c")
                 if _pc is not None and getattr(_pc, "ran_tests", None):
@@ -1629,7 +1643,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.set_current(project_dir,
                                  f"task2b/{module} / skipped (merged tree intact)")
             self.tel.log("  [skeleton-merge] task2b (merge) already done — skipping.")
+            phase_skipped("t2b", "merge marker valid, merged tree intact", module=module)
         else:
+            _ph_merge = phase_scope("t2b", module=module).open()
             self.tel.set_current(
                 project_dir,
                 f"task2b/{module} / merging {len(cluster_summaries)} cluster output(s)")
@@ -1677,6 +1693,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{merge_stats['cfg_gated_fns']} cfg-gated divergence(s).")
             self.tel.mark_phase(project_dir, f"task2b/{module}", "done",
                                 detail=f"{merge_stats['files_written']} file(s)")
+            _ph_merge.close()
 
         # Post-merge fill pass: per-cluster Phase C drove fills against each
         # cluster's filtered cfg view of the code. After the AST merge, the
@@ -1697,14 +1714,18 @@ class StaticSkeletonTask2Generator(Task2Generator):
             self.tel.set_current(project_dir,
                                  f"task2c/{module} / skipped (checkpoint valid)")
             self.tel.log("  task2c (merged-tree fill) already done — skipping.")
+            phase_skipped("t2c", "checkpoint valid", module=module)
         else:
             self.tel.set_current(project_dir, f"task2c/{module} / merged-tree fill")
-            _t2c_ok = self._post_merge_fill_pass(
-                project_dir=project_dir,
-                clusters=clusters,
-                module=module,
-                functional_req=functional_req,
-            )
+            with phase_scope("t2c", module=module) as _ph_fill:
+                _t2c_ok = self._post_merge_fill_pass(
+                    project_dir=project_dir,
+                    clusters=clusters,
+                    module=module,
+                    functional_req=functional_req,
+                )
+                if not _t2c_ok:
+                    _ph_fill.close("error")
             # Marked done on the RETURN, never unconditionally. The pass returns
             # on a stall exit, a timeout, a hard cap and a clean pass alike, so
             # an unconditional mark recorded `done` for a merged tree that never
@@ -1760,6 +1781,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{skeleton_dir}. The pre-strip bake step did not run "
                          "for this cluster.")
             return {"ok": False, "reason": "no_baked_skeleton"}
+        phase_step("t2a.check", cluster=cluster.name)
         self.tel.log(f"  {tag} [skeleton-A] using baked skeleton at {skeleton_dir}.")
 
         # cargo check on the skeleton with cluster env. Fix-loop on failure.
@@ -1828,6 +1850,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "cluster's other files.")
 
         # Per-cluster test scoping.
+        phase_step("t2a.tests", cluster=cluster.name)
         cluster_tests = self.clusters.filter_tests_for_cluster(all_test_pairs, cluster)
         self.tel.log(f"  {tag} [skeleton-B] tests for this cluster: "
                      f"{len(cluster_tests)}/{len(all_test_pairs)}")
@@ -2113,6 +2136,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 self.tel.log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
                              f"gen_tests decl(s) into filled tree.")
 
+        phase_step("t2a.fill", cluster=cluster.name)
         c_result: ClusterFillResult | dict[str, Any]
         if per_fn_mode:
             self.tel.log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
@@ -2228,6 +2252,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{c_result.attempts} LLM call(s), "
                          f"{c_result.remaining} stub(s) remaining, "
                          f"{len(c_result.errors)} error(s).")
+            if self.agreement is not None:
+                self.agreement(project_dir=project_dir, tree_dir=filled_dir, module=module,
+                               cluster=cluster, where="task2a", stubs=c_result.remaining)
         else:
             # Phase B — grouping (cached per cluster).
             groups_path = skeleton_dir / "groups.json"
@@ -2254,6 +2281,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{len(c_result['errors'])} error(s).")
 
         # Phase D — residual cleanup (per cluster).
+        phase_step("t2a.residual", cluster=cluster.name)
         # Plan 4 — under driver=tdd, the outer loop fills exactly the fns
         # reachable from failing tests. Residuals are by-design unreachable from
         # any test → leaving them `unimplemented!()` is correct under tests-only
@@ -2283,6 +2311,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         # identify the implicated fns from the error output, revert their bodies
         # to unimplemented!() so they re-appear as stubs, then re-enter the per-fn
         # fill loop targeting only those fns. Loop up to PHASE_C_VALIDATE_ITERS.
+        phase_step("t2a.validate", cluster=cluster.name)
         max_validate_iters = self.cfg.validate_iters
         validate_ok = False
         _vr_out = ""

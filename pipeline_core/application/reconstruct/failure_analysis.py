@@ -14,6 +14,7 @@ from pipeline_core.application.reconstruct.reconstruction_step import StepOutcom
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.domain.failure_classification import pass_count_is_measured
 from pipeline_core.domain.reconstruction import IterationState
+from pipeline_core.phases import phase_scope
 from pipeline_core.ports.reconstruct import (
     Analyst,
     Artifacts,
@@ -63,13 +64,14 @@ class FailureAnalysisStep:
         t4_source_context = self._artifacts.collect_source_context(
             ctx.project_dir, ctx.module_manifest, ctx.existing_test_files)
         self._tel.set_current(ctx.project_dir, f"task4/{ctx.module_name} / genesis update (iter {it})")
-        _t4_ok, current_pass = self._analyst.task4(
-            ctx.genesis_path, ctx.module_req_path, test_output, it, ctx.project_dir,
-            failure_type=failure_type,
-            failure_log=self._journal.load_failure_log(ctx.failure_log_path),
-            prev_pass_count=state.prev_pass_count, prev_test_output=state.prev_test_output,
-            source_context=t4_source_context,
-            api_surface=self._artifacts.load_api_surface(ctx.project_dir, ctx.module_name))
+        with phase_scope("t4", module=ctx.module_name, attempt=it):
+            _t4_ok, current_pass = self._analyst.task4(
+                ctx.genesis_path, ctx.module_req_path, test_output, it, ctx.project_dir,
+                failure_type=failure_type,
+                failure_log=self._journal.load_failure_log(ctx.failure_log_path),
+                prev_pass_count=state.prev_pass_count, prev_test_output=state.prev_test_output,
+                source_context=t4_source_context,
+                api_surface=self._artifacts.load_api_surface(ctx.project_dir, ctx.module_name))
         genesis_after = self._artifacts.read(ctx.genesis_path)
 
         # Anti-corruption: detect genesis stall (TASK 4 produced no update).

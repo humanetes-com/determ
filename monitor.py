@@ -89,8 +89,12 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.domain import graceful_stop  # noqa: E402
+from pipeline_core.monitor import bottom_bar as _bb  # noqa: E402
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
+from pipeline_core.monitor import exit_record as _exit  # noqa: E402
 from pipeline_core.monitor import iteration_steps as _steps  # noqa: E402
+from pipeline_core.monitor import phase_panel as _pp  # noqa: E402
+from pipeline_core.monitor import phase_view as _pv  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
 from pipeline_core.monitor.engine_metrics import (  # noqa: E402
     engine_rows as _engine_rows,
@@ -114,6 +118,7 @@ from pipeline_core.monitor.generation_panel import (  # noqa: E402
     generation_rows as _generation_rows,
 )
 from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
+from pipeline_core.monitor.key_input import REPORTING_OFF as _REPORTING_OFF  # noqa: E402
 from pipeline_core.monitor.key_input import KeyReader as _KeyReader  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
 from pipeline_core.monitor.render import (
@@ -123,7 +128,6 @@ from pipeline_core.monitor.render import (
     dim,
     green,
     red,
-    rev,
     yellow,
 )
 from pipeline_core.monitor.render import (
@@ -149,9 +153,6 @@ from pipeline_core.monitor.render import (
 )
 from pipeline_core.monitor.render import (
     oracle_row as _oracle_row,
-)
-from pipeline_core.monitor.render import (
-    phase_bar_rows as _phase_bar_rows,
 )
 from pipeline_core.monitor.render import (
     plain as _plain,
@@ -215,11 +216,11 @@ _GPU_BW = {"3090": 936.2, "3080": 760.0, "4090": 1008.0, "4080": 716.8,
 
 def _term_w():
     try: return os.get_terminal_size().columns
-    except: return 80
+    except OSError: return 80
 
 def _h():
     try: return os.get_terminal_size().lines
-    except: return 24
+    except OSError: return 24
 
 # ── Flicker-free diff renderer ────────────────────────────────────────────────
 
@@ -503,8 +504,9 @@ def pipeline_status(width: int):
     # vLLM backend status (loading indicator / docker logs when not ready)
     rows.extend(_vllm_status(w))
 
-    # Full pipeline phase sequence (t0a … t4) with the current stage highlighted.
-    rows.extend(_phase_bar_rows(*_rd.phase_progress(_find_project_dir())))
+    # The whole-run phase strip and the active phase's sub-steps, drawn from
+    # the phase registry and this run's phase events (`phase.enter`/`exit`).
+    rows.extend(_pv.strip_rows(_pp.load_board(EVENTS_LOG, _find_project_dir(), running), w, time.time()))
 
     # ── Header: status + coverage ────────────────────────────────────────────
     _cov_data = _parse_coverage_json(_find_project_dir())
@@ -767,7 +769,8 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
-_view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields
+_view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields|phases
+_phases = _pp.PhasePanel()    # the [e] view's scroll and expand state
 _scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
 _show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
 # Split layout (toggle: [v], or MONITOR_SPLIT=1 at start): [1]Monitor stays in
@@ -866,39 +869,12 @@ def _prompt_url() -> str:
 # shows only in the msg line above, keys stay the same)
 
 def _bottom_bar() -> list[str]:
-    running = _pipeline_running()
-
     split = _split_widths() is not None
-    shown = {"monitor", _pane_view()} if split else {_view}
-    parts = []
-    for vid, key, label in VIEWS:
-        tag = f"[{key}]{label}"
-        parts.append(rev(bold(tag)) if vid in shown else dim(tag))
-    s_col = red if running else dim
-    if split:
-        split_tag = cyan("[v]split on [<>]")
-    elif _layout.enabled:
-        split_tag = yellow("[v]split (too narrow)")
-    else:
-        split_tag = dim("[v]split")
-    parts += [
-        rev(bold("[l]egend")) if "legend" in shown else dim("[l]egend"),
-        rev(bold("[h]ealth")) if "health" in shown else dim("[h]ealth"),
-        rev(bold("[f]ields")) if "fields" in shown else dim("[f]ields"),
-        split_tag,
-        cyan("[t]ips on") if _show_hints else dim("[t]ips off"),
-        green("[c]ontinue"),
-        cyan("[g]raceful"),
-        yellow("[w]ipe"),
-        s_col("[s]top"),
-        red("[p]⏻armed") if _shutdown_armed() else dim("[p]oweroff"),
-        cyan("[a]uto ON") if _auto_armed() else dim("[a]uto"),
-        dim("[↑↓/PgUp/PgDn]"),
-        dim("[q]uit"),
-    ]
-    legend = "  ".join(parts)
-    msg = f"  {_action_msg}" if _action_msg else ""
-    return [msg, legend]
+    return _bb.bottom_rows(
+        views=VIEWS, shown={"monitor", _pane_view()} if split else {_view},
+        running=_pipeline_running(), split=split, split_enabled=_layout.enabled,
+        hints_on=_show_hints, shutdown_armed=_shutdown_armed(), auto_armed=_auto_armed(),
+        demo=_DEMO, demo_interval=DEMO_INTERVAL, action_msg=_action_msg)
 
 # ── Views ─────────────────────────────────────────────────────────────────────
 #
@@ -997,6 +973,10 @@ def _detail_box(view, width, inner, pipeline_rows, gen_rows) -> list[str]:
     elif view == "fields":
         title, rows = ("Field glossary — what each stat/label on screen means",
                        _field_glossary_window(cw, inner, _scroll["fields"]))
+    elif view == "phases":
+        title, rows = _phases.window(
+            _pp.load_board(EVENTS_LOG, _find_project_dir(), _pipeline_running()),
+            cw, inner, time.time())
     else:
         title, rows = ("Legend — what each phase performs",
                        _legend_window(cw, inner, _scroll["legend"]))
@@ -1092,6 +1072,9 @@ def _run_action(key):
 
 def _apply_key(key):
     global _action_msg, _view, _confirm, _graceful_pending, _show_hints, _layout
+    global _DEMO
+    if _DEMO and key in ("1", "2", "3", "4", "l", "h", "f", "e"):
+        _DEMO = False   # picking a view yourself means you want it to stay
     if _confirm == "wipe":
         if key == "y":
             _confirm = None
@@ -1201,6 +1184,15 @@ def _apply_key(key):
         _view = "monitor" if _view == "legend" else "legend"
     elif key == "h":
         _view = "monitor" if _view == "health" else "health"
+    elif key == "d":
+        _DEMO = not _DEMO
+        _action_msg = (yellow(f"[d]emo mode enabled — switching every {DEMO_INTERVAL}s")
+                       if _DEMO else dim("[d]emo mode stopped — the view stays where it is"))
+    elif key == "e":
+        _view = "monitor" if _view == "phases" else "phases"
+        _phases.reset()
+    elif key == "x" and _view == "phases":
+        _phases.toggle_expand()
     elif key == "f":
         _view = "monitor" if _view == "fields" else "fields"
     elif key == "t":
@@ -1222,20 +1214,39 @@ def _apply_key(key):
         # The scroll keys move the view whose box is drawn: the right column's
         # in the split layout. PgUp/PgDn move by that box's last drawn height.
         target = _pane_view() if _split_widths() is not None else _view
-        if target in _scroll:
+        if target == "phases":
+            step = SCROLL_STEP if key in ("UP", "DOWN") else _page
+            _phases.scroll(-step if key in ("UP", "PGUP") else step)
+        elif target in _scroll:
             step = SCROLL_STEP if key in ("UP", "DOWN") else _page
             up = key in ("UP", "PGUP")
             _scroll[target] = max(0, _scroll[target] + (step if up else -step))
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
+EXIT_LOG = os.path.join(SCRIPT_DIR, "logs", "monitor_exit.log")   # see exit_record
+
+
+def _repaint_error(e: Exception) -> None:
+    """Show a failed frame's error in place of the frame. A repaint that fails
+    too (the terminal refused the write) is not a reason to exit: the next
+    iteration draws again."""
+    _buf.clear()
+    _ln(red(f"  render error: {e}"))
+    with contextlib.suppress(Exception):
+        _flush_frame()
+    _buf.clear()
+
+
 def main():
     global _action_msg, _term_settings, _graceful_pending, _view
     signal.signal(signal.SIGHUP, signal.SIG_IGN)   # survive terminal events from child procs
+    signal.signal(signal.SIGTERM, _exit.on_sigterm)     # restore the terminal on a kill
     old_settings = termios.tcgetattr(sys.stdin)
     _term_settings = old_settings
-    sys.stdout.write("\033[2J\033[?25l")
+    sys.stdout.write(_REPORTING_OFF + "\033[2J\033[?25l")
     sys.stdout.flush()
+    exit_reason = "quit: unknown"
     _demo_idx = 0
     _demo_next = time.monotonic() + DEMO_INTERVAL
     try:
@@ -1247,13 +1258,13 @@ def main():
                 _demo_idx = (_demo_idx + 1) % len(_DEMO_VIEWS)
                 _view = _DEMO_VIEWS[_demo_idx]
                 _demo_next = time.monotonic() + DEMO_INTERVAL
+            elif not _DEMO:
+                _demo_next = time.monotonic() + DEMO_INTERVAL   # re-armed by [d]
             try:
                 _render_all()
                 _flush_frame()
             except Exception as e:
-                _buf.clear()
-                _ln(red(f"  render error: {e}"))
-                _flush_frame()
+                _repaint_error(e)
 
             if _graceful_pending:
                 if not graceful_stop.SENTINEL_PATH.exists():
@@ -1261,22 +1272,7 @@ def main():
                     _action_msg = ""
                 else:
                     _action_msg = bg_white(" ◑ graceful — waiting for pipeline to exit… ")
-            elif _confirm == "continue":
-                _action_msg = green("▶ continue (will kill running pipeline) — confirm? [y/n]")
-            elif _confirm == "graceful":
-                _action_msg = cyan("◑ graceful stop — finish current attempt then exit — confirm? [y/n]")
-            elif _confirm == "wipe":
-                _action_msg = yellow("↺ wipe all generated code and restart — confirm? [y/n]")
-            elif _confirm == "wipe-augmented":
-                _action_msg = yellow(
-                    "↺ augmentation found: [a]ugmentation restore, "
-                    "[h]ard reset, [other] cancel"
-                )
-            elif _confirm == "stop":
-                _action_msg = red("■ stop pipeline — confirm? [y/n]")
-            elif _confirm == "poweroff":
-                _action_msg = red("⏻ power off machine when the run finishes — confirm? [y/n]")
-            else:
+            elif _confirm is None:   # a pending confirmation keeps the prompt _apply_key set
                 _action_msg = ""
 
             try:
@@ -1294,7 +1290,7 @@ def main():
                 # all land before the next, possibly slow, render.
                 key = _key_reader.get(timeout=timeout)
                 if key == "q":
-                    raise KeyboardInterrupt
+                    raise _exit.key_quit("q", _key_reader.recent_input())
                 _run_action(key)
                 while True:
                     try:
@@ -1302,15 +1298,19 @@ def main():
                     except queue.Empty:
                         break
                     if key == "q":
-                        raise KeyboardInterrupt
+                        raise _exit.key_quit("q", _key_reader.recent_input())
                     _run_action(key)
             except queue.Empty:
                 pass
-            except Exception:
-                pass
-    except KeyboardInterrupt:
-        pass
+            except Exception as e:
+                _action_msg = red(f"key error: {e}")
+    except (_exit.Quit, KeyboardInterrupt) as e:
+        exit_reason = _exit.describe(e)
+    except BaseException as e:
+        exit_reason = _exit.describe(e)
+        raise
     finally:
+        _exit.record(EXIT_LOG, exit_reason)
         _key_reader.stop()
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         sys.stdout.write("\033[?25h\033[2J\033[H\n")

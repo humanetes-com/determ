@@ -24,7 +24,7 @@ from typing import Any
 
 from pipeline_core.domain import reasoning_cap
 
-from . import events_data, render
+from . import events_data
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -147,34 +147,65 @@ def find_project_dir() -> str | None:
     return best[1] if best else None
 
 
-def phase_progress(project_dir: str | None) -> tuple[set[str], str]:
-    """`(done phase keys, current stage line)` from pipeline_state.md.
+def read_phase_records(events_log: str) -> list[dict[str, Any]]:
+    """This run's `phase.enter` / `phase.exit` records, in order.
 
-    The pipeline's own state file is authoritative for phase status: the
-    `[key] done` entries give real per-phase completion and the `current:`
-    line gives the active stage. The rendering half is
-    `render.phase_bar_rows`; this half is here so the strip's I/O sits with
-    the other state readers rather than in the TUI god-file.
-
-    `task2-4` is the combined reconstruct marker — one key for the whole
-    task2a…task4 span — and is expanded by the caller that knows the phase
-    sequence, not here.
+    Read from `phases.jsonl` beside the event log, whole, not from the 8 MB
+    tail `events_data.read_recent_events` windows: the emitter copies phase
+    events into that sibling because a run that fills for hours pushes its own
+    setup and strip phases out of the tail. "This run" is the newest run id in
+    the file, the same rule the event readers use.
     """
-    done_keys: set[str] = set()
-    cur = ""
-    if not project_dir:
-        return done_keys, cur
+    path = os.path.join(os.path.dirname(events_log), "phases.jsonl")
     try:
-        with open(os.path.join(project_dir, "pipeline_state.md")) as _f:
-            for line in _f:
-                key = render.state_done_key(line)
-                if key is not None:
-                    done_keys.add(key)
-                if line.startswith("current:"):
-                    cur = line.split(":", 1)[1].strip()
-    except Exception:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    parsed: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            parsed.append(rec)
+    run_id = next((r.get("run_id") for r in reversed(parsed) if r.get("run_id")), "")
+    return [r for r in parsed if r.get("run_id") == run_id] if run_id else parsed
+
+
+def state_phase_statuses(project_dir: str | None) -> tuple[dict[str, str], tuple[str, ...]]:
+    """`({state key: status}, cluster names)` from pipeline_state.md.
+
+    The state file is the authority for a phase an EARLIER process finished:
+    the board falls back to it when the events of this run say nothing about a
+    phase. Cluster names come from the `cfg_scan` line's detail
+    (`N clusters: a, b`), the order the pipeline runs them in.
+    """
+    statuses: dict[str, str] = {}
+    clusters: tuple[str, ...] = ()
+    if not project_dir:
+        return statuses, clusters
+    try:
+        with open(os.path.join(project_dir, "pipeline_state.md"), encoding="utf-8") as fh:
+            for line in fh:
+                if not line.startswith("["):
+                    continue
+                end = line.find("]")
+                if end <= 1:
+                    continue
+                fields = line[end + 1:].split(maxsplit=2)
+                if not fields:
+                    continue
+                key = line[1:end]
+                statuses[key] = fields[0]
+                if key == "cfg_scan" and len(fields) == 3:
+                    value = _cluster_list_value(fields[2])
+                    if value:
+                        clusters = tuple(c.strip() for c in value.split(",") if c.strip())
+    except OSError:
         pass
-    return done_keys, cur
+    return statuses, clusters
 
 
 def _cluster_list_value(text: str) -> str | None:

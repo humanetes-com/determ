@@ -20,6 +20,7 @@ from pipeline_core.domain.reconstruction import (
     plan_whole_project_context,
 )
 from pipeline_core.domain.test_results import parse_test_counts, resolve_task3_verdict
+from pipeline_core.phases import phase_scope
 from pipeline_core.ports.reconstruct import (
     Artifacts,
     Fixer,
@@ -127,8 +128,9 @@ class ReconstructionStep:
 
         # TASK 3: run tests.
         self._tel.set_current(ctx.project_dir, f"task3/{ctx.module_name} / running tests (iter {it})")
-        passed, test_output = self._tests.task3(
-            ctx.project_dir, ctx.module_test_cmd, label, ctx.project_dir, ctx.genesis_path)
+        with phase_scope("t3", module=ctx.module_name, attempt=it):
+            passed, test_output = self._tests.task3(
+                ctx.project_dir, ctx.module_test_cmd, label, ctx.project_dir, ctx.genesis_path)
         if not api_ok:
             test_output = test_output + "\n\n--- API surface drift (pre-test) ---\n" + api_report + "\n"
         pass_count, fail_count, _ = parse_test_counts(test_output)
@@ -172,9 +174,11 @@ class ReconstructionStep:
         if fix_passed:
             # The fix loop's own check passed — but the ONLY authority for SUCCESS
             # is the per-cluster strict runner. Re-run TASK 3 for the verdict.
-            reverified, test_output = self._tests.task3(
-                ctx.project_dir, ctx.module_test_cmd, f"{label}-fixverify",
-                ctx.project_dir, ctx.genesis_path)
+            with phase_scope("t3", module=ctx.module_name, attempt=it,
+                             detail="re-verify after the fix loop"):
+                reverified, test_output = self._tests.task3(
+                    ctx.project_dir, ctx.module_test_cmd, f"{label}-fixverify",
+                    ctx.project_dir, ctx.genesis_path)
             if reverified:
                 self._lock(
                     ctx, state,

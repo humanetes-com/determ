@@ -171,6 +171,12 @@ from pipeline_core.adapters.gen_tests_storage import (
 from pipeline_core.adapters.gen_tests_storage import (
     strip_all_gen_tests_artifacts as _gts_strip_all_artifacts,
 )
+from pipeline_core.adapters.held_out_store import (
+    load_held_out,
+    record_agreement_rows,
+    save_held_out,
+    scratch_tree,
+)
 from pipeline_core.adapters.layout_outcome_store import load_layout_records
 from pipeline_core.adapters.layout_registry_store import (
     load_registry as load_layout_registry,
@@ -359,6 +365,7 @@ from pipeline_core.adapters.workspace_scan import (
 )
 from pipeline_core.application import fix_loop as _fix_loop_mod
 from pipeline_core.application import test_count as _tc_app
+from pipeline_core.application.behaviour_agreement import AgreementDeps, measure_agreement
 from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.cluster_augment import ClusterAugmentor
 from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
@@ -1722,8 +1729,8 @@ def build_app(
         save_private_surface=save_private_surface,
         author_private_fields=cfg.layout_author_private_fields,
         # Late-bound: `task0d_deps` is built below; the bake runs long after.
-        build_book=lambda pd, mod, cl, suite, src: build_book_from_source(
-            task0d_deps, pd, mod, cl, suite, src),
+        build_book=lambda pd, mod, cls, suites, src: build_book_from_source(
+            task0d_deps, pd, mod, cls, suites, src),
     )
 
     def _t0d_public_surface(pd: Path, _cluster: str) -> str:
@@ -1772,6 +1779,12 @@ def build_app(
         harvest=harvest_behaviour_suite,
         save_suite=save_behaviour_suite, load_suite=load_behaviour_suite,
         ask=lambda prompt: str(ports.ask(prompt, model=settings.task_models.task0c)),
+        # The book judge's calls are a measurement: bound at their own
+        # temperature, forwarded only when set (unset keeps the server's).
+        book_predict=lambda prompt: str(ports.ask(
+            prompt, model=settings.task_models.task0c,
+            **({} if settings.behaviour_book_predict_temperature is None
+               else {"temperature": settings.behaviour_book_predict_temperature}))),
         public_surface=_t0d_public_surface,
         # The same (empty) inventory t1.5 receives (`composition_layout`).
         symbol_inventory=lambda _pd, _c: "",
@@ -1792,11 +1805,19 @@ def build_app(
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
         EXERCISES_ENABLED=settings.task0d_exercises,
         PIN_ENV_DEBUG=settings.behaviour_pin_env_debug,
+        PROBE_EDGES_PER_CLUSTER=settings.task0d_probe_edges,
+        RULE_PROBES_MAX=settings.behaviour_rule_probes,
+        RULE_PROBE_PROGRAMS=settings.behaviour_rule_probe_programs,
+        HELD_OUT_SHARE=settings.behaviour_held_out_share,
+        save_held_out=save_held_out, load_held_out=load_held_out,
         BOOK_BUDGET=BookBudget(
             rules=settings.behaviour_book_rules,
             max_features=settings.behaviour_book_max_features,
             examples_per_prompt=settings.behaviour_book_examples_per_prompt,
-            drafts_per_reply=settings.behaviour_book_drafts_per_reply),
+            drafts_per_reply=settings.behaviour_book_drafts_per_reply,
+            lanes=settings.behaviour_book_lanes,
+            predict_temperature=settings.behaviour_book_predict_temperature,
+            sibling_chunks=settings.behaviour_book_sibling_chunks),
         write_features=write_feature_files,
     )
 
@@ -1896,6 +1917,20 @@ def build_app(
         route_ledger=RouteLedgerStore(),
     )
 
+    # ---- the held-out agreement reading --------------------------------------
+    # Bound once; both readers (a cluster's fill closing, task3's aggregate)
+    # call the same use case. Share 0 takes no reading at all.
+    _agreement_deps = AgreementDeps(
+        load_held_out=load_held_out, scratch_tree=scratch_tree, run_probe=run_probe,
+        record_rows=lambda module, cluster, where, rows: record_agreement_rows(
+            _body_ledger_root(), module, cluster, where, rows),
+        log=ports.log, emit=ports.emit)
+
+    def _measure_agreement(**kw: Any) -> Any:
+        if settings.behaviour_held_out_share <= 0:
+            return None
+        return measure_agreement(_agreement_deps, **kw)
+
     # ---- the reference floor -------------------------------------------------
     # Measured ONCE per run and memoized: `run_clusters_strict` is called by
     # task3, by the post-task3 fix loop's check, and by every re-verify, and the
@@ -1959,6 +1994,9 @@ def build_app(
 
     _emitter = JsonlEventEmitter(events_log, run_context if run_context is not None else {})
     _task3_deps = Task3Deps(
+        measure_agreement=lambda pd, cl, passed, expected: _measure_agreement(
+            project_dir=pd, tree_dir=pd, module=Path(pd).name, cluster=cl, where="task3",
+            oracle_pass=passed, oracle_total=expected),
         phase=_emitter.phase,
         load_baked_clusters=_load_baked_clusters,
         task3_legacy_single=helpers.task3_legacy_single,
@@ -2139,6 +2177,7 @@ def build_app(
                          apply_layout_to_tree),
             layout_registry=load_layout_registry,
             reference_measurement=_reference,
+            agreement=_measure_agreement,
             blueprint_deps=BlueprintDeps(
                 ask=lambda *a, **k: helpers.ask_raw(*a, **k),
                 log=ports.log, emit=ports.emit,
@@ -2505,6 +2544,7 @@ def build_app(
         git_tag=git_tag,
         list_git_tags=_ws_list_git_tags,
         oracle_drift=_workspace_oracle_drift,
+        set_current=set_current,
         source_hash=source_hash,
         log_state_summary=_state_log_state_summary,
         read=_io_read,

@@ -6,6 +6,8 @@ A new session starts here, then reads `handover.md`. AGENTS.md is a symlink to t
 
 Focus: read focus.md for eventual current focus
 
+Open work in progress: technical_debt.md entry 305 (behaviour-book set judge). The one-sentence refusal and the sibling-chunk judgment shipped 2026-10-01; "Remaining (2026-10-01, after the replay)" in that entry lists what closes it: the replay reading is taken (predict temperature stays unset), so the bake, its behaviour-book line, then rotate. Read that entry before starting it. Entry 307 (held-out agreement reading, use-case probes, rule probes) shipped 2026-10-01 and its fixture on the 25 August checkpoint reads on-theory; its t0d half has no live reading, and the first one is the hardcrate smoke from scratch, not an anyhow resume (a restart from the augmented tag never re-enters t0d).
+
 Launch after this ships: `bash pre_run.sh` then `bash continue.sh --y --no-tail`. Driver-half on the existing filled tree. Fills stay. `--y` is the stop; do not probe pids. Never wrap in timeout. Full ON RETURN is in `handover.md`.
 
 ## Replies to the user
