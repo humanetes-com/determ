@@ -291,10 +291,43 @@ def test_a_missing_doc_test_is_advisory_not_gating() -> None:
     assert verdict.met is True
     assert verdict.advisory_unmet == frozenset({_DOC})
     assert "src/lib.rs - Error" in verdict.reason
-    # ...and the opt-in still gates, so the decision is a policy and not a
-    # limitation of the comparison.
+
+
+_DOC_RAN = ("Doc-tests anyhow", "src/error.rs - error::Error::boxed#0")
+
+
+def test_a_doc_test_that_runs_here_and_fails_gates() -> None:
+    """Absent and failing are different facts. A doc example that is in the
+    tree, was compiled by rustdoc and asserts something false about the
+    reconstruction is a failing test the reference passes: the floor is not
+    met, while an absent one beside it stays advisory. Run `292191-d60a5308`
+    (2026-10-02): the example asserting a boxed error still provides its
+    backtrace fails on the merged tree once rustdoc sees the cluster's cfg."""
+    ref = ClusterReference(cluster="nightly",
+                           passed=frozenset({_A, _DOC, _DOC_RAN}),
+                           announced=3, reported=3)
+    verdict = judge_against_reference(
+        ref, frozenset({_A}), frozenset({_DOC_RAN}))
+    assert verdict.met is False
+    assert verdict.unmet == frozenset({_DOC_RAN})
+    assert verdict.unexcused_failures == frozenset({_DOC_RAN})
+    assert verdict.advisory_unmet == frozenset({_DOC})
+
+    # NEGATIVE CONTROL: the filter this replaced dropped every doc pair from
+    # both conditions; on the same input it reads the floor as met.
+    unmet = ref.passed - frozenset({_A})
+    unexcused = frozenset({_DOC_RAN}) - ref.neutral
+    old_unmet = frozenset(p for p in unmet if not is_doc_pair(p))
+    old_unexcused = frozenset(p for p in unexcused if not is_doc_pair(p))
+    assert not old_unmet and not old_unexcused
+
+
+def test_a_failing_doc_test_the_reference_fails_too_is_excused() -> None:
+    ref = ClusterReference(cluster="nightly", passed=frozenset({_A}),
+                           failed=frozenset({_DOC_RAN}),
+                           announced=2, reported=2)
     assert judge_against_reference(
-        ref, frozenset({_A}), frozenset(), gate_doc_tests=True).met is False
+        ref, frozenset({_A}), frozenset({_DOC_RAN})).met is True
 
 
 # --- an unhealthy reference is refused, never quietly trusted -------------

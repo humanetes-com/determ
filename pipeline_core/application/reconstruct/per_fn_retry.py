@@ -39,6 +39,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.application.refine_loop import run_callback_loop
 from pipeline_core.domain.attribution import AttributionResult
+from pipeline_core.domain.cluster_env import overlay_cluster_env
 from pipeline_core.domain.cluster_plan import cfg_world_rules, merged_view_cluster
 from pipeline_core.domain.last_error import resolve_kind
 from pipeline_core.domain.models import FnLocator, Frontier
@@ -174,23 +175,20 @@ class Task3Cargo:
     env: Callable[[], dict[str, str]]
     run: Callable[..., tuple[int, str]]
     check_diag: Callable[..., tuple[int, str, list[Any]]]
-    # Bound to cluster_cargo_env in composition. None keeps env() +
-    # dict.update(env_extra), which replaces RUSTFLAGS and never sets the
-    # toolchain.
+    # Bound to cluster_cargo_env in composition. None builds it from env()
+    # through the same overlay rule.
     cluster_env: Callable[..., dict[str, str]] | None = None
 
 
 def env_for_cluster(cargo: Task3Cargo, cluster: Any | None) -> dict[str, str]:
     """The cargo env for one named cluster, through the injected owner when
-    present. The dict.update fallback is the overlay that dropped `-A
-    warnings` and skipped RUSTUP_TOOLCHAIN on a live nightly cluster
-    (run 216855-03b2a21b)."""
+    present, else by the same overlay rule over the base env. A dict.update
+    here dropped `-A warnings` and skipped RUSTUP_TOOLCHAIN on a live nightly
+    cluster (run 216855-03b2a21b)."""
     if cargo.cluster_env is not None and cluster is not None:
         return cargo.cluster_env(cluster)
     e = cargo.env()
-    extra = getattr(cluster, "env_extra", None) if cluster is not None else None
-    if extra:
-        e.update(extra)
+    overlay_cluster_env(e, cluster)
     return e
 
 

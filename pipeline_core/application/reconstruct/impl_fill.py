@@ -149,6 +149,7 @@ from pipeline_core.domain.fill_class import (
     FillClassHistogram,
     FillOutcomeClass,
     class_for_kept,
+    keep_reading,
     note_fill_class,
     tests_could_not_run,
 )
@@ -302,6 +303,7 @@ from pipeline_core.domain.slice_session import (
     slice_plan_gaps,
     slice_plan_payload,
 )
+from pipeline_core.domain.splice_feedback import reply_refusal_feedback
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import (
@@ -464,6 +466,8 @@ class ImplFillDeps:
     cargo_err_sig_from_diagnostics: Callable[..., frozenset[str]]
     check_graceful_stop: Callable[[str], None]
     cluster_filter_type_members: Callable[..., list[TypeRecord]]
+    # The run's whole world plan, for the invariants section.
+    all_clusters: Callable[[], list[Any]]
     # `(target_src_dir, cluster) -> CfgDeadSites`: the sites this cluster
     # never compiles, stub or filled (`cluster_membership.cluster_dead_sites`).
     cluster_dead_sites: Callable[..., CfgDeadSites]
@@ -809,6 +813,17 @@ def prepare_impl_fill(
                             cluster=cluster_name, unit=unit, route=route)
             _classes_by_run.setdefault(
                 current_run_label(), FillClassCounter()).add(kind)
+
+    def _note_unit_end(reason: str, route: str, unit: str, attempts: int,
+                       **extra: object) -> None:
+        """One line and one event for a unit that may buy no further call
+        (`unit_clock.ended`): past its bound, or its claim's ground moved."""
+        line, event, data = unit_clock.end_note(reason, attempts=attempts)
+        _log(f"  [phase-c/{route}] {unit}: {line}"
+             + "".join(f", {k.replace('_', ' ')} {v}" for k, v in extra.items())
+             + "; no last-resort, no retrospective.")
+        _emit(event, data={"cluster": cluster_name, "route": route,
+                           "unit": unit, **extra, **data})
 
     def _classes_of_run() -> FillClassHistogram:
         """This run's classes plus the unlabelled ones — the keep-log rule
@@ -1257,7 +1272,8 @@ def prepare_impl_fill(
     _macro_invariants = _compute_cluster_macro_invariants(_src_for_macros, cluster)
     _no_std_invariant = _detect_crate_no_std_invariant(target_src_dir)
     invariants_section = fill_invariants_section(
-        cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants)
+        cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants,
+        worlds=deps.all_clusters())
     _crate_type_records = _cluster_filter_type_members(
         _enumerate_types_via_extractor(target_src_dir) or [], cluster)
     # The crate's tuple structs — the wrappers a body can construct by
@@ -1902,7 +1918,36 @@ def prepare_impl_fill(
         # prompt; a revert's retry and a peel's retry are turns on it.
         _conv = _open_conversation(glabel, "file")
         _prev_feedback: tuple[object, ...] | None = None
+        # The class a reverted attempt earned, noted only when no further
+        # attempt follows it (the last attempt, or the unit's end below).
+        _revert_cls: FillOutcomeClass | None = None
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
+            # Every later call of this group is asked here, once, whichever
+            # path came back to the top: an empty reply, nothing spliced, a
+            # peel retry after a judged keep, unspliced names, or the
+            # compile / test / regression revert that falls through the
+            # bottom of the loop. The first attempt is the claim the route
+            # already made. Run `3040-51eab48c` (2026-10-02, fill 5): two
+            # files each opened attempt 2 for a peeled name after a keep of
+            # the same wave had turned the last red test green.
+            # Asked on the tests of the names THIS attempt will ask — the
+            # peeled or unspliced names of a retry, the whole group on a
+            # revert — not on the claim's scope: the gate stands a claim on
+            # whatever part of its ground has not moved, so a peel whose own
+            # tests had all moved was still bought while another test of the
+            # file stayed red.
+            _ask_names = (_retry_names if _retry_names is not None
+                          else frozenset((*stub_names, *refill_names)))
+            _unit_end = unit_clock.ended(frozenset(
+                t for n in _ask_names
+                for t in _frontier_tests.tests_for(FnLocator(file_rel, n)))
+            ) if _attempt > 1 else ""
+            if _unit_end:
+                if unit_clock.note_once():
+                    _note_unit_end(_unit_end, "file", glabel, _attempt - 1)
+                if _revert_cls is not None:
+                    _cls(_revert_cls, glabel, "file")
+                return
             # TYPES_IN_SCOPE selected over the WHOLE file, which is this
             # route's unit — the per-impl path searches one block's member
             # signatures because that is all it may write. A retry adds only
@@ -2104,8 +2149,14 @@ def prepare_impl_fill(
                     members=members_in_file(all_blocks, file_rel))
                 for _db in routing.dropped:
                     _log(f"  [phase-c/file] {file_rel}: dropped `{_db.fn_name}` — "
-                         f"block header does not match any impl in this file. "
-                         f"raw_block={_db.block_attr!r} raw_canon={_db.attr_canon!r}")
+                         + (f"block header names {len(_db.ambiguous)} impls "
+                            "of this file (ambiguous): "
+                            + "; ".join(_db.ambiguous) + ". "
+                            if _db.ambiguous else
+                            "block header does not match any impl in this "
+                            "file. ")
+                         + f"raw_block={_db.block_attr!r} "
+                         f"raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
                 _landed: list[LandedBody] = []
                 # Refill targets are already-filled-but-WRONG bodies; the splice
@@ -2611,19 +2662,23 @@ def prepare_impl_fill(
                     # A non-regression keep's tests RAN (its GUARD line says
                     # so): it is judged here like any keep, and deferred
                     # only in the verdict row below.
-                    _cls(class_for_kept(
+                    _class_f = class_for_kept(
+                        reading=keep_reading(
+                            net_delta=(_cmp_f.net_pass_delta
+                                       if _cmp_f is not None else 0),
+                            newly_green=(_cmp_f.newly_green
+                                         if _cmp_f is not None else ()),
+                            attributed=_attr_f),
                         passed=_passed_f, unreachable=tests_could_not_run(
                             crash_keep=_crash_keep_file,
                             external_only=(
                                 _u2_file is not None
                                 and _u2_file.decision
                                 is U2Decision.ACCEPT_EXTERNAL_ONLY)),
-                        net_delta=(_cmp_f.net_pass_delta
-                                   if _cmp_f is not None else 0),
                         attributed=_attr_f,
                         measured=(_u2_file is not None
-                                  and not _u2_file.aborted)),
-                         glabel, "file")
+                                  and not _u2_file.aborted))
+                    _cls(_class_f, glabel, "file")
                     _emit("phase_c.file.fill.done", data={
                         "cluster": cluster_name, "file": file_rel,
                         "group": glabel, "fns_filled": spliced_now,
@@ -2637,6 +2692,11 @@ def prepare_impl_fill(
                                  else (_u2_file.self_passed
                                        if _u2_file is not None else frozenset()))
                     _deferred_f = _crash_keep_file or _nonregr_keep_file
+                    # POSITIVE is this keep's own payment, the same fact the
+                    # class reads: tests that were green before the keep are
+                    # observed passing after it and prove nothing about it.
+                    _paid_f = (_class_f is FillOutcomeClass.CASHED
+                               and bool(_passed_f))
                     _verdict_row(
                         glabel,
                         (Disposition.KEEP_DEFERRED if _deferred_f
@@ -2644,12 +2704,14 @@ def prepare_impl_fill(
                         ("kept on non-regression — no newly-red self-failure"
                          if _deferred_f
                          else f"accepted — {len(_passed_f)} attributed test(s) "
-                         "observed passing" if _passed_f
+                         "observed passing" if _paid_f
+                         else f"kept — {len(_passed_f)} attributed test(s) "
+                         "pass and none moved with this keep" if _passed_f
                          else "kept — compiles, but no attributed test was "
                          "observed passing (none were failing, or the scoped "
                          "run was inconclusive)"),
                         outcome=(GateOutcome.POSITIVE
-                                 if _passed_f and not _deferred_f
+                                 if _paid_f and not _deferred_f
                                  else GateOutcome.UNMEASURABLE),
                         evidence=tuple(sorted(_passed_f)),
                         attempt=_attempt,
@@ -2666,6 +2728,7 @@ def prepare_impl_fill(
                              "the pre-peel diagnostic (kept remainder "
                              "judged and kept).")
                         prior_error = _peel_err
+                        _revert_cls = None
                         _retry_names = frozenset(_peel_reverted)
                         _kept_names = sorted(
                             {b.fn_name for b in _landed} - _retry_names)
@@ -2690,6 +2753,7 @@ def prepare_impl_fill(
                                  f"left {len(_unspliced)} name(s) unspliced "
                                  f"({', '.join(sorted(_unspliced))}) — "
                                  "retrying those names; judged remainder stays.")
+                            _revert_cls = None
                             _retry_names = _unspliced
                             _retry_note = (
                                 "These names were not spliced from your last "
@@ -2769,9 +2833,10 @@ def prepare_impl_fill(
                     "banked": _bank is not None,
                     "error_codes": sorted(ecodes_in_text(prior_error)),
                     "retrying": _more})
+                _revert_cls = (FillOutcomeClass.COMPILE_FAIL if rc != 0
+                               else FillOutcomeClass.WRONG_BODY)
                 if not _more:
-                    _cls(FillOutcomeClass.COMPILE_FAIL if rc != 0
-                         else FillOutcomeClass.WRONG_BODY, glabel, "file")
+                    _cls(_revert_cls, glabel, "file")
 
     def _fill_one_block(block: ImplBlock,
                         withheld: frozenset[str] = frozenset()) -> None:
@@ -3482,6 +3547,9 @@ def prepare_impl_fill(
                 spliced_now = 0
                 _impl_spliced: list[str] = []
                 refusals: list[str] = []
+                # What each refusal that judges the reply's TEXT tells the
+                # next turn (`splice_feedback.reply_refusal_feedback`).
+                _reply_feedback: list[str] = []
                 # Refill members are already-filled (not `unimplemented!()`) —
                 # the splice must be told to overwrite a non-stub body for
                 # exactly these fn names, same as the per-fn refill path's
@@ -3516,12 +3584,13 @@ def prepare_impl_fill(
                         _log(f"  [phase-c/impl] {block_id}: dropped where-clause "
                              f"on trait-impl member `{fn_data['fn_name']}`")
                         wc = None
-                    ok, reason, delta = _splice_fn_with_where(
+                    _sp = _splice_fn_with_where(
                         target_file, container, fn_data["fn_name"],
                         fn_data["body"], wc,
                         allow_nonstub=fn_data["fn_name"] in _refill_names,
                         sig_text=_rb.sig_text,
                     )
+                    ok, reason, delta = _sp
                     if ok:
                         spliced_now += 1
                         _impl_spliced.append(fn_data["fn_name"])
@@ -3539,6 +3608,10 @@ def prepare_impl_fill(
                         refusals.append(reason)
                         _log(f"  [phase-c/impl] {block_id}: splice "
                              f"`{fn_data['fn_name']}` failed: {reason}")
+                        _fb = reply_refusal_feedback(
+                            _sp, unit=fn_data["fn_name"], file_rel=block.file)
+                        if _fb is not None:
+                            _reply_feedback.append(_fb)
                 if spliced_now == 0:
                     # every routed body refused as target_not_stub
                     # ⇒ the members are already filled — the block is
@@ -3561,7 +3634,18 @@ def prepare_impl_fill(
                                      else AttemptLoss.SPLICE_REFUSAL]
                     _log(f"  [phase-c/impl] {block_id}: nothing spliced "
                          f"({_last_loss[0].value}, attempt {fix_attempt}).")
-                    return FixOutcome("stop")
+                    if not (_reply_feedback
+                            and len(_reply_feedback) == len(refusals)
+                            and not routing.dropped):
+                        return FixOutcome("stop")
+                    # Every body was refused for its own text: a failed
+                    # attempt the next turn can repair, not a lost answer.
+                    # Nothing was written, so the refusals' diagnostics are
+                    # this attempt's compile verdict.
+                    _last_loss[:] = [AttemptLoss.MODEL_FAILURE]
+                    _log(f"  [phase-c/impl] {block_id}: every body was refused "
+                         "for its own text — charged as a failed attempt; the "
+                         "next turn carries the diagnostics.")
                 # Run cargo check via the structured-diagnostics wrapper
                 # so error counts come from rustc's own classification
                 # (JSON `compiler-message`s with `level == "error"`) and
@@ -3573,9 +3657,14 @@ def prepare_impl_fill(
                 # so error counts come from rustc's own classification
                 # (JSON `compiler-message`s with `level == "error"`) and
                 # not from regex over rendered text.
-                rc, cargo_out, diagnostics = _run_cargo_check_diag(
-                    check_cmd, target_src_dir, cluster_env)
-                if rc != 0:
+                if spliced_now == 0:
+                    _no_diags: list[Any] = []
+                    rc, cargo_out, diagnostics = (
+                        101, "\n\n".join(_reply_feedback), _no_diags)
+                else:
+                    rc, cargo_out, diagnostics = _run_cargo_check_diag(
+                        check_cmd, target_src_dir, cluster_env)
+                if rc != 0 and spliced_now:
                     # Deterministic repair: a body cannot add `use` items, so
                     # apply rustc's own single-candidate import suggestions to
                     # the block's file and re-check before charging the model.
@@ -3788,12 +3877,18 @@ def prepare_impl_fill(
                         (_u2_impl.self_passed | _u2_impl.self_failures
                          | _u2_impl.aborted)
                         if _u2_impl is not None else _block_answers.tests)
-                    _cls(class_for_kept(passed=_passed_i,
+                    _cls(class_for_kept(reading=keep_reading(
+                                            net_delta=(
+                                                _cmp_i.net_pass_delta
+                                                if _cmp_i is not None else 0),
+                                            newly_green=(
+                                                _cmp_i.newly_green
+                                                if _cmp_i is not None else ()),
+                                            attributed=_attr_i),
+                                        passed=_passed_i,
                                         unreachable=tests_could_not_run(
                                             crash_keep=_crash_keep,
                                             external_only=_u2_external_only),
-                                        net_delta=(_cmp_i.net_pass_delta
-                                                   if _cmp_i is not None else 0),
                                         attributed=_attr_i,
                                         measured=(_u2_impl is not None
                                                   and not _u2_impl.aborted)),
@@ -3840,7 +3935,10 @@ def prepare_impl_fill(
                 # green-but-behaviorally-wrong body just masks it as "filled".
                 # Fall through to revert (→ stub) so the per-fn behavioral re-fill
                 # retries it cleanly with the failing test.
-                if _b3_keep and rc != 0:
+                # (`spliced_now`: an attempt whose every body was refused for
+                # its text wrote nothing — there is nothing to keep, and its
+                # "red crate" is the refusal's diagnostic, not rustc's.)
+                if _b3_keep and rc != 0 and spliced_now:
                     _cur_sig = _cargo_err_sig_from_diagnostics(diagnostics)
                     _new_errs = _cur_sig - _baseline_sig
                     _frontier = _frontier_from_diags(diagnostics, target_src_dir)
@@ -3860,7 +3958,7 @@ def prepare_impl_fill(
                              f"fn(s) (B3 non-regressing; {len(_cur_sig)} crate "
                              f"err(s) remain elsewhere) (attempt {fix_attempt}).")
                         _cls(class_for_kept(
-                            passed=frozenset(),
+                            reading=keep_reading(), passed=frozenset(),
                             unreachable=tests_could_not_run(crate_red=True)),
                              block_id, "impl")
                         _emit("phase_c.impl.fill.done", duration_ms=int(
@@ -3886,6 +3984,11 @@ def prepare_impl_fill(
                 # rc != 0 establishes a minimum count of 1.
                 cur_err_sig = (_u2_impl.self_failures
                                if _u2_impl_reject and _u2_impl is not None
+                               # No rustc ran on a refused reply; the refusal
+                               # reasons are the signature the stall rule
+                               # compares, so the same refusal twice stalls.
+                               else frozenset(f"splice:{r}" for r in refusals)
+                               if not spliced_now
                                else _cargo_err_sig_from_diagnostics(diagnostics))
                 # Two tiers, never one count: a U2 self-failure means the block
                 # COMPILED, so its compile tier is 0 and it strictly beats every
@@ -4040,29 +4143,24 @@ def prepare_impl_fill(
                 on_stall=_on_impl_stall,
                 on_repeated=_on_impl_repeated,
                 check_stop=_check_graceful_stop,
+                # The block's own tests: an impl run claims several blocks
+                # of a file on one scope.
+                unit_tests=lambda: _answers_for_block(block),
             )
             if members_filled_this_block > 0 or block_already_complete:
                 break
-            if unit_clock.expired():
+            _unit_end = unit_clock.ended(_answers_for_block(block))
+            if _unit_end:
                 # The unit ran past its bound (`FILL_UNIT_SHARE_MULTIPLE` ×
-                # the run's share): no last-resort call and no retrospective —
-                # running out of time is not evidence about these bodies. The
-                # block exits as a failed block (salvage, stubs to the per-fn
-                # route); run `484518-91681c1a` spent 199 minutes of a
-                # 15-minute share here.
+                # the run's share), or the ground its claim was planned on
+                # moved: no last-resort call and no retrospective — neither
+                # is evidence about these bodies. The block exits as a failed
+                # block (salvage, stubs to the per-fn route); run
+                # `484518-91681c1a` spent 199 minutes of a 15-minute share
+                # here.
                 if unit_clock.note_once():
-                    _log(f"  [phase-c/impl] {block_id}: UNIT_BOUND — "
-                         f"{unit_clock.elapsed_minutes():.0f} min past its "
-                         f"{unit_clock.bound_minutes():.0f}-min bound after "
-                         f"{fix_attempt} attempt(s), retro round {_retro_round}; "
-                         "no last-resort, no retrospective.")
-                    _emit("phase_c.unit.bound", data={
-                        "cluster": cluster_name, "route": "impl",
-                        "unit": block_id, "attempts": fix_attempt,
-                        "retro_round": _retro_round,
-                        "bound_minutes": unit_clock.bound_minutes(),
-                        "elapsed_minutes": round(
-                            unit_clock.elapsed_minutes(), 1)})
+                    _note_unit_end(_unit_end, "impl", block_id, fix_attempt,
+                                   retro_round=_retro_round)
                 break
             if _crash_blocked_mark:
                 # No last-resort escalation, no retrospective, no conviction:
@@ -4795,6 +4893,22 @@ def prepare_impl_fill(
             for b in (pd.dispatcher_block, pd.implementer_block, *_pair_extra)
             for m in (*b.stub_members, *b.refill_members)]
         for _attempt in range(1, _FILE_FIRST_MAX_ATTEMPTS + 1):
+            # The pair's later call is asked like every other unit's: the
+            # compile retry falls through to here, and a pair whose leftover
+            # tests another keep already moved has nothing left to judge it.
+            _unit_end = (unit_clock.ended(frozenset(_pair_tests))
+                         if _attempt > 1 else "")
+            if _unit_end:
+                if unit_clock.note_once():
+                    _note_unit_end(_unit_end, "pair", pair_id, _attempt - 1)
+                # As at the last failed attempt below: the sha of the prompt
+                # that was sent must not refuse the next pass's question.
+                with _counters_lock:
+                    _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                    _crec["last_prompt_sha"] = ""
+                    retros_cache[_pair_key] = _crec
+                    _save_retrospectives(project_dir, retros_cache)
+                return
             if not _conv.opened:
                 prompt = _make_pair_prompt(_last_error, _pair_err.kind)
                 # Compare against the sha of the last prompt SENT (the cache,
@@ -5261,11 +5375,16 @@ def prepare_impl_fill(
                     (_pair_u2.self_passed | _pair_u2.self_failures
                      | _pair_u2.aborted)
                     if _pair_u2 is not None else frozenset())
-                _cls(class_for_kept(passed=_pair_passed,
+                _cls(class_for_kept(reading=keep_reading(
+                                        net_delta=(_cmp_p.net_pass_delta
+                                                   if _cmp_p is not None else 0),
+                                        newly_green=(_cmp_p.newly_green
+                                                     if _cmp_p is not None
+                                                     else ()),
+                                        attributed=_attr_p),
+                                    passed=_pair_passed,
                                     unreachable=tests_could_not_run(
                                         external_only=_pair_external_only),
-                                    net_delta=(_cmp_p.net_pass_delta
-                                               if _cmp_p is not None else 0),
                                     attributed=_attr_p,
                                     measured=(_pair_u2 is not None
                                               and not _pair_u2.aborted)),
@@ -5784,7 +5903,17 @@ def prepare_impl_fill(
                      "graded UNMEASURED, not a re-buy.")
                 _cls(FillOutcomeClass.ANSWER_DROPPED, _sid, "session")
             if _out.outcome == "accepted":
-                _cls(class_for_kept(passed=frozenset(_sl.tests),
+                # The accepted outcome's own delta: every target passing is
+                # not a payment when they passed before the session opened.
+                _cls(class_for_kept(reading=keep_reading(
+                                        net_delta=(_out.final.pass_delta
+                                                   if _out.final is not None
+                                                   else 0),
+                                        newly_green=(_out.final.newly_green
+                                                     if _out.final is not None
+                                                     else ()),
+                                        attributed=frozenset(_sl.tests)),
+                                    passed=frozenset(_sl.tests),
                                     unreachable=tests_could_not_run(),
                                     attributed=frozenset(_sl.tests),
                                     measured=True),
@@ -5804,11 +5933,15 @@ def prepare_impl_fill(
                     # tree at net +5 with a target still red is CASHED,
                     # not WRONG (run 3014175-d98ed09e iter 3 session #1).
                     _cls(class_for_kept(
+                        reading=keep_reading(
+                            net_delta=(_out.final.pass_delta
+                                       if _out.final is not None else 0),
+                            newly_green=(_out.final.newly_green
+                                         if _out.final is not None else ()),
+                            attributed=frozenset(_sl.tests)),
                         passed=(_out.final.green_targets
                                 if _out.final is not None else frozenset()),
                         unreachable=tests_could_not_run(),
-                        net_delta=(_out.final.pass_delta
-                                   if _out.final is not None else 0),
                         attributed=frozenset(_sl.tests),
                         measured=True),
                          _sid, "session")

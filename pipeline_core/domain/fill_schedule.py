@@ -2273,20 +2273,34 @@ class RunClock:
             self.refused += 1
             return "premise"
         if self.share_minutes is None or self.elapsed() < self.share_minutes:
-            return self._claimed()
+            return self._claimed(scope, claimed)
         fill_left = self._fill_remaining()
         if self.last_delta > 0 and (fill_left is None or fill_left > 0):
-            return self._claimed()
+            return self._claimed(scope, claimed)
         self.refused += 1
         return "share"
 
-    def _claimed(self) -> str:
+    def _claimed(self, scope: frozenset[str] | None,
+                 claimed: frozenset[FnLocator]) -> str:
         """Count the claim and start the claiming thread's unit clock: the
         unit may run until ``unit_multiple`` × the share, then ends at its
-        next attempt boundary (:mod:`unit_clock`)."""
+        next attempt boundary (:mod:`unit_clock`).
+
+        The unit keeps the ground question of THIS claim for each later
+        call it buys: on the tests of the names that call asks when the
+        route gives them, else on the claim's scope; always on the claim's
+        units, which is the standing-in set. The share is not asked again:
+        it is a between-units rule, and the unit's own bound is the
+        multiple above."""
         self.claims += 1
+        gate = self._ground_moved
+
+        def _ground(tests: Iterable[str] | None = None) -> bool:
+            assert gate is not None
+            return gate(scope if tests is None else frozenset(tests), claimed)
+
         unit_clock.start(
             self.share_minutes * self.unit_multiple
             if self.share_minutes and self.unit_multiple > 0 else None,
-            now=self._now)
+            now=self._now, ground=None if gate is None else _ground)
         return ""

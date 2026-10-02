@@ -276,8 +276,8 @@ def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
 
 def test_env_for_cluster_uses_the_injected_mapping_not_dict_update() -> None:
     """The old overlay replaced RUSTFLAGS and never set the toolchain.
-    With cluster_env bound, that mapping is the whole env. Without it,
-    dict.update still reproduces the recorded rustflags."""
+    With cluster_env bound, that mapping is the whole env. Without it, the
+    env is the base overlaid by the one cluster rule."""
     from types import SimpleNamespace
 
     def _unused(*_a, **_k):  # noqa: ANN002, ANN003
@@ -300,9 +300,15 @@ def test_env_for_cluster_uses_the_injected_mapping_not_dict_update() -> None:
     old = Task3Cargo(
         env=lambda: {"RUSTFLAGS": "-A warnings"},
         run=_unused, check_diag=_unused)
-    bad = env_for_cluster(old, cluster)
-    assert bad["RUSTFLAGS"] == "--cfg extra"
-    assert "RUSTUP_TOOLCHAIN" not in bad
+    # Unbound, the env is built from the base through the same overlay rule:
+    # the base flags survive and rustdoc is handed the cluster's cfg too.
+    built = env_for_cluster(old, cluster)
+    assert built["RUSTFLAGS"] == "-A warnings --cfg extra"
+    assert built["RUSTDOCFLAGS"] == "--cfg extra"
+    # NEGATIVE CONTROL: the dict.update this replaced, on the same input.
+    bad = {"RUSTFLAGS": "-A warnings"}
+    bad.update(cluster.env_extra)
+    assert bad["RUSTFLAGS"] == "--cfg extra" and "RUSTDOCFLAGS" not in bad
 
 
 def _braces_balance(p: Path) -> bool:

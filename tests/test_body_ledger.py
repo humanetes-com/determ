@@ -346,6 +346,26 @@ def test_a_passing_sibling_does_not_prove_a_body_whose_convicting_tests_fail(
     assert delta == ()
 
 
+def test_a_landing_with_no_red_attributed_test_is_flat_not_proven() -> None:
+    """Run `3040-51eab48c` (2026-10-02): the keeps after a fill's last red
+    test turned green landed with every attributed test already passing.
+    Nothing convicted the dispatch and the delta is empty, so the landing
+    is a graded try that bought nothing. `proven` here ranked the unit as
+    paying at the next schedule. Negative control: the same landing when
+    one of those tests was red before it is `proven`, with the delta."""
+    e = _entry(state=BodyState.LANDED)
+    before, after = _views(({"test_green"}, set()), ({"test_green"}, set()))
+    state, delta = classify(e, attributed={"test_green"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.FLAT
+    assert delta == ()
+    before, after = _views((set(), {"test_green"}), ({"test_green"}, set()))
+    state, delta = classify(e, attributed={"test_green"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.PROVEN
+    assert delta == (("test_green", "gained"),)
+
+
 def test_a_measured_non_regression_is_proven_and_names_what_moved() -> None:
     e = _entry(state=BodyState.LANDED)
     before, after = _views((set(), {"test_new", "test_kept"}),

@@ -16,6 +16,7 @@ from pipeline_core.domain.models import (
     DispatchFamily,
     FieldRecord,
     ImplBlock,
+    MethodRecord,
     SlotFit,
     TraitImplRecord,
     TypeRecord,
@@ -1132,6 +1133,30 @@ def _tuple_struct_fields(fields: tuple[FieldRecord, ...]) -> bool:
     return bool(fields) and all((not f.name) or f.name.isdigit() for f in fields)
 
 
+def world_gate_attr(member: FieldRecord | MethodRecord) -> str:
+    """`#[cfg(…)] ` for a member only some cfg worlds compile, else "".
+
+    The gate is the member's own effective cfg, spelled so a body can copy it:
+    a reference to the member is legal only under the same predicate, and a
+    struct literal has to carry the attribute on that field's initialiser.
+    The extractor's token-spaced spelling is tightened; the predicate is
+    otherwise verbatim."""
+    if not member.worlds or not member.cfg_predicates:
+        return ""
+    preds = [p.replace(" (", "(").replace("( ", "(").replace(" )", ")")
+              .replace(" ,", ",") for p in member.cfg_predicates]
+    pred = preds[0] if len(preds) == 1 else "all(" + ", ".join(preds) + ")"
+    return f"#[cfg({pred})] "
+
+
+def world_only_note(member: FieldRecord | MethodRecord) -> str:
+    """The trailing comment naming the worlds a gated member exists in."""
+    if not member.worlds:
+        return ""
+    return ("   // exists ONLY in cfg world "
+            + ", ".join(f"`{w}`" for w in member.worlds))
+
+
 def _construct_hint(rec: TypeRecord) -> str | None:
     """A `construct:` line showing HOW to build `rec`, derived deterministically
     from the frozen definition/fields (a legitimate, always-correct input).
@@ -1156,9 +1181,14 @@ def _construct_hint(rec: TypeRecord) -> str | None:
         return (f"  construct: {name}(<fields...>)   "
                 f"// tuple struct — positional args; NOT {name}::new(...)")
     if fields:
-        body = ", ".join(f"{f.name}: <{f.ty}>" for f in fields)
+        # A field only some cfg worlds compile is initialised under its own
+        # gate; the literal without it fails E0560 where the field is absent,
+        # and the literal without the field fails E0063 where it exists.
+        body = ", ".join(f"{world_gate_attr(f)}{f.name}: <{f.ty}>" for f in fields)
+        gated = (" — keep each `#[cfg(…)]` on its field"
+                 if any(world_gate_attr(f) for f in fields) else "")
         return (f"  construct: {name} {{ {body} }}   "
-                f"// struct literal; NOT {name}::new(...)")
+                f"// struct literal; NOT {name}::new(...){gated}")
     if "{" not in deff and "(" not in deff:
         return f"  construct: {name}   // unit struct — no fields"
     return None
@@ -1463,7 +1493,8 @@ def _private_field_lines(
     for f, ms in with_accessors:
         via = (" / ".join(_trim_sig(m.sig) for m in ms) if ms
                else "(no accessor declared here)")
-        lines.append(f"    {f.name}: {f.ty}   → {via}")
+        lines.append(f"    {world_gate_attr(f)}{f.name}: {f.ty}   → {via}"
+                     f"{world_only_note(f)}")
     return lines
 
 
@@ -1734,7 +1765,8 @@ def _type_block(
                 else "  fields (access with .name):")
             for f in accessible:
                 pub = "pub " if f.is_pub else ""
-                lines.append(f"    {pub}{f.name}: {f.ty}")
+                lines.append(f"    {world_gate_attr(f)}{pub}{f.name}: {f.ty}"
+                             f"{world_only_note(f)}")
                 lines.extend(_slot_fit_lines(f, rec.file))
         if private:
             lines.extend(_private_field_lines(rec, private, viewer_file))
@@ -1753,7 +1785,8 @@ def _type_block(
         # Dedup by method name (same fn can appear in multiple impl blocks);
         # keep the first sig we saw. Then render WITH SIGNATURE.
         seen: set[str] = set()
-        sigs: list[tuple[str, str, bool]] = []  # (name, sig, is_exactly_pub)
+        # (name, sig, is_exactly_pub, cfg gate, worlds note)
+        sigs: list[tuple[str, str, bool, str, str]] = []
         for m in methods:
             mn = m.name
             if mn and mn not in seen:
@@ -1762,21 +1795,22 @@ def _type_block(
                 # field artifact / stale extractor) — alone it would render a
                 # PRIVATE method as `pub`; is_pub can only narrow.
                 sigs.append((mn, _trim_sig(m.sig),
-                             bool(m.is_pub and m.is_exactly_pub)))
+                             bool(m.is_pub and m.is_exactly_pub),
+                             world_gate_attr(m), world_only_note(m)))
         if sigs:
             lines.append("  methods (sig shown; call with .name(args)):")
             # Cap to top 10 methods to keep prompts compact for types with
             # many. The first 10 are typically the most-used.
-            for mn, sig, is_pub in sigs[:10]:
+            for mn, sig, is_pub, gate, only in sigs[:10]:
                 # `pub ` is literal rendered text, so it must reflect TRUE
                 # external visibility (is_exactly_pub), not `pub(crate)`.
                 vis = "pub " if is_pub else ""
                 if sig:
-                    lines.append(f"    {vis}{sig}")
+                    lines.append(f"    {gate}{vis}{sig}{only}")
                 else:
-                    lines.append(f"    {vis}fn {mn}(...)  // sig unknown")
+                    lines.append(f"    {gate}{vis}fn {mn}(...)  // sig unknown{only}")
             if len(sigs) > 10:
-                rest = ", ".join(n for n, _, _ in sigs[10:])
+                rest = ", ".join(n for n, *_ in sigs[10:])
                 if len(rest) > 200:
                     rest = rest[:197] + "..."
                 lines.append(f"    // also: {rest}")

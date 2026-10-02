@@ -16,11 +16,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ..domain.phase_registry import PHASE_ENTER, PHASE_EXIT
+from ..domain.phase_registry import PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS
 from ..domain.test_results import build_test_name_index, per_file_test_stats
 from ..log import emit, log
 
-PHASE_EVENTS = frozenset({PHASE_ENTER, PHASE_EXIT})
+PHASE_EVENTS = frozenset({PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS})
 
 
 class JsonlEventEmitter:

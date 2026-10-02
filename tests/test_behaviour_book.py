@@ -510,29 +510,34 @@ def _two_chunk_ensure_suite() -> tuple[BehaviourSuite, dict[str, BehaviourSpec]]
     return BehaviourSuite("stable", tuple(specs)), {s.behaviour_id: s for s in specs}
 
 
-def test_a_pair_drafted_in_one_chunk_is_credited_on_a_sibling_chunk_whose_draft_is_wrong() -> None:
-    suite, pool = _two_chunk_ensure_suite()
-    glossary = (GlossaryEntry("ensure!", "macro"),)
+def _two_chunk_model(calls: list[str] | None = None) -> Callable[[str], str]:
+    """The two-chunk fixture's replies: the first chunk drafts the pair that
+    holds, the second drafts the sentence the visit must not carry."""
+    pool = {s.behaviour_id: s for s in _two_chunk_ensure_suite()[0].specs}
     answer = _base_suffix_answer(pool)
 
-    def model(calls: list[str]) -> Callable[[str], str]:
-        def ask(prompt: str) -> str:
+    def ask(prompt: str) -> str:
+        if calls is not None:
             calls.append(prompt)
-            ids = re.findall(r'<EXAMPLE id="([^"]+)">', prompt)
-            if "TASK: state the observable RULES" in prompt:
-                if "s0" in ids:
-                    return (f'<RULE covers="s0,s1,s2">{BASE.sentence}</RULE>'
-                            f'<RULE covers="s0,s1">{SUFFIX.sentence}</RULE>')
-                return f'<RULE covers="s3,s4,s5">{WRONG.sentence}</RULE>'
-            rules = frozenset(re.findall(r"^\d+\. (.*)$", prompt, re.M))
-            if WRONG.sentence in rules:
-                return "".join(f'<THEN id="{i}">Condition failed x</THEN>' for i in ids)
-            return "".join(f'<THEN id="{i}">{answer(rules, i)}</THEN>' for i in ids)
-        return ask
+        ids = re.findall(r'<EXAMPLE id="([^"]+)">', prompt)
+        if "TASK: state the observable RULES" in prompt:
+            if "s0" in ids:
+                return (f'<RULE covers="s0,s1,s2">{BASE.sentence}</RULE>'
+                        f'<RULE covers="s0,s1">{SUFFIX.sentence}</RULE>')
+            return f'<RULE covers="s3,s4,s5">{WRONG.sentence}</RULE>'
+        rules = frozenset(re.findall(r"^\d+\. (.*)$", prompt, re.M))
+        if WRONG.sentence in rules:
+            return "".join(f'<THEN id="{i}">Condition failed x</THEN>' for i in ids)
+        return "".join(f'<THEN id="{i}">{answer(rules, i)}</THEN>' for i in ids)
+    return ask
 
+
+def test_a_pair_drafted_in_one_chunk_is_credited_on_a_sibling_chunk_whose_draft_is_wrong() -> None:
+    suite, _pool = _two_chunk_ensure_suite()
+    glossary = (GlossaryEntry("ensure!", "macro"),)
     calls: list[str] = []
     book, reading = build_behaviour_book(
-        suite, crate="krate", glossary=glossary, private=set(), ask=model(calls),
+        suite, crate="krate", glossary=glossary, private=set(), ask=_two_chunk_model(calls),
         budget=BookBudget(examples_per_prompt=3))
     rules = {r.sentence: r.example_ids for r in book.features[0].rules}
     assert rules == {BASE.sentence: ("s0", "s1", "s2", "s3", "s4", "s5"),
@@ -553,16 +558,54 @@ def test_a_pair_drafted_in_one_chunk_is_credited_on_a_sibling_chunk_whose_draft_
     # NEGATIVE CONTROL: each chunk left with the drafts written from its own
     # examples — the second chunk keeps nothing and half the feature is uncovered.
     alone, flat = build_behaviour_book(
-        suite, crate="krate", glossary=glossary, private=set(), ask=model([]),
+        suite, crate="krate", glossary=glossary, private=set(), ask=_two_chunk_model(),
         budget=BookBudget(examples_per_prompt=3, sibling_chunks=False))
     assert flat.covered_examples == 3 and flat.sibling_examples == 0
     assert {r.sentence: r.example_ids for r in alone.features[0].rules} == {
         BASE.sentence: ("s0", "s1", "s2"), SUFFIX.sentence: ("s0", "s1")}
     # lanes do not change the book
     par, par_reading = build_behaviour_book(
-        suite, crate="krate", glossary=glossary, private=set(), ask=model([]),
+        suite, crate="krate", glossary=glossary, private=set(), ask=_two_chunk_model(),
         budget=BookBudget(examples_per_prompt=3, lanes=4))
     assert par.to_dict() == book.to_dict() and replace(par_reading, lanes=1) == replace(reading, lanes=1)
+
+
+def test_the_book_build_announces_chunks_then_sibling_visits() -> None:
+    """The counts the monitor bars are the build's own plan: two chunks of
+    the six-example feature, then the one sibling visit that feature owes.
+    With no book step open, and with rules off, nothing is announced."""
+    from pipeline_core import log as log_mod
+    from pipeline_core import phases
+
+    suite, _pool = _two_chunk_ensure_suite()
+    glossary = (GlossaryEntry("ensure!", "macro"),)
+    events: list[tuple[str, dict]] = []
+    orig_log, orig_emit = log_mod._log_sink, log_mod._emit_sink
+    log_mod.set_sinks(lambda _m: None, lambda ev, **f: events.append((ev, f)))
+    try:
+        phases.note_work(done=1, total=2, calls=1, lanes=1, wave="chunks")
+        with phases.phase_scope("bake"):
+            phases.step("bake.book")
+            build_behaviour_book(
+                suite, crate="krate", glossary=glossary, private=set(),
+                ask=_two_chunk_model(), budget=BookBudget(examples_per_prompt=3))
+            build_behaviour_book(
+                suite, crate="krate", glossary=glossary, private=set(),
+                ask=_two_chunk_model(), budget=BookBudget(rules=False))
+    finally:
+        log_mod.set_sinks(orig_log, orig_emit)
+    progress = [f["data"] for e, f in events if e == "phase.progress"]
+    assert events[0][0] != "phase.progress"
+    chunks = [p for p in progress if p["wave"] == "chunks"]
+    siblings = [p for p in progress if p["wave"] == "siblings"]
+    assert [p["done"] for p in chunks] == [0, 1, 2]
+    assert chunks[0]["total"] == 2 and chunks[-1]["calls"] >= 2
+    assert [p["done"] for p in siblings] == [0, 1]
+    assert siblings[0]["total"] == 1
+    assert siblings[-1]["calls"] > chunks[-1]["calls"]
+    assert all(p["lanes"] == 1 for p in progress)
+    # rules off adds no further count: the sibling visit is the last report
+    assert progress[-1] is siblings[-1]
 
 
 def test_the_prefix_rule_is_the_replays() -> None:
@@ -862,3 +905,231 @@ def test_an_example_the_checker_predicts_with_no_rule_is_recorded_on_its_feature
     back = BehaviourSuite.from_dict(json.loads(json.dumps(book.to_dict())))
     assert back.features[0].unaided_ids == ("s2", "s5")
     assert "unaided_ids" not in Feature("f", "fn", ("a",)).to_dict()
+
+
+# --- the Given: a pointer per root, the helper text once -----------------------------
+
+# An invented stored shape: two test files sharing one helper file. `build`
+# is the root both examples name; `Layer` and its impl are what `build` pulls
+# in; `check` is the asserting helper of the first file; each file has a
+# `use` block.
+_SHARED = {
+    "tests/shared/mod.rs::build": "pub fn build() -> Layer {\n    Layer { depth: 2 }\n}",
+    "tests/shared/mod.rs::Layer": "pub struct Layer {\n    depth: usize,\n}",
+    "tests/shared/mod.rs::Layer::impl1":
+        "impl Layer {\n    pub fn render(&self) -> String {\n        self.depth.to_string()\n    }\n}",
+    "tests/one.rs::check":
+        "fn check(got: String, want: &str) {\n    assert_eq!(got, want);\n}",
+    "tests/one.rs::use": "use krate::{wrap, Wrapped};",
+    "tests/two.rs::use": "use krate::wrap;\nuse std::fmt;",
+}
+
+
+def _given_suite() -> BehaviourSuite:
+    def keyed(bid: str, setup: str, when: str, keys: tuple[str, ...], via: str = "") -> BehaviourSpec:
+        return _spec(bid, setup, when, ObservableOutcome.display("2"), helper_keys=keys, via=via,
+                     helpers=tuple(_SHARED[k] for k in keys))
+    closure = ("tests/shared/mod.rs::build", "tests/shared/mod.rs::Layer",
+               "tests/shared/mod.rs::Layer::impl1")
+    specs = (
+        keyed("one", "let layer = build();", "wrap(layer).to_string()",
+              ("tests/one.rs::use", "tests/one.rs::check", *closure), via="check"),
+        keyed("two", "", "wrap(build()).to_string()", ("tests/two.rs::use", *closure)),
+        keyed("bare", "let n = 2;", "wrap(n).to_string()", ("tests/two.rs::use",)),
+    )
+    return BehaviourSuite("stable", specs, features=(Feature("wrap", "fn", ("one", "two", "bare")),),
+                          glossary=(GlossaryEntry("wrap", "fn", "Wraps."),))
+
+
+def _flat(text: str) -> str:
+    return "\n".join(ln.strip() for ln in text.split("\n") if ln.strip())
+
+
+def _pasted_given(spec: BehaviourSpec) -> str:
+    """NEGATIVE CONTROL: the Given the view printed before the change — the
+    example's whole helper closure and its setup under a bare keyword."""
+    return "\n".join(p for p in (*spec.helpers, spec.setup) if p.strip())
+
+
+def test_a_given_is_a_pointer_per_root_and_no_helper_text_is_in_a_feature_file() -> None:
+    from pipeline_core.domain.behaviour import example_given
+    from pipeline_core.domain.behaviour_book import GIVENS_INDEX_NAME
+    suite = _given_suite()
+    by_id = {s.behaviour_id: s for s in suite.specs}
+    one = example_given(by_id["one"])
+    assert one.roots == ("tests/shared/mod.rs::build",)
+    assert one.observer == ("tests/one.rs::check",) and one.imports == ("tests/one.rs::use",)
+    assert one.closure == ("tests/shared/mod.rs::Layer", "tests/shared/mod.rs::Layer::impl1")
+    assert one.keys == set(by_id["one"].helper_keys)
+    assert example_given(by_id["bare"]).roots == ()
+
+    files = feature_files(suite)
+    features = {n: t for n, t in files.items() if n.endswith(".feature")}
+    view = _flat("\n".join(features.values()))
+    # (a) no helper text occurs in any .feature
+    assert not [k for k, t in _SHARED.items() if _flat(t) in view]
+    # (b) every root step names a key the book's helpers table holds
+    steps = re.findall(r"^\s+(?:Given|And) `(\w+)` \(([^)]+)\)$", "\n".join(features.values()), re.M)
+    assert steps == [("build", "tests/shared/mod.rs")] * 2
+    assert all(f"{file}::{name}" in dict(suite.helpers) for name, file in steps)
+    # (c) the asserting helper is in no Given; the Then names it
+    assert ("check", "tests/one.rs") not in steps
+    assert "Then, as `check` (tests/one.rs) compares it, it displays as '2'" in view
+    # an example with no root and a setup still opens with a Given
+    assert "Given this setup" in view and "And this setup" in view
+    # the index prints each root, observer and import block once
+    index = files[GIVENS_INDEX_NAME]
+    assert index.count("## `build` (tests/shared/mod.rs)") == 1 and "given in 2 example(s)" in index
+    assert all(index.count(t) == 1 for t in _SHARED.values())
+    assert index.index("# Observers") < index.index("## `check` (tests/one.rs)") < index.index("# Imports")
+
+    # NEGATIVE CONTROL: the pre-change Given pasted the closure per example —
+    # the shared helper twice, the asserting helper as a precondition.
+    old = _flat("\n".join(_pasted_given(s) for s in suite.specs))
+    assert old.count(_flat(_SHARED["tests/shared/mod.rs::build"])) == 2
+    assert _flat(_SHARED["tests/one.rs::check"]) in old
+
+
+def test_a_root_the_example_names_is_a_root_even_when_another_root_pulls_it_in() -> None:
+    from pipeline_core.domain.behaviour import example_given
+    keys = ("tests/shared/mod.rs::build", "tests/shared/mod.rs::Layer",
+            "tests/shared/mod.rs::Layer::impl1")
+    spec = _spec("x", "let l: Layer = build();", "l.render()", ObservableOutcome.display("2"),
+                 helper_keys=keys, helpers=tuple(_SHARED[k] for k in keys))
+    given = example_given(spec)
+    assert given.roots == ("tests/shared/mod.rs::build", "tests/shared/mod.rs::Layer")
+    assert given.closure == ("tests/shared/mod.rs::Layer::impl1",)
+    assert dict(given.reach)["tests/shared/mod.rs::Layer"] == ("tests/shared/mod.rs::Layer::impl1",)
+
+
+def test_a_view_without_test_file_items_writes_no_index() -> None:
+    from pipeline_core.domain.behaviour_book import GIVENS_INDEX_NAME
+    spec = _spec("p", "", "wrap(1).to_string()", ObservableOutcome.display("1"))
+    suite = BehaviourSuite("stable", (spec,), features=(Feature("wrap", "fn", ("p",)),))
+    assert GIVENS_INDEX_NAME not in feature_files(suite)
+
+
+def test_the_rule_prompt_sends_the_given_it_was_measured_on() -> None:
+    """The rule prompt reads the given through `example_given` and sends the
+    same bytes as before: changing what the judge reads is a measurement
+    change with its own reading."""
+    from pipeline_core.prompts.behaviour_rules import _example_block
+    suite = _suite()
+    with_helpers = [s for s in suite.specs if s.helpers]
+    assert with_helpers
+    for s in (*suite.specs, *_given_suite().specs):
+        block = _example_block(s, with_then=False)
+        old = _pasted_given(s)
+        assert ("GIVEN:\n```rust\n" + old + "\n```" in block) if old else ("GIVEN:" not in block)
+
+
+_PASTES_HELPERS = re.compile(r"\*\s*\w+\.helpers\b")
+
+
+def test_no_reader_outside_the_model_joins_an_examples_helper_text() -> None:
+    """A view or a prompt that wants an example's precondition goes through
+    `example_given`; one that splats `spec.helpers` pastes the closure again."""
+    offenders = []
+    for path in sorted((REPO / "pipeline_core").rglob("*.py")):
+        if path.name != "behaviour.py" and _PASTES_HELPERS.search(path.read_text(encoding="utf-8")):
+            offenders.append(str(path.relative_to(REPO)))
+    assert offenders == []
+    # NEGATIVE CONTROL: the pre-change view's and prompt's join.
+    assert _PASTES_HELPERS.search('context = "\\n".join(p for p in (*s.helpers, s.setup) if p.strip())')
+
+
+def test_a_key_the_table_lacks_never_shifts_another_keys_text() -> None:
+    from pipeline_core.domain.behaviour import helper_items
+    spec = _spec("k", "", "f()", ObservableOutcome.display("1"),
+                 helper_keys=("tests/a.rs::gone", "tests/a.rs::f"))
+    suite = BehaviourSuite("stable", (spec,), helpers=(("tests/a.rs::f", "fn f() {}"),))
+    assert helper_items(suite.specs[0]) == (("tests/a.rs::gone", ""), ("tests/a.rs::f", "fn f() {}"))
+    assert example_code(suite.specs[0]) == "fn f() {}\nf()"
+
+
+# --- the phrase of a root: model-written at the bake, shown in the view only ----------
+
+def _phrase_ask(reply: str, seen: list[str]) -> Callable[[str], str]:
+    def ask(prompt: str) -> str:
+        seen.append(prompt)
+        return reply if "TEST FILE:" in prompt else ""
+    return ask
+
+
+def _build_given_book(reply: str, **budget: object) -> tuple[BehaviourSuite, object, list[str]]:
+    seen: list[str] = []
+    book, reading = build_behaviour_book(
+        _given_suite(), crate="krate", glossary=(GlossaryEntry("wrap", "fn", "Wraps."),),
+        private={"hidden_fn"}, ask=_phrase_ask(reply, seen), budget=BookBudget(**budget))  # type: ignore[arg-type]
+    return book, reading, seen
+
+
+def test_a_root_gets_one_phrase_per_bake_and_the_view_prints_it_before_the_pointer() -> None:
+    from pipeline_core.domain.behaviour_book import GIVENS_INDEX_NAME
+    key = "tests/shared/mod.rs::build"
+    book, reading, seen = _build_given_book(
+        f'<GIVEN key="{key}">A layer two deep.</GIVEN>'
+        '<GIVEN key="tests/shared/mod.rs::Layer">A sentence on a key no example is given.</GIVEN>')
+    asked = [p for p in seen if "TEST FILE:" in p]
+    # one call per test file that declares a root; test code only, and of the
+    # root and what it pulls in — never the asserting helper
+    assert len(asked) == 1 and "TEST FILE: tests/shared/mod.rs" in asked[0]
+    assert _SHARED[key] in asked[0] and _SHARED["tests/shared/mod.rs::Layer::impl1"] in asked[0]
+    assert "fn check" not in asked[0]
+    assert book.givens == ((key, "A layer two deep."),)
+    assert "givens: 1 phrase(s) for 1 root(s) (without one: none)" in reading.line()  # type: ignore[attr-defined]
+    files = feature_files(book)
+    assert "Given A layer two deep. — `build` (tests/shared/mod.rs)" in files["wrap.feature"]
+    assert "A layer two deep." in files[GIVENS_INDEX_NAME]
+    # it survives the store and a merge with a later harvest
+    back = BehaviourSuite.from_dict(json.loads(json.dumps(book.to_dict())))
+    assert back.givens == book.givens
+    assert merge_suites(BehaviourSuite("stable", _given_suite().specs), back).givens == book.givens
+    # NEGATIVE CONTROL: a book written before the table has no phrase and the
+    # step is the pointer alone.
+    plain = feature_files(_given_suite())["wrap.feature"]
+    assert "      Given `build` (tests/shared/mod.rs)" in plain and "—" not in plain.split("Rule:")[1]
+
+
+def test_a_refused_or_missing_phrase_leaves_the_pointer() -> None:
+    key = "tests/shared/mod.rs::build"
+    for reply, why in (
+        (f'<GIVEN key="{key}">It builds a layer. It is two deep.</GIVEN>', "more than one sentence"),
+        (f'<GIVEN key="{key}">What `hidden_fn` returns.</GIVEN>', "names the private item"),
+        ("no block at all", "no phrase in the reply"),
+    ):
+        book, reading, _seen = _build_given_book(reply)
+        assert book.givens == ()
+        assert reading.given_refused == {why: 1}, why  # type: ignore[attr-defined]
+        assert "Given `build` (tests/shared/mod.rs)" in feature_files(book)["wrap.feature"]
+    # a phrase that quotes the Then of an example given that root is a restatement
+    from pipeline_core.domain.behaviour_book import given_roots, keep_given_phrases
+    long = _spec("q", "", "wrap(build()).to_string()", ObservableOutcome.display("a twelve char value"),
+                 helper_keys=(key,), helpers=(_SHARED[key],))
+    kept, refused = keep_given_phrases(
+        given_roots([long]), {key: "It displays a twelve char value in the end."}, {"q": long}, set())
+    assert not kept and refused[key].startswith("quotes q's Then")
+
+
+def test_phrases_off_asks_nothing_about_a_root() -> None:
+    book, reading, seen = _build_given_book("<GIVEN key=\"x\">y</GIVEN>", given_phrases=False)
+    assert not [p for p in seen if "TEST FILE:" in p] and book.givens == ()
+    # the roots are still counted, and the line says why they have no phrase
+    assert "givens: 0 phrase(s) for 1 root(s) (without one: not asked 1)" in reading.line()  # type: ignore[attr-defined]
+
+
+_READS_GIVENS = re.compile(r"\.givens\b")
+
+
+def test_a_given_phrase_is_read_by_the_view_and_the_store_only() -> None:
+    """Nothing checks that a phrase is true, so no prompt and no gate may
+    read the table: its readers are the suite model, the world projection
+    and the view builder."""
+    readers = {"pipeline_core/domain/behaviour.py", "pipeline_core/domain/world_book.py",
+               "pipeline_core/application/behaviour_book_build.py"}
+    offenders = [str(path.relative_to(REPO))
+                 for path in sorted((REPO / "pipeline_core").rglob("*.py"))
+                 if _READS_GIVENS.search(path.read_text(encoding="utf-8"))]
+    assert set(offenders) <= readers
+    # NEGATIVE CONTROL: a prompt builder reaching for the table.
+    assert _READS_GIVENS.search("phrases = dict(suite.givens)")

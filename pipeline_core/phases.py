@@ -34,11 +34,12 @@ from contextlib import suppress
 from types import TracebackType
 from typing import Any
 
-from .domain.phase_registry import PHASE_ENTER, PHASE_EXIT, parent_of
+from .domain.phase_registry import PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS, parent_of
 from .domain.phase_registry import phase as _phase
 from .log import emit, log
 
-__all__ = ["PhaseScope", "phase_scope", "phase_skipped", "step", "bind_current"]
+__all__ = ["PhaseScope", "phase_scope", "phase_skipped", "step", "note_work",
+           "bind_current"]
 
 _current_sink: Callable[[str], None] | None = None
 _open: list[PhaseScope] = []
@@ -183,6 +184,30 @@ def phase_skipped(phase_id: str, reason: str, *, cluster: str | None = None,
     """A phase that did not run because its checkpoint says it is done."""
     emit(PHASE_EXIT, **_fields(phase_id, cluster, module, None, reason),
          outcome="skipped", duration_ms=0)
+
+
+def note_work(*, done: int, total: int, calls: int, lanes: int, wave: str) -> None:
+    """How far the open book step is through the plan it already counted.
+
+    The book stays one step for the whole build, so enter/exit cannot move a
+    bar. This leaves the step open and reports the count: `chunks` while the
+    draft-and-judge wave runs, `siblings` once that wave's visits are known.
+    No open book step means the build is not on the strip (a unit test, a
+    caller that has not entered the step): say nothing rather than invent a
+    phase. `wave` is only those two names; anything else is dropped."""
+    if wave not in ("chunks", "siblings") or total <= 0:
+        return
+    with _lock:
+        owner = next((s for s in reversed(_open)
+                      if s._step is not None and s._step[0].endswith(".book")), None)
+        step_at = owner._step if owner is not None else None
+    if owner is None or step_at is None:
+        return
+    child_id, cl, _t0 = step_at
+    emit(PHASE_PROGRESS, phase=child_id,
+         cluster=cl, module=owner.module, attempt=owner.attempt,
+         data={"wave": wave, "done": done, "total": total,
+               "calls": calls, "lanes": lanes})
 
 
 def step(child_id: str, *, cluster: str | None = None,

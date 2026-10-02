@@ -126,6 +126,7 @@ class FakeFill:
     def cluster_dead_sites(self, *a: Any) -> CfgDeadSites:
         return CfgDeadSites(frozenset(self.s.get("dead_sites", ())))
     def cluster_filter_type_members(self, records: Any, cluster: Any) -> Any: return []
+    def all_clusters(self) -> Any: return []
     def is_gen_tests_file(self, name: str) -> bool: return False
     def leaf_first_fn_order(self, tuples: Any, counts: Any) -> Any: return tuples
 

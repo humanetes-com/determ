@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book, feature_files
 from pipeline_core.domain.behaviour import (
@@ -145,6 +146,10 @@ class Task0dDeps:
     # shared across every cluster's filled tree by a symlink, so an ungated
     # file is ACTIVE in clusters it was never captured under.
     cluster_cfg_attr: Callable[[BuildCluster], str] = lambda _c: ""
+    # (project_dir, module, clusters): render the original's doc examples as
+    # tests under `tests/`, keep those that pass on it, gate each to the
+    # worlds it passes in. None emits nothing (the pre-2026-10-02 phase).
+    emit_doc_examples: Callable[[Path, str, list[BuildCluster]], Any] | None = None
     PROBE_MAX_PER_CLUSTER: int = 12
     # Blocks honoured per reply. The target cap bounds how many units are
     # ASKED about; without this a single reply could spend an unbounded number
@@ -872,7 +877,30 @@ def run_task0d(
         )
         _ph.close()
     if passed:
+        _doc_examples_once(deps, project_dir, module_name, clusters)
         _book_once(deps, project_dir, module_name, clusters, passed, src_dir)
+
+
+def _doc_examples_once(
+    deps: Task0dDeps,
+    project_dir: Path,
+    module_name: str,
+    clusters: list[BuildCluster],
+) -> None:
+    """The crate's doc examples become oracle tests, once for every world
+    (`application.doc_example_tests`): the original is on disk here to verify
+    each against, and it is the last phase where that is true before the
+    augmentation measures coverage. Additive like every stage after the
+    harvest: a failure keeps the suites and says so."""
+    if deps.emit_doc_examples is None:
+        return
+    with phase_scope("t0d", module=module_name) as ph:
+        ph.step("t0d.doc_examples")
+        try:
+            deps.emit_doc_examples(project_dir, module_name, clusters)
+        except Exception as e:
+            deps.log(f"  [task0d] doc examples were not emitted as tests "
+                     f"(non-fatal, the suites are kept): {e}")
 
 
 def _book_once(

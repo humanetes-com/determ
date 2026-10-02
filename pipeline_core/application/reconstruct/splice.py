@@ -29,6 +29,7 @@ from pipeline_core.domain.reconstruction import (
     FnLocation,
     SpliceOutcome,
     SpliceReason,
+    SpliceRefusal,
 )
 from pipeline_core.domain.rust_fn_headers import is_pub_fn, locate_all_fns
 from pipeline_core.domain.rust_idents import canon_container, declares_fn
@@ -59,6 +60,22 @@ def _unwrap_redeclaration(body: str, fn_name: str) -> str | None:
             return body
         body = inner
     return None if redeclared_inner_body(body, fn_name) is not None else body
+
+
+def parse_refusal(candidate_text: str,
+                  validate_parse: ParseValidator | None) -> SpliceOutcome:
+    """The refusal of a write that would leave the file unparseable, with the
+    parser's diagnostic on the refused text when the validator can give one
+    (`diagnose(text) -> str`; the production validator asks rustc's parser).
+    A validator that cannot, or a diagnostic that fails, is a bare refusal."""
+    diagnose = getattr(validate_parse, "diagnose", None)
+    text = ""
+    if callable(diagnose):
+        try:
+            text = str(diagnose(candidate_text) or "")
+        except Exception:
+            text = ""
+    return SpliceRefusal("parse_broken", text)
 
 
 def _commit_with_repairs(
@@ -294,7 +311,8 @@ def splice_fn_body_at(file_path: Path, body_byte_start: int, body_byte_end: int,
                 new_raw.decode("utf-8", errors="replace")) != items_before:
             return SpliceOutcome(False, "item_set_changed", 0)
         if not parse_guarded_write(file_path, new_raw, raw, validate_parse):
-            return SpliceOutcome(False, "parse_broken", 0)
+            return parse_refusal(new_raw.decode("utf-8", errors="replace"),
+                                 validate_parse)
         return SpliceOutcome(True, reason, len(new_raw) - len(raw))
 
     return _commit_with_repairs(_commit, nb)
@@ -467,7 +485,7 @@ def splice_fn_body(file_path: Path, fn_name: str, new_body: str,
             return SpliceOutcome(False, "item_set_changed", 0)
         if not parse_guarded_write(file_path, new_text.encode("utf-8"),
                                    text.encode("utf-8"), validate_parse):
-            return SpliceOutcome(False, "parse_broken", 0)
+            return parse_refusal(new_text, validate_parse)
         return SpliceOutcome(True, reason, len(new_text) - len(text))
 
     return _commit_with_repairs(_commit, nb)

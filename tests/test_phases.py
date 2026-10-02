@@ -79,6 +79,28 @@ def test_ambient_step_finds_the_open_parent_scope(wire):
     assert not lines
 
 
+def test_book_work_is_reported_on_the_open_book_step_only(wire):
+    events, _lines, _c = wire
+    phases.note_work(done=1, total=4, calls=1, lanes=2, wave="chunks")
+    with phases.phase_scope("bake"):
+        phases.step("bake.extract", cluster="stable")
+        phases.note_work(done=1, total=4, calls=1, lanes=2, wave="chunks")
+        phases.step("bake.book")
+        phases.note_work(done=0, total=4, calls=0, lanes=2, wave="chunks")
+        phases.note_work(done=4, total=4, calls=9, lanes=2, wave="chunks")
+        phases.note_work(done=1, total=2, calls=11, lanes=2, wave="siblings")
+        phases.note_work(done=1, total=0, calls=11, lanes=2, wave="chunks")
+        phases.note_work(done=1, total=2, calls=11, lanes=2, wave="features")
+    progress = [f for e, f in events if e == "phase.progress"]
+    assert [p["phase"] for p in progress] == ["bake.book", "bake.book", "bake.book"]
+    assert [p["data"] for p in progress] == [
+        {"wave": "chunks", "done": 0, "total": 4, "calls": 0, "lanes": 2},
+        {"wave": "chunks", "done": 4, "total": 4, "calls": 9, "lanes": 2},
+        {"wave": "siblings", "done": 1, "total": 2, "calls": 11, "lanes": 2},
+    ]
+    assert all(e != "phase.progress" or f["phase"] == "bake.book" for e, f in events)
+
+
 def test_step_without_its_parent_scope_is_loud_not_silent(wire):
     events, lines, _c = wire
     phases.step("bake.book", cluster="stable")

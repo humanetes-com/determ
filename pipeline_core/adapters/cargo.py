@@ -20,6 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..domain.cluster_env import overlay_cluster_env
 from ..domain.cluster_scope import ClusterScope
 from ..domain.enums import ProcessFailure
 from ..domain.models import BuildCluster
@@ -65,17 +66,12 @@ def base_cargo_env() -> dict[str, str]:
 
 
 def apply_cluster_env(env: dict[str, str], cluster: BuildCluster | None) -> None:
-    """Layer a cluster's env contribution onto ``env`` in place: its ``env_extra``
-    (RUSTFLAGS is APPENDED so the base ``-A warnings`` survives; others set), and
-    ``RUSTUP_TOOLCHAIN=nightly`` when the cluster requires the nightly toolchain."""
-    if cluster and cluster.env_extra:
-        for k, v in cluster.env_extra.items():
-            if k == "RUSTFLAGS":
-                env["RUSTFLAGS"] = env["RUSTFLAGS"] + " " + v
-            else:
-                env[k] = v
-    if cluster and cluster.requires_nightly:
-        env["RUSTUP_TOOLCHAIN"] = "nightly"
+    """Layer a cluster's env contribution onto ``env`` in place. The rule is
+    :func:`domain.cluster_env.overlay_cluster_env`: the cluster's flags are
+    APPENDED so the base ``-A warnings`` survives, every cfg it sets for rustc
+    is set for rustdoc too, and ``RUSTUP_TOOLCHAIN=nightly`` is set when the
+    cluster requires the nightly toolchain."""
+    overlay_cluster_env(env, cluster)
 
 
 def cluster_cargo_env(cluster: BuildCluster | None) -> dict[str, str]:

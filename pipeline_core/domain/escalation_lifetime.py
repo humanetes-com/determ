@@ -36,6 +36,7 @@ from typing import Literal
 
 from pipeline_core.domain.fill_schedule import DEFAULT_UNPAID_GRACE
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.oracle_ledger import bare_test_name
 
 #: Why a fired product was dropped this sweep.
 DropReason = Literal["stub_accessor", "not_failing", "format_trait_test"]
@@ -226,6 +227,37 @@ def withholding_paired_tests(
         t for t in paired
         if int(unpaid_buys.get(t, 0)) < unpaid_grace
         and int(unopened.get(t, 0)) < unpaid_grace)
+
+
+def attributed_cohorts(
+    frontier: Mapping[FnLocator, Collection[str]],
+    eligible: Mapping[FnLocator, Collection[str]],
+) -> dict[str, set[FnLocator]]:
+    """Each failing test's attributed units: the cohort the owner admission,
+    the pair withholding and the attributed-write set all read.
+
+    ``frontier`` is the attribution before the exhaustion re-entry filter;
+    ``eligible`` is what stayed dispatchable plus what the loop added after
+    that filter (crash-blamed units). The cohort is their union. Built from
+    ``eligible`` alone, a test whose last attributed unit was skipped as
+    exhausted had an EMPTY cohort, which :func:`escalate_to_measured_owners`
+    reads as "no attribution" and skips — while its own rule counts an
+    exhausted unit as done. Run `3040-51eab48c` (2026-10-02, cluster
+    `stable`): the one leftover's implementer exhausted at iter 3, the
+    owners admitted at iter 2 left the frontier mid-pass, neither the lapse
+    nor the withhold line printed, and iter 4 spent a no-other-move
+    re-admission to get the same 17 owners back at iter 5. On iter 3's own
+    owner map the eligible-only cohort admits 0 units and this one 19.
+
+    A unit the frontier holds and a filter withheld from dispatch (blocked
+    behind a stub, narrowed away on a red build) is in the cohort unserved,
+    so it holds the admission until it is served or unable."""
+    out: dict[str, set[FnLocator]] = {}
+    for src in (frontier, eligible):
+        for loc, tests in src.items():
+            for t in tests:
+                out.setdefault(bare_test_name(t), set()).add(loc)
+    return out
 
 
 def escalate_to_measured_owners(

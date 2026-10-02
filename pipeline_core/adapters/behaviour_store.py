@@ -36,8 +36,8 @@ def write_feature_files(project_dir: Path, cfg_cluster: str, files: dict[str, st
     directory."""
     d = Path(project_dir) / _SKELETON_DIR / f"_features_{cfg_cluster}"
     d.mkdir(parents=True, exist_ok=True)
-    for old in d.glob("*.feature"):
-        if old.name not in files:
+    for old in d.iterdir():
+        if old.is_file() and old.name not in files:
             old.unlink()
     for name, text in files.items():
         (d / name).write_text(text, encoding="utf-8")

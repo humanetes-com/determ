@@ -25,11 +25,14 @@ from pipeline_core.application.reconstruct.stub_scan import (
 from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+from pipeline_core.domain.cfg_worlds import world_mark, worlds_of
 from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
 from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.models import (
+    FieldRecord,
     FnLocator,
     ImplBlock,
+    MethodRecord,
     ModRecord,
     TypeRecord,
 )
@@ -100,12 +103,30 @@ def cfg_dead_type_records(
 
 def cluster_filter_type_members(
     records: list[TypeRecord], cluster: Any,
+    all_clusters: Sequence[Any] = (),
 ) -> list[TypeRecord]:
     """Drop what `cluster` does not compile so TYPES_IN_SCOPE advertises only
     what exists here: a METHOD whose cfg evaluates definitively
     False, a FIELD whose effective cfg does, a TRAIT IMPL whose impl-block cfg
     does, and a whole TYPE RECORD whose own leading cfg does. Undecidable predicates are kept (conservative).
     `cluster is None` → unchanged.
+
+    With the run's whole world plan (`all_clusters`, two or more), fields and
+    methods are projected for the CRATE, not for one world: a member some
+    world compiles is kept and carries the worlds that compile it (`worlds`)
+    when that is not all of them; only a member no world compiles is dropped.
+    The body a fill writes is built in every world (`cargo_runner
+    .WorldChecks`), so it has to see both kinds of gated member: one that
+    exists here and not elsewhere, which it may only touch under the same
+    gate, and one that exists elsewhere and not here, which a struct literal
+    there still has to initialise. Run `292191-d60a5308` (2026-10-02): the
+    `stable` fills were shown `ErrorVTable.object_backtrace` with no gate and
+    never shown that `nightly` lacks it; six constructors initialised it
+    unguarded and did not build in `nightly`. Hiding the other world's
+    members (the 2026-09-07 projection below) made each tree right for its
+    own world and wrong for the crate. Trait impls, slot candidates and whole
+    type records stay projected to `cluster`: those lists render as complete
+    for the world the fill is judged in.
 
     Fields are the member kind this filter did not reach until 2026-09-07.
     The extractor carried cfg on methods only, so the type section and the
@@ -146,6 +167,22 @@ def cluster_filter_type_members(
     if cluster is None:
         return records
     cfg_set = _cfg.cluster_cfg_set(cluster)
+    worlds = list(all_clusters) if len(all_clusters) > 1 else []
+    every = [str(c.name) for c in worlds]
+
+    def _here(preds: tuple[str, ...]) -> bool:
+        return not any(cfg_set.evaluate(p) is False for p in preds)
+
+    def _member[M: (FieldRecord, MethodRecord)](member: M) -> M | None:
+        """The member as this projection shows it, or None when dropped."""
+        if not worlds:
+            return member if _here(member.cfg_predicates) else None
+        compiled = worlds_of(member.cfg_predicates, worlds)
+        if not compiled:
+            return None
+        mark = world_mark(compiled, every)
+        return member if mark == member.worlds else dataclasses.replace(
+            member, worlds=mark)
 
     def _cfg_kept(impls: tuple[Any, ...] | None) -> tuple[Any, ...] | None:
         if impls is None:
@@ -165,10 +202,7 @@ def cluster_filter_type_members(
         preds = _cfg.cfg_inline_predicates(_leading_attr_text(r.definition))
         if preds and any(cfg_set.evaluate(p) is False for p in preds):
             continue
-        kept = tuple(
-            m for m in r.methods
-            if not any(cfg_set.evaluate(p) is False for p in m.cfg_predicates)
-        )
+        kept = tuple(m for m in map(_member, r.methods) if m is not None)
         # A slot candidate the cluster does not compile cannot be installed
         # here; the fits list renders as complete, so it leaves it.
         kept_fields = tuple(
@@ -176,8 +210,7 @@ def cluster_filter_type_members(
                 c for c in f.fits
                 if not any(cfg_set.evaluate(p) is False
                            for p in c.cfg_predicates)))
-            for f in r.fields
-            if not any(cfg_set.evaluate(p) is False for p in f.cfg_predicates)
+            for f in map(_member, r.fields) if f is not None
         )
         # A trait impl the cluster does not compile is not an impl here: the
         # list renders as complete, so an impl the cfg world drops must leave
@@ -185,7 +218,7 @@ def cluster_filter_type_members(
         # crate's type-parameter impls are the same kind of list.
         kept_impls = _cfg_kept(r.trait_impls)
         kept_blankets = _cfg_kept(r.blanket_impls)
-        if (len(kept) != len(r.methods) or kept_fields != r.fields
+        if (kept != r.methods or kept_fields != r.fields
                 or kept_impls != r.trait_impls
                 or kept_blankets != r.blanket_impls):
             out.append(dataclasses.replace(
@@ -220,31 +253,6 @@ def cluster_cfg_attr(cluster: Any, all_clusters: list[Any]) -> str:
         return ""
     terms = [f'any({f}, feature = "{f}")' for f in flags]
     return terms[0] if len(terms) == 1 else "all(" + ", ".join(terms) + ")"
-
-
-def cluster_gate_for_sibling(
-    cluster: Any,
-    source_text: str,
-    uncov_lines: Any,
-    sibling_body: str,
-    all_clusters: list[Any],
-    cluster_specific_symbols: Callable[[], frozenset[str]],
-) -> str:
-    """The cfg gate to stamp on a gen_tests sibling. The default cluster
-    shares a test UNGATED only when its target lines AND its body are both
-    cluster-agnostic (so a later cluster sees those lines already covered);
-    otherwise the gate stays. `cluster_specific_symbols` is a lazy provider —
-    only consulted in the symbol branch (preserves the original laziness)."""
-    base_gate = cluster_cfg_attr(cluster, all_clusters)
-    if not base_gate or not getattr(cluster, "is_default", False):
-        return base_gate
-    contexts = [_cfg.cluster_cfg_set(c)
-                for c in all_clusters]
-    if _cfg.lines_are_cluster_specific(source_text, set(uncov_lines or ()), contexts):
-        return base_gate
-    if _cfg.body_uses_cluster_specific_symbol(sibling_body, cluster_specific_symbols()):
-        return base_gate   # body touches a cluster-gated symbol → must stay gated
-    return ""   # cluster- AND symbol-agnostic → shareable across clusters
 
 
 def propagate_or_quarantine_sibling(

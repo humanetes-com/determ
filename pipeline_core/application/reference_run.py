@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..domain.cluster_env import overlay_cluster_env, world_env_extra
 from ..domain.measurement import combine_source_hashes
 from ..domain.reference_floor import (
     ClusterReference,
@@ -62,8 +63,8 @@ class ReferenceDeps:
     enumerate_fns: Callable[[Path], list[dict[str, Any]] | None]
     test_timeout: int = 900
     # Same contract as Task3Deps.cluster_env: the env for ONE named cluster.
-    # Bound to cluster_cargo_env in composition. None keeps cargo_env() +
-    # dict.update(env_extra) for tests that do not bind it.
+    # Bound to cluster_cargo_env in composition. None builds it from
+    # cargo_env() through the same overlay rule, for tests that do not bind it.
     cluster_env: Callable[..., dict[str, str]] | None = None
 
 
@@ -132,7 +133,12 @@ def reference_key(clusters: Sequence[Any], source_ref: str,
         h.update(b"\0")
         h.update(_toolchain_id(getattr(c, "toolchain", None)).encode())
         h.update(b"\0")
-        h.update(json.dumps(dict(getattr(c, "env_extra", {}) or {}),
+        # The env the cluster's cargo actually runs under, not the stored
+        # `env_extra`: a change to what the overlay delivers (the cfg reaching
+        # rustdoc, 2026-10-02) changes what every doc test of the reference
+        # measured while `env_extra` stays byte-identical, and a key that
+        # missed it would reuse the stale vector.
+        h.update(json.dumps(world_env_extra(getattr(c, "env_extra", None)),
                             sort_keys=True).encode())
         h.update(b"\0")
     return h.hexdigest()[:16]
@@ -204,7 +210,7 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
     cmd_parts += ["test", "--no-fail-fast"]
     env = deps.cluster_env(cluster) if deps.cluster_env is not None else deps.cargo_env()
     if deps.cluster_env is None:
-        env.update(getattr(cluster, "env_extra", {}) or {})
+        overlay_cluster_env(env, cluster)
     t0 = time.monotonic()
     try:
         res = subprocess.run(deps.parse_cmd(" ".join(cmd_parts)), cwd=tree,

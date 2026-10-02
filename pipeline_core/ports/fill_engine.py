@@ -195,6 +195,7 @@ class WorkspaceModel(Protocol):
     def cluster_filter_type_members(
         self, records: list[TypeRecord], cluster: BuildCluster | None,
     ) -> list[TypeRecord]: ...
+    def all_clusters(self) -> list[BuildCluster]: ...
     def is_gen_tests_file(self, name: str) -> bool: ...
     def leaf_first_fn_order(
         self, tuples: list[FnLocator],
@@ -221,6 +222,7 @@ class Retros(Protocol):
         bound_methods_section: str = ...,
         pinned_observables: str = ...,
         compiled: bool = ...,
+        later_compile_failures: int = ...,
     ) -> dict[str, Any]: ...
     def append_note(
         self, fr_path: Path, note: str,

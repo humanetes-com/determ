@@ -63,7 +63,8 @@ def test_replay_reproduces_real_fill_engine(tmp_path, monkeypatch) -> None:
     res1 = _run(_ws(tmp_path / "rec"))
     fill1 = (tmp_path / "rec" / "src" / "lib.rs").read_text()
     assert res1.fns_filled == 1 and "42" in fill1
-    assert len(asks) == 1 and len(rec.cache) == 1            # one prompt, one cargo verdict recorded
+    # one prompt, one cargo verdict recorded — the compile gate is the check port
+    assert len(asks) == 1 and len(rec.check_cache) == 1
 
     # --- REPLAY: fresh tree, cassette + replay-mode memo; real runners must NOT fire. ---
     misses: list[str] = []

@@ -14,16 +14,19 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 
+from pipeline_core.domain.oracle_ledger import bare_test_name
+
 
 class FillOutcomeClass(StrEnum):
     """What one dispatched fill (file group / impl block / per-fn unit)
     terminated as."""
 
     CASHED = "cashed"
-    """The fill's reading moved verdicts: attributed tests observed
-    passing, a banked joint improvement, or a net gain in the suite
-    reading the route ledger grades on. A compiling accept whose reading
-    moved nothing is :attr:`UNREACHABLE_VERDICT` — not this."""
+    """This keep's own reading moved verdicts: a net gain in the suite
+    reading the route ledger grades on, or one of the unit's attributed
+    tests turned green by it (:func:`keep_reading`). Attributed tests
+    merely observed passing are not this: they may have been green before
+    the keep."""
 
     WRONG_BODY = "wrong"
     """The right unit, a compiling (or peeled) answer that did not cash:
@@ -33,7 +36,9 @@ class FillOutcomeClass(StrEnum):
 
     MIS_TARGETED = "mis"
     """The record already said this unit cannot pay (refill-only, no
-    container-qualified convicting test) — GPU skipped, or would have been."""
+    container-qualified convicting test) — GPU skipped, or would have been.
+    Also a keep whose attributed tests all ran green and none moved: no
+    red test was aimed when the body was judged."""
 
     UNREACHABLE_VERDICT = "unreachable"
     """Body kept, attributed tests cannot run (ACCEPT_EXTERNAL_ONLY /
@@ -124,14 +129,51 @@ def tests_could_not_run(
                        blocked_sibling=blocked_sibling, crate_red=crate_red)
 
 
+@dataclass(frozen=True, slots=True)
+class KeepReading:
+    """What ONE keep moved: the suite reading's net gain at the keep, and
+    the unit's own attributed tests that keep turned green. Built only by
+    :func:`keep_reading`; truthy when the keep moved a verdict."""
+
+    net_delta: int = 0
+    newly_passing: frozenset[str] = frozenset()
+
+    def __bool__(self) -> bool:
+        return self.net_delta > 0 or bool(self.newly_passing)
+
+
+def keep_reading(
+    *, net_delta: int = 0, newly_green: Collection[str] = (),
+    attributed: Collection[str] = (),
+) -> KeepReading:
+    """The ``reading=`` every keep site passes to :func:`class_for_kept`.
+
+    ``net_delta`` and ``newly_green`` are the comparison the keep site
+    measured (`fill_reading.last_comparison` at the keep, a session's final
+    outcome): the reading the route row is graded on. ``net_delta`` is the
+    suite reading, so a joint keep with an empty attributed set and a moved
+    reading still cashes (run `3014175-d98ed09e`, 2026-09-08). A newly
+    green test counts only inside ``attributed``: a sibling's test going
+    green in the same comparison is not this unit's payment.
+
+    A site with no comparison passes nothing and gets a reading that moved
+    nothing. There is no argument for "tests observed passing": a test that
+    was green before the keep is observed passing after it too."""
+    own = {bare_test_name(t) for t in attributed}
+    return KeepReading(
+        net_delta=int(net_delta),
+        newly_passing=frozenset(
+            n for n in (bare_test_name(t) for t in newly_green) if n in own))
+
+
 def class_for_kept(
-    *, passed: Collection[str], unreachable: CouldNotRun,
-    net_delta: int = 0, newly_passing: Collection[str] = (),
+    *, reading: KeepReading, passed: Collection[str],
+    unreachable: CouldNotRun,
     attributed: Collection[str] | None = None,
     measured: bool | None = None,
 ) -> FillOutcomeClass:
-    """CASHED when the fill's reading moved verdicts; else WRONG_BODY or
-    UNREACHABLE depending on whether the attributed tests ran.
+    """CASHED when THIS keep's reading moved a verdict; else UNREACHABLE,
+    WRONG_BODY or MIS_TARGETED by what its attributed tests did.
 
     The three fill routes used to assign CASHED in the else of a U2
     decision chain, ten lines before they computed ``_passed_f`` /
@@ -141,26 +183,25 @@ def class_for_kept(
     :func:`tests_could_not_run` (ACCEPT_EXTERNAL_ONLY, still-stubbed
     sibling, crash-keep, B3-while-red), never a site's own flag.
 
-    The opposite miscount: ``passed`` is the unit's ATTRIBUTED tests
-    observed passing, and a fill run with no attribution (every leftover
-    test hollow) has an empty set for every unit, so a joint win graded
-    UNREACHABLE. Run `3014175-d98ed09e` (2026-09-08) iter 2: the file-
-    first `src/error.rs` group read `pass 26 -> 32` and the per-fn
-    `object_ref` keep `pass 32 -> 87`, both graded on an empty attributed
-    set, and the iter line printed `cashed=0` beside two CASHED ledger
-    rows (+6 and +55). The class now reads the evidence the ledger grades
-    on: ``net_delta`` and ``newly_passing`` are the fill reading the keep
-    site measured (`fill_reading.last_comparison` at the keep, the same
-    reading `note_kept_comparison` records for the route row). A reading
-    that moved verdicts is CASHED whatever the attribution says.
+    ``reading`` is always :func:`keep_reading`, and it is the ONLY source
+    of CASHED. ``passed`` — the unit's attributed tests observed passing
+    after the splice — used to be a second one, and it cannot tell a test
+    this keep turned green from one that was green before the call
+    returned. Run `3040-51eab48c` (2026-10-02, fill 5): one file keep
+    turned the last red test green (`pass 183 -> 184`), and the four keeps
+    after it in the same fill — one of them 19 bodies with no byte changed
+    on disk — were each graded `cashed` beside a `pass 184 -> 184 (net
+    +0)` reading, because that test was attributed to them and passing.
 
     A keep whose attributed tests RAN and still fail is WRONG_BODY, not
     UNREACHABLE. Run `3500465-67c40e78` (2026-09-08) labelled twelve
     such per-fn keeps unreachable because ``not passed`` collapsed "none
     passed" with "could not run". Callers that pass ``attributed`` and
-    ``measured`` split those. Omitting either keeps the pre-change
-    reading (empty passed → UNREACHABLE) so existing folds stay the
-    negative control.
+    ``measured`` split those.
+
+    A keep whose attributed tests ran, all pass, and none moved is
+    MIS_TARGETED: nothing red was aimed when the body was judged, so no
+    body written there could have moved a verdict.
     """
     if not isinstance(unreachable, CouldNotRun):
         # The one state this grading must not be able to reach: a site
@@ -169,19 +210,25 @@ def class_for_kept(
             "class_for_kept(unreachable=) takes tests_could_not_run(...), "
             f"not {type(unreachable).__name__} — a keep whose attributed "
             "tests RAN is WRONG_BODY, whatever the site believes")
-    if net_delta > 0 or newly_passing:
+    if not isinstance(reading, KeepReading):
+        raise TypeError(
+            "class_for_kept(reading=) takes keep_reading(...), not "
+            f"{type(reading).__name__} — CASHED is the keep's own "
+            "comparison, never a set of tests observed passing")
+    if reading:
         return FillOutcomeClass.CASHED
     if unreachable:
         return FillOutcomeClass.UNREACHABLE_VERDICT
+    green = {bare_test_name(t) for t in passed}
     if attributed is not None and measured is not None:
         if not attributed or not measured:
             return FillOutcomeClass.UNREACHABLE_VERDICT
-        if not passed:
+        if {bare_test_name(t) for t in attributed} - green:
             return FillOutcomeClass.WRONG_BODY
-        return FillOutcomeClass.CASHED
-    if not passed:
+        return FillOutcomeClass.MIS_TARGETED
+    if not green:
         return FillOutcomeClass.UNREACHABLE_VERDICT
-    return FillOutcomeClass.CASHED
+    return FillOutcomeClass.MIS_TARGETED
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,10 +20,18 @@ capturing; this module only names the language and enforces its invariants.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from typing import Any
+
+from pipeline_core.domain.example_setup import (
+    IMPORTS_KEY_SUFFIX,
+    helper_closure,
+    helper_key_parts,
+    stored_index,
+    uses,
+)
 
 
 class OutcomeKind(Enum):
@@ -608,6 +616,84 @@ def example_code(spec: BehaviourSpec) -> str:
     return "\n".join(p for p in (x.strip() for x in parts) if p)
 
 
+def helper_items(spec: BehaviourSpec) -> tuple[tuple[str, str], ...]:
+    """`(key, text)` of the test-file items the example calls, in stored
+    order (the harvester's first-reached order)."""
+    return tuple(zip(spec.helper_keys, spec.helpers, strict=False))
+
+
+@dataclass(frozen=True, slots=True)
+class ExampleGiven:
+    """What one example is given, as four kinds of helper key and its own
+    setup. The harvester stores an example's helpers as one closure; a view
+    that pasted that closure under `Given` printed 6,796 of 8,818 lines of
+    the anyhow `stable` view as helper text (books written 2026-10-01), 96%
+    of it copies, and called an asserting helper and a `use` block
+    preconditions.
+
+    - ``roots``: the file-level items the example's own code names — one key
+      per name, the declaration when the file has one. These are its givens.
+    - ``closure``: what the roots pull in (a root type's impls, the items
+      their text names), and any key nothing below claims.
+    - ``observer``: the asserting helper the Then is compared through
+      (``via``) and what only it pulls in. How the Then is read, not a
+      precondition.
+    - ``imports``: the file's `use` block. Name resolution, not a
+      precondition.
+
+    Keys only; the text stays in the suite's table (:func:`helper_text`).
+    ``reach`` is each root's own share of the closure, for a reader that
+    shows a root once with what it stands on."""
+
+    roots: tuple[str, ...] = ()
+    closure: tuple[str, ...] = ()
+    observer: tuple[str, ...] = ()
+    imports: tuple[str, ...] = ()
+    setup: str = ""
+    reach: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    @property
+    def keys(self) -> frozenset[str]:
+        """Every helper key of the example."""
+        return frozenset((*self.roots, *self.closure, *self.observer, *self.imports))
+
+
+def example_given(spec: BehaviourSpec) -> ExampleGiven:
+    """How to show or send an example's precondition (:class:`ExampleGiven`).
+    A pure function of what the store holds: a name-in-code test over the
+    example's setup and when, the same `uses` and the same closure walk the
+    harvester resolved the keys with, the import key suffix it writes, and
+    ``via``. :func:`example_code` stays the accessor for everything the
+    example runs."""
+    items = helper_items(spec)
+    imports = tuple(k for k, _ in items if k.endswith(IMPORTS_KEY_SUFFIX))
+    index = stored_index(items)
+    named = uses(f"{spec.setup}\n{spec.when}")
+    root_of: dict[str, str] = {}
+    for key, _text in items:
+        _file, name, _is_impl = helper_key_parts(key)
+        if key in imports or name not in named or name in root_of:
+            continue
+        declared = [k for k, item in index[name] if not item.is_impl]
+        root_of[name] = (declared or [k for k, _ in index[name]])[0]
+    roots = list(root_of.values())
+    reach = [(root, tuple(k for k, _ in helper_closure("", index, extra=(name,))
+                          if k not in roots))
+             for name, root in root_of.items()]
+    claimed = {*roots, *(k for _, pulled in reach for k in pulled)}
+    observer = tuple(k for k, _ in helper_closure("", index, extra=(spec.via,))
+                     if k not in claimed) if spec.via else ()
+    rest = tuple(k for k, _ in items
+                 if k not in roots and k not in observer and k not in imports)
+    return ExampleGiven(roots=tuple(roots), closure=rest, observer=observer, imports=imports,
+                        setup=spec.setup, reach=tuple(reach))
+
+
+def helper_text(spec: BehaviourSpec, keys: Collection[str]) -> tuple[str, ...]:
+    """The text of the example's helpers among `keys`, in stored order."""
+    return tuple(t for k, t in helper_items(spec) if k in keys)
+
+
 # --- classification ---------------------------------------------------------
 
 # A resource boundary is a NUMBER next to one of these tokens on the same line
@@ -904,6 +990,13 @@ class BehaviourSuite:
     # `72627-751534fe` (2026-09-30) left two per-cluster books over 227
     # identical examples, 2 rules kept in one and 3 in the other.
     book_worlds: tuple[str, ...] = ()
+    # `root key → phrase`: one model-written sentence per root an example is
+    # given (:func:`example_given`), drafted at the bake from the test
+    # file's own text. Nothing checks that a phrase is true (a sentence
+    # about a fixture cannot be replayed), so it is shown beside the pointer
+    # in the generated view and sent in no prompt. A book written before the
+    # table existed has none and renders the identifier alone.
+    givens: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         # The table is the union of what was handed in and what the specs
@@ -940,6 +1033,8 @@ class BehaviourSuite:
             "features": [f.to_dict() for f in self.features],
             "glossary": [g.to_dict() for g in self.glossary],
             **({"book_worlds": list(self.book_worlds)} if self.book_worlds else {}),
+            **({"givens": {k: v for k, v in sorted(self.givens) if k in used}}
+               if any(k in used for k, _ in self.givens) else {}),
         }
 
     @classmethod
@@ -955,6 +1050,7 @@ class BehaviourSuite:
             glossary=tuple(GlossaryEntry.from_dict(g) for g in (d.get("glossary") or [])),
             format_version=version,
             book_worlds=tuple(str(w) for w in (d.get("book_worlds") or ())),
+            givens=tuple(sorted((str(k), str(v)) for k, v in (d.get("givens") or {}).items())),
         )
 
 
@@ -971,7 +1067,10 @@ def _resolve(
                 by_example.setdefault(eid, []).append(r)
     out: list[BehaviourSpec] = []
     for s in specs:
-        texts = tuple(helpers[k] for k in s.helper_keys if k in helpers) or s.helpers
+        # One text per key, so `helper_items` pairs each key with its own
+        # text: a key the table lacks holds an empty text, never a shift.
+        texts = (tuple(helpers.get(k, "") for k in s.helper_keys)
+                 if any(k in helpers for k in s.helper_keys) else s.helpers)
         rules = tuple(by_example.get(s.behaviour_id, ()))
         if texts == s.helpers and rules == s.rules:
             out.append(s)
@@ -1050,6 +1149,7 @@ def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> Behaviou
         features=existing.features if has_book else incoming.features,
         glossary=existing.glossary if has_book else incoming.glossary,
         book_worlds=existing.book_worlds if has_book else incoming.book_worlds,
+        givens=existing.givens if has_book else incoming.givens,
     )
 
 

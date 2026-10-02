@@ -164,7 +164,8 @@ class _Harness:
             count_test_attrs=count_test_attrs,
             gen_tests_path=lambda p, n: p.with_name(f"{p.stem}.gen_tests_{n}.rs"),
             build_gen_tests_decl=lambda *a, **k: '\n#[cfg(test)]\n#[path = "gen"]\nmod gen_tests_1;\n',
-            cluster_gate_for=lambda *a, **k: "",
+            world_gate=lambda _c: "",
+            settle_test_gate=lambda *a, **k: "",
             extract_gen_tests_body=lambda b: b,
             revert_gen_tests_pass=self.revert,
             subprocess=SimpleNamespace(

@@ -10,6 +10,10 @@ rule (the ablation), with every surviving draft (the set), and with the set
 minus one draft over the examples that draft cites (leave-one-out); a rule is
 kept for the examples the set gains and the set without it loses.
 
+GIVEN PHRASES: one test file's roots (the test-file items its examples are
+given, with the items those pull in) → one sentence per root, for the
+generated view. The reply is read by nothing but the view.
+
 Legality (Hard Rule 11): the inputs are the crate's tests (the oracle) and the
 first sentence of each PUBLIC item's doc comment, read pre-strip at t0d. No
 body, no private name — a sentence that names a private item is dropped by
@@ -19,7 +23,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-from pipeline_core.domain.behaviour import BehaviourSpec, GlossaryEntry, OutcomeKind, example_when, then_value_text
+from pipeline_core.domain.behaviour import (
+    BehaviourSpec,
+    GlossaryEntry,
+    OutcomeKind,
+    example_given,
+    example_when,
+    helper_text,
+    then_value_text,
+)
+from pipeline_core.domain.behaviour_book import GivenRoot
 
 _QUESTION = {
     OutcomeKind.DISPLAY_STRING: "its Display text (`to_string()` / `{}`), exactly",
@@ -51,7 +64,11 @@ def _example_block(spec: BehaviourSpec, *, with_then: bool,
     only = (worlds or {}).get(spec.behaviour_id, ())
     if only:
         parts.append("BUILT ONLY IN: " + ", ".join(only))
-    context = "\n".join(p for p in (*spec.helpers, spec.setup) if p.strip())
+    # Every part of the example's given, through the one accessor: the
+    # asserting helper and the `use` block are sent with the roots because
+    # the judge was measured on this text.
+    given = example_given(spec)
+    context = "\n".join(p for p in (*helper_text(spec, given.keys), given.setup) if p.strip())
     if context:
         parts.append("GIVEN:\n```rust\n" + context + "\n```")
     parts.append("WHEN:\n```rust\n" + example_when(spec) + "\n```")
@@ -151,6 +168,30 @@ For EACH example answer the ASKED value exactly — no quotes around it unless
 they are part of the value, no explanation — as:
 
 <THEN id="<example id>">the value</THEN>
+"""
+
+
+def build_given_phrase_prompt(*, crate: str, file: str, roots: Sequence[GivenRoot]) -> str:
+    """Ask for one sentence per root of one test file. The input is test
+    code only: each root's text and the test-file items it pulls in."""
+    blocks = "\n\n".join(f'<FIXTURE key="{r.key}">\n```rust\n{r.text}\n```\n</FIXTURE>'
+                         for r in roots)
+    return f"""You are describing the fixtures the tests of the Rust crate `{crate}` build their cases on.
+
+TEST FILE: {file}
+
+FIXTURES (each: an item of the test files, followed by the test-file items it uses):
+
+{blocks}
+
+TASK: for EACH fixture write ONE sentence saying what a test that uses it is given: the
+value it builds or the type it declares, and what is particular about it (what it wraps,
+how many layers, what it returns, what it records). Say only what this code shows. Do not
+say what the crate does with it and do not quote an expected output.
+
+Answer with one block per fixture and nothing else:
+
+<GIVEN key="<the fixture's key, exactly as given>">The sentence.</GIVEN>
 """
 
 

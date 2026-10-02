@@ -33,7 +33,6 @@ from pipeline_core.domain.test_count import (
     count_test_fns_cfg_aware,
     count_test_fns_in_records,
     file_top_cfg_excluded,
-    rustdoc_cfg_sets,
     test_fn_names_in_records,
 )
 
@@ -308,12 +307,14 @@ def active_test_inventory_for_cluster(
     #    no records and so no doc tests — cargo cannot build it either. Only an
     #    unavailable extractor falls back to the whole-file text scan, which
     #    over-counts cfg-divergent copies and so errs toward 'incomplete'.
-    #    They are evaluated under rustdoc's cfg set, not rustc's: a cfg the
-    #    cluster sets only through RUSTFLAGS never reaches rustdoc.
+    #    They are evaluated under the cluster's one cfg set: every cargo env
+    #    for a cluster hands rustdoc the cfgs it hands rustc
+    #    (`domain.cluster_env.overlay_cluster_env`), so rustdoc collects doc
+    #    tests from the same copies rustc compiles. Until 2026-10-02 the cfg
+    #    reached rustc only and this count moved it to false for rustdoc — a
+    #    correct count of a measurement that ran the wrong world's examples.
     _count_doc_tests = tests_dir_stems is None
     docs_by_file: dict[str, list[DocItemRecord]] | None = None
-    doc_true, doc_false = rustdoc_cfg_sets(
-        cfg_true, cfg_false, getattr(cluster, "env_extra", None))
     if _count_doc_tests:
         doc_recs = deps.enumerate_doc_items(project_dir)
         if doc_recs is not None:
@@ -338,5 +339,5 @@ def active_test_inventory_for_cluster(
             total += count_doc_tests(stext)
         else:
             total += count_doc_tests_in_records(
-                docs_by_file.get(rel, ()), doc_true, doc_false, default_features)
+                docs_by_file.get(rel, ()), cfg_true, cfg_false, default_features)
     return total, frozenset(names)

@@ -162,7 +162,8 @@ def project_book(book: BehaviourSuite, union: WorldUnion, world: str,
         helpers=suite.helpers,
         features=tuple(features),
         glossary=glossary,
-        book_worlds=union.clusters)
+        book_worlds=union.clusters,
+        givens=book.givens)
 
 
 def book_is_current(suites: Mapping[str, BehaviourSuite]) -> bool:

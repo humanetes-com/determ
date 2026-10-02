@@ -73,15 +73,16 @@ def test_retry_fixes_failing_test(monkeypatch, tmp_path):
     bodies = iter(["41", "42"])
     install_scripted_model(monkeypatch,
                            per_fn_body=lambda _fn: next(bodies, "42"))
-    # fill verify ok → pass-test FAILED → retry iter 1: check ok, test ok.
+    # fill verify ok and retry check ok (both the check port, where the tree
+    # is also built in the other cfg worlds) → pass-test FAILED → test ok.
     cargo = install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
-        run=[(0, "ok"), (101, FAILED), (0, "ok"), (0, "ok")])
+        run=[(101, FAILED), (0, "ok")])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "42" in text and "41" not in text      # re-splice kept
     assert res.attempts == 2                   # fill + one retry
-    assert cargo["run"].calls == 4
+    assert cargo["run"].calls == 2
 
 
 def test_retry_stall_exits_after_three_nonimproving_iters(monkeypatch, tmp_path):
@@ -94,15 +95,12 @@ def test_retry_stall_exits_after_three_nonimproving_iters(monkeypatch, tmp_path)
                            per_fn_body=lambda _fn: next(bodies, "b3"))
     cargo = install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
-        run=[(0, "ok"), (101, FAILED),
-             (0, "ok"), (101, FAILED),
-             (0, "ok"), (101, FAILED),
-             (0, "ok"), (101, FAILED)])
+        run=[(101, FAILED), (101, FAILED), (101, FAILED), (101, FAILED)])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "b3" in text                           # last attempt kept
     assert res.attempts == 4                   # fill + 3 retries
-    assert cargo["run"].calls == 8                # 1 fill + 1 pass-test + 3×(check+test)
+    assert cargo["run"].calls == 4                # 1 pass-test + 3×test
 
 
 def test_retry_broken_check_restores_the_presplice_tree(monkeypatch, tmp_path):
@@ -116,16 +114,20 @@ def test_retry_broken_check_restores_the_presplice_tree(monkeypatch, tmp_path):
     bodies = iter(["41", "broken_body"])
     install_scripted_model(monkeypatch,
                            per_fn_body=lambda _fn: next(bodies, "broken_body"))
+    def _check():  # noqa: ANN202
+        broken = "broken_body" in (ws / "src" / "lib.rs").read_text()
+        return ((101, "error[E0308]: broken\n --> src/lib.rs:2:5", []) if broken
+                else (0, "", []))
+
     cargo = install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=[(0, "ok"), (101, FAILED),
-             (101, "error[E0308]: broken\n --> src/lib.rs:2:5")])
+        monkeypatch, check_diag=_check,
+        run=[(101, FAILED)])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "broken_body" not in text
     assert "41" in text                        # the compiling fill survives
     assert res.attempts == 2
-    assert cargo["run"].calls == 3                # no cargo test after broken check
+    assert cargo["run"].calls == 1                # no cargo test after broken check
 
 
 def test_retry_no_resplice_stops_immediately(monkeypatch, tmp_path):
@@ -137,9 +139,9 @@ def test_retry_no_resplice_stops_immediately(monkeypatch, tmp_path):
                            per_fn_body=lambda _fn: next(bodies, None))
     cargo = install_scripted_cargo(
         monkeypatch, check_diag=(0, "", []),
-        run=[(0, "ok"), (101, FAILED)])
+        run=[(101, FAILED)])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert "41" in text
     assert res.attempts == 2                   # fill + the no-body retry ask
-    assert cargo["run"].calls == 2
+    assert cargo["run"].calls == 1

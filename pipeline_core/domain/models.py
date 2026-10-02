@@ -139,6 +139,10 @@ class FieldRecord:
     # printed as complete must be complete, so absence is never rendered as
     # "nothing fits".
     fits: tuple[SlotFit, ...] | None = None
+    # The cfg worlds that compile this field, when that is not every world of
+    # the run (`cluster_membership.cluster_filter_type_members` sets it; the
+    # extractor never does). Empty: every world, or no world plan in hand.
+    worlds: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FieldRecord:
@@ -175,6 +179,9 @@ class MethodRecord:
     # items), so filtering on `is_pub` alone cannot drop them.
     file: str = ""
     mod_path: str = ""
+    # As `FieldRecord.worlds`: the cfg worlds that compile this method when
+    # that is not every world of the run.
+    worlds: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MethodRecord:

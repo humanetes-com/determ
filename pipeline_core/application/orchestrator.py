@@ -21,6 +21,7 @@ from pipeline_core import phases
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.tasks.task0d import run_task0d
+from pipeline_core.domain.attribution import canon_site
 from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.enums import Backend
@@ -43,9 +44,9 @@ from pipeline_core.phases import phase_scope, phase_skipped
 
 @dataclass(frozen=True, slots=True)
 class StubVerdict:
-    """The four states a still-hollow fn can be in at completion time.
+    """The five states a still-hollow fn can be in at completion time.
 
-    Only `orphaned` is a defect. The other three exist because "every
+    Only `orphaned` is a defect. The other four exist because "every
     `unimplemented!()` is a hole we failed to fill" is false about real crates,
     and holding it cost a run its verdict after the whole cost was paid.
 
@@ -58,6 +59,16 @@ class StubVerdict:
     augmentation record says the original's suite DID execute: the loudest
     kind, because the reconstruction's green suite never reaches a body the
     original's suite entered.
+
+    `dead_in_tree` is the one the COMPILER measured on the finished tree: in
+    every baked world that compiles the stub, rustc's dead-code analysis
+    reports it never used (`domain.dead_code`). Nothing the crate exposes can
+    reach it, so no test can enter it and no fill of it could be judged — a
+    private helper the reconstructed bodies do not call. It is not counted;
+    the target is the crate's tested behaviour, not the original's call graph.
+    A site here that is also in `executed_upstream` is reported loudest: the
+    original's suite entered a body this tree cannot reach, which is what a
+    lost call path looks like.
     """
 
     orphaned: tuple[FnLocator, ...] = ()
@@ -66,6 +77,9 @@ class StubVerdict:
     unreached_by_tests: tuple[FnLocator, ...] = ()
     unreached_evidence: tuple[str, ...] = ()
     executed_upstream: frozenset[FnLocator] = frozenset()
+    dead_in_tree: tuple[FnLocator, ...] = ()
+    # Labels of the `dead_in_tree` sites the original's suite executed.
+    dead_executed_upstream: tuple[str, ...] = ()
 
 
 def classify_remaining_stubs(
@@ -73,9 +87,11 @@ def classify_remaining_stubs(
     cfg_sets: Iterable[CfgSet],
     reference_hollow: Iterable[tuple[str, str]] = (),
     fn_records: Sequence[FnCoverageRecord] = (),
+    dead_sites: frozenset[FnSite] = frozenset(),
 ) -> StubVerdict:
     """Split the fns still holding `unimplemented!()` into un-attempted,
-    cfg-unreachable, hollow-upstream-too, and unreached-by-tests.
+    cfg-unreachable, hollow-upstream-too, unreached-by-tests, and dead in
+    the finished tree.
 
     Two filters, and the ORDER matters. First reachability: a stub the union of
     the baked cfg-sets compiles out was never reachable by any cluster's Phase C
@@ -106,6 +122,14 @@ def classify_remaining_stubs(
     with no record to read. Stubs may be named by site (container kept) or by
     locator; a locator reads the record's sites for it conservatively
     (`FnCoverageRecord.classify_stub`).
+
+    The fourth filter reads the compiler's dead-code analysis of THIS tree
+    (`dead_sites`, from `dead_stub_reading.read_dead_stub_sites`): a stub the
+    earlier filters leave orphaned, which every world that compiles it reports
+    never used, leaves as `dead_in_tree`. Run `292191-d60a5308` (2026-10-02)
+    exited 1 on two private helpers the filled callers route around. Last in
+    the order on purpose: a stub augmentation measured unreached keeps that
+    better-evidenced bucket.
     """
     sets = list(cfg_sets)
     unreachable: list[FnLocator] = []
@@ -124,9 +148,14 @@ def classify_remaining_stubs(
     account = classify_stub_sites(candidates, fn_records)
     unreached: dict[FnSite, UnreachedFn] = dict(account.unreached)
     executed = frozenset(account.executed)
+    dead = [s for s in candidates
+            if s not in unreached and canon_site(s) in dead_sites]
     return StubVerdict(
         orphaned=tuple(FnLocator(s.file, s.fn_name) for s in candidates
-                       if s not in unreached),
+                       if s not in unreached and s not in dead),
+        dead_in_tree=tuple(FnLocator(s.file, s.fn_name) for s in dead),
+        dead_executed_upstream=tuple(
+            site_label(s) for s in dead if s in executed),
         unreachable=tuple(unreachable),
         upstream_hollow=tuple(FnLocator(s.file, s.fn_name) for s in reachable
                               if (s.file, s.fn_name) not in orphaned_keys),
@@ -142,9 +171,43 @@ def classify_remaining_stubs(
     )
 
 
+def remaining_stub_verdict(
+    project_dir: Path,
+    *,
+    scan_unimplemented_functions: Callable[..., StubInventory],
+    load_baked_clusters: Callable[[Path], list[Any]],
+    reference_hollow: Callable[[Path], frozenset[tuple[str, str]]],
+    augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]],
+    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]],
+) -> tuple[StubVerdict, int]:
+    """The end gate's verdict on the tree at `project_dir`, and how many baked
+    cfg-sets it was judged under. BOTH completion paths call this — the
+    single-module `lock_or_complete` and the multi-module FINAL — so the two
+    cannot drift: they once ran different scans, and a fully green crate
+    exited 1 on one path and 0 on the other.
+
+    The dead-code reading costs one `cargo check` per cluster, so it is taken
+    only when the cheaper filters leave an orphan it could move."""
+    clusters = load_baked_clusters(project_dir) or []
+    cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                for c in clusters]
+    # One pair PER SITE: at completion every hollow site is its own finding,
+    # and the inventory names that choice.
+    stubs = scan_unimplemented_functions(project_dir).site_preds()
+    hollow = reference_hollow(project_dir)
+    records = augmentation_fn_records(project_dir)
+    verdict = classify_remaining_stubs(stubs, cfg_sets, hollow, records)
+    if verdict.orphaned:
+        dead = dead_stub_sites(project_dir, clusters)
+        if dead:
+            verdict = classify_remaining_stubs(
+                stubs, cfg_sets, hollow, records, dead)
+    return verdict, len(cfg_sets)
+
+
 def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
                         cfg_set_count: int) -> bool:
-    """Log all three buckets and return True when the run may claim success."""
+    """Log every bucket and return True when the run may claim success."""
     if verdict.unreachable:
         log(f"\nNOTE: {len(verdict.unreachable)} fn(s) remain unimplemented!() "
             f"but are UNREACHABLE under the union of all {cfg_set_count} baked "
@@ -168,6 +231,20 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
             "counted against this run:")
         for line in verdict.unreached_evidence:
             log(f"    {line}")
+    if verdict.dead_in_tree:
+        log(f"\nNOTE: {len(verdict.dead_in_tree)} fn(s) remain "
+            "unimplemented!() and the compiler reports them NEVER USED in "
+            "every baked cluster that compiles them — nothing this crate "
+            "exposes reaches them, so no test can enter them and no fill for "
+            "them could have been judged. Not counted against this run:")
+        for loc in verdict.dead_in_tree:
+            log(f"    {loc.file}::{loc.fn_name}")
+        if verdict.dead_executed_upstream:
+            log(f"  ‼ {len(verdict.dead_executed_upstream)} of them the "
+                "ORIGINAL's suite executed at augmentation: a body the "
+                "original reaches and this tree cannot. The call path to it "
+                "was not reconstructed — check that no behaviour went with "
+                "it: " + ", ".join(verdict.dead_executed_upstream))
     if verdict.orphaned:
         log(f"\nWARNING: all tests passed, but {len(verdict.orphaned)} fn(s) "
             "are STILL unimplemented!() — reachable under a baked cfg-set and "
@@ -596,6 +673,10 @@ class LockDeps:
     # degrades the gate to the reachability + reference form.
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
         lambda _p: ())
+    # (project_dir, baked clusters) -> the stub sites rustc reports never used
+    # in every cluster that compiles them; empty takes no such reading.
+    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]] = (
+        lambda _p, _c: frozenset())
 
 
 def lock_or_complete(
@@ -644,16 +725,14 @@ def lock_or_complete(
             # A fully green `anyhow` therefore still exited 1 on the three
             # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
             # are byte-identical to the `unimplemented!()` upstream writes there.
-            _clusters = deps.load_baked_clusters(project_dir) or []
-            _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
-                         for c in _clusters]
-            # One pair PER SITE: at completion every hollow site is its own
-            # finding, and the inventory names that choice.
-            _verdict = classify_remaining_stubs(
-                deps.scan_unimplemented_functions(project_dir).site_preds(),
-                _cfg_sets, deps.reference_hollow(project_dir),
-                deps.augmentation_fn_records(project_dir))
-            _clean = report_stub_verdict(_verdict, deps.log, len(_cfg_sets))
+            _verdict, _n_sets = remaining_stub_verdict(
+                project_dir,
+                scan_unimplemented_functions=deps.scan_unimplemented_functions,
+                load_baked_clusters=deps.load_baked_clusters,
+                reference_hollow=deps.reference_hollow,
+                augmentation_fn_records=deps.augmentation_fn_records,
+                dead_stub_sites=deps.dead_stub_sites)
+            _clean = report_stub_verdict(_verdict, deps.log, _n_sets)
             if not _clean:
                 if complete_commit_msg is not None:
                     deps.git_commit(project_dir, complete_commit_msg)
@@ -771,6 +850,9 @@ class RunDeps:
     # `classify_remaining_stubs`); empty degrades to the two-filter form.
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
         lambda _p: ())
+    # Same contract as LockDeps.dead_stub_sites.
+    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]] = (
+        lambda _p, _c: frozenset())
     # The oracle against its strip-time seal, `(project_dir, module) ->
     # OracleDrift | None` (None: unsealed). Defaults to "unguarded" so a
     # caller that wires none behaves as before the seal existed.
@@ -1418,13 +1500,14 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # hollow is not a hole this run failed to fill. `classify_remaining_stubs`
         # applies both filters in order and is shared with `lock_or_complete`,
         # which is where single-module crates actually finish.
-        _cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
-                     for c in (deps.load_baked_clusters(project_dir) or [])]
-        _verdict = classify_remaining_stubs(
-            deps.scan_unimplemented_functions(project_dir).site_preds(), _cfg_sets,
-            deps.reference_hollow(project_dir),
-            deps.augmentation_fn_records(project_dir))
-        if not report_stub_verdict(_verdict, deps.log, len(_cfg_sets)):
+        _verdict, _n_sets = remaining_stub_verdict(
+            project_dir,
+            scan_unimplemented_functions=deps.scan_unimplemented_functions,
+            load_baked_clusters=deps.load_baked_clusters,
+            reference_hollow=deps.reference_hollow,
+            augmentation_fn_records=deps.augmentation_fn_records,
+            dead_stub_sites=deps.dead_stub_sites)
+        if not report_stub_verdict(_verdict, deps.log, _n_sets):
             sys.exit(1)
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)

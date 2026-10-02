@@ -20,6 +20,7 @@ from pipeline_core.domain.fill_class import (
     FillClassCounter,
     FillOutcomeClass,
     class_for_kept,
+    keep_reading,
 )
 from pipeline_core.domain.fill_class import (
     tests_could_not_run as could_not_run,
@@ -40,10 +41,10 @@ def _fold(with_reading: bool) -> dict[str, int]:
         # The recorded row's own class is replayed as the could-not-run
         # reason it stood for; a raw bool is refused by the grading.
         counter.add(class_for_kept(
+            reading=keep_reading(net_delta=net),
             passed=frozenset(),
             unreachable=could_not_run(
-                blocked_sibling=c["class"] == "unreachable"),
-            net_delta=net))
+                blocked_sibling=c["class"] == "unreachable")))
     return {k: v for k, v in counter.histogram().as_dict().items() if v}
 
 

@@ -36,7 +36,9 @@ What this module holds, all pure:
   declaration (name, container) the way the identity instruction is aimed,
   never on coverage `exercises` (coverage of the original put 55 of 85
   stubbed units under the identity MUST on 2026-08-28);
-- the GHERKIN view — `render_feature`, generated from the model, never read.
+- the GHERKIN view — `render_feature` and `render_givens_index`, generated
+  from the model, never read. A Given is a pointer to a test-file item;
+  the item's text is printed once, in the index.
 
 No function here names a crate, a test, a trait or a language construct:
 the glossary, the grouping and the aiming key on the extractor's records and
@@ -50,19 +52,22 @@ from dataclasses import dataclass, field, replace
 
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
+    ExampleGiven,
     Feature,
     GlossaryEntry,
     ObservableOutcome,
     OutcomeKind,
     Rule,
     example_code,
+    example_given,
     example_when,
+    helper_items,
     outcome_matches,
     then_value_text,
 )
 from pipeline_core.domain.behaviour_probe import is_public_crate_fn
 from pipeline_core.domain.cfg import CfgSet
-from pipeline_core.domain.example_setup import IMPORTS_KEY_SUFFIX
+from pipeline_core.domain.example_setup import IMPORTS_KEY_SUFFIX, helper_key_parts
 from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.rust_idents import impl_self_type, impl_trait_name
 from pipeline_core.domain.rust_lex import code_mask
@@ -500,7 +505,7 @@ def group_features(
         when = s.when.strip()
         if when and all(c in _IDENT for c in when):
             when = _binding_initializer(s.setup, when) or when
-        called = [t for k, t in zip(s.helper_keys, s.helpers, strict=False)
+        called = [t for k, t in helper_items(s)
                   if not k.endswith(IMPORTS_KEY_SUFFIX)]
         sections = [when, *reversed(_statements_of(s.setup)), *called]
         key = next((k for k in (outermost_hit(sec, vocab) for sec in sections) if k), CRATE_FEATURE)
@@ -638,6 +643,29 @@ def sentence_breaks(text: str) -> int:
     return len(_SENTENCE_BREAK.findall(_CODE_SPAN.sub("C", text)))
 
 
+def sentence_refusal(
+    sentence: str,
+    cited: Sequence[BehaviourSpec],
+    private: Collection[str],
+) -> str | None:
+    """Why a model-written sentence about `cited` examples is refused on its
+    text alone, else None: it is more than one sentence, it names a private
+    item, or it quotes a cited example's Then verbatim. The one mechanical
+    rule a rule draft and a given phrase both pass."""
+    if sentence_breaks(sentence):
+        return "more than one sentence"
+    for name in sorted(private):
+        if _mentions(sentence, name):
+            return f"names the private item `{name}`"
+    for s in cited:
+        if s.then is None:
+            continue
+        value = then_value_text(s.then)
+        if len(value) >= _RESTATEMENT_MIN and value in sentence:
+            return f"quotes {s.behaviour_id}'s Then verbatim"
+    return None
+
+
 def draft_refusal(
     draft: RuleDraft,
     examples: Mapping[str, BehaviourSpec],
@@ -650,17 +678,7 @@ def draft_refusal(
     cited = [examples[i] for i in draft.covers if i in examples]
     if not cited:
         return "cites no checkable example of its feature"
-    if sentence_breaks(draft.sentence):
-        return "more than one sentence"
-    for name in sorted(private):
-        if _mentions(draft.sentence, name):
-            return f"names the private item `{name}`"
-    for s in cited:
-        assert s.then is not None
-        value = then_value_text(s.then)
-        if len(value) >= _RESTATEMENT_MIN and value in draft.sentence:
-            return f"quotes {s.behaviour_id}'s Then verbatim"
-    return None
+    return sentence_refusal(draft.sentence, cited, private)
 
 
 # `predict(rule sentences, example ids) -> {id: predicted Then}`: one call of
@@ -907,6 +925,11 @@ class BookReading:
     predict_temperature: float | None = None
     sibling_examples: int = 0
     unaided_examples: int = 0
+    # The roots the examples are given, the phrases kept for them, and why
+    # the others have none (`given_phrase_drops`).
+    given_roots: int = 0
+    given_phrases: int = 0
+    given_refused: Mapping[str, int] = field(default_factory=dict)
 
     def line(self) -> str:
         drop = ", ".join(f"{k} {v}" for k, v in sorted(self.dropped.items())) or "none"
@@ -918,7 +941,14 @@ class BookReading:
                 f"checkable examples covered ({self.sibling_examples} by a sibling chunk's rule; "
                 f"{self.unaided_examples} predicted with no rule); "
                 f"dropped: {drop}; lanes={self.lanes}; "
-                f"predict-temp={self._temp()}{where}")
+                f"predict-temp={self._temp()}{where}{self._givens()}")
+
+    def _givens(self) -> str:
+        if not self.given_roots:
+            return ""
+        why = ", ".join(f"{k} {v}" for k, v in sorted(self.given_refused.items())) or "none"
+        return (f"; givens: {self.given_phrases} phrase(s) for {self.given_roots} root(s) "
+                f"(without one: {why})")
 
     def _temp(self) -> str:
         return "server" if self.predict_temperature is None else f"{self.predict_temperature:g}"
@@ -936,6 +966,8 @@ class BookReading:
             "predict_temperature": self.predict_temperature,
             "sibling_examples": self.sibling_examples,
             "unaided_examples": self.unaided_examples,
+            "given_roots": self.given_roots, "given_phrases": self.given_phrases,
+            "given_refused": dict(self.given_refused),
         }
 
 
@@ -1065,7 +1097,16 @@ def feature_file_name(feature: Feature) -> str:
     return f"{slug}{'_macro' if feature.item.endswith('!') else ''}.feature"
 
 
-def _then_step(then: ObservableOutcome | None) -> list[str]:
+def _then_step(then: ObservableOutcome | None, observer: str = "") -> list[str]:
+    """The Then in words. `observer` is the asserting helper the test routes
+    its literal through, as a pointer: the Then is what that helper compares."""
+    lines = _then_lines(then)
+    if observer:
+        lines[0] = f"Then, as {observer} compares it, " + lines[0].removeprefix("Then ")
+    return lines
+
+
+def _then_lines(then: ObservableOutcome | None) -> list[str]:
     if then is None:
         return ["Then the example's own assertions hold"]
     kind = then.kind
@@ -1100,10 +1141,19 @@ def render_feature(
     feature: Feature,
     glossary: Sequence[GlossaryEntry],
     specs_by_id: Mapping[str, BehaviourSpec],
+    phrases: Mapping[str, str] | None = None,
 ) -> str:
     """One `.feature` file: the item and its glossary line(s), each kept rule
     with the examples it cites, then the examples no kept rule covers under a
-    rule-less `Rule:` heading. Pure; deterministic for a given book."""
+    rule-less `Rule:` heading. Pure; deterministic for a given book.
+
+    An example's Given is one step per root (:func:`example_given`), a
+    pointer `name (file)` into the test file that declares it, then the
+    example's own setup. No helper text is printed here: each root, observer
+    and import block is printed once, in :func:`render_givens_index`.
+    `phrases` (`root key → sentence`, the book's `givens`) leads a step with
+    its sentence; a root without one prints the pointer alone, so the
+    pointer never depends on a model."""
     aimed = set(feature_spellings(feature.item, glossary))
     names = [g for g in glossary if g.name in aimed]
     lines = [GHERKIN_HEADER, f"Feature: {feature.item}"]
@@ -1116,13 +1166,16 @@ def render_feature(
         if s is None:
             return []
         out = [f"    Example: {bid}"]
-        context = "\n".join(p for p in (*s.helpers, s.setup) if p.strip())
-        if context:
-            out.append("      Given")
-            out.extend("      " + ln for ln in _code_block(context))
+        given = example_given(s)
+        steps = [_given_step(k, phrases or {}) for k in given.roots]
+        for n, step in enumerate(steps):
+            out.append(f"      {'And' if n else 'Given'} {step}")
+        if given.setup.strip():
+            out.append(f"      {'And' if steps else 'Given'} this setup")
+            out.extend("      " + ln for ln in _code_block(given.setup))
         out.append("      When")
         out.extend("      " + ln for ln in _code_block(example_when(s)))
-        out.extend("      " + ln for ln in _then_step(s.then))
+        out.extend("      " + ln for ln in _then_step(s.then, _observer_pointer(s, given)))
         return out
 
     for r in feature.rules:
@@ -1138,3 +1191,154 @@ def render_feature(
         for bid in rest:
             lines.extend(example(bid))
     return "\n".join(lines) + "\n"
+
+
+GIVENS_INDEX_NAME = "_givens.md"
+
+
+def _pointer(key: str) -> str:
+    file, name, _is_impl = helper_key_parts(key)
+    return f"`{name}` ({file})"
+
+
+def _observer_pointer(spec: BehaviourSpec, given: ExampleGiven) -> str:
+    """The asserting helper as a pointer, or its bare name when the store
+    holds no item for it; empty for an example compared directly."""
+    if not spec.via:
+        return ""
+    for key in (*given.observer, *given.roots):
+        if helper_key_parts(key)[1] == spec.via:
+            return _pointer(key)
+    return f"`{spec.via}`"
+
+
+def _given_step(key: str, phrases: Mapping[str, str]) -> str:
+    phrase = phrases.get(key, "")
+    return f"{phrase} — {_pointer(key)}" if phrase else _pointer(key)
+
+
+@dataclass(frozen=True, slots=True)
+class GivenRoot:
+    """One root the examples are given, across the suite: its key, the keys
+    it pulls in, its text followed by theirs, and the examples given it."""
+
+    key: str
+    pulled: tuple[str, ...]
+    text: str
+    example_ids: tuple[str, ...]
+
+    @property
+    def file(self) -> str:
+        return helper_key_parts(self.key)[0]
+
+
+def _joined(keys: Sequence[str], text: Mapping[str, str]) -> str:
+    return "\n\n".join(text[k].strip() for k in keys if text.get(k, "").strip())
+
+
+def given_roots(specs: Sequence[BehaviourSpec]) -> tuple[GivenRoot, ...]:
+    """Every root of `specs` once, sorted by key (:func:`example_given`)."""
+    text: dict[str, str] = {}
+    pulled: dict[str, list[str]] = {}
+    ids: dict[str, list[str]] = {}
+    for s in specs:
+        text.update(helper_items(s))
+        for root, more in example_given(s).reach:
+            have = pulled.setdefault(root, [])
+            have.extend(k for k in more if k not in have)
+            ids.setdefault(root, []).append(s.behaviour_id)
+    return tuple(GivenRoot(k, tuple(pulled[k]), _joined((k, *pulled[k]), text), tuple(ids[k]))
+                 for k in sorted(pulled))
+
+
+_GIVEN_RE = re.compile(r"<GIVEN\s+key\s*=\s*\"([^\"]*)\"\s*>(.*?)</GIVEN>", re.S | re.I)
+
+
+def parse_given_phrases(reply: str) -> dict[str, str]:
+    """`key → sentence` from `<GIVEN key="…">sentence</GIVEN>` blocks, the
+    first block of a key winning; whitespace in the sentence collapsed."""
+    out: dict[str, str] = {}
+    for key, body in _GIVEN_RE.findall(strip_think_blocks(reply)):
+        sentence = " ".join(body.split())
+        if sentence:
+            out.setdefault(key.strip(), sentence)
+    return out
+
+
+NO_PHRASE = "no phrase in the reply"
+NOT_ASKED = "not asked"
+
+
+def keep_given_phrases(
+    roots: Sequence[GivenRoot],
+    answered: Mapping[str, str],
+    examples: Mapping[str, BehaviourSpec],
+    private: Collection[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`(root key → kept phrase, root key → why it has none)` for `roots`,
+    given the model's `answered` sentences. A phrase passes the mechanical
+    rule a rule draft passes (:func:`sentence_refusal`), against the examples
+    given that root. A sentence on a key that is no root is read by nobody."""
+    kept: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for r in roots:
+        phrase = answered.get(r.key, "")
+        if not phrase:
+            refused[r.key] = NO_PHRASE
+            continue
+        why = sentence_refusal(phrase, [examples[i] for i in r.example_ids if i in examples], private)
+        if why:
+            refused[r.key] = why
+        else:
+            kept[r.key] = phrase
+    return kept, refused
+
+
+def render_givens_index(specs: Sequence[BehaviourSpec],
+                        phrases: Mapping[str, str] | None = None) -> str:
+    """The step-definition index of the view: every root a `Given` step
+    points at, once, with its phrase when the book has one, the keys it
+    pulls in and their text; then every observer and every import block,
+    once. Empty when no example calls a test-file item. The text is the test
+    files' own (the oracle), which is what executes it; nothing here is run."""
+    text: dict[str, str] = {}
+    observers: dict[str, list[str]] = {}
+    imports: list[str] = []
+    for s in specs:
+        text.update(helper_items(s))
+        given = example_given(s)
+        if given.observer:
+            have = observers.setdefault(given.observer[0], [])
+            have.extend(k for k in given.observer[1:] if k not in have)
+        imports.extend(k for k in given.imports if k not in imports)
+    roots = given_roots(specs)
+    if not (roots or observers or imports):
+        return ""
+
+    def block(body: str) -> list[str]:
+        return ["```rust", body, "```", ""]
+
+    out = [GHERKIN_HEADER, "", "# Givens", "",
+           "Each `Given` step of a `.feature` file names one of these: an item of the "
+           "crate's own test files, which is what runs it.", ""]
+    for r in roots:
+        out += [f"## {_pointer(r.key)}", ""]
+        if (phrases or {}).get(r.key):
+            out += [(phrases or {})[r.key], ""]
+        out += [f"- key: `{r.key}`", f"- given in {len(r.example_ids)} example(s)"]
+        if r.pulled:
+            out.append("- pulls in: " + ", ".join(f"`{k}`" for k in r.pulled))
+        out += ["", *block(r.text)]
+    if observers:
+        out += ["# Observers", "",
+                "The asserting helper a `Then` is compared through. Not a precondition.", ""]
+        for key in sorted(observers):
+            out += [f"## {_pointer(key)}", "", f"- key: `{key}`"]
+            if observers[key]:
+                out.append("- pulls in: " + ", ".join(f"`{k}`" for k in observers[key]))
+            out += ["", *block(_joined((key, *observers[key]), text))]
+    if imports:
+        out += ["# Imports", "", "Each test file's `use` block: what its examples' names resolve to.", ""]
+        for key in sorted(imports):
+            out += [f"## {helper_key_parts(key)[0]}", "", *block(_joined((key,), text))]
+    return "\n".join(out).rstrip("\n") + "\n"

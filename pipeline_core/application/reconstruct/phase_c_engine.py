@@ -704,7 +704,8 @@ class PhaseCFillEngine:
             _src_for_macros, cluster)
         _no_std_invariant = self.prompt.detect_crate_no_std_invariant(target_src_dir)
         invariants_section = fill_invariants_section(
-            cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants)
+            cluster, no_std=_no_std_invariant, macro_invariants=_macro_invariants,
+            worlds=self.ws.all_clusters())
         # Crate-wide type records, filtered to what THIS cfg-cluster compiles.
         _crate_type_records = self.ws.cluster_filter_type_members(
             self.ws.enumerate_types(target_src_dir) or [], cluster)
@@ -1369,7 +1370,10 @@ class PhaseCFillEngine:
                                 return FixOutcome("stop")
 
                             # Re-run cargo check (cheap) then cargo test.
-                            rc_c, out_c = self.cargo.run(check_cmd, target_src_dir, cluster_env)
+                            # Through the check port, not a bare run: that port is
+                            # where the tree is also built in the other cfg worlds.
+                            rc_c, out_c, _ = self.cargo.check_diag(
+                                check_cmd, target_src_dir, cluster_env)
                             if rc_c != 0:
                                 for _timg in _touched.values():
                                     with suppress(OSError):

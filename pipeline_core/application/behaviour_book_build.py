@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.behaviour import (
@@ -40,26 +40,36 @@ from pipeline_core.domain.behaviour import (
     outcome_matches,
 )
 from pipeline_core.domain.behaviour_book import (
+    GIVENS_INDEX_NAME,
+    NOT_ASKED,
     BookReading,
     ChunkJudgment,
     CreditedRule,
+    GivenRoot,
     Predict,
     RuleDraft,
+    SiblingVisit,
     draft_refusal,
     drop_reason_class,
     feature_file_name,
     feature_spellings,
+    given_roots,
     group_features,
     judge_rule_set,
     judge_visit,
+    keep_given_phrases,
+    parse_given_phrases,
     parse_predictions,
     parse_rule_drafts,
     render_feature,
+    render_givens_index,
     rule_checkable,
     rule_terms,
     sibling_visits,
 )
+from pipeline_core.phases import note_work
 from pipeline_core.prompts.behaviour_rules import (
+    build_given_phrase_prompt,
     build_rule_authoring_prompt,
     build_then_prediction_prompt,
 )
@@ -74,7 +84,9 @@ class BookBudget:
     judge's `predict` with, carried here only so the reading prints it
     (None: the server default). `sibling_chunks=False` leaves every chunk
     with the rules drafted from its own examples (the build before
-    2026-10-01, and the negative control of the sibling judgment)."""
+    2026-10-01, and the negative control of the sibling judgment).
+    `given_phrases=False` asks for no sentence about a root, and the view
+    prints each `Given` as its pointer alone."""
 
     rules: bool = True
     max_features: int = 24
@@ -83,6 +95,7 @@ class BookBudget:
     lanes: int = 1
     predict_temperature: float | None = None
     sibling_chunks: bool = True
+    given_phrases: bool = True
 
 
 def _chunks(items: Sequence[BehaviourSpec], size: int) -> list[Sequence[BehaviourSpec]]:
@@ -106,6 +119,9 @@ class _ChunkResult:
     # The examples the ablation answered right (empty when no draft
     # survived: the ablation was then never asked).
     unaided: tuple[str, ...] = ()
+    # Model calls this chunk spent: the draft, plus the judge's calls when
+    # any draft survived.
+    calls: int = 0
 
     def judgment(self) -> ChunkJudgment:
         return ChunkJudgment(tuple(self.pool), self.judged, tuple(
@@ -152,16 +168,40 @@ def build_behaviour_book(
                       predict=predict or ask, budget=budget, worlds=worlds)
 
     lanes = max(1, min(budget.lanes, len(tasks) or 1))
-    results = _on_lanes(run, tasks, lanes)
+    spent = 0
+    finished = 0
+
+    def _chunk_done(result: _ChunkResult) -> None:
+        nonlocal spent, finished
+        finished += 1
+        spent += result.calls
+        note_work(done=finished, total=len(tasks), calls=spent, lanes=lanes, wave="chunks")
+
+    if tasks:
+        note_work(done=0, total=len(tasks), calls=0, lanes=lanes, wave="chunks")
+    results = _on_lanes(run, tasks, lanes, on_done=_chunk_done)
     per_feature: dict[str, list[_ChunkResult]] = {}
     for (f, _chunk_specs), r in zip(tasks, results, strict=True):
         per_feature.setdefault(f.item, []).append(r)
     visits = [(item, rs[v.chunk], v) for item, rs in per_feature.items()
               for v in sibling_visits([r.judgment() for r in rs])] if budget.sibling_chunks else []
     travelled: dict[str, dict[str, list[str]]] = {}
-    for (item, _r, _v), credit in zip(
-            visits, _on_lanes(lambda t: judge_visit(t[2], t[1].pool, predict=t[1].check)[0],
-                              visits, lanes), strict=True):
+    visited = 0
+
+    def _visit(task: tuple[str, _ChunkResult, SiblingVisit]) -> tuple[dict[str, tuple[str, ...]], int]:
+        _item, chunk, visit = task
+        return judge_visit(visit, chunk.pool, predict=chunk.check)
+
+    def _visit_done(result: tuple[dict[str, tuple[str, ...]], int]) -> None:
+        nonlocal spent, visited
+        visited += 1
+        spent += result[1]
+        note_work(done=visited, total=len(visits), calls=spent, lanes=lanes, wave="siblings")
+
+    if visits:
+        note_work(done=0, total=len(visits), calls=spent, lanes=lanes, wave="siblings")
+    for (item, _r, _v), (credit, _n) in zip(
+            visits, _on_lanes(_visit, visits, lanes, on_done=_visit_done), strict=True):
         for sentence, ids in credit.items():
             travelled.setdefault(item, {}).setdefault(sentence, []).extend(ids)
     dropped: Counter[str] = Counter()
@@ -194,6 +234,11 @@ def build_behaviour_book(
         built.append(replace(f, rules=tuple(rules), unaided_ids=plain))
         log(f"    [behaviour-book] {f.item}: {len(checkable_of[f.item])} checkable "
             f"example(s), {len(rules)} rule(s) kept")
+    roots = given_roots(suite.specs)
+    phrases, without = (_given_phrases(roots, by_id, crate=crate, private=private, ask=ask,
+                                       lanes=budget.lanes)
+                        if budget.rules and budget.given_phrases
+                        else ({}, {r.key: NOT_ASKED for r in roots}))
     checkable = sum(len(v) for v in checkable_of.values())
     covered = {i for f in built for r in f.rules for i in r.example_ids}
     reading = BookReading(
@@ -202,20 +247,64 @@ def build_behaviour_book(
         checkable_examples=checkable, covered_examples=len(covered),
         proposed=proposed, kept=kept, dropped=dict(dropped), lanes=lanes,
         predict_temperature=budget.predict_temperature, sibling_examples=len(sibling),
-        unaided_examples=unaided)
+        unaided_examples=unaided,
+        given_roots=len(roots), given_phrases=len(phrases),
+        given_refused=dict(Counter(drop_reason_class(why) for why in without.values())))
     out = BehaviourSuite(
         cfg_cluster=suite.cfg_cluster,
         specs=tuple(replace(s, rules=()) for s in suite.specs),
-        helpers=suite.helpers, features=tuple(built), glossary=tuple(glossary))
+        helpers=suite.helpers, features=tuple(built), glossary=tuple(glossary),
+        givens=tuple(sorted(phrases.items())))
     return out, reading
 
 
-def _on_lanes[T, R](fn: Callable[[T], R], items: Sequence[T], lanes: int) -> list[R]:
-    """`fn` over `items`, results in item order, on up to `lanes` threads."""
+def _given_phrases(
+    roots: Sequence[GivenRoot],
+    examples: Mapping[str, BehaviourSpec],
+    *,
+    crate: str,
+    private: Collection[str],
+    ask: Callable[[str], str],
+    lanes: int,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`(root key → phrase, root key → why it has none)`: one drafting call
+    per test file that declares a root, each over that file's roots only."""
+    by_file: dict[str, list[GivenRoot]] = {}
+    for r in roots:
+        by_file.setdefault(r.file, []).append(r)
+    tasks = sorted(by_file.items())
+    replies = _on_lanes(
+        lambda t: parse_given_phrases(ask(build_given_phrase_prompt(crate=crate, file=t[0], roots=t[1]))),
+        tasks, max(1, min(lanes, len(tasks) or 1)))
+    answered = {k: v for reply in replies for k, v in reply.items()}
+    return keep_given_phrases(roots, answered, examples, private)
+
+
+def _on_lanes[T, R](fn: Callable[[T], R], items: Sequence[T], lanes: int,
+                    on_done: Callable[[R], None] | None = None) -> list[R]:
+    """`fn` over `items`, results in item order, on up to `lanes` threads.
+
+    `on_done` runs on this thread as each result arrives, so a progress
+    count moves when a unit finishes rather than when the whole wave does."""
+    if not items:
+        return []
     if lanes > 1 and len(items) > 1:
         with ThreadPoolExecutor(max_workers=lanes, thread_name_prefix="behaviour-book") as pool:
-            return list(pool.map(fn, items))
-    return [fn(t) for t in items]
+            pending = {pool.submit(fn, item): i for i, item in enumerate(items)}
+            done: dict[int, R] = {}
+            for fut in as_completed(pending):
+                i = pending[fut]
+                done[i] = fut.result()
+                if on_done is not None:
+                    on_done(done[i])
+        return [done[i] for i in range(len(items))]
+    out: list[R] = []
+    for item in items:
+        result = fn(item)
+        out.append(result)
+        if on_done is not None:
+            on_done(result)
+    return out
 
 
 def _chunk(
@@ -266,7 +355,7 @@ def _chunk(
 
     judged = tuple(d.sentence for d in surviving)
     if not surviving:
-        return _ChunkResult(proposed, (), dropped, pool, judged, check)
+        return _ChunkResult(proposed, (), dropped, pool, judged, check, calls=1)
 
     verdict = judge_rule_set(surviving, pool, predict=check)
     dropped.update(drop_reason_class(why) for why in verdict.dropped)
@@ -288,10 +377,20 @@ def _chunk(
         i for i, spec in pool.items()
         if spec.then is not None and i in ablation[0] and outcome_matches(ablation[0][i], spec.then)
     ) if ablation else ()
-    return _ChunkResult(proposed, kept, dropped, pool, judged, check, unaided)
+    return _ChunkResult(proposed, kept, dropped, pool, judged, check, unaided,
+                        calls=1 + verdict.calls)
 
 
 def feature_files(suite: BehaviourSuite) -> dict[str, str]:
-    """`file name → text` of the Gherkin view of `suite`'s book."""
+    """`file name → text` of the Gherkin view of `suite`'s book: one
+    `.feature` per feature, and the index their `Given` steps point into
+    when any shown example calls a test-file item."""
     by_id = {s.behaviour_id: s for s in suite.specs}
-    return {feature_file_name(f): render_feature(f, suite.glossary, by_id) for f in suite.features}
+    phrases = dict(suite.givens)
+    files = {feature_file_name(f): render_feature(f, suite.glossary, by_id, phrases)
+             for f in suite.features}
+    shown = dict.fromkeys(i for f in suite.features for i in f.example_ids if i in by_id)
+    index = render_givens_index([by_id[i] for i in shown], phrases)
+    if index:
+        files[GIVENS_INDEX_NAME] = index
+    return files

@@ -41,7 +41,7 @@ pipeline's own oracle:
 logged and never gated on. Filling a body it left hollow is ignored. The
 reconstruction is required to satisfy the spec, not to be byte-identical.
 
-**Doc tests gate nothing here, and the reason is not their line numbers.**
+**A doc test absent here gates nothing, and the reason is not its line number.**
 A doc test's cargo name embeds the line its ``` block opens on
 (`src/lib.rs - Result (line 427)`), and the reconstruction's line numbering is
 not upstream's — measured 2026-08-06, `context::Option<T>` is line 70 upstream
@@ -54,11 +54,20 @@ runnable example and the reconstruction's (`lib.rs:273`) carries no doc comment
 at all. Reconstructing doc COMMENTS is a capability the pipeline does not have
 — no fill route writes them, and the merge's syn round-trip actively drops
 comments (6 → 0 in `src/error.rs`, measured 2026-08-05, including the note
-explaining why an unsafe `ManuallyDrop` cast is sound). Gating on doc tests
-would therefore fail every run for a reason no iteration can address, which is
-the exact defect this module exists to remove. They are compared and REPORTED
-(:attr:`FloorVerdict.advisory_unmet`) so the gap stays visible, and excluded
-from the verdict until something can write a doc comment.
+explaining why an unsafe `ManuallyDrop` cast is sound). Gating on an ABSENT
+doc test would therefore fail every run for a reason no iteration can address,
+which is the exact defect this module exists to remove. Absent ones are
+compared and REPORTED (:attr:`FloorVerdict.advisory_unmet`) so the gap stays
+visible, and excluded from the verdict until something can write a doc comment.
+
+**A doc test that runs here and fails is not that case, and it gates.** The
+example is in the tree, rustdoc compiled it, and its assertion is false about
+the reconstruction: a body rewrite can address it. Until 2026-10-02 one filter
+dropped every doc pair from both conditions, so a failing doc test was
+excused with the absent ones. On the merged tree of run `292191-d60a5308` the
+example asserting that a boxed error still provides its backtrace fails once
+rustdoc is given the cluster's cfg, and under that filter the cluster would
+still have read `met the reference floor`.
 """
 from __future__ import annotations
 
@@ -279,8 +288,6 @@ def judge_against_reference(
     reference: ClusterReference,
     ours_passed: frozenset[tuple[str, str]],
     ours_failed: frozenset[tuple[str, str]],
-    *,
-    gate_doc_tests: bool = False,
 ) -> FloorVerdict:
     """Rule on one cluster against the reference it must meet.
 
@@ -293,15 +300,19 @@ def judge_against_reference(
 
     Anything the reference does not have and that PASSES here is the
     reconstruction exceeding its floor; it is counted and never gated on.
+
+    A doc test is a test under both conditions, with one advisory state: a
+    doc test the reference passes that is ABSENT here — it neither passed nor
+    failed, because the doc comment carrying it was not reconstructed — is
+    reported and not gated (the module docstring says why). One that RAN here
+    and failed is a failing test like any other.
     """
     required = reference.passed
     unmet = required - ours_passed
     unexcused = ours_failed - reference.neutral
-    advisory: frozenset[tuple[str, str]] = frozenset()
-    if not gate_doc_tests:
-        advisory = frozenset(p for p in unmet if is_doc_pair(p))
-        unmet = frozenset(p for p in unmet if not is_doc_pair(p))
-        unexcused = frozenset(p for p in unexcused if not is_doc_pair(p))
+    advisory = frozenset(p for p in unmet
+                         if is_doc_pair(p) and p not in ours_failed)
+    unmet = unmet - advisory
     return FloorVerdict(
         cluster=reference.cluster,
         unmet=unmet,
@@ -369,8 +380,8 @@ class ReferenceMeasurement:
     plus the fns the ORIGINAL leaves hollow, plus the key that decides whether
     this measurement still applies.
 
-    `key` folds `rustc -vV` per toolchain, each cluster's `env_extra`, and a
-    hash of the test file set. Any change re-measures — and that key is exactly
+    `key` folds `rustc -vV` per toolchain, the env each cluster's cargo runs
+    under, and a hash of the test file set. Any change re-measures — and that key is exactly
     what flips `ui`: a new nightly re-renders the diagnostics the `.stderr`
     fixtures pin, so the reference's own verdict on `ui` moves with it and the
     floor follows without anyone editing a taxonomy.

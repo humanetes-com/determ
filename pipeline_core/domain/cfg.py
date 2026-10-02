@@ -25,8 +25,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
-from pipeline_core.domain.rust_scan import contains_word
-
 # Built-in cfg identifiers cargo evaluates from the build TARGET (not from a
 # `--cfg`/feature flag). Undecidable to a cluster's cfg sets, but cargo MAY set
 # them, so cargo-faithful exclusion must never force them off (never over-exclude).
@@ -217,59 +215,6 @@ class Any(CfgPred):
         if any(v is None for v in vals):
             return None
         return False
-
-
-def lines_are_cluster_specific(
-    source_text: str, lines: set[int], contexts: Iterable[CfgSet],
-) -> bool:
-    """True if any of ``lines`` is compiled OUT under at least one cluster context
-    — i.e. the lines live inside a cluster-specific `#[cfg]` region, so a test
-    covering them cannot be safely shared across clusters and must stay gated.
-
-    When every line is compiled in under every context the test is cluster-agnostic
-    and may be emitted UNGATED so a later cluster sees those lines already covered
-    (no re-augmentation). This is exactly the criterion that keeps a `not(X)`
-    stable-only test gated to stable while letting an always-compiled test be shared
-    — the documented failure mode where ungating stable's `not(egma)` siblings broke
-    the nightly harness."""
-    return any(ctx.excluded_uncovered_lines(source_text, lines) for ctx in contexts)
-
-
-def cluster_specific_symbol_names(
-    fn_records: Iterable[object], contexts: Iterable[CfgSet],
-) -> frozenset[str]:
-    """Names of fns whose `#[cfg(...)]` chain is compiled OUT under at least one
-    cluster context. A test BODY that references such a symbol
-    cannot be shared across clusters even when the LINES it targets are agnostic
-    — under a cluster that excludes the symbol the shared sibling fails to
-    compile. Accepts FnRecord dicts (`fn_name`/`cfg_predicates`) or objects with
-    those attrs; `#[cfg(test)]`-only fns carry the builtin `test` atom which is
-    never cargo-excluded, so they are correctly NOT flagged."""
-    ctxs = list(contexts)
-    names: set[str] = set()
-    for r in fn_records:
-        if isinstance(r, dict):
-            name = r.get("fn_name", "")
-            preds = r.get("cfg_predicates") or ()
-        else:
-            name = getattr(r, "fn_name", "")
-            preds = getattr(r, "cfg_predicates", ()) or ()
-        if not name or not preds:
-            continue
-        if any(ctx.excludes_for_cargo(p) for ctx in ctxs for p in preds):
-            names.add(name)
-    return frozenset(names)
-
-
-def body_uses_cluster_specific_symbol(
-    body: str, names: frozenset[str] | set[str],
-) -> bool:
-    """True if `body` references any cluster-specific symbol name as a standalone
-    identifier. Word-boundary match so `new` does not match
-    `new_inner`."""
-    if not body or not names:
-        return False
-    return any(contains_word(body, n) for n in names)
 
 
 _OPS = {"not": Not, "all": All, "any": Any}

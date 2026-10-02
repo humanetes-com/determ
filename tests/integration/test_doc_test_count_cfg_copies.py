@@ -15,9 +15,19 @@ ended the run non-converged.
 
 The crate is invented and generated per run: two gated copies of one documented
 fn with different example counts, one `#[test]`, and two cluster envs — no
-flags, and the cfg delivered only through RUSTFLAGS. If cargo starts forwarding
-RUSTFLAGS cfgs to rustdoc, `test_premise_rustdoc_does_not_read_rustflags`
-fails and says so: `rustdoc_cfg_sets` was derived from that behaviour.
+flags, and the cfg delivered through RUSTFLAGS.
+
+The second class, run `292191-d60a5308` (2026-10-02): because that cfg reached
+rustc only, a cluster ran the doc tests of the OTHER world, and a doc example
+its crate gates on the cfg compiled as an empty shell and passed — on the
+reconstruction, which had lost the behaviour it asserts, and on the reference.
+Every cluster env now goes through `domain.cluster_env.overlay_cluster_env`,
+which hands rustdoc the cfgs it hands rustc, and the reference floor gates a
+doc test that runs and fails. `_reported` builds its env through that rule;
+`_reported_rustflags_only` is the pre-fix env and the negative control. If
+cargo starts forwarding RUSTFLAGS cfgs to rustdoc,
+`test_premise_rustdoc_does_not_read_rustflags` fails and says so: the overlay
+would then deliver each cfg twice and can be removed.
 
 Gated on `INTEGRATION=1` (plain cargo, no dependencies);
 `scripts/run_integration.sh` is the launcher.
@@ -41,8 +51,17 @@ from pipeline_core.application.test_count import (
     TestCountDeps as _CountDeps,
 )
 from pipeline_core.application.test_count import count_active_tests_for_cluster
+from pipeline_core.domain.cluster_env import overlay_cluster_env
 from pipeline_core.domain.models import BuildCluster
-from pipeline_core.domain.test_results import parse_test_counts
+from pipeline_core.domain.reference_floor import (
+    ClusterReference,
+    judge_against_reference,
+    pairs_of,
+)
+from pipeline_core.domain.test_results import (
+    parse_binary_results,
+    parse_test_counts,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -116,17 +135,32 @@ def _clusters() -> tuple[BuildCluster, BuildCluster]:
     return base, alt
 
 
-def _reported(root: Path, cluster: BuildCluster) -> tuple[int, str]:
-    """What the cluster's `cargo test` reports, read the way task3 reads it."""
+def _run(root: Path, cluster: BuildCluster, *, overlay: bool) -> tuple[int, str]:
     env = dict(os.environ)
     env.pop("RUSTFLAGS", None)
     env.pop("RUSTDOCFLAGS", None)
-    env.update(cluster.env_extra or {})
-    env["CARGO_TARGET_DIR"] = str(_TARGET / cluster.name)
+    if overlay:
+        overlay_cluster_env(env, cluster)
+    else:
+        env.update(cluster.env_extra or {})
+    env["CARGO_TARGET_DIR"] = str(
+        _TARGET / root.name / (cluster.name + ("" if overlay else "-rustc-only")))
     _rc, out = run_cargo(CargoCli(), "cargo test --offline --no-fail-fast",
                          root, env, timeout=600)
     passed, failed, ignored = parse_test_counts(out)
     return passed + failed + ignored, out
+
+
+def _reported(root: Path, cluster: BuildCluster) -> tuple[int, str]:
+    """What the cluster's `cargo test` reports under the env the pipeline
+    builds for it, read the way task3 reads it."""
+    return _run(root, cluster, overlay=True)
+
+
+def _reported_rustflags_only(root: Path, cluster: BuildCluster) -> tuple[int, str]:
+    """The same under the cluster's stored `env_extra` alone — the env every
+    cluster cargo ran under until 2026-10-02."""
+    return _run(root, cluster, overlay=False)
 
 
 def _deps(*, doc_records: bool) -> _CountDeps:
@@ -160,13 +194,20 @@ def _doc_test_count(out: str) -> int:
 def test_premise_rustdoc_does_not_read_rustflags(tmp_path: Path) -> None:
     root = _crate(tmp_path)
     _base, alt = _clusters()
-    _n, out = _reported(root, alt)
+    _n, out = _reported_rustflags_only(root, alt)
     doc = _doc_test_count(out)
     assert doc == 1, (
         f"rustdoc ran {doc} doc test(s) under RUSTFLAGS=--cfg {_CFG}; the base "
         "copy has 1 and the alternate 2. If this is 2, cargo now forwards "
-        "RUSTFLAGS cfgs to rustdoc and `rustdoc_cfg_sets` must be re-derived.\n"
-        + out[-2000:])
+        "RUSTFLAGS cfgs to rustdoc and `domain.cluster_env` no longer has to "
+        "deliver them.\n" + out[-2000:])
+
+
+def test_the_cluster_env_runs_the_doc_tests_of_its_own_world(tmp_path: Path) -> None:
+    root = _crate(tmp_path)
+    _base, alt = _clusters()
+    _n, out = _reported(root, alt)
+    assert _doc_test_count(out) == 2, out[-2000:]
 
 
 @pytest.mark.parametrize("which", ["base", "alt"])
@@ -185,3 +226,56 @@ def test_negative_control_the_whole_file_scan_overcounts(tmp_path: Path) -> None
         expected = count_active_tests_for_cluster(
             root, cluster, _deps(doc_records=False))
         assert expected > reported, (cluster.name, expected, reported, out[-2000:])
+
+
+# --- a doc example gated on the cluster's cfg ------------------------------
+
+def _gated_lib(value: int) -> str:
+    """`probe()` returns `value`; its one example asserts it returns 1 and is
+    wrapped so that without the cfg its whole body is a `stringify!` argument."""
+    return f"""/// ```
+#[cfg_attr(not({_CFG}), doc = "# _ = stringify! {{")]
+/// assert_eq!(gadgets::probe(), 1);
+#[cfg_attr(not({_CFG}), doc = "# }};")]
+/// ```
+pub fn probe() -> u8 {{
+    {value}
+}}
+"""
+
+
+def _gated_crate(tmp_path: Path, name: str, value: int) -> Path:
+    root = tmp_path / name / "gadgets"
+    (root / "src").mkdir(parents=True)
+    (root / "Cargo.toml").write_text(_CARGO_TOML)
+    (root / "src" / "lib.rs").write_text(_gated_lib(value))
+    return root
+
+
+def _floor(tmp_path: Path, reporter: Any) -> Any:
+    """The reference floor's ruling on a tree whose `probe()` is wrong (2),
+    against a reference whose `probe()` is right (1), both run by `reporter`
+    under the cfg cluster."""
+    _base, alt = _clusters()
+    _n, ref_out = reporter(_gated_crate(tmp_path, "reference", 1), alt)
+    _n, our_out = reporter(_gated_crate(tmp_path, "ours", 2), alt)
+    r_pass, r_fail, r_ign, r_inc = pairs_of(parse_binary_results(ref_out))
+    o_pass, o_fail, _i, _c = pairs_of(parse_binary_results(our_out))
+    assert r_pass and not r_fail, ref_out[-2000:]
+    ref = ClusterReference(cluster="alt", passed=r_pass, failed=r_fail,
+                           ignored=r_ign, incomplete=r_inc)
+    return judge_against_reference(ref, o_pass, o_fail), our_out
+
+
+def test_a_wrong_body_fails_the_floor_through_its_cfg_gated_doc_example(
+        tmp_path: Path) -> None:
+    verdict, out = _floor(tmp_path, _reported)
+    assert verdict.met is False, out[-2000:]
+    assert any("probe" in name for _label, name in verdict.unexcused_failures)
+
+
+def test_negative_control_without_the_cfg_at_rustdoc_the_example_is_a_shell(
+        tmp_path: Path) -> None:
+    verdict, out = _floor(tmp_path, _reported_rustflags_only)
+    assert verdict.met is True, out[-2000:]
+    assert not verdict.unexcused_failures and not verdict.unmet

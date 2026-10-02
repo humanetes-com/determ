@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -145,8 +145,8 @@ def run_fix_loop(
 
     `should_end()` is read before every attempt after the first; True ends
     the loop there (reason ``"unit_bound"``) — the unit's wall-clock bound
-    (:mod:`unit_clock`), so the first attempt always runs and the one in
-    flight always completes."""
+    or its claim's moved ground (:func:`unit_clock.ended`), so the first
+    attempt always runs and the one in flight always completes."""
     if initial_done:
         return LoopOutcome(0, "done")
     n = 0
@@ -200,6 +200,7 @@ def drive_fix_loop(
     on_repeated: Callable[[int, FloorStall], None] | None = None,
     initial_floor: FixProgress | None = None,
     check_stop: Callable[[str], None] = _no_stop,
+    unit_tests: Callable[[], Iterable[str] | None] | None = None,
 ) -> tuple[bool, int]:
     """Outcome-view facade over :func:`run_fix_loop`. Run `one_attempt` until
     accepted / dead-end / stall / repeated sig / hard cap; returns
@@ -228,9 +229,14 @@ def drive_fix_loop(
     result = run_fix_loop(
         attempt, gauge, hard_cap=hard_cap, max_stalls=max_stalls,
         before_attempt=lambda n: check_stop(f"{stop_context} attempt {n}"),
-        # Every fix loop a fill route drives reads its unit's bound here, so
-        # a new route cannot run a unit unbounded by forgetting the check.
-        should_end=unit_clock.expired,
+        # Every fix loop a fill route drives reads its unit's end here — past
+        # its bound, or the ground its claim was planned on moved — so a new
+        # route cannot run a unit unbounded, or buy a call on moved ground,
+        # by forgetting the check.
+        # `unit_tests` is the tests of the names each attempt re-asks (a
+        # block of a multi-block run); without it the claim's own scope.
+        should_end=lambda: bool(unit_clock.ended(
+            unit_tests() if unit_tests is not None else None)),
     )
     if result.reason == "stalled" and on_stall is not None:
         on_stall(result.attempts, gauge)

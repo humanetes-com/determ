@@ -11,8 +11,10 @@ Three pieces:
 
 * :func:`strip_rows` — tier one, the top-level strip, and tier two, the active
   phase's sub-steps with a per-cluster status when it runs per cluster and the
-  time in the current step, ending in the `[e]` hint. Never wraps: when the
-  strip does not fit, the leading cells collapse to `…`.
+  time in the current step, ending in the `[e]` hint. Tier three is the open
+  book step's own plan (chunks, then sibling visits) when that step has
+  reported one. Never wraps: when the strip does not fit, the leading cells
+  collapse to `…`, and the book bar narrows.
 * :func:`detail_lines` — the `[e]` view: one block per phase with what it does,
   why it exists, its steps with live status and durations, what it reads and
   writes and when it is skipped. The running phase, and every phase not yet
@@ -30,10 +32,11 @@ from pipeline_core.monitor.phase_board import (
     Board,
     PhaseStatus,
     Slot,
+    WorkGauge,
     focus_top,
     phase_status,
 )
-from pipeline_core.monitor.render import cyan, dim, green, plain, red, yellow
+from pipeline_core.monitor.render import cyan, dim, green, plain, progress_bar, red, yellow
 
 __all__ = ["strip_rows", "detail_lines", "detail_start", "HINT"]
 
@@ -125,8 +128,26 @@ def _child_clusters(board: Board, c: Phase, st: PhaseStatus) -> list[str]:
     return ordered or [""]
 
 
+def _work_row(label: str, gauge: WorkGauge, width: int) -> str:
+    """The book step's bar. The count is the plan (`chunks` or `siblings`);
+    `calls` climbs on every model reply, which is where the minutes go.
+    Narrows the bar, then drops the lane count, so the row stays one line."""
+    noun = "chunks" if gauge.wave == "chunks" else "siblings"
+    prefix = "  " + label.ljust(9)
+    counts = (f"  {gauge.done}/{gauge.total} {noun}   {gauge.calls} calls"
+              f"   {gauge.lanes} lanes")
+    room = width - len(prefix) - len(counts) - 2
+    if room < 4:
+        counts = f"  {gauge.done}/{gauge.total} {noun}   {gauge.calls} calls"
+        room = width - len(prefix) - len(counts) - 2
+    bar_w = max(1, min(24, room))
+    pct = min(100.0, gauge.done / gauge.total * 100)
+    text = f"{prefix}[{progress_bar(pct, bar_w)}]{counts}"
+    return text if len(text) <= width else text[:width]
+
+
 def strip_rows(board: Board, width: int, now: float) -> list[str]:
-    """Tier one and tier two (see the module docstring)."""
+    """Tier one, tier two, and the book bar when that step is the open one."""
     cells = []
     focus_idx: int | None = None
     for i, p in enumerate(TOP_LEVEL):
@@ -152,6 +173,7 @@ def strip_rows(board: Board, width: int, now: float) -> list[str]:
             _PAINT[s](f"{cl} {_GLYPH[s]}") for cl, s in st.clusters.items()))
         parts.append(dim("│"))
     running_child: tuple[str, float | None] | None = None
+    running_id: str | None = None
     child_focus: int | None = None
     for c in kids:
         slot = _step_slot(board, c.id, active)
@@ -162,6 +184,7 @@ def strip_rows(board: Board, width: int, now: float) -> list[str]:
         parts.append(_cell(status, c.label))
         if status == "running" and slot is not None:
             running_child = (c.label, (now - slot.since) if slot.since else None)
+            running_id = c.id
             child_focus = len(parts) - 1
     if not kids:
         parts.append(_PAINT[st.status](f"{_GLYPH[st.status]}{top.title.lower()}"))
@@ -175,6 +198,9 @@ def strip_rows(board: Board, width: int, now: float) -> list[str]:
         tail = _PAINT[st.status](f"  {_WORD[st.status]}")
     rows.append(_fit(parts, width, "  " + label, tail + "  " + dim(HINT),
                      focus=child_focus))
+    gauge = board.gauges.get(running_id) if running_id and st.status == "running" else None
+    if gauge is not None and running_child is not None:
+        rows.append(_work_row(running_child[0], gauge, width))
     return rows
 
 

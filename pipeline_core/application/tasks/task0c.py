@@ -82,7 +82,13 @@ class Task0cDeps:
     block_is_prose: Any
     build_gen_tests_decl: Any
     cargo_env: Any
-    cluster_gate_for: Any        # (cluster, source_text, uncov_lines) → sibling cfg gate
+    # A generated test's gate (`application.test_worlds`): the generating
+    # world's own gate while the block is being validated, then the worlds
+    # cargo measured it to build and pass in.
+    world_gate: Any              # (cluster) → that world's own cfg gate
+    # (project_dir, module, test_file, block, cluster) → gate, or None when the
+    # test does not pass in the world that generated it (the caller drops it).
+    settle_test_gate: Any
     condense_rust_to_signatures: Any
     count_test_attrs: Any
     derive_gentest_prelude: Any
@@ -1556,7 +1562,8 @@ def _run_phase_c(
     _build_gen_tests_decl = deps.build_gen_tests_decl
     _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
     _cargo_env = deps.cargo_env
-    _cluster_gate_for = deps.cluster_gate_for
+    _world_gate = deps.world_gate
+    _settle_test_gate = deps.settle_test_gate
     _condense_rust_to_signatures = deps.condense_rust_to_signatures
     _count_test_attrs = deps.count_test_attrs
     _describe_test_environment = deps.describe_test_environment
@@ -2169,9 +2176,10 @@ project-specific import paths, type construction patterns, and hard constraints.
                 return "no_tests", block
             _sib = project_dir / gen_tests_integration_rel(abs_path.stem, pass_n)
             _test_bin = _sib.stem
-            _gate = _cluster_gate_for(
-                _current_cluster, existing_text, uncov_lines,
-                block, project_dir)
+            # Its generating world's gate until the block is accepted: nothing
+            # has shown it true in another world yet. The measured gate
+            # replaces it at the commit below.
+            _gate = _world_gate(_current_cluster) if _current_cluster else ""
             # FixLoop port: verify→LLM-fix cycle on the shared driver.
             # The old hand-rolled loop terminated only on identical error
             # signatures — floor-stall + the backstop now also bound the
@@ -2310,6 +2318,31 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _fc["contract"] = True
                         _fc["sigs"] = frozenset({"contract:" + _reason})
                         return FixOutcome("failed", err_sig=frozenset({"contract:" + _reason}),
+                                          metric=FixProgress(0, 1))
+                    # The last judge, and the one the suite is built on: the
+                    # block's worlds, its own first. It asks more than the
+                    # admission above on one point — every declared test must
+                    # be REPORTED passing, so an ignored test or a test the
+                    # block compiles out is not a pass. A block it refuses is
+                    # a failed attempt like any other: the fix loop is told
+                    # why, and nothing below counts it as admitted.
+                    if _settle_test_gate(project_dir, module_name, _sib, block,
+                                         _current_cluster) is None:
+                        _why = (
+                            "The file compiles and no test failed, but not every #[test] in "
+                            "it was reported PASSING when run in the build it was written "
+                            "for. Every test must run and pass: no `#[ignore]`, and no "
+                            "`#[cfg(...)]` (on a test or at the top of the file) that "
+                            "compiles a test out.")
+                        _log(f"  [{module_name}] gen_tests_{pass_n} in {rel_path} is not "
+                             "reported passing in the world that generated it.")
+                        _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1,
+                                            block, _why, "test_failure")
+                        _fc["err_text"] = _why
+                        _fc["runtime"] = True
+                        _fc["contract"] = False
+                        _fc["sigs"] = frozenset({"no_world"})
+                        return FixOutcome("failed", err_sig=frozenset({"no_world"}),
                                           metric=FixProgress(0, 1))
                     _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1, block, "", "success")
                     _pins = (", pins " + ", ".join(sorted(_cv.pinned))) if _cv.pinned else ""
@@ -2618,9 +2651,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _current_text = abs_path.read_text(encoding="utf-8")
                 _retry_sibling = project_dir / _retry_rel
                 _retry_sibling.parent.mkdir(parents=True, exist_ok=True)
-                _retry_gate = _cluster_gate_for(
-                    _current_cluster, existing_text, uncov_lines,
-                    _retry_block, project_dir)
+                _retry_gate = _world_gate(_current_cluster) if _current_cluster else ""
                 _retry_body = as_integration_test(
                     _retry_block, crate=module_name, allow_line=_allow_line)
                 if _retry_gate:
@@ -2635,7 +2666,17 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] Quick-retry {_ir + 1}: compile failed — reverting.")
                     _revert_gen_tests_pass(abs_path, _current_text, _retry_sibling)
                     break
-                _log(f"  [{module_name}] Quick-retry {_ir + 1}: compiled — checking coverage.")
+                # Compiling is not passing: the settle runs the block in the
+                # world that generated it before any other, and a block that
+                # fails there never enters the suite.
+                if _settle_test_gate(project_dir, module_name, _retry_sibling,
+                                     _retry_block, _current_cluster) is None:
+                    _log(f"  [{module_name}] Quick-retry {_ir + 1}: compiled but its own "
+                         "tests do not pass — reverting.")
+                    _revert_gen_tests_pass(abs_path, _current_text, _retry_sibling)
+                    break
+                _log(f"  [{module_name}] Quick-retry {_ir + 1}: compiled and passes — "
+                     "checking coverage.")
                 _qr_result = _quick_file_coverage(project_dir, module_name, rel_path)
                 if _qr_result is not None:
                     _qr_cov, _qr_able = _qr_result
@@ -2903,7 +2944,6 @@ def task0c_augment_module(
     _build_gen_tests_decl = deps.build_gen_tests_decl
     _build_task0c_prompt_sections = functools.partial(_engine_build_prompt_sections, deps)
     _cargo_env = deps.cargo_env
-    _cluster_gate_for = deps.cluster_gate_for
     _condense_rust_to_signatures = deps.condense_rust_to_signatures
     _count_test_attrs = deps.count_test_attrs
     _derive_gentest_prelude = deps.derive_gentest_prelude

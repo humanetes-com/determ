@@ -16,7 +16,6 @@ from typing import Any
 
 from pipeline_core.application.reconstruct import cluster_membership as _membership
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
-from pipeline_core.domain.cfg import cluster_specific_symbol_names
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.models import ImplBlock, ModRecord
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -38,7 +37,6 @@ class StructureCache:
         self._collect_impl_blocks = collect_impl_blocks
         self._log = log
         self._mod_records: dict[str, list[ModRecord]] = {}
-        self._cluster_specific_syms: dict[str, frozenset[str]] = {}
         self._last_membership_line: str = ""
 
     def invalidate(self) -> None:
@@ -47,7 +45,6 @@ class StructureCache:
         regeneration). Cheap enough that callers should err on the side of
         invalidation."""
         self._mod_records.clear()
-        self._cluster_specific_syms.clear()
 
     def mod_records(self, src_dir: Path) -> list[ModRecord] | None:
         """ModRecords for `src_dir` via the syn extractor, cached per dir.
@@ -59,21 +56,6 @@ class StructureCache:
                 return None
             self._mod_records[key] = recs
         return self._mod_records[key]
-
-    def cluster_specific_symbols(
-        self, project_dir: Path | None, contexts: list[Any],
-    ) -> frozenset[str]:
-        """Crate fn names compiled OUT under some cluster, cached per project.
-        The non-test fn cfg gates are stable across a cluster's augmentation
-        (added gen_tests siblings are `#[cfg(test)]`-only → never
-        cluster-specific), so caching is safe. Cleared by `invalidate()`."""
-        if project_dir is None:
-            return frozenset()
-        key = str(project_dir)
-        if key not in self._cluster_specific_syms:
-            recs = self._enumerate_fns(project_dir) or []
-            self._cluster_specific_syms[key] = cluster_specific_symbol_names(recs, contexts)
-        return self._cluster_specific_syms[key]
 
     def scan_unimplemented_records(self, src_dir: Path) -> list[dict[str, Any]] | None:
         """Full FnRecord dicts for every fn whose body is still unimplemented.

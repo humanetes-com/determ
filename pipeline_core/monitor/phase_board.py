@@ -25,13 +25,14 @@ takes the events over the state file.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from pipeline_core.domain.phase_registry import (
     PHASE_ENTER,
     PHASE_EXIT,
+    PHASE_PROGRESS,
     TOP_LEVEL,
     Phase,
     children_of,
@@ -39,7 +40,7 @@ from pipeline_core.domain.phase_registry import (
     phase_satisfied_by_state,
 )
 
-__all__ = ["Slot", "Board", "fold_board", "phase_status", "PhaseStatus",
+__all__ = ["Slot", "Board", "WorkGauge", "fold_board", "phase_status", "PhaseStatus",
            "running_top", "focus_top"]
 
 _OUTCOME_STATUS = {"ok": "done", "skipped": "skipped", "error": "error",
@@ -54,6 +55,19 @@ class Slot:
     since: float | None = None
     duration_s: float | None = None
     detail: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class WorkGauge:
+    """The open book's own plan: chunks of the draft-and-judge wave, then
+    sibling visits. `calls` is every model call spent so far, across both
+    waves. `lanes` is how many of those units run at once."""
+
+    wave: str
+    done: int
+    total: int
+    calls: int
+    lanes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +89,8 @@ class Board:
     state: Mapping[str, str]
     alive: bool
     clusters: tuple[str, ...]
+    # phase id -> the latest `phase.progress` for that step.
+    gauges: Mapping[str, WorkGauge] = field(default_factory=dict)
 
 
 def _epoch(ts: Any) -> float | None:
@@ -86,6 +102,22 @@ def _epoch(ts: Any) -> float | None:
         return None
 
 
+def _gauge(data: Any) -> WorkGauge | None:
+    if not isinstance(data, Mapping):
+        return None
+    wave = data.get("wave")
+    if wave not in ("chunks", "siblings"):
+        return None
+    try:
+        done, total = int(data["done"]), int(data["total"])
+        calls, lanes = int(data["calls"]), int(data["lanes"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if total <= 0 or done < 0 or calls < 0:
+        return None
+    return WorkGauge(str(wave), done, total, calls, max(1, lanes))
+
+
 def fold_board(
     records: Iterable[Mapping[str, Any]],
     state: Mapping[str, str],
@@ -93,26 +125,36 @@ def fold_board(
     alive: bool,
     clusters: Sequence[str] = (),
 ) -> Board:
-    """Replay `records` (this run's `phase.enter` / `phase.exit`, in order)."""
+    """Replay `records` (this run's `phase.enter` / `phase.exit` /
+    `phase.progress`, in order)."""
     slots: dict[tuple[str, str], Slot] = {}
+    gauges: dict[str, WorkGauge] = {}
     recency: list[str] = []
     for rec in records:
         name = rec.get("event")
         pid = rec.get("phase")
-        if name not in (PHASE_ENTER, PHASE_EXIT) or not isinstance(pid, str):
+        if name not in (PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS) or not isinstance(pid, str):
             continue
         cl = rec.get("cluster") or ""
         key = (pid, cl)
         data = rec.get("data") or {}
         detail = str(data.get("detail", "")) if isinstance(data, Mapping) else ""
+        if name == PHASE_PROGRESS:
+            gauge = _gauge(data)
+            if gauge is not None:
+                gauges[pid] = gauge
+            continue
         ts = _epoch(rec.get("ts"))
         if pid in recency:
             recency.remove(pid)
         recency.append(pid)
         if name == PHASE_ENTER:
             # A parent entering again (t1 on the next iteration, t2a on the
-            # next cluster) discards the steps its previous entry left behind.
+            # next cluster) discards the steps its previous entry left behind,
+            # and the book's bar with them: the new entry has not reported yet.
+            gauges.pop(pid, None)
             for child in children_of(pid):
+                gauges.pop(child.id, None)
                 for k in [k for k in slots if k[0] == child.id and k[1] in (cl, "")]:
                     del slots[k]
             slots[key] = Slot("running", since=ts, detail=detail)
@@ -127,7 +169,7 @@ def fold_board(
     if not alive:
         slots = {k: (Slot("aborted", v.since, v.duration_s, v.detail)
                      if v.status == "running" else v) for k, v in slots.items()}
-    return Board(slots, tuple(recency), dict(state), alive, tuple(clusters))
+    return Board(slots, tuple(recency), dict(state), alive, tuple(clusters), gauges)
 
 
 def _slots_of(board: Board, pid: str) -> dict[str, Slot]:

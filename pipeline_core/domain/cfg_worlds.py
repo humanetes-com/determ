@@ -138,3 +138,25 @@ def membership(per_world: Mapping[str, Iterable[str]]) -> Callable[[str], Worlds
         for k in keys:
             index.setdefault(k, set()).add(w)
     return lambda k: frozenset(index.get(k, ()))
+
+
+def gate_for_worlds(worlds: Iterable[str], atoms: Mapping[str, str]) -> str:
+    """The cfg predicate under which code is compiled in exactly `worlds`,
+    rendered from each world's own gate (`atoms`: world → the predicate that
+    is true in that world and false in the others).
+
+    Empty when `worlds` is every world — the element is core and carries no
+    gate — or when a world in it has no gate of its own (a crate with one
+    world). One world gives its atom; several give `any(…)` of theirs, in
+    name order. An element in no world is a caller's error: something that
+    was never shown to build anywhere must not come out ungated."""
+    every = frozenset(atoms)
+    ws = frozenset(worlds) & every
+    if not ws:
+        raise ValueError("gate_for_worlds: no known world to gate to")
+    if ws >= every:
+        return ""
+    preds = [atoms[w] for w in sorted(ws)]
+    if not all(preds):
+        return ""
+    return preds[0] if len(preds) == 1 else "any(" + ", ".join(preds) + ")"

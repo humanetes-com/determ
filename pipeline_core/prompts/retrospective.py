@@ -20,6 +20,7 @@ def build_phase_c_retro_prompt(
     bound_methods_section: str = "",
     pinned_observables: str = "",
     compiled: bool = False,
+    later_compile_failures: int = 0,
 ) -> str:
     """`pinned_observables` is the oracle extraction of the tests the unit
     answers for (`domain.refill_evidence.pinned_observables_from_tests`).
@@ -50,14 +51,23 @@ def build_phase_c_retro_prompt(
         f"\n<BOUND_METHODS>\n{bound_methods_section}\n</BOUND_METHODS>\n"
     ) if bound_methods_section.strip() else ""
     if compiled:
+        # The subject is the best compiling attempt when later ones did not
+        # compile (`refine.retro_subject`): say so, or the reader takes the
+        # body for the last word and the attempt count for its history.
+        later = (
+            f" {later_compile_failures} later attempt(s) did not compile; "
+            "they were different bodies and their errors are not shown."
+            if later_compile_failures > 0 else "")
         attempt_line = (
             f"You are diagnosing why a reconstruction attempt for fn `{fn_name}` "
             f"in `{file_rel}` (impl: `{container}`, cluster: `{cluster_name}`) "
             f"compiled and then crashed or reddened tests after "
-            f"{fix_attempts} attempt(s).\n\n")
+            f"{fix_attempts} attempt(s).{later}\n\n")
         body_line = (
-            "Last attempted body (compiled; rustc accepted it):\n"
-            f"```rust\n{last_body[:failed_body_cap]}\n```\n\n")
+            ("Best attempted body (compiled; rustc accepted it; this is the "
+             "body the loop keeps):\n" if later_compile_failures > 0
+             else "Last attempted body (compiled; rustc accepted it):\n")
+            + f"```rust\n{last_body[:failed_body_cap]}\n```\n\n")
         error_line = (
             "Crash / test failure from that attempt:\n"
             f"```\n{error_excerpt[:fix_err_cap]}\n```\n")

@@ -17,8 +17,7 @@ thin shims built it.
 """
 from __future__ import annotations
 
-import shlex
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
 from pipeline_core.domain.cfg import (
@@ -151,47 +150,6 @@ def count_doc_tests_in_records(
         count_doc_tests_in_doc(r.doc) for r in records
         if not any(cs.excludes_for_cargo(g) for g in r.cfg_predicates))
 
-
-
-def _cfg_flag_names(flags: str) -> set[str]:
-    """The `--cfg` names one RUSTFLAGS/RUSTDOCFLAGS value sets (`--cfg N` and
-    `--cfg=N`; a `key="value"` cfg keeps its whole spelling)."""
-    try:
-        tokens = shlex.split(flags)
-    except ValueError:
-        tokens = flags.split()
-    out: set[str] = set()
-    for i, tok in enumerate(tokens):
-        if tok == "--cfg" and i + 1 < len(tokens):
-            out.add(tokens[i + 1].strip())
-        elif tok.startswith("--cfg="):
-            out.add(tok[len("--cfg="):].strip())
-    return out
-
-
-def rustdoc_cfg_sets(
-    cfg_true: Iterable[str],
-    cfg_false: Iterable[str],
-    env_extra: Mapping[str, str] | None,
-) -> tuple[set[str], set[str]]:
-    """(true, false) cfg sets as RUSTDOC sees them for a cluster built under
-    `env_extra`.
-
-    cargo hands RUSTFLAGS to rustc and RUSTDOCFLAGS to rustdoc, so a cluster
-    that activates a cfg with `RUSTFLAGS=--cfg N` compiles `#[cfg(N)]` items
-    and still documents — and collects doc tests from — the `not(N)` arms.
-    A cluster's `cfg_true` lists both spellings of such an atom (`N` and
-    `feature = "N"`, since a cluster delivers one of the two); the `--cfg`
-    delivery reaches neither form for rustdoc, so both move to false.
-    Measured on the merged anyhow tree (run 185710-f6135a93, 2026-09-17): the
-    `nightly` cluster (`RUSTFLAGS=--cfg error_generic_member_access`) ran the
-    doc tests of the not-`error_generic_member_access` copies — 177 reported
-    where the rustc cfg set counted 178."""
-    rustc_only = _cfg_flag_names((env_extra or {}).get("RUSTFLAGS", "")) - \
-        _cfg_flag_names((env_extra or {}).get("RUSTDOCFLAGS", ""))
-    off = set(rustc_only) | {f'feature = "{n}"' for n in rustc_only}
-    return ({p for p in cfg_true if p not in off},
-            set(cfg_false) | off)
 
 
 def test_fn_names_in_records(

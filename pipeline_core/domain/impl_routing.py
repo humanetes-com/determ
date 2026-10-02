@@ -24,7 +24,9 @@ from typing import Any
 from pipeline_core.domain.identity import ContainerId
 from pipeline_core.domain.models import ImplBlock
 from pipeline_core.domain.rust_idents import (
+    ContainerIdentity,
     canon_container,
+    container_identity,
     impl_head_name,
     impl_trait_name,
     mod_container_ident,
@@ -96,6 +98,10 @@ class DroppedBody:
     fn_name: str
     block_attr: str
     attr_canon: str
+    #: The file containers the header named when it named MORE than one
+    #: (two impls of same-named traits for one self type): the body is
+    #: dropped as ambiguous, not as unknown.
+    ambiguous: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +185,46 @@ def _member_identity_admits(block_attr: str, decls: list[FileMember]) -> bool:
     return head is not None and ident is not None and head == ident
 
 
+def named_container(
+    block_attr: str, containers: Sequence[tuple[str, ContainerIdentity]],
+) -> tuple[str | None, tuple[str, ...]]:
+    """The file container a reply header names, or ``(None, candidates)``.
+
+    ``containers`` is the target first, then the related containers in
+    listed order, each with its :func:`container_identity`. One question,
+    answered once: which container of this file does the header name?
+
+    * the header as written, then the same canonical identity — first in
+      listed order, so the target wins and two cfg-gated twins with one
+      header resolve as they always did;
+    * else the containers whose self type is equal and whose trait path is
+      a segment suffix of the header's, or the reverse
+      (:meth:`ContainerIdentity.names`). Exactly one distinct identity
+      routes. More than one is ambiguous and is returned for the drop line;
+      none is unknown.
+
+    The suffix clause is what a string compare could not read: run
+    `3040-51eab48c` (2026-10-02) dropped a body tagged ``impl<E>
+    ext::StdError for E where …`` against the file's ``impl<E> StdError for
+    E`` inside ``mod ext``. A trait impl that is absent from the file (cfg-
+    gated out of this cluster) still names nothing: no container has its
+    self type under that trait."""
+    raw = next((c for c, _ in containers if c == block_attr), None)
+    if raw is not None:
+        return raw, ()
+    ident = container_identity(block_attr)
+    same = next((c for c, ci in containers if ci.canon == ident.canon), None)
+    if same is not None:
+        return same, ()
+    near: dict[str, str] = {}
+    for c, ci in containers:
+        if ident.names(ci):
+            near.setdefault(ci.canon, c)
+    if len(near) == 1:
+        return next(iter(near.values())), ()
+    return None, tuple(near.values())
+
+
 def route_fn_bodies(
     parsed: list[dict[str, Any]], *, target: str, related: list[str],
     trait_defaults: Sequence[TraitDefaultHost] = (),
@@ -186,9 +232,11 @@ def route_fn_bodies(
 ) -> BodyRouting:
     """Resolve each parsed FN block to the TARGET or a RELATED container.
 
-    Tiers per body (first hit wins): exact match on TARGET, exact on RELATED
-    (listed order), canonical match on TARGET, canonical on RELATED (listed
-    order), then the trait-default tier — a body tagged `impl <Trait> for <Ty>`
+    Tiers per body (first hit wins): the container the header NAMES
+    (:func:`named_container` — one identity of trait path and self type,
+    of which the exact and the canonical match are the degenerate case),
+    then a mis-closed generic list read as closed, then the trait-default
+    tier — a body tagged `impl <Trait> for <Ty>`
     or the abbreviated `impl <Trait>` that matched no container routes to the
     declaration of `<Trait>` when that trait declares the member — the
     membership requirement is what makes the abbreviated form safe, since in
@@ -264,6 +312,7 @@ def route_fn_bodies(
     dropped: list[DroppedBody] = []
     target_canon = canon_container(target)
     related_canon = [(c, canon_container(c)) for c in related]
+    idents = [(c, container_identity(c)) for c in (target, *related)]
     for fn_data in parsed:
         block_attr = fn_data.get("block") or ""
         if not block_attr.strip():
@@ -275,20 +324,15 @@ def route_fn_bodies(
             else:
                 routed.append(RoutedBody(fn_data, target))
             continue
-        if block_attr == target:
-            routed.append(RoutedBody(fn_data, target))
-            continue
-        exact = next((c for c in related if block_attr == c), None)
-        if exact is not None:
-            routed.append(RoutedBody(fn_data, exact))
+        named, ambiguous = named_container(block_attr, idents)
+        if named is not None:
+            routed.append(RoutedBody(fn_data, named))
             continue
         attr_canon = canon_container(block_attr)
-        if attr_canon == target_canon:
-            routed.append(RoutedBody(fn_data, target))
-            continue
-        canonical = next((c for c, cc in related_canon if attr_canon == cc), None)
-        if canonical is not None:
-            routed.append(RoutedBody(fn_data, canonical))
+        if ambiguous:
+            dropped.append(DroppedBody(
+                str(fn_data.get("fn_name", "")), block_attr, attr_canon,
+                ambiguous=ambiguous))
             continue
         # A header whose last generic list the model closed with `)` or `]`
         # (`… for Result<T, E)`, `… ContextError<C, Error]`) names the impl as

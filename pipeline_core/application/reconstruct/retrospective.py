@@ -67,6 +67,7 @@ def diagnose_phase_c(
     bound_methods_section: str = "",
     pinned_observables: str = "",
     compiled: bool = False,
+    later_compile_failures: int = 0,
 ) -> dict[str, str]:
     if not last_body and not error_excerpt:
         return {"category": "", "guidance": "", "signal": "no_data"}
@@ -121,6 +122,7 @@ def diagnose_phase_c(
         bound_methods_section=bound_methods_section,
         pinned_observables=pinned_observables,
         compiled=compiled,
+        later_compile_failures=later_compile_failures,
     )
     # Retro runs think=True with a bounded output budget (think=False
     # returns empty content on the vLLM reasoning-parser endpoint). One retry on

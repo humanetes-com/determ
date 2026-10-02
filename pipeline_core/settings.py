@@ -178,6 +178,12 @@ class Settings:
     # rules drafted from its own examples. Read off the behaviour-book line
     # (`N by a sibling chunk's rule`).
     behaviour_book_sibling_chunks: bool = True
+    # One sentence per root the examples are given (a test-file item their
+    # code names), drafted in one call per test file and printed beside the
+    # pointer in the generated view only. `BEHAVIOUR_BOOK_GIVEN_PHRASES=0`
+    # asks for none. Read off the behaviour-book line (`givens: N phrase(s)
+    # for M root(s)`).
+    behaviour_book_given_phrases: bool = True
     # Percent of t0d's own captures held out of the suite as the agreement
     # reading (`domain/held_out.py`): never emitted as tests, never in a
     # prompt or the book; run against the reconstruction when a cluster's
@@ -256,6 +262,8 @@ class Settings:
                 os.getenv("BEHAVIOUR_HELD_OUT_SHARE", "25")))),
             behaviour_book_sibling_chunks=os.getenv(
                 "BEHAVIOUR_BOOK_SIBLING_CHUNKS", "1").strip() == "1",
+            behaviour_book_given_phrases=os.getenv(
+                "BEHAVIOUR_BOOK_GIVEN_PHRASES", "1").strip() == "1",
             language_driver=LanguageDriverKind.coerce(
                 os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC),
         )

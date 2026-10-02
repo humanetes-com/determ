@@ -357,6 +357,7 @@ def cfg_world_rules(clusters: Iterable[BuildCluster]) -> str:
 
 def fill_invariants_section(
     cluster: BuildCluster | None, *, no_std: str, macro_invariants: str,
+    worlds: Sequence[BuildCluster] = (),
 ) -> str:
     """The CLUSTER_INVARIANTS text every fill route hands its prompt builder:
     the crate-level no_std fact, the cluster's cfg world, and the active macro
@@ -369,8 +370,28 @@ def fill_invariants_section(
     cluster `nightly`: the per-fn fill of `ErrorImpl::backtrace` reasoned
     "used by nightly provide? Possibly." and wrote a body that never takes the
     active cfg's path. The task3 retry had rendered these facts since
-    2026-08-19; the fill routes did not."""
-    world = cfg_world_rules([cluster]) if cluster is not None else ""
+    2026-08-19; the fill routes did not.
+
+    `worlds` is the run's whole world plan. With two or more, the section
+    describes every one of them and says the body is built in each: the tree
+    a fill writes into keeps every cfg arm, and the compile check builds it
+    under each world (`cargo_runner.WorldChecks`). Describing only the fill's
+    own world told it that the other world's items "DO NOT EXIST" and that
+    its own gated items simply exist — run `292191-d60a5308` (2026-10-02),
+    six `stable` constructors that read `stable`-only items unguarded and did
+    not build in `nightly`. With no plan, or one world, the text is the
+    one-world text as before."""
+    if cluster is None:
+        world = ""
+    elif len(worlds) > 1:
+        names = ", ".join(f"`{c.name}`" for c in sorted(worlds, key=lambda c: c.name))
+        world = (
+            f"This source is ONE tree compiled in EVERY cfg world below "
+            f"({names}). A body you write is built in each of them and must "
+            f"compile in all; the tests that judge it here run in "
+            f"`{cluster.name}`.\n" + cfg_world_rules(worlds))
+    else:
+        world = cfg_world_rules([cluster])
     return "\n\n".join(s for s in (no_std, world, macro_invariants) if s)
 
 
@@ -407,7 +428,7 @@ def target_scope_rule(
     `gated_*` are the targets the cluster's cfg identity compiles — code the
     world with that identity inverted compiles out (`fn_execution
     .flipped_cfg_set`): a test for them needs the gated items and is gated to
-    the cluster (`cluster_gate_for_sibling`). `shared_*` are targets every
+    the cluster until cargo measures otherwise (`application.test_worlds`). `shared_*` are targets every
     cluster compiles and no test run under THIS cluster reaches yet. A
     cluster with no cfg identity (a crate with one world) gets no rule; a
     prompt with no target gets none either.

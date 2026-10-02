@@ -15,6 +15,7 @@ for leaf-first scheduling"; a token scan preserves that exactly.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 
 
 def _word_spans(text: str) -> list[tuple[int, int]]:
@@ -1177,6 +1178,41 @@ def canon_container(container: str) -> str:
     brace is removed, never a split at the first one: a const-generic self type
     (``impl Foo for Bar<{ N }>``) carries braces that are part of its identity
     and ends in ``>``."""
+    return _canon_tail(_header_core(container))
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerIdentity:
+    """What a container header names: the trait path it implements, split
+    into ``::`` segments (empty for an inherent impl, a trait declaration or
+    a module), and the self type. Both in :func:`canon_container`'s
+    normal form, so ``canon`` is that function's string."""
+
+    trait: tuple[str, ...]
+    self_ty: str
+    canon: str
+
+    def names(self, other: ContainerIdentity) -> bool:
+        """True when the two headers name one impl of one file: the self
+        types are equal and one trait path is a SEGMENT suffix of the other
+        (``ext::StdError`` and ``StdError``; ``core::fmt::Debug`` and
+        ``fmt::Debug``). Equal identities are the degenerate case.
+
+        Segments, never characters: ``Error for E`` is a character suffix
+        of ``StdError for E`` and names a different trait. An inherent
+        header names only an inherent header."""
+        if self.self_ty != other.self_ty:
+            return False
+        a, b = self.trait, other.trait
+        if not a or not b:
+            return a == b
+        short, long = (a, b) if len(a) <= len(b) else (b, a)
+        return long[len(long) - len(short):] == short
+
+
+def _header_core(container: str) -> str:
+    """The single-spaced header past ``impl`` and its generics, with the
+    where-clause and a trailing body brace dropped."""
     s = " ".join(_strip_outer_attrs(_unescape_layout(container)).split())
     if s.startswith("impl"):
         s = _skip_generics(s[4:].lstrip())
@@ -1184,9 +1220,69 @@ def canon_container(container: str) -> str:
         s = s.rstrip()[:-1]
     if s.endswith(" where"):
         s = s[: -len(" where")]
-    s = s.split(" where ")[0]
+    return s.split(" where ")[0]
+
+
+def _canon_tail(s: str) -> str:
     return _drop_empty_generics(
         _drop_orphan_plus("".join(_strip_lifetimes(s).split())))
+
+
+def _path_segments(path: str) -> tuple[str, ...]:
+    """``path`` split at ``::`` outside any generic list. Whitespace-free."""
+    out: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(path):
+        ch = path[i]
+        if ch in "<(":
+            depth += 1
+        elif ch in ">)":
+            depth -= 1
+        elif depth == 0 and path.startswith("::", i):
+            out.append(path[start:i])
+            start = i + 2
+            i += 1
+        i += 1
+    out.append(path[start:])
+    return tuple(seg for seg in out if seg)
+
+
+def container_identity(container: str) -> ContainerIdentity:
+    """The header's identity (see :class:`ContainerIdentity`).
+
+    A reply tags each body with the header it answers to, and a model that
+    sees an impl inside ``mod ext`` writes the trait by the path it would
+    use from outside: ``impl<E> ext::StdError for E where …`` for the file's
+    ``impl<E> StdError for E``. The router compared the canonical strings
+    byte for byte and dropped the body (run `3040-51eab48c`, 2026-10-02,
+    `src/context.rs`, `raw_canon='ext::StdErrorforE'`). The separator is the
+    one :func:`impl_trait_name` already reads: the first whole-word ``for``
+    at generic depth 0 that does not open an HRTB."""
+    core = _header_core(container)
+    is_impl = " ".join(
+        _strip_outer_attrs(_unescape_layout(container)).split()
+    ).startswith("impl")
+    canon = _canon_tail(core)
+    if is_impl:
+        depth = 0
+        for i, ch in enumerate(core):
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif (depth == 0 and core.startswith("for", i)
+                  and (i == 0 or not _is_ascii_ident_char(core[i - 1]))
+                  and (i + 3 >= len(core)
+                       or not _is_ascii_ident_char(core[i + 3]))):
+                rest = core[i + 3:].lstrip()
+                if rest.startswith("<"):    # HRTB, not the separator
+                    continue
+                return ContainerIdentity(
+                    trait=_path_segments(_canon_tail(core[:i])),
+                    self_ty=_canon_tail(rest), canon=canon)
+    return ContainerIdentity(trait=(), self_ty=canon, canon=canon)
 
 
 def repair_truncated_generics(canon: str) -> str:

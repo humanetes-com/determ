@@ -35,13 +35,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 __all__ = [
-    "PHASE_ENTER", "PHASE_EXIT", "OUTCOMES", "Phase", "PHASES", "TOP_LEVEL",
+    "PHASE_ENTER", "PHASE_EXIT", "PHASE_PROGRESS", "OUTCOMES", "Phase", "PHASES", "TOP_LEVEL",
     "phase", "children_of", "parent_of", "state_key_owner", "known_ids",
     "phase_satisfied_by_state",
 ]
 
 PHASE_ENTER = "phase.enter"
 PHASE_EXIT = "phase.exit"
+# A step that stays open for a long time (the behaviour book) reports how
+# much of its own plan is done without closing. The monitor draws that as
+# the bar under the step row. It is not a phase and it has no registry id.
+PHASE_PROGRESS = "phase.progress"
 
 # What a `phase.exit` reports. `skipped` = the phase's own checkpoint said it
 # was already done, so nothing ran; `aborted` = the process is stopping.
@@ -142,6 +146,10 @@ PHASES: tuple[Phase, ...] = (
     _p("t0d.exercises", "exercises", "Exercises",
        "Which functions each example enters, by coverage.", per_cluster=True),
     _p("t0d.emit", "emit", "Emit tests", "Captured values become real, executed tests.", per_cluster=True),
+    _p("t0d.doc_examples", "doc examples", "Doc examples",
+       "Once per module, after the clusters' passes: each runnable doc example of the "
+       "original is rendered as a test, run on the original, and kept in the worlds "
+       "where it passes."),
     _p("t0d.book", "book", "Behaviour book",
        "Once for every build world, after the clusters' passes: rules drafted and "
        "checked by the model over the union of the suites, projected into each "

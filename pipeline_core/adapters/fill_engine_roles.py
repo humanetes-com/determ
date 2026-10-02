@@ -329,6 +329,11 @@ class WorkspaceModelAdapter:
     cluster_filter_type_members_fn: Callable[[list[Any], Any], list[Any]]
     is_gen_tests_file_fn: Callable[[str], bool]
     leaf_first_fn_order_fn: Callable[[list[FnLocator], Any], list[FnLocator]]
+    # The run's whole world plan; empty when none is bound (one-world text).
+    all_clusters_fn: Callable[[], list[Any]] = lambda: []
+
+    def all_clusters(self) -> list[Any]:
+        return list(self.all_clusters_fn())
 
     def scan_stub_records(self, target_src_dir: Path,
                           cluster: Any) -> list[dict[str, Any]] | None:
@@ -411,7 +416,8 @@ class RetrosAdapter:
                  fix_attempts: int, prior_retrospective: str = "",
                  bound_methods_section: str = "",
                  pinned_observables: str = "",
-                 compiled: bool = False) -> dict[str, Any]:
+                 compiled: bool = False,
+                 later_compile_failures: int = 0) -> dict[str, Any]:
         return self.diagnose_fn(
             fn_name=fn_name, sig_text=sig_text, container=container,
             file_rel=file_rel, cluster_name=cluster_name, last_body=last_body,
@@ -419,7 +425,8 @@ class RetrosAdapter:
             prior_retrospective=prior_retrospective,
             bound_methods_section=bound_methods_section,
             pinned_observables=pinned_observables,
-            compiled=compiled)
+            compiled=compiled,
+            later_compile_failures=later_compile_failures)
 
     def append_note(self, fr_path: Path, note: str,
                     error_codes: list[str] | set[str] | None = None,

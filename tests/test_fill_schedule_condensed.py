@@ -284,3 +284,111 @@ def test_the_shared_driver_reads_the_bound_and_always_runs_one_attempt() -> None
         unit_clock.clear()
     # A thread that never claimed has no bound.
     assert not unit_clock.expired()
+
+
+# ---- a claimed unit keeps its claim's ground question ----
+# Run `3040-51eab48c` (2026-10-02, fill 5): the premise gate was asked when a
+# unit was claimed and never again, so a unit's later call was bought after a
+# keep of the same wave had moved every test it was planned on.
+
+
+def test_a_claimed_unit_ends_when_the_ground_of_its_claim_moves() -> None:
+    from pipeline_core.application.fix_loop import FixOutcome
+    moved: set[str] = set()
+    asked: list[tuple[frozenset[str] | None, frozenset[FnLocator]]] = []
+    unit = FnLocator("a.rs", "f")
+
+    def ground(scope, units) -> bool:
+        asked.append((scope, units))
+        return bool(scope and scope <= moved)
+
+    clock = RunClock(share_minutes=None, fill_remaining=lambda: None,
+                     ground_moved=ground, scope=frozenset({"t_run"}),
+                     units=frozenset({unit}))
+    calls: list[int] = []
+
+    def attempt(n: int) -> FixOutcome:
+        calls.append(n)
+        moved.add("t_unit")  # a keep elsewhere moved this unit's test
+        return FixOutcome("failed", err_sig=frozenset({str(n)}),
+                          metric=FixProgress(10 - n, 0))
+
+    try:
+        assert clock.may_claim(["t_unit"], [unit])
+        assert unit_clock.ended() == ""
+        claims = clock.claims
+        accepted, n = drive_fix_loop(attempt, hard_cap=10, max_stalls=99,
+                                     stop_context="unit")
+        assert (accepted, n, calls) == (False, 1, [1])
+        assert unit_clock.ended() == "premise"
+        # Asked on the CLAIM's scope and units, not the run's, and asking
+        # is not a claim: no count, no restarted bound.
+        assert asked[-1] == (frozenset({"t_unit"}), frozenset({unit}))
+        assert clock.claims == claims
+    finally:
+        unit_clock.clear()
+    assert unit_clock.ended() == ""
+
+
+def test_negative_control_a_claim_with_no_premise_gate_runs_to_its_cap() -> None:
+    """The pre-change boundary: only the bound ends a unit. The same loop
+    with nothing to ask runs every attempt."""
+    from pipeline_core.application.fix_loop import FixOutcome
+    clock = RunClock(share_minutes=None, fill_remaining=lambda: None)
+    calls: list[int] = []
+
+    def attempt(n: int) -> FixOutcome:
+        calls.append(n)
+        return FixOutcome("failed", err_sig=frozenset({str(n)}),
+                          metric=FixProgress(10 - n, 0))
+
+    try:
+        assert clock.may_claim()
+        _accepted, n = drive_fix_loop(attempt, hard_cap=4, max_stalls=99,
+                                      stop_context="unit")
+        assert n == 4 and unit_clock.ended() == ""
+    finally:
+        unit_clock.clear()
+
+
+def test_the_premise_is_asked_before_the_bound() -> None:
+    t = [0.0]
+    try:
+        unit_clock.start(1.0, now=lambda: t[0], ground=lambda _tests: True)
+        t[0] = 600.0
+        assert unit_clock.expired() and unit_clock.ended() == "premise"
+        unit_clock.start(1.0, now=lambda: t[0])
+        t[0] = 1300.0
+        assert unit_clock.ended() == "bound"
+        assert unit_clock.note_once() and not unit_clock.note_once()
+    finally:
+        unit_clock.clear()
+
+
+def test_a_later_call_is_asked_on_the_names_it_sends_not_the_claims_scope() -> None:
+    """A claim planned on two tests stands while one of them still fails —
+    that is the gate's rule for a claim. A retry that sends only the name
+    whose test moved has nothing left to judge it, and a retry that sends
+    no named test is refused once anything moved. Negative control: the
+    same state asked on the claim's scope (the first cut of this boundary)
+    still buys the call."""
+    moved = {"t_peeled"}
+    unit = FnLocator("a.rs", "f")
+
+    def gate(scope, _units) -> bool:
+        # The gate's own rule: refused only when the whole scope moved; an
+        # empty scope stands on the whole ground.
+        return bool(moved) and (not scope or scope <= moved)
+
+    clock = RunClock(share_minutes=None, fill_remaining=lambda: None,
+                     ground_moved=gate,
+                     scope=frozenset({"t_peeled", "t_still_red"}),
+                     units=frozenset({unit}))
+    try:
+        assert clock.may_claim()
+        assert unit_clock.ended() == ""                     # the control
+        assert unit_clock.ended(["t_peeled"]) == "premise"
+        assert unit_clock.ended(["t_still_red"]) == ""
+        assert unit_clock.ended([]) == "premise"
+    finally:
+        unit_clock.clear()

@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -31,6 +31,7 @@ from pipeline_core.domain.assertion_position import (
     is_oracle_test_path,
 )
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
+from pipeline_core.domain.cluster_env import world_of_env
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
@@ -914,11 +915,99 @@ def run_check_diag(
 
 
 @dataclass(frozen=True, slots=True)
+class WorldChecks:
+    """The other build worlds a tree that compiles in its own must compile in.
+
+    A cluster's tree keeps every cfg arm, so it is the crate in every world,
+    and a body the fill wrote while shown one world is kept by a check that
+    built one world. Run `292191-d60a5308` (2026-10-02), anyhow: six
+    constructors `stable` accepted at 183 of 184 read `no_backtrace`,
+    `context_backtrace` and `ErrorVTable.object_backtrace`, which exist only
+    where `error_generic_member_access` is off. The same tree under the
+    `nightly` world: 13 errors, all in those bodies; `stable`'s own check: 0.
+    `nightly` seeded them, its entry heal re-stubbed them, and it refilled
+    them — 41 calls, 263 model-minutes — while both skeletons build clean in
+    both worlds.
+
+    So the compile check answers for the crate: when the tree builds in the
+    world the command ran in, it is built in each other world, and the first
+    world that fails is the result — its diagnostics, each naming the world,
+    under a header saying the home build is clean. Every consumer of the
+    check (the keep sites, the fix loops, the heal, the compile frontier)
+    then reads one verdict and none can keep a one-world body by not asking.
+
+    The home world is read from the env (`cluster_env.WORLD_VAR`, set by the
+    one overlay that builds a cluster env); an env built for no cluster, or a
+    run with one world, is checked once as before. A world whose cargo run
+    equals the home one (`world_key`) is not a second world."""
+
+    clusters: Callable[[], Sequence[Any]]
+    cluster_env: Callable[[Any], dict[str, str]]
+    world_key: Callable[[Any], object]
+    log: Callable[[str], None]
+
+    def others(self, env: Mapping[str, str]) -> list[Any]:
+        home = world_of_env(env)
+        if not home:
+            return []
+        by_name = {str(c.name): c for c in self.clusters()}
+        here = by_name.get(home)
+        if here is None:
+            return []
+        own = self.world_key(here)
+        return [c for n, c in sorted(by_name.items())
+                if n != home and self.world_key(c) != own]
+
+    def env_for(self, cluster: Any, cwd: Path, home_env: Mapping[str, str]) -> dict[str, str]:
+        """The other world's env. Its own target directory: another world's
+        flags and toolchain in the home target would invalidate every
+        fingerprint the home build relies on."""
+        env = self.cluster_env(cluster)
+        base = home_env.get("CARGO_TARGET_DIR") or str(cwd / "target")
+        env["CARGO_TARGET_DIR"] = str(Path(base) / "worlds" / str(cluster.name))
+        return env
+
+
+def cmd_for_world(cmd: str, cluster: Any) -> str:
+    """`cmd` with the toolchain selector of `cluster` instead of its own
+    (`cargo +nightly check` ↔ `cargo check`)."""
+    argv = shlex.split(cmd)
+    if not argv:
+        return cmd
+    rest = argv[1:]
+    if rest and rest[0].startswith("+"):
+        rest = rest[1:]
+    toolchain = getattr(cluster, "toolchain", None)
+    return shlex.join([argv[0], *([f"+{toolchain}"] if toolchain else []), *rest])
+
+
+def world_failure(
+    home: str, world: str, rc: int, text: str, diags: list[Diagnostic],
+) -> tuple[int, str, list[Diagnostic]]:
+    """A failure of the `world` build of a tree whose `home` build is clean,
+    as the check's result: every diagnostic and the text say which build it
+    is, so a prompt that quotes either cannot present it as a `home` error."""
+    note = (f"  = note: this is the `{world}` cfg world's build of the SAME "
+            f"source; the `{home}` build compiles. The item or field named "
+            f"here is cfg-gated: it does not exist in `{world}`.")
+    tagged = [replace(d, rendered=(d.rendered.rstrip() + "\n" + note + "\n")
+                                  if d.rendered else d.rendered)
+              for d in diags]
+    header = (f"The tree compiles in cfg world `{home}` and FAILS in cfg world "
+              f"`{world}` — one source, two builds. A body every world "
+              f"compiles must build in both:\n")
+    return rc, header + text, tagged
+
+
+@dataclass(frozen=True, slots=True)
 class PortBoundCargoRunner:
     """Production `ports.cargo_runner.CargoRunner`: the module's composition
     fns bound to one raw `Cargo` port. Built once in `build_app`."""
 
     cargo: Cargo
+    # None checks only the world the command ran in (the negative control of
+    # the every-world check, and every caller that binds no clusters).
+    worlds: WorldChecks | None = None
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
             timeout: int = 180) -> tuple[int, str]:
@@ -926,4 +1015,22 @@ class PortBoundCargoRunner:
 
     def check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
                    timeout: int = 180) -> tuple[int, str, list[Diagnostic]]:
-        return run_check_diag(self.cargo, cmd, cwd, env, timeout)
+        home = run_check_diag(self.cargo, cmd, cwd, env, timeout)
+        if home[0] != 0 or self.worlds is None:
+            return home
+        for cluster in self.worlds.others(env):
+            rc, text, diags = run_check_diag(
+                self.cargo, cmd_for_world(cmd, cluster), cwd,
+                self.worlds.env_for(cluster, cwd, env), timeout)
+            if rc == -1:
+                # No reading (timeout, cargo missing) is not a failure of the
+                # tree: the home verdict stands and the log says what is
+                # missing.
+                self.worlds.log(
+                    f"  [check] no reading in cfg world `{cluster.name}` "
+                    f"({text.strip()[:120]}) — judged on `{world_of_env(env)}` alone.")
+                continue
+            if rc != 0:
+                return world_failure(world_of_env(env), str(cluster.name),
+                                     rc, text, diags)
+        return home

@@ -148,7 +148,7 @@ def find_project_dir() -> str | None:
 
 
 def read_phase_records(events_log: str) -> list[dict[str, Any]]:
-    """This run's `phase.enter` / `phase.exit` records, in order.
+    """This run's `phase.enter` / `phase.exit` / `phase.progress` records, in order.
 
     Read from `phases.jsonl` beside the event log, whole, not from the 8 MB
     tail `events_data.read_recent_events` windows: the emitter copies phase

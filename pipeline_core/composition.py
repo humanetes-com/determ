@@ -106,6 +106,7 @@ from pipeline_core.adapters.coverage import (
 from pipeline_core.adapters.coverage_owner import (
     measure_coverage_slice as _measure_coverage_slice,
 )
+from pipeline_core.adapters.dead_code import measure_world_dead_code
 from pipeline_core.adapters.discovery import (
     collect_examples as _disc_collect_examples,
 )
@@ -275,6 +276,7 @@ from pipeline_core.adapters.retros import (
     suspend_futile_guidance as _suspend_futile_guidance,
 )
 from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
+from pipeline_core.adapters.rust_parse import ParseCheck
 from pipeline_core.adapters.skeleton_compile import compile_filled_check
 from pipeline_core.adapters.state import (
     log_state_summary as _state_log_state_summary,
@@ -322,6 +324,7 @@ from pipeline_core.adapters.telemetry import (
     emit_per_file_test_overview as _emit_per_file_test_overview,
 )
 from pipeline_core.adapters.test_runner import CallableTestRunner
+from pipeline_core.adapters.test_worlds import test_passes_in_world
 from pipeline_core.adapters.vllm_bootstrap import (
     ensure_vllm_ready as _ensure_vllm_ready,
 )
@@ -368,6 +371,14 @@ from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.behaviour_agreement import AgreementDeps, measure_agreement
 from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.cluster_augment import ClusterAugmentor
+from pipeline_core.application.dead_stub_reading import (
+    DeadStubDeps,
+    read_dead_stub_sites,
+)
+from pipeline_core.application.doc_example_tests import (
+    DocExampleDeps,
+    emit_doc_example_tests,
+)
 from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
@@ -430,7 +441,10 @@ from pipeline_core.application.reconstruct.cargo_errors import (
 from pipeline_core.application.reconstruct.cargo_errors import (
     focus_cargo_errors as _focus_cargo_errors_impl,
 )
-from pipeline_core.application.reconstruct.cargo_runner import PortBoundCargoRunner
+from pipeline_core.application.reconstruct.cargo_runner import (
+    PortBoundCargoRunner,
+    WorldChecks,
+)
 from pipeline_core.application.reconstruct.cargo_runner import (
     u2_test_gate as _cargo_runner_u2_gate,
 )
@@ -628,6 +642,11 @@ from pipeline_core.application.tasks.task3 import (
 )
 from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_run
+from pipeline_core.application.test_worlds import (
+    TestWorldsDeps,
+    settle_test_gate,
+    world_is_measurable,
+)
 from pipeline_core.application.validate import Task2CheckerDeps
 from pipeline_core.application.validate import (
     validate_task1_output as _validate_task1_output,
@@ -663,6 +682,7 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
 )
+from pipeline_core.domain.cluster_env import world_key
 from pipeline_core.domain.cluster_plan import merged_view_cluster, nightly_rules_for
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.coverage import CoverageMeasurement
@@ -757,7 +777,7 @@ from pipeline_core.domain.llm_output import (
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _split_api_surface_by_file,
 )
-from pipeline_core.domain.models import FnRecord
+from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retro_categories,
@@ -944,7 +964,6 @@ class Helpers:
     # provides these App-reading closures itself):
     # Phase-subcommand collaborators:
     # Task-0c collaborators (Task0cDeps construction):
-    cluster_gate_for: Callable[..., Any]
     describe_test_environment: Callable[..., Any]
     coverage_target: float
     task0c_prompt_char_cap: int
@@ -1301,11 +1320,15 @@ def build_app(
     # Former pipeline delegate defs, bound direct. The splice gate + the
     # cluster caches resolve through the LIVE App when app_ref is provided (a
     # test's dataclasses.replace on the held App wins), else the injected values.
-    def _validate_parse(path: Path) -> bool:
+    def _parse_ok(path: Path) -> bool:
         """Splice-gate validator: parse-check via the live structure reader —
         only fill-tree files are gated, never the frozen oracle/tests."""
         reader = app_ref().structure if app_ref is not None else structure
         return reader.parse_ok(path)
+
+    # Callable as the gate always was; a refusal also asks it what the parser
+    # says about the refused text (`adapters.rust_parse`).
+    _validate_parse = ParseCheck(_parse_ok)
 
     splice_fn_body_at = functools.partial(
         _splice_mod.splice_fn_body_at, validate_parse=_validate_parse)
@@ -1382,6 +1405,44 @@ def build_app(
     # More former pipeline delegate defs, bound direct.
     def cluster_cfg_attr(cluster: Any) -> str:
         return _membership.cluster_cfg_attr(cluster, scope.all)
+
+    def _world_type_members(records: list[Any], cluster: Any) -> list[Any]:
+        """The type table every fill route is shown: fields and methods of
+        every world, the gated ones marked (`cluster_filter_type_members`)."""
+        return _membership.cluster_filter_type_members(
+            records, cluster, list(scope.all))
+
+    # A generated test's worlds are measured, not predicted
+    # (`application.test_worlds`): the accepted file is run under every other
+    # baked world's env and gated to the worlds it passes in.
+    _test_worlds_deps = TestWorldsDeps(
+        clusters=lambda: list(scope.all),
+        world_gate=cluster_cfg_attr,
+        passes_in=functools.partial(
+            test_passes_in_world, cluster_env=cluster_cargo_env,
+            timeout=cfg.build_timeout),
+        log=ports.log, emit=ports.emit,
+        world_key=world_key)
+
+    def _settle_test_gate(project_dir: Path, module_name: str, test_file: Path,
+                          block: str, cluster: Any) -> str | None:
+        return settle_test_gate(project_dir, module_name, test_file, block,
+                                cluster, _test_worlds_deps)
+
+    # The original's doc examples, emitted as oracle tests before strip
+    # (`application.doc_example_tests`), each verified and gated by the same
+    # per-world measurement as a generated test.
+    _doc_example_deps = DocExampleDeps(
+        enumerate_doc_items=enumerate_doc_items,
+        world_gate=cluster_cfg_attr,
+        settle=_settle_test_gate,
+        measurable=lambda c: world_is_measurable(c, _test_worlds_deps),
+        log=ports.log, emit=ports.emit)
+
+    def _emit_doc_examples(project_dir: Path, module_name: str,
+                           clusters: Any) -> Any:
+        return emit_doc_example_tests(project_dir, module_name, clusters,
+                                      _doc_example_deps)
 
     def build_test_reverse_map(test_files: Any, src_dir: Path) -> Any:
         deps_a = app_ref().attribution_deps if app_ref is not None else _attr_deps
@@ -1800,6 +1861,7 @@ def build_app(
         verify_tests=_verify_behaviour_tests,
         perturb_env=lambda c: perturbed_env(probe_env(c)),
         cluster_cfg_attr=cluster_cfg_attr,
+        emit_doc_examples=_emit_doc_examples,
         PROBE_MAX_PER_CLUSTER=settings.task0d_probe_max,
         PROBE_BLOCKS_PER_REPLY=settings.task0d_blocks_per_reply,
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
@@ -1817,7 +1879,8 @@ def build_app(
             drafts_per_reply=settings.behaviour_book_drafts_per_reply,
             lanes=settings.behaviour_book_lanes,
             predict_temperature=settings.behaviour_book_predict_temperature,
-            sibling_chunks=settings.behaviour_book_sibling_chunks),
+            sibling_chunks=settings.behaviour_book_sibling_chunks,
+            given_phrases=settings.behaviour_book_given_phrases),
         write_features=write_feature_files,
     )
 
@@ -1886,7 +1949,8 @@ def build_app(
             fn_container_index_fn=_via("fn_container_index"),
             fn_belongs_to_cluster_fn=structure_cache.fn_belongs_to_cluster,
             cluster_dead_sites_fn=structure_cache.cluster_dead_sites,
-            cluster_filter_type_members_fn=_membership.cluster_filter_type_members,
+            cluster_filter_type_members_fn=_world_type_members,
+            all_clusters_fn=lambda: list(scope.all),
             is_gen_tests_file_fn=helpers.is_gen_tests_file,
             leaf_first_fn_order_fn=_leaf_first_fn_order,
         ),
@@ -1958,6 +2022,16 @@ def build_app(
     def _reference_hollow(project_dir: Path) -> frozenset[tuple[str, str]]:
         measured = _reference(project_dir)
         return measured.hollow if measured is not None else frozenset()
+
+    _dead_stub_deps = DeadStubDeps(
+        enumerate_fns=enumerate_fns, enumerate_mods=enumerate_mods,
+        measure_world=functools.partial(
+            measure_world_dead_code, cluster_env=cluster_cargo_env,
+            timeout=cfg.test_timeout),
+        log=ports.log)
+
+    def _dead_stub_sites(project_dir: Path, clusters: Any) -> frozenset[FnSite]:
+        return read_dead_stub_sites(project_dir, clusters, _dead_stub_deps)
 
     def _reference_excused(project_dir: Path) -> frozenset[str]:
         """Bare names of tests the pristine tree fails or skips in ANY cluster."""
@@ -2267,6 +2341,7 @@ def build_app(
         load_baked_clusters=_load_baked_clusters,
         reference_hollow=_reference_hollow,
         augmentation_fn_records=augment_store.all_fn_records,
+        dead_stub_sites=_dead_stub_sites,
     )
     reattach_deps = ReattachDeps(
         log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,
@@ -2582,6 +2657,7 @@ def build_app(
         scan_unimplemented_functions=scan_unimplemented_functions,
         reference_hollow=_reference_hollow,
         augmentation_fn_records=augment_store.all_fn_records,
+        dead_stub_sites=_dead_stub_sites,
     )
 
     _crash_localizer_deps = CrashLocalizerDeps(
@@ -2604,7 +2680,17 @@ def build_app(
         ports=ports,
         config=config,
         structure=structure,
-        cargo_runner=PortBoundCargoRunner(adapters.cargo),
+        cargo_runner=PortBoundCargoRunner(
+            adapters.cargo,
+            # Every compile check of a cluster tree also builds the other
+            # worlds (`cargo_runner.WorldChecks`). `PHASE_C_ALL_WORLDS_CHECK=0`
+            # checks the home world only — the pre-2026-10-02 gate, kept as
+            # the negative control of a reading.
+            worlds=(WorldChecks(
+                clusters=lambda: list(scope.all),
+                cluster_env=cluster_cargo_env,
+                world_key=world_key, log=ports.log)
+                if _os.getenv("PHASE_C_ALL_WORLDS_CHECK", "1") != "0" else None)),
         ask_client=ask_client,
         scan_stub_records_for_cluster=structure_cache.scan_unimplemented_records_for_cluster,
         collect_impl_blocks_for_cluster=structure_cache.collect_impl_blocks_for_cluster,
@@ -2721,7 +2807,8 @@ def build_app(
             cargo_err_sig=_cargo_err_sig,
             cargo_err_sig_from_diagnostics=_cargo_err_sig_from_diagnostics,
             check_graceful_stop=check_graceful_stop,
-            cluster_filter_type_members=_membership.cluster_filter_type_members,
+            cluster_filter_type_members=_world_type_members,
+            all_clusters=lambda: list(scope.all),
             collect_crate_macros=collect_crate_macros,
             collect_impl_blocks_for_cluster=collect_impl_blocks_via_app,
             collect_sibling_filled_bodies=_collect_sibling_filled_bodies,
@@ -2792,7 +2879,8 @@ def build_app(
             build_gen_tests_decl=_gen_build_gen_tests_decl,
             guard=ports.guard,
             cargo_env=ports.cargo_env,
-            cluster_gate_for=helpers.cluster_gate_for,
+            world_gate=cluster_cfg_attr,
+            settle_test_gate=_settle_test_gate,
             condense_rust_to_signatures=_condense_rust_to_signatures,
             count_test_attrs=_scan_count_test_attrs,
             derive_gentest_prelude=_gts_derive_gentest_prelude,

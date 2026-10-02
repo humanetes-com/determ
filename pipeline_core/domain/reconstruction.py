@@ -92,6 +92,26 @@ class SpliceOutcome(NamedTuple):
     reason: SpliceReason
     delta: int
 
+
+class SpliceRefusal(SpliceOutcome):
+    """A refused splice that carries what the parser said about the text it
+    refused. Still the `(ok, reason, delta)` tuple every caller unpacks; the
+    diagnostic rides beside it for the one reader that turns a refusal into
+    feedback (`splice_feedback.reply_refusal_feedback`).
+
+    A refusal used to be a bare reason. The reply that caused it was never
+    shown why, so the cheapest failure to repair — a syntax slip — ended the
+    unit's fix loop: run `473471-33301154` (2026-09-29), the frontier's top
+    blocker answered with `x as &dyn A + B + 'static`, an ambiguous `+` in a
+    cast type, was refused `parse_broken`, and got one call per fill."""
+
+    diagnostic: str = ""
+
+    def __new__(cls, reason: SpliceReason, diagnostic: str = "") -> SpliceRefusal:
+        self = super().__new__(cls, False, reason, 0)
+        self.diagnostic = diagnostic
+        return self
+
 # Crate-type constraint appended to the generation context for proc-macro crates
 # so the model emits a valid macro crate (entry fns over `proc_macro::TokenStream`,
 # helpers in private submodules). Policy text, not I/O — lives in the domain.

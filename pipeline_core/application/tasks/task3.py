@@ -21,6 +21,7 @@ from typing import Any
 from pipeline_core.domain.test_results import join_capture
 
 from ...application.reconstruct.attribution import not_body_repairable_tests
+from ...domain.cluster_env import overlay_cluster_env
 from ...domain.reference_floor import (
     ReferenceMeasurement,
     judge_cluster_binaries,
@@ -69,9 +70,10 @@ class Task3Deps:
     # no inventory at all.
     reference: Callable[[Path], ReferenceMeasurement | None] = lambda _p: None
     # The env for ONE named cluster (RUSTFLAGS appended, RUSTUP_TOOLCHAIN set
-    # when required). Bound to cluster_cargo_env in composition. None keeps
-    # the old cargo_env() + dict.update(env_extra) overlay for tests that
-    # inject a fake result through env_extra — that overlay is what dropped
+    # when required). Bound to cluster_cargo_env in composition. None builds
+    # it from cargo_env() through the same overlay rule
+    # (`domain.cluster_env.overlay_cluster_env`), for tests that inject a fake
+    # result through env_extra; the dict.update it replaced dropped
     # -A warnings and skipped the toolchain on a live nightly cluster.
     cluster_env: Callable[[Any], dict[str, str]] | None = None
     # (project_dir, cluster, pass count, expected count): the held-out
@@ -140,7 +142,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             cluster_env = deps.cluster_env(cluster)
         else:
             cluster_env = deps.cargo_env()
-            cluster_env.update(cluster.env_extra or {})
+            overlay_cluster_env(cluster_env, cluster)
         log(f"  [task3/{cluster.name}] running {cluster_cmd}")
         t_c = time.monotonic()
         try:

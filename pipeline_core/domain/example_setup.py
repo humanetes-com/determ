@@ -25,6 +25,7 @@ language-shaped item the scanner can split. It names no crate and no test.
 from __future__ import annotations
 
 import textwrap
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.rust_lex import code_mask
@@ -574,6 +575,28 @@ def item_index(files: list[tuple[str, str]]) -> dict[str, list[tuple[str, FileIt
             else:
                 key = f"{path}::{item.name}"
             index.setdefault(item.name, []).append((key, item))
+    return index
+
+
+def helper_key_parts(key: str) -> tuple[str, str, bool]:
+    """`(file, name, is_impl)` of a key :func:`item_index` wrote: `path::name`,
+    or `path::name::implN` for an impl of that name. A file's import key
+    (`path::use`) reads as the name `use`; ask `IMPORTS_KEY_SUFFIX` first."""
+    file, _, rest = key.partition("::")
+    name, _, tail = rest.partition("::")
+    return file, name, tail.startswith("impl") and tail[4:].isdigit()
+
+
+def stored_index(items: Sequence[tuple[str, str]]) -> dict[str, list[tuple[str, FileItem]]]:
+    """The index :func:`item_index` built, recovered from stored `(key,
+    text)` pairs, so a reader of a stored example resolves a name to the
+    same keys the harvester did. Import keys bind no item and are left out."""
+    index: dict[str, list[tuple[str, FileItem]]] = {}
+    for key, text in items:
+        if key.endswith(IMPORTS_KEY_SUFFIX):
+            continue
+        _file, name, is_impl = helper_key_parts(key)
+        index.setdefault(name, []).append((key, FileItem(name=name, text=text, is_impl=is_impl)))
     return index
 
 

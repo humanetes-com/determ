@@ -130,6 +130,7 @@ from pipeline_core.domain.dispatch_batch import (
 )
 from pipeline_core.domain.escalation_lifetime import (
     FiredProduct,
+    attributed_cohorts,
     escalate_to_measured_owners,
     escalation_fire_due,
     product_addition_keys,
@@ -5163,11 +5164,10 @@ def run_phase_c_tdd(
         # grade) and the frontier; they do not replace an existing producer
         # product and they do not re-admit permanently_exhausted.
         _owner_admits: dict[FnLocator, set[str]] = {}
-        _units_for_owners: dict[str, set[FnLocator]] = {}
-        for _ok, _ots in eligible.items():
-            for _ot in _ots:
-                _units_for_owners.setdefault(
-                    bare_test_name(_ot), set()).add(_ok)
+        # The cohort is the attribution's, not the dispatchable subset: a
+        # unit the exhaustion filter skipped is still one the test was
+        # attributed to, and the admission counts it as done.
+        _units_for_owners = attributed_cohorts(frontier, eligible)
         _pair_locs = frozenset(
             loc
             for p in (_attr.pairs or ())

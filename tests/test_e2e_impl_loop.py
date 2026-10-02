@@ -2057,3 +2057,85 @@ def test_impl_round_whose_lesson_would_not_reach_the_prompt_does_not_re_enter(
     install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
     res2 = _run(ws2)
     assert res2.impls_filled == 1 and res2.attempts == 3
+
+
+# --- a later call of a claimed unit is asked on the claim's ground ----------
+# Run `3040-51eab48c` (2026-10-02, fill 5): a file keep turned the last red
+# test green, and two file runs already inside that wave then each opened a
+# second attempt for a peeled name. The unit's claim hands its ground
+# question to `unit_clock`; the attempt loop reads it before every call
+# after the first. The two tests above (peel retry lands `kind`; compile
+# failure is retried with the diagnostics) are the negative controls: the
+# same scripts with no moved ground buy the second call.
+
+
+def _claim_with_ground(monkeypatch, moved) -> None:
+    """Every claim of the fill carries ``moved`` as its ground question —
+    what `RunClock` hands the unit clock when the fill has a premise gate.
+    The harness fill has none, so the claim's own call is wrapped."""
+    from pipeline_core.domain import unit_clock
+    real = unit_clock.start
+    monkeypatch.setattr(
+        unit_clock, "start",
+        lambda bound, **kw: real(bound, **{**kw, "ground": moved}))
+
+
+def test_a_peel_retry_is_not_bought_once_the_claims_ground_moved(
+        monkeypatch, tmp_path):
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return RESPONSE_TWO
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])],
+        frontier={FnLocator("lib.rs", "kind"): {"<compile>"}})
+    # The claim's ground: unmoved when the unit opens, moved by the time its
+    # first reply has been judged (another run of the wave kept a body).
+    asked: list[frozenset[str] | None] = []
+
+    def _moved(tests=None) -> bool:
+        asked.append(None if tests is None else frozenset(tests))
+        return bool(prompts)
+
+    _claim_with_ground(monkeypatch, _moved)
+    res = _run(ws)
+    # Asked on the tests of the one name the retry would send (`kind`, the
+    # peeled body) — an explicit set, never the claim's scope (None). The
+    # peeled stub holds no test in this harness, so the set is empty: a
+    # call that asks no named test, refused once anything has moved.
+    assert asked and asked[0] == frozenset()
+    text = (ws / "src" / "lib.rs").read_text()
+    assert "self.tag + 1" in text, "the judged remainder of attempt 1 stays"
+    assert len(prompts) == 1, (
+        "no call opens for the peeled name on ground that moved")
+    assert res.answer_lost_fns == (), "a deferred name is not a lost answer"
+
+
+def test_a_compile_retry_is_not_bought_once_the_claims_ground_moved(
+        monkeypatch, tmp_path):
+    """The revert that falls through the bottom of the attempt loop is asked
+    at the same boundary as the `continue` paths: no retry turn is sent."""
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    sent = install_scripted_turns(monkeypatch, RESPONSE_TWO)
+    monkeypatch.setenv("PHASE_C_FILE_MAX_ATTEMPTS", "3")
+    install_scripted_cargo(
+        monkeypatch,
+        check_diag=(101, "error[E0432]: unresolved import `crate::Nope`",
+                    [diag("src/lib.rs", code="E0432")]))
+    _claim_with_ground(monkeypatch, lambda _tests=None: bool(sent))
+    _run(ws)
+    retries = [t for t in sent
+               if t[-1]["content"].startswith("RESULT of your previous reply")]
+    assert retries == [], "no file-first retry turn on moved ground"

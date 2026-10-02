@@ -74,17 +74,6 @@ def test_filter_tests_for_cluster_none_passthrough() -> None:
     assert cm.filter_tests_for_cluster(tf, None) is tf
 
 
-def test_cluster_gate_lazy_symbols_not_called_for_nondefault() -> None:
-    nightly = _C(name="nightly", active_cfg=("egma",))
-    called: list[int] = []
-    def _record_call() -> frozenset[str]:
-        called.append(1)
-        return frozenset()
-
-    cm.cluster_gate_for_sibling(nightly, "src", [], "", [nightly], _record_call)
-    assert not called  # non-default cluster → returns base gate before symbol branch
-
-
 def test_propagate_or_quarantine_sibling(tmp_path: Path) -> None:
     gt = tmp_path / "x.gen_tests_2.rs"
     gt.write_text("// test", encoding="utf-8")

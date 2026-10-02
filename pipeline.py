@@ -68,7 +68,6 @@ from pipeline_core.adapters.run_registry import FileRunRegistry, RunRegistryEntr
 from pipeline_core.adapters.structure import CliStructureReader as _CliStructureReader
 from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.application import orchestrator as _orchestrator
-from pipeline_core.application.reconstruct import cluster_membership as _membership
 from pipeline_core.application.reconstruct import fix_diagnostics as _fix_diag
 from pipeline_core.application.reconstruct import impl_fill as _impl_fill
 from pipeline_core.application.reconstruct import per_fn_retry as _per_fn_retry
@@ -89,7 +88,6 @@ from pipeline_core.composition import CompositionConfig as _CompositionConfig
 from pipeline_core.composition import Helpers as _Helpers
 from pipeline_core.composition import Ports as _Ports
 from pipeline_core.composition import build_app as _build_app
-from pipeline_core.domain import cfg as _cfg
 from pipeline_core.domain.cargo_toml import cargo_is_proc_macro as _domain_cargo_is_proc_macro
 from pipeline_core.domain.cargo_toml import load_cargo_toml as _domain_load_cargo_toml
 from pipeline_core.domain.cluster_scope import ClusterScope
@@ -837,7 +835,6 @@ _set_current: "Callable[..., None]" = _state_mod.set_current
 _HELPERS = _Helpers(
     ask_retrospective=lambda *a, **k: _ask_retrospective(*a, **k),
     ask_per_fn_body=lambda *a, **k: _ask_per_fn_body(*a, **k),
-    cluster_gate_for=lambda *a, **k: _cluster_gate_for_sibling(*a, **k),
     describe_test_environment=lambda *a, **k: _describe_test_environment(*a, **k),
     coverage_target=COVERAGE_AUGMENTATION_TARGET,
     task0c_prompt_char_cap=TASK0C_PROMPT_CHAR_CAP,
@@ -1408,32 +1405,6 @@ _is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
 # Prelude imports injected into generated test modules when absent. Each row is
 # (import_stmt, accepted `use`-prefixes, required symbol token): present when a
 # `use <prefix>…<symbol>…` statement exists (R7: rust_scan.use_imports_symbol).
-
-
-def _cluster_gate_for_sibling(cluster, source_text: str, uncov_lines,
-                              sibling_body: str = "",
-                              project_dir: "Path | None" = None) -> str:
-    """The cfg gate to stamp on a gen_tests sibling. Gate it to its cluster
-    only when the lines it targets are cluster-SPECIFIC (live inside a `#[cfg]`
-    region that some cluster compiles out); a cluster-agnostic test is emitted
-    UNGATED so a later cluster sees those lines already covered and skips
-    re-augmenting them (kills the cross-cluster duplication). Only the default
-    (stable) cluster shares — a non-default cluster keeps its gate (it runs after
-    stable, so its agnostic lines are already covered; its real work is the gated
-    delta). This is the documented-safe criterion: a `not(egma)` stable-only test
-    stays gated to stable, never leaking into the nightly harness.
-
-    Additionally, even when the TARGET lines are agnostic, a body that CALLS a
-    cluster-specific symbol (a fn compiled out under some cluster) would fail to
-    compile if shared ungated into that cluster's harness. So keep the gate when
-    `sibling_body` references any cluster-specific symbol — only a body that is
-    both line-agnostic AND symbol-agnostic is shared."""
-    # Relocated to cluster_membership.cluster_gate_for_sibling; shim binds
-    # _SCOPE.all + a LAZY cluster-specific-symbols provider (extractor + cache).
-    contexts = [_cfg.CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false) for c in _SCOPE.all]
-    return _membership.cluster_gate_for_sibling(
-        cluster, source_text, uncov_lines, sibling_body, _SCOPE.all,
-        lambda: _APP.structure_cache.cluster_specific_symbols(project_dir, contexts))
 
 
 # TestAugmentor (ABC) → ports/augment.py; StaticRustTestAugmentor →

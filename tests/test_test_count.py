@@ -130,16 +130,18 @@ def _with_records(records):
     return dataclasses.replace(_deps(), enumerate_doc_items=lambda _p: records)
 
 
-def test_doc_tests_of_a_cfg_gated_copy_count_only_where_rustdoc_collects_it(
+def test_doc_tests_of_a_cfg_gated_copy_count_in_the_cluster_that_compiles_it(
         tmp_path: Path) -> None:
+    """A cluster's doc tests are those of the copies its cfg compiles: every
+    cluster cargo env hands rustdoc the cfgs it hands rustc
+    (`domain.cluster_env`), so the count has one cfg set, however the cluster
+    spells its env."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(_TWO_COPIES)
     deps = _with_records(_doc_records())
     assert active_test_inventory_for_cluster(tmp_path, _base_cluster(), deps)[0] == 1
-    # RUSTFLAGS reaches rustc only: rustdoc documents the not-variant_b copy.
     rustflags = _variant_cluster({"RUSTFLAGS": "--cfg variant_b"})
-    assert active_test_inventory_for_cluster(tmp_path, rustflags, deps)[0] == 1
-    # The same cfg handed to rustdoc too collects the other copy's two examples.
+    assert active_test_inventory_for_cluster(tmp_path, rustflags, deps)[0] == 2
     both = _variant_cluster({"RUSTFLAGS": "--cfg variant_b",
                              "RUSTDOCFLAGS": "--cfg variant_b"})
     assert active_test_inventory_for_cluster(tmp_path, both, deps)[0] == 2
@@ -152,13 +154,3 @@ def test_without_doc_records_the_text_scan_counts_every_copy(tmp_path: Path) -> 
     (tmp_path / "src" / "lib.rs").write_text(_TWO_COPIES)
     for cluster in (_base_cluster(), _variant_cluster({"RUSTFLAGS": "--cfg variant_b"})):
         assert active_test_inventory_for_cluster(tmp_path, cluster, _deps())[0] == 3
-
-
-def test_rustdoc_cfg_sets_drop_only_what_rustflags_alone_delivers() -> None:
-    from pipeline_core.domain.test_count import rustdoc_cfg_sets
-    true, false = rustdoc_cfg_sets(
-        ["x", 'feature = "x"', "y", 'feature = "std"'], ["z"],
-        {"RUSTFLAGS": "-A warnings --cfg x --cfg=y", "RUSTDOCFLAGS": "--cfg y"})
-    assert true == {"y", 'feature = "std"'}
-    assert false == {"z", "x", 'feature = "x"'}
-    assert rustdoc_cfg_sets(["x"], [], None) == ({"x"}, set())

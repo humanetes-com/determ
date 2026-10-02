@@ -93,50 +93,6 @@ def test_excluded_uncovered_lines_active_and_excluded_blocks() -> None:
     assert stable.excluded_uncovered_lines(src, set()) == set()
 
 
-def test_lines_are_cluster_specific() -> None:
-    from pipeline_core.domain.cfg import lines_are_cluster_specific
-    src = (
-        "fn always() { body(); }\n"                # 1  agnostic
-        "#[cfg(error_generic_member_access)]\n"    # 2
-        "fn egma() { x(); }\n"                      # 3  nightly-only
-    )
-    stable = CfgSet.of(cfg_false=["error_generic_member_access"])
-    nightly = CfgSet.of(cfg_true=["error_generic_member_access"])
-    ctxs = [stable, nightly]
-    # Line 1 compiles in both clusters → agnostic → shareable.
-    assert lines_are_cluster_specific(src, {1}, ctxs) is False
-    # Line 3 is compiled out under stable → cluster-specific → must stay gated.
-    assert lines_are_cluster_specific(src, {3}, ctxs) is True
-    assert lines_are_cluster_specific(src, set(), ctxs) is False
-
-
-def test_cluster_specific_symbol_names_flags_gated_fns() -> None:
-    # A fn compiled OUT under some cluster is cluster-specific; an
-    # ungated fn (and a #[cfg(test)]-only fn, builtin atom) is NOT.
-    from pipeline_core.domain.cfg import cluster_specific_symbol_names
-    recs = [
-        {"fn_name": "always", "cfg_predicates": []},
-        {"fn_name": "egma", "cfg_predicates": ["error_generic_member_access"]},
-        {"fn_name": "std_only", "cfg_predicates": ['feature = "std"']},
-        {"fn_name": "a_test", "cfg_predicates": ["test"]},  # builtin → never excluded
-    ]
-    stable = CfgSet.of(cfg_false=["error_generic_member_access"])      # default, std on
-    no_std = CfgSet.of(cfg_false=["error_generic_member_access", 'feature = "std"'])
-    names = cluster_specific_symbol_names(recs, [stable, no_std])
-    assert names == frozenset({"egma", "std_only"})
-
-
-def test_body_uses_cluster_specific_symbol_word_boundary() -> None:
-    from pipeline_core.domain.cfg import body_uses_cluster_specific_symbol
-    names = frozenset({"egma", "std_only"})
-    assert body_uses_cluster_specific_symbol("let x = egma();", names) is True
-    # word-boundary: `egma_helper` must NOT match `egma`.
-    assert body_uses_cluster_specific_symbol("egma_helper();", names) is False
-    assert body_uses_cluster_specific_symbol("let x = always();", names) is False
-    assert body_uses_cluster_specific_symbol("", names) is False
-    assert body_uses_cluster_specific_symbol("egma()", frozenset()) is False
-
-
 def test_excludes_for_cargo_custom_off_and_nondefault_feature() -> None:
     empty = CfgSet.of()
     # custom --cfg toggle enabled nowhere → cargo leaves it OFF → excluded.

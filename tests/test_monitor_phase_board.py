@@ -70,6 +70,13 @@ def test_state_file_alone_cannot_claim_bake_is_running():
     assert "✓t0c" in row and "·bake" in row and "▶" not in row
 
 
+def _progress(done, total, calls, *, wave="chunks", lanes=4, ts=10):
+    rec = ev("progress", "bake.book", ts)
+    rec["data"] = {"wave": wave, "done": done, "total": total,
+                   "calls": calls, "lanes": lanes}
+    return rec
+
+
 def test_events_put_the_bake_and_the_book_on_screen_while_they_run():
     b = board(BAKE_STRETCH)
     assert pb.running_top(b).id == "bake"
@@ -78,6 +85,32 @@ def test_events_put_the_bake_and_the_book_on_screen_while_they_run():
     assert "✓inline-tests" in sub and "✓api" in sub and "✓skeleton" in sub
     assert "▶book" in sub and "[e] explain" in sub
     assert sub.startswith("  bake")
+    # Negative control: a book with no plan reported draws no third row.
+    assert len(strip(b)) == 2
+
+
+def test_the_open_book_draws_its_own_bar_and_a_finished_book_does_not():
+    b = board(BAKE_STRETCH + [_progress(3, 16, 21)])
+    rows = strip(b)
+    assert len(rows) == 3
+    assert rows[2].startswith("  book")
+    assert "3/16 chunks" in rows[2] and "21 calls" in rows[2] and "4 lanes" in rows[2]
+    assert "█" in rows[2] and "░" in rows[2]
+    siblings = board(BAKE_STRETCH + [_progress(2, 9, 40, wave="siblings", ts=11)])
+    assert "2/9 siblings" in strip(siblings)[2]
+    # The bar is the open step's. Once the book exits, the row goes with it.
+    moved = board(BAKE_STRETCH + [
+        _progress(16, 16, 62),
+        ev("exit", "bake.book", 20, outcome="ok", dur=1000),
+        ev("enter", "bake.manifest", 20),
+    ])
+    assert len(strip(moved)) == 2 and "▶manifest" in strip(moved)[1]
+    # A dead process is not still filling the bar.
+    assert len(strip(board(BAKE_STRETCH + [_progress(3, 16, 21)], alive=False))) == 2
+    for width in (140, 60, 40):
+        for row in strip(b, width):
+            assert len(row) <= width, (width, row)
+        assert "3/16 chunks" in strip(b, width)[2]
 
 
 def test_a_dead_process_reads_aborted_not_running():

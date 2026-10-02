@@ -752,3 +752,80 @@ def test_a_tuple_self_type_is_not_mistaken_for_a_truncated_header() -> None:
     assert [rb.container for rb in r.routed] == [pair_impl]
     assert r.dropped_names == ("g",)
     assert canon_container("impl Foo for (A, B)") == "Foofor(A,B)"
+
+
+# --- a header names an impl by a pair (trait path, self type) ---------------
+# Run `3040-51eab48c` (2026-10-02, src/context.rs): the body was tagged with
+# the trait as it is named from outside the inline module that declares the
+# impl, the router compared canonical strings byte for byte, and the answer
+# was dropped. The shapes below are invented; only the header slip is the
+# recorded one.
+
+
+def test_a_header_with_a_longer_trait_path_routes_to_the_one_impl_it_names(
+) -> None:
+    inner = "impl < E > Shown for E"
+    other = "impl Shown for Wrapper"
+    r = route_fn_bodies(
+        [_fn("show", "impl<E> ext::Shown for E where E: crate::Shown + Send,")],
+        target=other, related=[inner])
+    assert r.dropped == ()
+    assert [rb.container for rb in r.routed] == [inner]
+    # The reverse spelling — the file is the longer one — is the same name.
+    r = route_fn_bodies(
+        [_fn("fmt", "impl Debug for Wrapper")],
+        target="impl core::fmt::Debug for Wrapper", related=[])
+    assert [rb.container for rb in r.routed] == [
+        "impl core::fmt::Debug for Wrapper"]
+
+
+def test_negative_control_the_string_compare_drops_the_longer_path() -> None:
+    """The pre-change rule on the same header: no container's canonical
+    string equals it, so the body had nowhere to go."""
+    attr = "impl<E> ext::Shown for E where E: crate::Shown + Send,"
+    containers = ["impl Shown for Wrapper", "impl < E > Shown for E"]
+    assert canon_container(attr) not in {canon_container(c) for c in containers}
+
+
+def test_a_suffix_is_of_segments_never_of_characters() -> None:
+    # `Shown for E` is a character suffix of `ReShown for E`; it is another
+    # trait, and the body is dropped as unknown.
+    r = route_fn_bodies(
+        [_fn("show", "impl<E> Shown for E")],
+        target="impl<E> ReShown for E", related=[])
+    assert r.routed == () and r.dropped_names == ("show",)
+    assert r.dropped[0].ambiguous == ()
+
+
+def test_a_trait_impl_absent_from_the_file_still_names_nothing() -> None:
+    # The cfg-gated-out impl: no container has that self type under that
+    # trait, whatever path the header spells — and an inherent header never
+    # names a trait impl of the same type.
+    r = route_fn_bodies(
+        [_fn("not", "impl crate::Bool for bool"),
+         _fn("fmt", "impl Wrapper")],
+        target="impl<T> Bool for &T", related=["impl Debug for Wrapper"])
+    assert r.routed == () and set(r.dropped_names) == {"not", "fmt"}
+
+
+def test_two_impls_the_header_could_name_drop_it_as_ambiguous() -> None:
+    a = "impl a::Shown for Wrapper"
+    b = "impl b::Shown for Wrapper"
+    r = route_fn_bodies([_fn("show", "impl Shown for Wrapper")],
+                        target=a, related=[b])
+    assert r.routed == ()
+    assert r.dropped[0].ambiguous == (a, b)
+    # The full path is still exact, and wins over the ambiguity.
+    r = route_fn_bodies([_fn("show", "impl b::Shown for Wrapper")],
+                        target=a, related=[b])
+    assert [rb.container for rb in r.routed] == [b]
+
+
+def test_twin_headers_resolve_to_the_first_listed_as_before() -> None:
+    # Two cfg-gated impls with one header are one identity, not an
+    # ambiguity: the target, then listed order.
+    twin = "impl<C> Source for Holder<C>"
+    r = route_fn_bodies([_fn("source", "impl<C> wrap::Source for Holder<C>")],
+                        target="impl Other for X", related=[twin, twin])
+    assert [rb.container for rb in r.routed] == [twin]
+    assert r.dropped == ()

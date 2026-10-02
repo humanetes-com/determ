@@ -94,3 +94,13 @@ def test_wellformed_suite_round_trips_and_stays_quiet(tmp_path, sink):
     assert path.exists()
     assert bs.load_behaviour_suite(tmp_path, "stable") == suite
     assert logs == [] and events == []
+
+
+def test_the_view_directory_holds_only_the_files_of_the_last_write(tmp_path):
+    """The view is generated: a file a previous pass wrote and this one does
+    not (a feature the book no longer has, the givens index of a book with no
+    test-file item) would describe a book that no longer exists."""
+    d = bs.write_feature_files(tmp_path, "stable", {"a.feature": "A", "_givens.md": "G"})
+    assert sorted(p.name for p in d.iterdir()) == ["_givens.md", "a.feature"]
+    bs.write_feature_files(tmp_path, "stable", {"b.feature": "B"})
+    assert [p.name for p in d.iterdir()] == ["b.feature"]

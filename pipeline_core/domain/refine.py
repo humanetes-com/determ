@@ -72,6 +72,10 @@ class SalvagedFill:
     #: Bodies written with this one as a single write (`domain.joint_write`
     #: `JointUnit`s): a joint attempt is only salvageable whole.
     extras: tuple[Any, ...] = ()
+    #: What this attempt's own run printed (its failing tests, its crash) and
+    #: which attempt of the loop it was — what a diagnosis of this body reads.
+    excerpt: str = ""
+    attempt: int = 0
 
 
 class CompilingSalvage:
@@ -98,19 +102,64 @@ class CompilingSalvage:
         self._best: SalvagedFill | None = None
 
     def offer(self, body: str, metric: FixProgress,
-              extras: tuple[Any, ...] = ()) -> None:
+              extras: tuple[Any, ...] = (), *, excerpt: str = "",
+              attempt: int = 0) -> None:
         """Record an attempt. Red attempts and empty bodies are ignored — only a
         body that COMPILED is a candidate to keep over the stub. ``extras``
         are the other bodies the attempt wrote with it; a restore puts them
-        back together or not at all."""
+        back together or not at all. ``excerpt`` and ``attempt`` are that
+        attempt's own output and number."""
         if not body.strip() or not metric.compiles:
             return
         if self._best is None or metric < self._best.metric:
-            self._best = SalvagedFill(body, metric, tuple(extras))
+            self._best = SalvagedFill(body, metric, tuple(extras),
+                                      excerpt=excerpt, attempt=attempt)
 
     @property
     def best(self) -> SalvagedFill | None:
         return self._best
+
+
+@dataclass(frozen=True, slots=True)
+class RetroSubject:
+    """The attempt a retrospective is asked about.
+
+    `later_compile_failures` is how many attempts AFTER it did not compile:
+    they are different bodies, and their errors are not this one's."""
+
+    body: str
+    excerpt: str
+    compiled: bool
+    later_compile_failures: int = 0
+
+
+def retro_subject(
+    *, last_body: str, last_excerpt: str, last_compiled: bool,
+    last_attempt: int, best: SalvagedFill | None,
+) -> RetroSubject:
+    """Which attempt a fix loop's retrospective describes: the body the loop
+    stands on, not whichever came last.
+
+    A loop that produced a compiling body keeps it on exhaustion
+    (:class:`CompilingSalvage`). Diagnosing the LAST attempt instead told the
+    model the unit "could not be made to compile" and showed it a later
+    attempt's rustc errors, while the tree held a body rustc had accepted and
+    whose tests were what failed. Run `82925-203ed7b8` (2026-09-28), per-fn
+    `context`: attempt 1 E0277, attempts 2 and 3 compiled and failed tests,
+    attempts 4 and 5 E0277, then `KEEPING best compiling body`; the
+    retrospective opened "could not be made to compile after 5 attempt(s)"
+    over attempt 5's errors.
+
+    The last attempt, when it compiled, is the subject. Otherwise the best
+    compiling attempt is, with its own output, and the attempts after it are
+    counted as later compile failures. Only a loop that never compiled is
+    described as not compiling."""
+    if last_compiled or best is None:
+        return RetroSubject(last_body, last_excerpt, last_compiled)
+    return RetroSubject(
+        best.body, best.excerpt or last_excerpt, True,
+        later_compile_failures=max(0, last_attempt - best.attempt)
+        if best.attempt else 0)
 
 
 BEST_COMPILE_KEY = "best_compile_errors"

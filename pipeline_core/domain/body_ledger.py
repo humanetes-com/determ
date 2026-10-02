@@ -878,7 +878,16 @@ def classify(
         return BodyState.PROVEN, delta
     if not (names & after.passed):
         return BodyState.UNMEASURED, delta
-    return BodyState.PROVEN, delta
+    # No attributed test was red when the body landed, and they pass now:
+    # the tests ran, nothing was at stake, and the delta is empty. That is a
+    # graded try that bought nothing — `flat` on an empty convicting set —
+    # not `proven`: the schedule ranks a proven landing as paying, so a
+    # rewrite of a body whose tests were already green was bought again at
+    # the never-served weight (run `3040-51eab48c`, 2026-10-02, the keeps
+    # after the fill's last red test turned green). The flat claim stands
+    # only while nothing convicts the unit, so a test that later fails in it
+    # reopens it.
+    return BodyState.FLAT, delta
 
 
 # --- selection ---------------------------------------------------------------

@@ -162,6 +162,26 @@ def flipped_cfg_set(cfg_true: Iterable[str], cfg_false: Iterable[str],
                      default_features=default_features)
 
 
+def compiled_under(rec: FnRecord, cs: CfgSet,
+                   mod_records: Sequence[ModRecord] | None,
+                   file_texts: Mapping[str, str]) -> bool:
+    """Whether the world `cs` compiles this `src/` fn record: its file's
+    crate-level `#![cfg]`, one of its `mod` declaration chains, and its own
+    cfg chain all keep it. The one rule for "a cluster compiles this body":
+    the augmentation criterion's candidates and the end gate's dead-stub
+    reading both ask it. A record whose file text is unknown is not compiled
+    (nothing can be said about it)."""
+    text = file_texts.get(rec.file)
+    if text is None or not rec.file.startswith("src/"):
+        return False
+    if any(cs.evaluate(p.strip()) is False for p in crate_cfg_predicates(text)):
+        return False
+    if mod_records is not None and not mod_chain_active(
+            rec.file[len("src/"):], mod_records, cs):
+        return False
+    return not any(cs.excludes_for_cargo(p) for p in rec.cfg_predicates)
+
+
 @dataclass(frozen=True, slots=True)
 class CandidateFn:
     """One function the criterion is about: the record plus whether the
@@ -203,24 +223,11 @@ def candidate_records(
             continue
         if is_oracle_fn(rec) or is_test_only(rec.cfg_predicates):
             continue
-        text = file_texts.get(rec.file)
-        if text is None:
-            continue
-        rel_to_src = rec.file[len("src/"):]
-        if any(cs.evaluate(p.strip()) is False for p in crate_cfg_predicates(text)):
-            continue
-        if mod_records is not None and not mod_chain_active(rel_to_src, mod_records, cs):
-            continue
-        if any(cs.excludes_for_cargo(p) for p in rec.cfg_predicates):
+        if not compiled_under(rec, cs, mod_records, file_texts):
             continue
         if hollow(rec):
             continue
-        gated = (
-            any(flipped.excludes_for_cargo(p) for p in rec.cfg_predicates)
-            or (mod_records is not None
-                and not mod_chain_active(rel_to_src, mod_records, flipped))
-            or any(flipped.evaluate(p.strip()) is False
-                   for p in crate_cfg_predicates(text)))
+        gated = not compiled_under(rec, flipped, mod_records, file_texts)
         out.append(CandidateFn(rec, gated))
     return out
 

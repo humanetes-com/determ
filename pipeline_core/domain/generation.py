@@ -455,7 +455,7 @@ def merge_gen_tests_blocks(blocks: list[str]) -> str | None:
     (`error: an inner attribute is not permitted in this context`). The
     crate-level allow is re-injected downstream by `as_integration_test`, so
     dropping them here loses nothing — and a `#![cfg(…)]` gate is the caller's
-    (`_cluster_gate_for`) decision to make, not a subset reply's.
+    (`application.test_worlds`) decision to make, not a subset reply's.
 
     Returns None when any declared top-level item name occurs in more than one
     subset — flattening into one module would then be an E0428/E0252 clash, so

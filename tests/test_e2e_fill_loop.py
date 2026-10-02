@@ -77,9 +77,9 @@ def test_fix_loop_recovers_on_second_attempt(monkeypatch, tmp_path):
     install_scripted_model(monkeypatch,
                            per_fn_body=lambda _fn: next(bodies, "42"))
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=[(101, ERR.format(code="E0308", msg="mismatched types")),
-             (0, "ok")])
+        monkeypatch,
+        check_diag=[(101, ERR.format(code="E0308", msg="mismatched types"), []),
+                    (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 1
@@ -92,8 +92,8 @@ def test_repeated_error_signature_stops_after_two_attempts(monkeypatch, tmp_path
     install_scripted_model(monkeypatch, per_fn_body="0")
     # Same E-code (same sig) every time → FloorStall.repeated fires on attempt 2.
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+        monkeypatch,
+        check_diag=(101, ERR.format(code="E0308", msg="mismatched types"), []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 0 and res.remaining == 1
@@ -108,8 +108,8 @@ def test_floor_stall_exhaustion_restores_annotated_stub(monkeypatch, tmp_path):
     # → the floor never improves; stall budget (3) exhausts on attempt 4.
     codes = iter(["E0308", "E0425", "E0277", "E0599", "E0061"])
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=lambda: (101, ERR.format(code=next(codes, "E0999"), msg="x")))
+        monkeypatch,
+        check_diag=lambda: (101, ERR.format(code=next(codes, "E0999"), msg="x"), []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 0 and res.remaining == 1
@@ -216,8 +216,8 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
         (101, "error[E0308]: a\n --> src/lib.rs:2:5"),
         (0, "ok"),
     ])
-    install_scripted_cargo(monkeypatch, check_diag=(0, "", []),
-                           run=lambda: next(fails, (0, "ok")))
+    install_scripted_cargo(monkeypatch,
+                           check_diag=lambda: (*next(fails, (0, "")), []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 1
@@ -244,10 +244,10 @@ def test_retro_retry_recovers_after_first_fix_loop_exhausts(monkeypatch, tmp_pat
     # Round 1: same E-code twice → repeated-signature exit after 2 attempts.
     # Round 2 (post-retro): attempt 3 compiles clean → filled.
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=[(101, ERR.format(code="E0308", msg="mismatched types")),
-             (101, ERR.format(code="E0308", msg="mismatched types")),
-             (0, "ok")])
+        monkeypatch,
+        check_diag=[(101, ERR.format(code="E0308", msg="mismatched types"), []),
+                    (101, ERR.format(code="E0308", msg="mismatched types"), []),
+                    (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 1 and res.remaining == 0
@@ -263,8 +263,8 @@ def test_retro_retry_parks_fn_when_error_floor_stops_improving(monkeypatch, tmp_
     # Every attempt fails with the SAME single error → round 1 baselines the
     # error count, round 2 shows no strict improvement → fully exhausted.
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+        monkeypatch,
+        check_diag=(101, ERR.format(code="E0308", msg="mismatched types"), []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 0 and res.remaining == 1
@@ -282,8 +282,8 @@ def test_transient_retro_does_not_trigger_immediate_retry(monkeypatch, tmp_path)
     # install_scripted_model leaves _ask_retrospective returning "" →
     # empty_response (transient): no state update, no immediate retry.
     install_scripted_cargo(
-        monkeypatch, check_diag=(0, "", []),
-        run=(101, ERR.format(code="E0308", msg="mismatched types")))
+        monkeypatch,
+        check_diag=(101, ERR.format(code="E0308", msg="mismatched types"), []))
     res = _run(ws)
     assert res.fns_filled == 0 and res.remaining == 1
     assert res.attempts == 2          # single round, no retro retry

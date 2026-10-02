@@ -73,6 +73,7 @@ from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import (
     FillOutcomeClass,
     class_for_kept,
+    keep_reading,
     tests_could_not_run,
 )
 from pipeline_core.domain.joint_write import (
@@ -102,6 +103,7 @@ from pipeline_core.domain.refine import (
     FloorStall,
     best_progress_fields,
     best_progress_of,
+    retro_subject,
 )
 from pipeline_core.domain.retro_gate import (
     BlockedOnStubs,
@@ -129,6 +131,7 @@ from pipeline_core.domain.retro_gate import (
     stamp_conviction,
     tree_premise_absent,
 )
+from pipeline_core.domain.splice_feedback import reply_refusal_feedback
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import U2Decision, judge_refill
 from pipeline_core.domain.type_refs import types_referenced_in_text
@@ -261,7 +264,10 @@ class FillOneFn:
                              f"not restorable: {_missed}) — reverting to stub.")
                 revert()
                 return False
-        _rc, _ = self.cargo.run(ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+        # Through the check port, where the tree is also built in the other
+        # cfg worlds: a salvaged body is a kept body like any other.
+        _rc, _, _ = self.cargo.check_diag(
+            ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
             stub_free=ctx.stub_free, hollow_before=_hollow_before)
@@ -1136,40 +1142,69 @@ class FillOneFn:
                 self.tel.log(f"  [phase-c/per-fn] {fn_name}: landed only after "
                              "dropping the fn's own closing brace — the reply "
                              "closed the body itself.")
+            # A refusal that judges the reply's TEXT (it does not parse, it
+            # closed its fn early) is a failed attempt, charged and answered
+            # with the parser's diagnostic; any other refusal ends the unit
+            # (`splice_feedback.reply_refusal_feedback` holds which is which).
+            _refused_feedback: str | None = None
             if not ok:
                 # The target did not land: its extras must not stay alone.
                 self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
                 ctx.splice_check_lock.release()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""
+                _refused_feedback = None if _race_detected else reply_refusal_feedback(
+                    splice_out, unit=fn_name, file_rel=rel_file)
                 if _race_detected:
                     self.tel.log(f"  [phase-c/per-fn] GUARD POSSIBLE RACE — "
                                  f"{rel_file}::{fn_name}{_ctx} already filled by "
                                  "another worker; this worker's LLM output "
                                  "discarded.")
+                elif _refused_feedback is not None:
+                    self.tel.log(f"  [phase-c/per-fn] splice refused for "
+                                 f"{rel_file}::{fn_name}{_ctx}: "
+                                 f"{splice_out.reason} — the reply's text, so "
+                                 "this is a failed attempt and the next turn "
+                                 "carries the diagnostic.")
                 else:
                     self.tel.log(f"  [phase-c/per-fn] splice refused for "
                                  f"{rel_file}::{fn_name}{_ctx}: "
                                  f"{splice_out.reason}.")
-                self.tel.emit("phase_c.fn.fill.skip", data={
+                if _refused_feedback is None:
+                    self.tel.emit("phase_c.fn.fill.skip", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "container": container,
+                        "fix_attempt": fix_attempt, "body_chars": len(body),
+                        "reason": "race_lost" if _race_detected else splice_out.reason,
+                    })
+                    return FixOutcome("stop")
+                self.tel.emit("phase_c.fn.fill.reply_refused", data={
                     "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
-                    "file": rel_file, "fn": fn_name,
-                    "container": container,
+                    "file": rel_file, "fn": fn_name, "container": container,
                     "fix_attempt": fix_attempt, "body_chars": len(body),
-                    "reason": "race_lost" if _race_detected else splice_out.reason,
+                    "reason": splice_out.reason,
+                    "diagnostic": bool(getattr(splice_out, "diagnostic", "")),
                 })
-                return FixOutcome("stop")
 
-            rc, cargo_out = self.cargo.run(
-                ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
-            if rc != 0:
+            if _refused_feedback is not None:
+                # Nothing was written, so there is no tree to check: the
+                # refusal's diagnostic IS this attempt's compile verdict.
+                _no_diags: list[Any] = []
+                rc, cargo_out, _diags = 101, _refused_feedback, _no_diags
+            else:
+                # The compile gate is the check port, never a plain run: the
+                # port is where the tree is also built in the run's other cfg
+                # worlds, so a body only this world can build fails here with
+                # that world's diagnostics. Until 2026-10-02 this gate was a
+                # plain run and the every-world check did not reach the per-fn
+                # route at all.
+                rc, cargo_out, _diags = self.cargo.check_diag(
+                    ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+            if rc != 0 and _refused_feedback is None:
                 # Deterministic repair: a body cannot add `use` items, so apply
                 # rustc's own single-candidate import suggestions to this fn's
-                # file and re-check before charging the model an attempt. The
-                # structured diagnostics are fetched only on failure — the
-                # plain `run` above stays the compile gate.
-                _, _, _diags = self.cargo.check_diag(
-                    ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
+                # file and re-check before charging the model an attempt.
                 _rep = repair_missing_imports(
                     self.cargo.check_diag, ctx.check_cmd, ctx.target_src_dir,
                     ctx.cluster_env or {}, rel_file, _diags, self.tel.log,
@@ -1516,7 +1551,10 @@ class FillOneFn:
                 # branch, silently cutting whatever the render appended last.
                 # Pass it through intact instead of filtering it for
                 # diagnostics it was never going to contain.
-                if _u2_fail_sig is not None:
+                if _u2_fail_sig is not None or _refused_feedback is not None:
+                    # A refusal's feedback is the pipeline's own sentence plus
+                    # the parser's block; the focuser would keep only blocks
+                    # with a `-->` and drop the sentence saying what happened.
                     cap = max_chars or self.caps.fix_err_cap
                     return cargo_out[:cap]
                 return self.cargo.focus_errors(cargo_out, rel_file,
@@ -1534,8 +1572,13 @@ class FillOneFn:
             # the stall signature is the failing-test set so floor-stall
             # works (a test output has no E-codes → cargo_err_sig would be
             # empty and never stall).
-            cur_err_sig = (_u2_fail_sig if _u2_fail_sig is not None
-                           else cargo_err_sig(cargo_out))
+            cur_err_sig = (
+                _u2_fail_sig if _u2_fail_sig is not None
+                # A refusal has no E-code; its reason is the signature the
+                # stall detector compares, so two refusals in a row stall.
+                else frozenset({f"splice:{splice_out.reason}"})
+                if _refused_feedback is not None
+                else cargo_err_sig(cargo_out))
             # An attempt that reached the test gate COMPILED — its compile tier
             # is 0, so it strictly beats every red attempt no matter how many
             # tests are still failing. Scoring both on one count made the first
@@ -1571,7 +1614,8 @@ class FillOneFn:
             last_body = body
             last_metric = cur_metric
             salvage.offer(body, cur_metric,
-                          extras=tuple(u for u, _pre in joint.live))
+                          extras=tuple(u for u, _pre in joint.live),
+                          excerpt=_focused, attempt=fix_attempt)
             error_excerpt = _excerpt()
             _excerpt_quotes_run[0] = True
             # Revert to snapshot before returning; the model will see
@@ -1580,7 +1624,10 @@ class FillOneFn:
             # block below restores + annotates anyway, so the end state
             # on a stall/repeated exit is identical to the old in-loop
             # ordering.)
-            _revert_own_body()
+            # Nothing was written on a refused reply: there is no body to
+            # put back, and a revert of an untouched fn would log a failure.
+            if _refused_feedback is None:
+                _revert_own_body()
             if not _lock_released:
                 ctx.splice_check_lock.release()
                 _lock_released = True
@@ -1672,24 +1719,22 @@ class FillOneFn:
             )
             if success:
                 break
-            if unit_clock.expired():
+            _unit_end = unit_clock.ended()
+            if _unit_end:
                 # Past the unit's bound (`FILL_UNIT_SHARE_MULTIPLE` × the
-                # run's share): no retrospective — running out of time is not
-                # evidence about this body. The unit exits as a failed unit.
+                # run's share), or the ground its claim was planned on moved:
+                # no retrospective — neither is evidence about this body. The
+                # unit exits as a failed unit.
                 if unit_clock.note_once():
+                    line, event, data = unit_clock.end_note(
+                        _unit_end, attempts=fix_attempt)
                     self.tel.log(
-                        f"  [phase-c/per-fn] {rel_file}::{fn_name}: UNIT_BOUND "
-                        f"— {unit_clock.elapsed_minutes():.0f} min past its "
-                        f"{unit_clock.bound_minutes():.0f}-min bound after "
-                        f"{fix_attempt} attempt(s), retro round {_retro_round}; "
-                        "no retrospective.")
-                    self.tel.emit("phase_c.unit.bound", data={
+                        f"  [phase-c/per-fn] {rel_file}::{fn_name}: {line}, "
+                        f"retro round {_retro_round}; no retrospective.")
+                    self.tel.emit(event, data={
                         "cluster": ctx.cluster_name, "route": "per-fn",
                         "unit": f"{rel_file}::{fn_name}",
-                        "attempts": fix_attempt, "retro_round": _retro_round,
-                        "bound_minutes": unit_clock.bound_minutes(),
-                        "elapsed_minutes": round(
-                            unit_clock.elapsed_minutes(), 1)})
+                        "retro_round": _retro_round, **data})
                 break
             if _crash_blocked_mark or _unpayable_mark:
                 # No retrospective and no conviction: the failure was never
@@ -1729,18 +1774,27 @@ class FillOneFn:
                     unit=screening_unit(rel_file, fn_name),
                     pins=_fn_pins, observables=_fn_observables,
                     loop_scope=_loop_scope)
+                # The diagnosis is of the body the loop stands on — its best
+                # compiling attempt when the last one did not compile — never
+                # of whichever attempt happened to come last.
+                _subject = retro_subject(
+                    last_body=last_body or first_failed_body or "",
+                    last_excerpt=error_excerpt or first_error_excerpt or "",
+                    last_compiled=_last_failure[0] is not AttemptFailure.COMPILE,
+                    last_attempt=fix_attempt, best=salvage.best)
                 _retro = self.retros.diagnose(
                     fn_name=fn_name, sig_text=sig_text,
                     container=container, file_rel=rel_file,
                     cluster_name=ctx.cluster_name,
-                    last_body=last_body or first_failed_body or "",
-                    error_excerpt=error_excerpt or first_error_excerpt or "",
+                    last_body=_subject.body,
+                    error_excerpt=_subject.excerpt,
                     fix_attempts=fix_attempt,
                     prior_retrospective=_prior_guidance,
                     bound_methods_section=retro_bound_methods,
                     pinned_observables=pins_for_contradiction_guard(
                         _fn_pins, _fn_observables),
-                    compiled=_last_failure[0] is not AttemptFailure.COMPILE,
+                    compiled=_subject.compiled,
+                    later_compile_failures=_subject.later_compile_failures,
                 )
                 # Transient empties (llm_error / empty_response) don't
                 # update state — we never saw a real fix attempt's
@@ -2208,9 +2262,12 @@ class FillOneFn:
         _cmp_u = last_comparison() if ctx.tdd_test_cmd else None
         note_kept_comparison(_cmp_u)
         _ok = class_for_kept(
+            reading=keep_reading(
+                net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0,
+                newly_green=_cmp_u.newly_green if _cmp_u is not None else (),
+                attributed=_answers.tests),
             passed=_observed_passed[0],
             unreachable=tests_could_not_run(blocked_sibling=bool(_blocked_by)),
-            net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0,
             attributed=_answers.tests,
             measured=not _blocked_by)
         self.tel.emit("phase_c.fill.class", data={

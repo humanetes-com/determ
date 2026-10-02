@@ -504,8 +504,9 @@ def pipeline_status(width: int):
     # vLLM backend status (loading indicator / docker logs when not ready)
     rows.extend(_vllm_status(w))
 
-    # The whole-run phase strip and the active phase's sub-steps, drawn from
-    # the phase registry and this run's phase events (`phase.enter`/`exit`).
+    # The whole-run phase strip, the active phase's sub-steps, and the book
+    # bar while that step is open. Drawn from the phase registry and this
+    # run's phase events (`phase.enter` / `exit` / `progress`).
     rows.extend(_pv.strip_rows(_pp.load_board(EVENTS_LOG, _find_project_dir(), running), w, time.time()))
 
     # ── Header: status + coverage ────────────────────────────────────────────
