@@ -32,7 +32,7 @@ from pipeline_core.domain.fn_execution import (
     function_execution,
     unmeasured_record,
 )
-from pipeline_core.domain.models import FnRecord, ModRecord
+from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +116,8 @@ def read_function_execution(
 
 def fold_reading(prior: FnCoverageRecord | None,
                  reading: FunctionExecution | str,
-                 *, attempt_budget: int) -> FnCoverageRecord:
+                 *, attempt_budget: int,
+                 inherited: Mapping[FnSite, int] | None = None) -> FnCoverageRecord:
     """The record after this measurement.
 
     An unavailable reading measures nothing (see the module docstring) but
@@ -127,4 +128,5 @@ def fold_reading(prior: FnCoverageRecord | None,
         if prior is None:
             return unmeasured_record(reading)
         return replace(prior, measured=False, reason=reading)
-    return advance_record(prior, reading, attempt_budget=attempt_budget)
+    return advance_record(prior, reading, attempt_budget=attempt_budget,
+                          inherited=inherited)

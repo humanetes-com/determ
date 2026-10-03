@@ -107,6 +107,24 @@ class FileAugmentStore:
         tmp.write_text(record.to_json(), encoding="utf-8")
         os.replace(tmp, p)
 
+    def other_cluster_fn_records(self, project_dir: Path, cluster_name: str,
+                                 module_name: str) -> list[FnCoverageRecord]:
+        """The function records the OTHER clusters wrote for `module_name`:
+        what a shared body was already tried against in another world."""
+        d = project_dir / CLUSTER_AUGMENTED_DIR
+        own = self.fn_record_path(project_dir, cluster_name, module_name)
+        out: list[FnCoverageRecord] = []
+        for p in sorted(d.glob(f"*__{module_name}.fns.json")) if d.is_dir() else ():
+            if p == own:
+                continue
+            try:
+                rec = FnCoverageRecord.from_json(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if rec is not None:
+                out.append(rec)
+        return out
+
     def all_fn_records(self, project_dir: Path) -> list[FnCoverageRecord]:
         """Every cluster's function record in the workspace, for the gates
         that classify a stub against what augmentation measured."""

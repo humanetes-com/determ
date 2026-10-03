@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -223,3 +224,18 @@ def test_negative_control_the_file_level_claims_reused_contradict_the_subset(
     assert _claimed_and_shown(add_p) == (2, 1)
     assert "all other lines are already covered" in add_p
     assert "`src/lib.rs::capacity_hint`" in add_p
+
+
+def test_a_block_that_does_not_compile_is_still_an_attempt_at_its_function(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The nightly `Mut::clone` defect: the budget was charged only when the
+    block compiled, so a function whose blocks kept failing to compile never
+    spent its attempts. The block was written for the function; it is an
+    attempt, and the reason it did not reach the function is recorded."""
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
+    object.__setattr__(h.deps, "subprocess", SimpleNamespace(
+        run=lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="error[E0277]")))
+    outcome = _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,))
+    assert outcome.blocks_admitted == 0
+    assert outcome.fn_attempted == {_HINT.site}
+    assert dict(outcome.fn_outcomes) == {_HINT.site: "compile_failed"}

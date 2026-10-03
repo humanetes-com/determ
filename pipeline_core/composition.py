@@ -2945,6 +2945,7 @@ def build_app(
             enumerate_mods=enumerate_mods,
             load_fn_record=augment_store.cluster_fn_record,
             save_fn_record=augment_store.save_cluster_fn_record,
+            other_fn_records=augment_store.other_cluster_fn_records,
         ),
         gen_fix_loop_deps=GenerateFixLoopDeps(
             set_current=set_current,

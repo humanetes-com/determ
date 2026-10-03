@@ -324,11 +324,21 @@ def _site_of(raw: Mapping[str, Any]) -> FnSite:
 class PendingFn:
     """An unexecuted function and the targeted attempts already spent on it
     (outer augmentation attempt numbers — the `attempt` field of
-    `.task0c_attempts.jsonl`). Only an attempt whose test block compiled and
-    ran counts."""
+    `.task0c_attempts.jsonl`). An attempt is a pass that sent the function in
+    a prompt and got a test block back, whatever the block then did: a block
+    that does not compile is an attempt that did not reach the function. A
+    pass with no block at all (an empty or refused reply) is not one."""
 
     target: FnTarget
     attempts: tuple[int, ...] = ()
+    # What each charged attempt's block did, parallel to `attempts` (`ran`,
+    # `compile_failed`, `reverted`, `no_tests`): the budget counts aimed
+    # passes, and this is why each one did not reach the function.
+    outcomes: tuple[str, ...] = ()
+    # The retrospective's classification of this function, when it named
+    # exactly this site; evidence the next pass is asked to test, never a
+    # reason to stop on its own.
+    verdict: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +349,8 @@ class UnreachedFn:
     site: FnSite
     attempts: tuple[int, ...] = ()
     cluster_gated: bool = False
+    outcomes: tuple[str, ...] = ()
+    verdict: str = ""
 
 
 # How a stub reads against augmentation's record, for the gates downstream.
@@ -442,11 +454,13 @@ class FnCoverageRecord:
                 {**_site_json(p.target.site), "first_line": p.target.first_line,
                  "last_line": p.target.last_line,
                  "cluster_gated": p.target.cluster_gated,
-                 "attempts": list(p.attempts)}
+                 "attempts": list(p.attempts), "outcomes": list(p.outcomes),
+                 "verdict": p.verdict}
                 for p in self.pending],
             "unreached": [
                 {**_site_json(u.site), "cluster_gated": u.cluster_gated,
-                 "attempts": list(u.attempts)}
+                 "attempts": list(u.attempts), "outcomes": list(u.outcomes),
+                 "verdict": u.verdict}
                 for u in self.unreached],
             "unmeasured": [_site_json(s) for s in self.unmeasured],
         }, indent=2) + "\n"
@@ -471,11 +485,15 @@ class FnCoverageRecord:
                 PendingFn(FnTarget(_site_of(p), int(p.get("first_line", 0)),
                                    int(p.get("last_line", 0)),
                                    bool(p.get("cluster_gated", False))),
-                          tuple(int(a) for a in p.get("attempts", [])))
+                          tuple(int(a) for a in p.get("attempts", [])),
+                          tuple(str(o) for o in p.get("outcomes", [])),
+                          str(p.get("verdict", "")))
                 for p in raw.get("unexecuted", [])),
             unreached=tuple(
                 UnreachedFn(_site_of(u), tuple(int(a) for a in u.get("attempts", [])),
-                            bool(u.get("cluster_gated", False)))
+                            bool(u.get("cluster_gated", False)),
+                            tuple(str(o) for o in u.get("outcomes", [])),
+                            str(u.get("verdict", "")))
                 for u in raw.get("unreached", [])),
             unmeasured=tuple(_site_of(s) for s in raw.get("unmeasured", [])),
         )
@@ -486,28 +504,43 @@ def unmeasured_record(reason: str) -> FnCoverageRecord:
 
 
 def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
-                   *, attempt_budget: int) -> FnCoverageRecord:
+                   *, attempt_budget: int,
+                   inherited: Mapping[FnSite, int] | None = None) -> FnCoverageRecord:
     """Fold a new reading into the record.
 
     A count above 0 makes a function executed, whatever it was before — an
     unreached function a later block happened to reach is executed. A
     function still at 0 keeps the attempts spent on it, and becomes unreached
     once `attempt_budget` targeted attempts are spent: the reading being
-    folded is the measurement after the last of them."""
-    spent: dict[FnSite, tuple[int, ...]] = {}
+    folded is the measurement after the last of them.
+
+    `inherited` is the attempts other clusters already spent on a site. It
+    applies only to a function this cluster does not own (`cluster_gated`
+    False — the same body is compiled in the other world) and only after this
+    cluster has spent one attempt of its own: a test gated to this world can
+    reach what the other world's tests could not, so the other world's
+    verdict shortens the budget and never replaces the attempt."""
+    spent: dict[FnSite, PendingFn | UnreachedFn] = {}
     if prior is not None:
         for p in prior.pending:
-            spent[p.target.site] = p.attempts
+            spent[p.target.site] = p
         for u in prior.unreached:
-            spent[u.site] = u.attempts
+            spent[u.site] = u
     pending: list[PendingFn] = []
     unreached: list[UnreachedFn] = []
+    budget = max(1, attempt_budget)
     for target in reading.unexecuted:
-        attempts = spent.get(target.site, ())
-        if len(attempts) >= max(1, attempt_budget):
-            unreached.append(UnreachedFn(target.site, attempts, target.cluster_gated))
+        before = spent.get(target.site)
+        attempts = before.attempts if before is not None else ()
+        outcomes = before.outcomes if before is not None else ()
+        verdict = before.verdict if before is not None else ""
+        own = len(attempts)
+        carried = 0 if target.cluster_gated else (inherited or {}).get(target.site, 0)
+        if own >= budget or (own >= 1 and own + carried >= budget):
+            unreached.append(UnreachedFn(target.site, attempts, target.cluster_gated,
+                                         outcomes, verdict))
         else:
-            pending.append(PendingFn(target, attempts))
+            pending.append(PendingFn(target, attempts, outcomes, verdict))
     return FnCoverageRecord(
         measured=True,
         candidates=reading.candidates,
@@ -518,20 +551,90 @@ def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
     )
 
 
+def aimed_fn_outcomes(targets: Iterable[FnTarget], aimed_lines: Iterable[int],
+                      ran_lines: Iterable[int], otherwise: str) -> dict[FnSite, str]:
+    """Per target a prompt carried, what became of the block written for it:
+    `ran` when a committed block's lines cover the function, else `otherwise`
+    (why the block did not reach it). A target no aimed line falls in was not
+    in a prompt that got a block back and is absent."""
+    aimed = sorted(set(aimed_lines))
+    ran = sorted(set(ran_lines))
+    out: dict[FnSite, str] = {}
+    for t in targets:
+        if any(t.first_line <= ln <= t.last_line for ln in aimed):
+            out[t.site] = ("ran" if any(t.first_line <= ln <= t.last_line for ln in ran)
+                           else otherwise)
+    return out
+
+
+def unambiguous_verdicts(targets: Iterable[FnTarget],
+                         categories: Mapping[str, Iterable[str]]) -> dict[FnSite, str]:
+    """The retrospective names a function by bare name. It attributes to a
+    site only when that name is exactly one target's in the file and exactly
+    one category's: three `clone` impls and one verdict is not evidence about
+    any of them."""
+    ts = list(targets)
+    out: dict[FnSite, str] = {}
+    for t in ts:
+        name = t.site.fn_name
+        if sum(1 for o in ts if o.site.fn_name == name) != 1:
+            continue
+        said = [cat for cat, names in categories.items() if name in set(names)]
+        if len(said) == 1:
+            out[t.site] = said[0]
+    return out
+
+
+def inherited_attempts(others: Iterable[FnCoverageRecord]) -> dict[FnSite, int]:
+    """The attempts other clusters spent per site, for `advance_record`.
+    Only a shared body counts there: an entry another cluster owns
+    (`cluster_gated`) is code this world does not compile."""
+    out: dict[FnSite, int] = {}
+    for rec in others:
+        if not rec.measured:
+            continue
+        for p in rec.pending:
+            if not p.target.cluster_gated:
+                out[p.target.site] = out.get(p.target.site, 0) + len(p.attempts)
+        for u in rec.unreached:
+            if not u.cluster_gated:
+                out[u.site] = out.get(u.site, 0) + len(u.attempts)
+    return out
+
+
 def note_attempt(record: FnCoverageRecord, sites: Iterable[FnSite],
-                 attempt: int) -> FnCoverageRecord:
+                 attempt: int, *,
+                 outcomes: Mapping[FnSite, str] | None = None) -> FnCoverageRecord:
     """Charge one targeted attempt to each pending function in `sites` — the
-    functions a test block that compiled and ran was generated for.
+    functions a test block was generated for this pass (compiled or not; see
+    `PendingFn`).
 
     Called once per generation pass. `attempt` is that pass's outer attempt
     number as `.task0c_attempts.jsonl` records it; the number restarts at 1
     when the cluster loop re-enters augmentation for another module pass, so
-    it is evidence to quote, never a key to de-duplicate on."""
+    it is evidence to quote, never a key to de-duplicate on. `outcomes` is
+    what the block did, per site (`ran` when absent)."""
     hit = {canon_site(s) for s in sites}
     if not hit:
         return record
+    why = {canon_site(k): v for k, v in (outcomes or {}).items()}
     pending = tuple(
-        replace(p, attempts=(*p.attempts, attempt)) if p.target.site in hit else p
+        replace(p, attempts=(*p.attempts, attempt),
+                outcomes=(*p.outcomes, why.get(p.target.site, "ran")))
+        if p.target.site in hit else p
+        for p in record.pending)
+    return replace(record, pending=pending)
+
+
+def note_verdicts(record: FnCoverageRecord,
+                  verdicts: Mapping[FnSite, str]) -> FnCoverageRecord:
+    """Attach the retrospective's classification to the pending functions it
+    named. Evidence only: it changes no budget."""
+    if not verdicts:
+        return record
+    said = {canon_site(k): v for k, v in verdicts.items()}
+    pending = tuple(
+        replace(p, verdict=said[p.target.site]) if p.target.site in said else p
         for p in record.pending)
     return replace(record, pending=pending)
 

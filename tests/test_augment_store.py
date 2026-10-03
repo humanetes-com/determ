@@ -165,3 +165,17 @@ def test_the_function_record_persists_beside_the_sentinel(tmp_path: Path) -> Non
     # A record of another criterion accounts for nothing.
     s.fn_record_path(tmp_path, "stable", "m").write_text('{"criterion": "old"}')
     assert s.cluster_fn_record(tmp_path, "stable", "m") is None
+
+
+def test_the_other_clusters_records_for_the_module_exclude_its_own(tmp_path: Path) -> None:
+    from pipeline_core.domain.fn_execution import FnCoverageRecord
+    s = FileAugmentStore()
+    stable = FnCoverageRecord(measured=True, candidates=1)
+    nightly = FnCoverageRecord(measured=True, candidates=2)
+    other_module = FnCoverageRecord(measured=True, candidates=3)
+    s.save_cluster_fn_record(tmp_path, "stable", "m", stable)
+    s.save_cluster_fn_record(tmp_path, "nightly", "m", nightly)
+    s.save_cluster_fn_record(tmp_path, "stable", "other", other_module)
+    assert s.other_cluster_fn_records(tmp_path, "nightly", "m") == [stable]
+    assert s.other_cluster_fn_records(tmp_path, "stable", "m") == [nightly]
+    assert s.other_cluster_fn_records(tmp_path / "none", "stable", "m") == []

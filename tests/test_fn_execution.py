@@ -24,14 +24,18 @@ from pipeline_core.domain.fn_execution import (
     SiteIndex,
     UnreachedFn,
     advance_record,
+    aimed_fn_outcomes,
     candidate_records,
     classify_stub_sites,
     executed_by_key,
     flipped_cfg_set,
     function_execution,
+    inherited_attempts,
     is_test_only,
     mod_chain_active,
     note_attempt,
+    note_verdicts,
+    unambiguous_verdicts,
 )
 from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
 
@@ -204,7 +208,7 @@ def test_attempts_below_the_budget_keep_the_function_pending_and_the_stop_open()
     assert rec.pending[0].attempts == (1, 2, 1)
     rec = advance_record(rec, FunctionExecution(unexecuted=(_G,)), attempt_budget=3)
     assert rec.accounted
-    assert rec.unreached == (UnreachedFn(_G.site, (1, 2, 1), True),)
+    assert rec.unreached == (UnreachedFn(_G.site, (1, 2, 1), True, ('ran', 'ran', 'ran')),)
 
 
 def test_a_count_above_zero_removes_the_function_whatever_it_was() -> None:
@@ -275,3 +279,69 @@ def test_a_stub_is_matched_by_exact_site_never_by_locator() -> None:
     # A renamed container is not accounted — it can keep a run failing, never excuse.
     renamed = FnSite("src/w.rs", "provide", "impl StdError for Boxed")
     assert classify_stub_sites([renamed], [one]).unaccounted == (renamed,)
+
+
+def test_a_block_that_did_not_compile_spends_the_budget_and_says_why() -> None:
+    """The nightly `Mut::clone` shape: three passes aimed, the blocks failed
+    to compile. The account reads the aim, so the function is unreached after
+    the third, with each pass's reason kept."""
+    rec = advance_record(None, FunctionExecution(unexecuted=(_G,)), attempt_budget=3)
+    for attempt in (1, 2, 3):
+        rec = note_attempt(rec, [_G.site], attempt, outcomes={_G.site: "compile_failed"})
+        rec = advance_record(rec, FunctionExecution(unexecuted=(_G,)), attempt_budget=3)
+    assert rec.accounted
+    assert rec.unreached == (
+        UnreachedFn(_G.site, (1, 2, 3), True, ("compile_failed",) * 3),)
+
+
+def test_aimed_outcomes_name_the_function_a_block_was_written_for() -> None:
+    both = aimed_fn_outcomes([_G, _S], aimed_lines={8}, ran_lines=set(), otherwise="compile_failed")
+    assert both == {_G.site: "compile_failed"}                    # _S (1-4) was not in a prompt
+    ran = aimed_fn_outcomes([_G, _S], aimed_lines={2, 8}, ran_lines={8}, otherwise="compile_failed")
+    assert ran == {_S.site: "compile_failed", _G.site: "ran"}
+    assert aimed_fn_outcomes([_G], aimed_lines=set(), ran_lines=set(), otherwise="x") == {}
+
+
+def test_attempts_another_world_spent_shorten_a_shared_budget_but_never_replace_one() -> None:
+    other = FnCoverageRecord(measured=True, unreached=(UnreachedFn(_S.site, (1, 2, 3)),))
+    inherited = inherited_attempts([other])
+    assert inherited == {_S.site: 3}
+    reading = FunctionExecution(unexecuted=(_S,))
+    first = advance_record(None, reading, attempt_budget=3, inherited=inherited)
+    assert first.accounted is False                                 # one own attempt first
+    spent = note_attempt(first, [_S.site], 1)
+    assert advance_record(spent, reading, attempt_budget=3, inherited=inherited).unreached
+    # Negative control: no inherited attempts, the same single attempt leaves it pending.
+    assert not advance_record(spent, reading, attempt_budget=3).unreached
+    # A body only this world compiles is never shortened by another world's record.
+    gated = advance_record(note_attempt(advance_record(None, FunctionExecution(unexecuted=(_G,)),
+                                                      attempt_budget=3), [_G.site], 1),
+                           FunctionExecution(unexecuted=(_G,)), attempt_budget=3,
+                           inherited={_G.site: 3})
+    assert gated.pending and not gated.unreached
+
+
+def test_inherited_attempts_skip_what_the_other_world_owns_and_an_unmeasured_record() -> None:
+    other = FnCoverageRecord(measured=True, pending=(PendingFn(_G, (1, 2)), PendingFn(_S, (1,))))
+    assert inherited_attempts([other]) == {_S.site: 1}
+    assert inherited_attempts([FnCoverageRecord(measured=False)]) == {}
+
+
+def test_a_retrospective_verdict_attributes_only_to_a_name_that_is_one_site() -> None:
+    own = FnTarget(FnSite("src/p.rs", "clone", "impl Clone for Own<T>"), 1, 3, False)
+    ref = FnTarget(FnSite("src/p.rs", "clone", "impl Clone for Ref<T>"), 5, 7, False)
+    uniq = FnTarget(FnSite("src/p.rs", "provide", ""), 9, 11, False)
+    cats = {"NEEDS_INTERNALS": ["clone"], "TESTABLE": ["provide"], "UNREACHABLE": []}
+    assert unambiguous_verdicts([own, ref, uniq], cats) == {uniq.site: "TESTABLE"}
+    both = {"NEEDS_INTERNALS": ["provide"], "TESTABLE": ["provide"]}
+    assert unambiguous_verdicts([uniq], both) == {}
+
+
+def test_a_verdict_is_evidence_on_the_record_and_changes_no_budget() -> None:
+    rec = FnCoverageRecord(measured=True, pending=(PendingFn(_S, (1,), ("ran",)),))
+    said = note_verdicts(rec, {_S.site: "NEEDS_INTERNALS"})
+    assert said.pending[0].verdict == "NEEDS_INTERNALS"
+    assert said.pending[0].attempts == (1,) and said.accounted is False
+    again = advance_record(said, FunctionExecution(unexecuted=(_S,)), attempt_budget=3)
+    assert again.pending[0].verdict == "NEEDS_INTERNALS"
+    assert FnCoverageRecord.from_json(said.to_json()) == said

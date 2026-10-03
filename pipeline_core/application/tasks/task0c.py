@@ -34,9 +34,13 @@ from ...domain.coverage import PerFileCoverage, coverage_pass_outcome
 from ...domain.fn_execution import (
     FnCoverageRecord,
     FnTarget,
+    aimed_fn_outcomes,
     flipped_cfg_set,
+    inherited_attempts,
     note_attempt,
+    note_verdicts,
     site_label,
+    unambiguous_verdicts,
 )
 from ...domain.generation import (
     as_integration_test,
@@ -165,6 +169,7 @@ class Task0cDeps:
     enumerate_mods: Any = None
     load_fn_record: Any = None
     save_fn_record: Any = None
+    other_fn_records: Any = None
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -1514,9 +1519,14 @@ class _PhaseCOutcome:
     at_ceiling: bool = False
     result: tuple[float, int, bool, str] | None = None
     blocks_admitted: int = 0                   # gen_tests blocks that passed every gate
-    # Unexecuted functions a test block that compiled and ran was generated
-    # for this pass — one targeted attempt each (`fn_execution.note_attempt`).
+    # Unexecuted functions a test block was generated for this pass — one
+    # targeted attempt each (`fn_execution.note_attempt`), whatever the block
+    # then did; `fn_outcomes` is that, per site, as (site, outcome) pairs.
     fn_attempted: frozenset[Any] = frozenset()
+    fn_outcomes: tuple[tuple[Any, str], ...] = ()
+    # The retrospective's classification of the unexecuted functions it named
+    # unambiguously, as (site, category) pairs. Evidence for the record.
+    fn_verdicts: tuple[tuple[Any, str], ...] = ()
 
 
 def _run_phase_c(
@@ -1543,8 +1553,9 @@ def _run_phase_c(
     `fn_targets` are the functions the cluster compiles that no test executes
     (`FnCoverageRecord.targets`, cluster-gated first). Their files go to the
     front of the queue, each prompt lists their bodies as never executed, and a
-    block that compiled and ran for a file charges one attempt to each target
-    its lines covered (`_PhaseCOutcome.fn_attempted`).
+    block written for a file charges one attempt to each target its prompt
+    carried (`_PhaseCOutcome.fn_attempted`), with what the block did as the
+    reason it did or did not reach them (`fn_outcomes`).
     """
     deps = ctx.deps
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
@@ -1639,6 +1650,8 @@ def _run_phase_c(
         if str(project_dir / _ft.site.file).startswith(mod_prefix):
             fn_targets_by_file.setdefault(_ft.site.file, []).append(_ft)
     _fn_attempted: set[Any] = set()
+    _fn_outcomes: dict[Any, str] = {}
+    _fn_verdicts: dict[Any, str] = {}
     uncovered_by_file: dict[str, tuple[str, set[int]]] = {}
     for fdata in files_data:
         abs_path_str = fdata.abs_path
@@ -2398,6 +2411,9 @@ project-specific import paths, type construction patterns, and hard constraints.
         # Lines whose test block compiled and ran this pass — the evidence an
         # unexecuted function's targeted attempt is charged on.
         _ran_lines: set[int] = set()
+        # Lines whose prompt got a test block back — the evidence an
+        # unexecuted function was aimed at, whether or not the block compiled.
+        _aimed_lines: set[int] = set()
         _did_split = False
         _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pass_n)
         # Split-and-merge: partition the file's uncovered functions into N
@@ -2421,6 +2437,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     if _raw_sub:
                         _raw_subs.append(_raw_sub)
                         _raw_sub_lines.append(set(_partitions[_i]))
+                        _aimed_lines |= set(_partitions[_i])
                         continue
                     # A dropped subset reply is the crime scene for a routing
                     # defect: without the raw prefix and the stream log, an
@@ -2532,8 +2549,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _save_stream_log(_gen_attempt, _query, response or "", "empty_generation_retry")
         if block:
             # Single-shot: finalize + commit the one generated block.
+            _aimed_lines |= uncov_lines
             _status, block = _finalize_and_commit(block, _pass_n, _raw_text)
             if _status == "no_tests":
+                _fn_empty = aimed_fn_outcomes(
+                    _file_fn_targets, _aimed_lines, _ran_lines, "no_tests")
+                _fn_outcomes.update(_fn_empty)
+                _fn_attempted.update(_fn_empty)
                 continue
             _block_committed = (_status == "committed")
             if _block_committed:
@@ -2546,9 +2568,10 @@ project-specific import paths, type construction patterns, and hard constraints.
         # Charged before the quick-cov gate below may revert the block: a block
         # that compiled, ran and added no line is exactly an attempt that did
         # not reach its function.
-        _fn_attempted.update(
-            _ft.site for _ft in _file_fn_targets
-            if any(_ft.first_line <= _ln <= _ft.last_line for _ln in _ran_lines))
+        _fn_pass = aimed_fn_outcomes(_file_fn_targets, _aimed_lines, _ran_lines,
+                                     "compile_failed")
+        _fn_outcomes.update(_fn_pass)
+        _fn_attempted.update(_fn_pass)
 
         # Quick per-file coverage snapshot after a successful append.
         _qcov_after: int | None = None
@@ -2594,6 +2617,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                          f"increase (was {_prev_qcov}, now {_qcov}); reverting.")
                     _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
                     _block_committed = False
+                    for _site, _why in _fn_pass.items():
+                        if _why == "ran":
+                            _fn_outcomes[_site] = "reverted"
                     file_last_qcov[rel_path] = _prev_qcov  # restore tracker too
 
         # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
@@ -2765,6 +2791,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     # Immediately pragma UNREACHABLE/CFG_GATED functions — no point retrying
                     # test generation for code that is intrinsically unmeasurable.
                     _retro_cats = _parse_retrospective_categories(retro)
+                    _fn_verdicts.update(unambiguous_verdicts(_file_fn_targets, _retro_cats))
                     _pragma_fns = _retro_cats["UNREACHABLE"] + _retro_cats["CFG_GATED"]
                     if _pragma_fns:
                         _log(f"  [{module_name}] Targeted pragma for: {_pragma_fns}")
@@ -2830,7 +2857,9 @@ project-specific import paths, type construction patterns, and hard constraints.
     if _pass_outcome == "ceiling":
         _log(f"  [{module_name}] All files filtered (cfg/artifact) — no actionable uncovered lines. Stopping.")
         return _PhaseCOutcome("break", at_ceiling=True, blocks_admitted=_blocks_admitted,
-                              fn_attempted=frozenset(_fn_attempted))
+                              fn_attempted=frozenset(_fn_attempted),
+                              fn_outcomes=tuple(_fn_outcomes.items()),
+                              fn_verdicts=tuple(_fn_verdicts.items()))
     # If every remaining uncovered file is now skipped, die with a report. The
     # function criterion holds the stop open above the line target, so a pass
     # whose every file carrying an unexecuted function is skipped cannot make
@@ -2851,7 +2880,9 @@ project-specific import paths, type construction patterns, and hard constraints.
         _log("  Action required: improve the generation prompt or add manual tests for these files.")
         return _PhaseCOutcome("return", result=(coverage, covered_lines, False, ""),
                               blocks_admitted=_blocks_admitted,
-                              fn_attempted=frozenset(_fn_attempted))
+                              fn_attempted=frozenset(_fn_attempted),
+                              fn_outcomes=tuple(_fn_outcomes.items()),
+                              fn_verdicts=tuple(_fn_verdicts.items()))
 
     # Reachable work and not one model call, with files still dispatchable: a
     # generation or routing defect, never a ceiling. This sits BELOW the
@@ -2868,10 +2899,14 @@ project-specific import paths, type construction patterns, and hard constraints.
         _emit("task0c.pass_no_work", data={"actionable": _pass_actionable,
                                            "files": len(_active_files)})
         return _PhaseCOutcome("break", at_ceiling=False, blocks_admitted=_blocks_admitted,
-                              fn_attempted=frozenset(_fn_attempted))
+                              fn_attempted=frozenset(_fn_attempted),
+                              fn_outcomes=tuple(_fn_outcomes.items()),
+                              fn_verdicts=tuple(_fn_verdicts.items()))
 
     return _PhaseCOutcome("continue", blocks_admitted=_blocks_admitted,
-                          fn_attempted=frozenset(_fn_attempted))
+                          fn_attempted=frozenset(_fn_attempted),
+                              fn_outcomes=tuple(_fn_outcomes.items()),
+                              fn_verdicts=tuple(_fn_verdicts.items()))
 
 
 def _diagnose_and_fix_regression(
@@ -3106,6 +3141,14 @@ def task0c_augment_module(
     _fn_budget = max(1, int(os.getenv("TASK0C_FN_ATTEMPTS", "3")))
     _fn_inputs = FnCriterionInputs(enumerate_fns=deps.enumerate_fns,
                                    enumerate_mods=deps.enumerate_mods)
+    # What the other clusters already spent on a body both compile. Read once
+    # at entry: they are finished (or frozen) while this one runs.
+    _fn_inherited: dict[Any, int] = {}
+    if callable(deps.other_fn_records):
+        _others = deps.other_fn_records(project_dir, _cluster_label, module_name)
+        _fn_inherited = inherited_attempts(
+            r for r in (_others if isinstance(_others, list) else [])
+            if isinstance(r, FnCoverageRecord))
     _fn_record: FnCoverageRecord | None = None
     if callable(deps.load_fn_record):
         _loaded = deps.load_fn_record(project_dir, _cluster_label, module_name)
@@ -3190,7 +3233,7 @@ def task0c_augment_module(
         _fn_record = fold_reading(
             _fn_record,
             read_function_execution(project_dir, _current_cluster, _functions, _fn_inputs),
-            attempt_budget=_fn_budget)
+            attempt_budget=_fn_budget, inherited=_fn_inherited)
         _record_fn_reading(deps, project_dir, module_name, _cluster_label, attempt, _fn_record)
         _mark_phase(project_dir, f"task0c/{_cluster_label}/{module_name}", "in_progress",
                     detail=f"{coverage:.1f}% attempt {attempt}", source_hash=_source_hash(project_dir))
@@ -3290,15 +3333,21 @@ def task0c_augment_module(
                 stall_context=_STALL_CONTEXT,
             ),
         )
+        if _pc.fn_verdicts:
+            _fn_record = note_verdicts(_fn_record, dict(_pc.fn_verdicts))
         if _pc.fn_attempted:
             # Charged now, judged at the next measurement: the attempt counts
             # toward `unreached` only if the reading after it still reads 0.
-            _fn_record = note_attempt(_fn_record, _pc.fn_attempted, attempt)
+            _fn_record = note_attempt(_fn_record, _pc.fn_attempted, attempt,
+                                      outcomes=dict(_pc.fn_outcomes))
+            _outcomes = dict(_pc.fn_outcomes)
+            _log(f"  [{module_name}/{_cluster_label}] targeted attempt {attempt} wrote test "
+                 f"block(s) for {len(_pc.fn_attempted)} unexecuted function(s): "
+                 + ", ".join(sorted(f"{site_label(s)} ({_outcomes.get(s, 'ran')})"
+                                    for s in _pc.fn_attempted)))
+        if _pc.fn_attempted or _pc.fn_verdicts:
             if callable(deps.save_fn_record):
                 deps.save_fn_record(project_dir, _cluster_label, module_name, _fn_record)
-            _log(f"  [{module_name}/{_cluster_label}] targeted attempt {attempt} ran test "
-                 f"block(s) for {len(_pc.fn_attempted)} unexecuted function(s): "
-                 + ", ".join(sorted(site_label(s) for s in _pc.fn_attempted)))
         if _pc.kind == "return":
             assert _pc.result is not None
             return _pc.result
