@@ -6,6 +6,7 @@ __pycache__
 .env
 .swp
 *.log
+*.cast
 logs/
 tmp
 handover/
