@@ -1,4 +1,4 @@
-"""Pins for the BDD behaviour oracle domain (F10)."""
+"""Pins for the BDD behaviour oracle domain."""
 from __future__ import annotations
 
 import pytest

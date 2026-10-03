@@ -1,6 +1,6 @@
-"""Core-first dispatch partition (F4, pure domain).
+"""Core-first dispatch partition (pure domain).
 
-Complements F3's blame partition at the FRONTIER level: a unit whose every
+Complements the blame partition at the FRONTIER level: a unit whose every
 failing test panics inside a DIFFERENT still-`unimplemented!()` producer cannot
 be helped by filling it — the test never reaches the unit's own code. Dispatch
 it and you burn an LLM call ahead of the producer the test actually blocks on.

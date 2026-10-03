@@ -82,8 +82,8 @@ determ HEAD: ${CODE_ID}${UNCOMMITTED}
 anyhow workspace tag: ${WORKSPACE_TAG}
 compare seed: ${SNAPSHOT_NAME}
 
-Behaviour fix (236): emit_behaviour_tests env-twin + Debug probe ranking (580fb7e).
-Session fix (238): attributed_units_for_session join + P18 census.
+Behaviour fix: emit_behaviour_tests env-twin + Debug probe ranking (580fb7e).
+Session fix: attributed_units_for_session join.
 Harvest reading OPEN until restart_from.sh task0c."
 
 git tag -f "$DETERM_TAG" -m "$DETERM_MSG"

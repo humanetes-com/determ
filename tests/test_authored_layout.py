@@ -1,4 +1,4 @@
-"""Pins for the F11 authored-layout reply protocol + coverage check."""
+"""Pins for the authored-layout reply protocol + coverage check."""
 from __future__ import annotations
 
 from pipeline_core.domain.authored_layout import (

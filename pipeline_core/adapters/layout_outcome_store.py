@@ -1,11 +1,11 @@
 """Layout-outcome storage — persist WHICH connected component t1.5 authored,
-gated, or left frozen (F11 M3's precondition), and — for authored components —
+gated, or left frozen (the layout re-trigger's precondition), and — for authored components —
 the per-uid locate-keys a later re-author needs to find the authored items in
 the LIVE skeleton (the baked frozen definitions no longer exist there once a
 splice landed, so locating by them fails every attempt).
 
 Written once per t1.5 pass (`application/author_layout_phase.py::run_layout_phase`)
-and upserted per component by the F11 M3 re-trigger
+and upserted per component by the layout re-trigger
 (`application/retrigger_layout.py`) when it re-authors one. One file per
 cfg-cluster mirrors the skeleton's per-cluster layout, matching
 `private_surface_store.py`'s convention.
@@ -84,7 +84,7 @@ def load_layout_records(
     project_dir: Path, cfg_cluster: str,
 ) -> list[LayoutComponentRecord]:
     """Read a cluster's per-component outcome records. Missing/corrupt → empty
-    list (the F11 M3 caller is additive — its absence must never break a run;
+    list (the layout re-trigger caller is additive — its absence must never break a run;
     it simply finds nothing to retrigger). Rows written before locate-keys
     existed load with empty ``defs`` — an AUTHORED row without defs is simply
     not re-authorable and gets skipped loudly by the consumer."""

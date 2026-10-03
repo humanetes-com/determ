@@ -205,7 +205,7 @@ def _hot_reload_mi() -> None:
         _log(f"  [hot-reload] reload failed: {e}")
 
 # .env is already loaded at model_interact import (above) — no second load needed
-# (Debt #1). load_dotenv does not override already-set vars anyway.
+# load_dotenv does not override already-set vars anyway.
 
 # Composition root: resolve all env-driven knobs once into one typed object.
 # Everything downstream reads SETTINGS rather than os.environ for these values.
@@ -462,7 +462,7 @@ _ASK_CLIENT = AskClient(
 _BUDGETS = PromptBudgets.derive(SINGLE_CALL_CHAR_LIMIT)
 _FIX_ERR_CAP = SETTINGS.fix_caps.fix_err_cap  # Settings passthrough, not a budget fraction
 
-# Plan 10 U2: test-based acceptance. When on, a per-fn fill is accepted only if
+# Test-based acceptance. When on, a per-fn fill is accepted only if
 # the fn's OWN tests pass (not just compile); test failures route through the
 # same fix loop as compile errors. Default OFF — identical to legacy behavior —
 # so it can be validated live before enabling. Fail-safe: any error in the test
@@ -900,7 +900,7 @@ _coverage_provider: _covmod.CoverageProvider = _APP.coverage_provider
 # build.rs cfg authority — prunes phantom clusters from source `#[cfg]` atoms.
 
 
-# _LateStructure hoisted above _HELPERS (step 22).
+# _LateStructure hoisted above _HELPERS.
 
 
 # Composition root for the attribution use-case. Collaborators are late-bound
@@ -1266,7 +1266,7 @@ _phase_valid: Callable[[Path, str], bool] = _state_mod.phase_valid
 # API-surface section cap: ~25% of the single-call budget. The skeleton must
 # survive truncation because TASK 1 treats it as ground truth — but we still
 # bound it so it doesn't crowd out tests and README on large projects.
-# Plan 9 F3: was SINGLE_CALL//4 (~79K) — dropped 38% of a 129K API surface at
+# Was SINGLE_CALL//4 (~79K) — dropped 38% of a 129K API surface at
 # task1. Raised to //2 (~159K) so the whole API reaches FR synthesis; the
 # context guard still protects total-prompt overflow.
 
@@ -1404,7 +1404,7 @@ _is_gen_tests_file: Callable[[str], bool] = _discovery.is_gen_tests_file
 
 # Prelude imports injected into generated test modules when absent. Each row is
 # (import_stmt, accepted `use`-prefixes, required symbol token): present when a
-# `use <prefix>…<symbol>…` statement exists (R7: rust_scan.use_imports_symbol).
+# `use <prefix>…<symbol>…` statement exists (rust_scan.use_imports_symbol).
 
 
 # TestAugmentor (ABC) → ports/augment.py; StaticRustTestAugmentor →

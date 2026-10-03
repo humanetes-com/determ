@@ -1,4 +1,4 @@
-"""Layout re-trigger ACTION (F11 M3) — the TDD driver's escape hatch when a
+"""Layout re-trigger ACTION — the TDD driver's escape hatch when a
 cluster's per-fn fix loop is stalled by a private layout it can't work with.
 
 `domain/layout_retrigger.py` decides WHETHER to retrigger; this module does

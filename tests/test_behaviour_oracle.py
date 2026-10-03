@@ -1,4 +1,4 @@
-"""Pins for the behaviour oracle (F10 Use-A / M4)."""
+"""Pins for the behaviour oracle."""
 from __future__ import annotations
 
 from pipeline_core.application.run_behaviour_oracle import run_behaviour_oracle

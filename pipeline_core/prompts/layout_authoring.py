@@ -1,4 +1,4 @@
-"""Layout-authoring prompt (F11 t1.5) — asks the model to DESIGN a crate's
+"""Layout-authoring prompt — asks the model to DESIGN a crate's
 private layout instead of reproducing the original's.
 
 The freeze-scope bug forced the model to satisfy the original's hand-rolled

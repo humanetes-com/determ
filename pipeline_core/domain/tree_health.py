@@ -1,4 +1,4 @@
-"""Typed tree-health classification (F7, pure domain).
+"""Typed tree-health classification (pure domain).
 
 The tdd loop read `pass=0 fail=0 frontier=None` for ~30h across restarts while
 the crate did not PARSE, and marched on marking fns exhausted from that broken

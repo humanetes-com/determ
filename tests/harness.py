@@ -255,7 +255,7 @@ class FakeStructureReader:
         # None = extractor unavailable: the doc-test count takes its text scan.
         return None
 
-    def parse_ok(self, path):  # noqa: ANN001, ANN201 — F1 splice gate
+    def parse_ok(self, path):  # noqa: ANN001, ANN201 — splice gate
         # Fail-open in tests: no real syn binary here, and the scripted fixtures
         # are trusted, so the parse gate never blocks a splice (mirrors the
         # production adapter's fail-open on an unavailable extractor).

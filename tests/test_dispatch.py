@@ -1,4 +1,4 @@
-"""F4 pins — core-first dispatch (defer consumers blocked by stubbed producers)."""
+"""Core-first dispatch (defer consumers blocked by stubbed producers)."""
 from __future__ import annotations
 
 from pipeline_core.domain.dispatch import DispatchClass, defer_blocked_consumers

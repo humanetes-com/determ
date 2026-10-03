@@ -71,7 +71,7 @@ def test_an_unlocatable_site_leaves_that_binary_out() -> None:
 
 _RUSTC = "/rustc/0000/library/core/src/panicking.rs:233:5"
 _STABLE_245 = (
-    # Entry 245's stable shape (run `2585062-494e630e`): one binary aborts on a
+    # The stable shape (run `2585062-494e630e`): one binary aborts on a
     # stub panic plus the runtime's destructor line, one aborts after an
     # ASSERTION, one completes with a stub failure of its own.
     "running 3 tests\n"

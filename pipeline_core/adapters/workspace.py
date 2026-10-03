@@ -91,6 +91,27 @@ def git_commit(deps: WorkspaceDeps, project_dir: Path, message: str, *, managed:
         return False
 
 
+def git_checkpoint(deps: WorkspaceDeps, project_dir: Path, message: str, *,
+                   managed: bool) -> bool:
+    """Commit every change and say whether HEAD now holds the whole working
+    tree (True also when there was nothing to commit). False off git and on
+    any failure: a restore point must not be tagged over a tree its commit
+    does not hold, and `git_commit` returns False for "nothing to commit" and
+    for a failed commit alike."""
+    if not managed:
+        return False
+    git_commit(deps, project_dir, message, managed=managed)
+    try:
+        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=project_dir,
+                               check=True, capture_output=True, text=True).stdout.strip()
+    except Exception as e:
+        deps.log(f"  [git] status failed: {e}")
+        return False
+    if dirty:
+        deps.log(f"  [git] {len(dirty.splitlines())} path(s) still uncommitted after: {message}")
+    return not dirty
+
+
 def git_commit_paths(
     deps: WorkspaceDeps, project_dir: Path, rel_paths: list[str], message: str,
     *, managed: bool,

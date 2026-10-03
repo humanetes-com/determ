@@ -1,4 +1,4 @@
-"""Behaviour selection for prompts (F10 Use-B, M5) — pure domain.
+"""Behaviour selection for prompts — pure domain.
 
 The few-shot channel: given the behaviours harvested for a cluster, pick the ones
 RELEVANT to the fn being filled and render them as concrete RIGHT usage examples
@@ -96,7 +96,7 @@ def select_usage_examples(
 
 
 # --------------------------------------------------------------------------
-# Layout-authoring channel (t1.5): which RUNTIME behaviours a component's
+# Layout-authoring channel: which RUNTIME behaviours a component's
 # representation must make expressible.
 #
 # The authoring prompt used to carry only the STATIC_ASSERTION pins

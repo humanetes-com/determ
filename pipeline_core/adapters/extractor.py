@@ -1,7 +1,7 @@
 """Extractor adapter — wraps the Rust skeleton-extractor binary over its JSON CLI.
 
 Satisfies :class:`pipeline_core.ports.Extractor`. Mirrors the invocation patterns in
-``pipeline.py`` byte-for-byte (the seam is sacred, CODE_ARCHITECTURE.md §4): each
+``pipeline.py`` byte-for-byte (the seam is sacred): each
 ``enumerate_*`` shells ``[bin, "--<subcmd>", "--input", <dir>, <cfg-args>]``, parses the
 stdout JSON, and returns ``None`` on any failure (missing binary, non-zero rc, bad JSON).
 
@@ -144,10 +144,11 @@ class CliExtractor:
     # ── parse-check : syn-parse a single FILE, bool out ───────────────────────
     def parse_check(self, file_path: Path) -> bool:
         """True iff the syn extractor parses `file_path` as valid Rust. The
-        transactional splice gate's signal (F1). Fail-OPEN: the gate must reject
+        transactional splice gate's signal. Fail-OPEN: the gate must reject
         ONLY on a POSITIVE syn parse failure (rc != 0). A missing binary or
         subprocess error is inconclusive → return True (don't block all fills;
-        F2 heal + F7 alarm are the downstream net for anything that slips)."""
+        The heal hierarchy and the tree-health alarm are the downstream net
+        for anything that slips)."""
         if not self._bin.exists():
             return True
         cmd = [str(self._bin), "--parse-check", "--input", str(file_path)]

@@ -1,4 +1,4 @@
-"""Behaviour probes — pure domain half of the synthesis tier (F10 tier 3).
+"""Behaviour probes — pure domain half of the synthesis tier.
 
 A PROBE is a model-authored program that USES the crate's public API and
 PRINTS an observable; the harness runs it against the ORIGINAL crate in the

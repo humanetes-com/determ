@@ -1,4 +1,4 @@
-"""Pins for the test-assertion harvester (F10 tier 2), on the anyhow test
+"""Pins for the test-assertion harvester, on the anyhow test
 files the 98-tree failures pin — copied verbatim to tests/fixtures/behaviours/.
 
 The claim under test is the plan's: the three defect observables the suite

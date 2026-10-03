@@ -1,4 +1,4 @@
-"""Test-assertion harvester (F10 extraction tier 2) — the observables a crate's
+"""Test-assertion harvester — the observables a crate's
 own `tests/*.rs` pin, lifted as OUTCOME behaviours with a runtime Then.
 
 Why this tier exists. The bake's suite for anyhow (30 specs, 2026-08-26)

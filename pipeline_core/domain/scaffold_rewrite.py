@@ -1,7 +1,7 @@
-"""Scaffold rewrite (F11 t1.5) — splice the model's authored private layout
+"""Scaffold rewrite — splice the model's authored private layout
 into the baked skeleton, replacing the frozen private definitions.
 
-Per the F11(b) decision the layout IS the scaffold: t1.5 rewrites the skeleton
+By design the layout IS the scaffold: t1.5 rewrites the skeleton
 files pre-t2a, and the body-filler (splice) is untouched. This module performs
 the replacement purely on text: find a frozen definition in a skeleton file
 (whitespace-tolerant, since the enumerated source text and the emitted skeleton

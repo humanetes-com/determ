@@ -1,7 +1,7 @@
 //! Integration pin for TRAP T7 (label.rs). complexity 4 — frozen-bound mismatch.
 //! Pins `tagged` to render through the FROZEN `T: Describe` bound's method, and
 //! `describe` to its per-variant text — the unique rule a human reading only the
-//! tests derives (FR-022 boundary).
+//! tests derives.
 use hardcrate::{Describe, Reason, Tagged};
 
 #[test]

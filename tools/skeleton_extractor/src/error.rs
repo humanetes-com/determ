@@ -1,4 +1,4 @@
-//! Typed library error (CODE_ARCHITECTURE.md §3: thiserror at the lib edge, anyhow only in
+//! Typed library error (thiserror at the lib edge, anyhow only in
 //! the binary). Every `pub fn` in the crate returns `Result<T> = Result<T, ExtractError>`, so
 //! a *library* consumer gets a matchable error with the file path attached — not an opaque
 //! `anyhow::Error`. The binary (`main.rs`) keeps `anyhow`; `?` converts `ExtractError` into

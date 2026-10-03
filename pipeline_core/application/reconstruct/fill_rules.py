@@ -264,7 +264,7 @@ def failure_hit_unfilled_stub(detail: str) -> bool:
     """True when a test FAILURE is a panic from a still-unfilled `unimplemented!()`
     / `todo!()` stub rather than a real assertion mismatch.
 
-    Used by the per-fn fill loop (#3): a multi-fn test attributed to fn A can fail
+    Used by the per-fn fill loop: a multi-fn test attributed to fn A can fail
     because a SIBLING fn it also calls is still a stub — not because A is wrong.
     Runtime panic attribution is first-panic-order, so we can't tell from the
     frontier alone; the panic MESSAGE is the reliable signal. The fn just filled

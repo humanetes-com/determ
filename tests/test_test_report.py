@@ -1,4 +1,4 @@
-"""F3 pins — structured test-run report + blame partition (pure domain)."""
+"""Blame-partition pins — structured test-run report + blame partition (pure domain)."""
 from __future__ import annotations
 
 from pipeline_core.domain.models import FnSite
@@ -15,7 +15,7 @@ from pipeline_core.domain.test_report import (
     self_aborted_tests,
 )
 
-# --- F8 excerpt discipline -------------------------------------------------- #
+# --- excerpt discipline -------------------------------------------------- #
 
 def test_cap_at_line_boundary_keeps_whole_lines() -> None:
     text = "line-one\nline-two\nline-three\n"

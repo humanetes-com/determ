@@ -1,5 +1,5 @@
 """Apply an already-validated authored layout to a LIVE (already-filled) source
-tree — the F11 M3 layout-retrigger action's propagation step.
+tree — the layout-retrigger action's propagation step.
 
 `author_layout` splices into the SKELETON and gates on it compiling. But the
 tree cargo actually builds (`.skeleton-filled/{cluster}/`) is seeded from the

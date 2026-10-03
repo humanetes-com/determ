@@ -330,6 +330,7 @@ from pipeline_core.adapters.vllm_bootstrap import (
     ensure_vllm_ready as _ensure_vllm_ready,
 )
 from pipeline_core.adapters.workspace import WorkspaceDeps, git_commit_paths
+from pipeline_core.adapters.workspace import git_checkpoint as _ws_git_checkpoint
 from pipeline_core.adapters.workspace import (
     git_clean_reset as _ws_git_clean_reset,
 )
@@ -1519,6 +1520,10 @@ def build_app(
         _ws_git_tag(_live().ws_deps, project_dir, tag,
                     managed=run_state.git_managed)
 
+    def git_checkpoint(project_dir: Path, message: str) -> bool:
+        return _ws_git_checkpoint(_live().ws_deps, project_dir, message,
+                                  managed=run_state.git_managed)
+
     collect_test_files = functools.partial(
         _disc_collect_test_files, is_gen_tests_decl_only=_gen_is_decl_only_src)
 
@@ -2619,6 +2624,7 @@ def build_app(
         restart_from_pre_augment=restore_from_pre_augment.run,
         git_tag=git_tag,
         list_git_tags=_ws_list_git_tags,
+        git_checkpoint=git_checkpoint,
         oracle_drift=_workspace_oracle_drift,
         set_current=set_current,
         source_hash=source_hash,

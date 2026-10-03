@@ -63,8 +63,8 @@ def _setup(monkeypatch, tmp_path: Path) -> Path:
     ws = tmp_path / "ws"
     (ws / "src").mkdir(parents=True)
     (ws / "src" / "lib.rs").write_text(IMPL_LIB)
-    # B3 is env-driven and .env sets it ON for live runs — pin it OFF here so
-    # the revert-path tests are environment-independent; the B3 test pins it ON.
+    # Keep-while-red is env-driven and .env sets it ON for live runs — pin it OFF here so
+    # the revert-path tests are environment-independent; the keep-while-red test pins it ON.
     monkeypatch.setenv("PHASE_C_KEEP_NONREGRESSING", "0")
     # Route order resolves from the task2 MODEL when the env is silent
     # (domain/model_defaults.py), and the operator's .env may name a model
@@ -225,7 +225,7 @@ def test_impl_prompt_carries_its_whole_file_read_each_attempt(
 
 
 def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
-    # B3: crate still has a PRE-EXISTING error elsewhere, but this
+    # Keep-while-red: crate still has a PRE-EXISTING error elsewhere, but this
     # block's fill adds no NEW error and none lands on the filled fns →
     # keep the fill instead of reverting (convergence-deadlock dissolver).
     ws = _setup(monkeypatch, tmp_path)
@@ -234,7 +234,7 @@ def test_impl_b3_keeps_nonregressing_fill(monkeypatch, tmp_path):
     elsewhere = diag("src/other.rs", code="E0425")
     install_scripted_cargo(
         monkeypatch,
-        # 1st call = B3 baseline, 2nd = post-splice verify: same single error.
+        # 1st call = keep-while-red baseline, 2nd = post-splice verify: same single error.
         check_diag=[(101, "error: y", [elsewhere]),
                     (101, "error: y", [elsewhere])],
         frontier={},   # no diagnostic attributes to the filled fns

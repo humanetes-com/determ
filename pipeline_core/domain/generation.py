@@ -628,7 +628,7 @@ def _strip_decls(text: str, keep: Callable[[GenTestsDecl], bool]) -> str:
 
 def strip_gen_tests_decl(parent_text: str, sibling_name: str, pass_n: int) -> str:
     """Remove the one decl block whose `#[path]` is `sibling_name` and pass is
-    `pass_n`; leave all others untouched. (#9: replaces the reattach-quarantine regex.)"""
+    `pass_n`; leave all others untouched. Replaces the reattach-quarantine regex."""
     return _strip_decls(
         parent_text,
         keep=lambda d: not (d.pass_n == pass_n and d.sibling_name == sibling_name))

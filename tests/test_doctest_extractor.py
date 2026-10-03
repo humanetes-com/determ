@@ -1,4 +1,4 @@
-"""Pins for the doc-test harvester (F10 extraction tier 1)."""
+"""Pins for the doc-test harvester."""
 from __future__ import annotations
 
 from pipeline_core.domain.behaviour import (

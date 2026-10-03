@@ -350,7 +350,7 @@ pub fn stub_b() -> &'static str { "hello" }
 
 
 def test_fn_block_extract_and_merge() -> None:
-    """P3.2: per-function output format. _extract_fn_blocks parses <FN sig=...>
+    """Per-function output format. _extract_fn_blocks parses <FN sig=...>
     blocks; _merge_fn_blocks_into_disk substitutes bodies into disk by sig.
     """
     import pipeline
@@ -395,7 +395,7 @@ pub fn stub_b() -> &'static str { ::core::unimplemented!() }
 
 
 def test_format_skeleton_index() -> None:
-    """P3.3: signatures-only skeleton. Replaces `{...}` bodies with `;`."""
+    """Signatures-only skeleton. Replaces `{...}` bodies with `;`."""
     import pipeline
 
     files = [(
@@ -546,7 +546,7 @@ def test_strip_doc_attrs() -> None:
     assert "pub fn foo" in out
     assert "pub fn bar" in out
     assert "#[cfg(test)]" in out
-    print("  OK  _strip_doc_attrs (FR-024)")
+    print("  OK  _strip_doc_attrs")
 
 
 def test_condense_doc_attrs() -> None:
@@ -573,7 +573,7 @@ def test_condense_doc_attrs() -> None:
     assert 'let x = 1;' not in out, "code example leaked"
     assert 'badge' not in out, "badge leaked"
     assert 'pub fn new' in out
-    print("  OK  _condense_doc_attrs (FR-026)")
+    print("  OK  _condense_doc_attrs")
 
 
 def test_cluster_gate_predicate_is_satisfiable() -> None:
@@ -591,7 +591,7 @@ def test_cluster_gate_predicate_is_satisfiable() -> None:
     assert ', feature = "anyhow_no_core_error",' not in g, f"feature AND'd: {g}"
     # default (no active/excluded) → empty gate
     assert cluster_gate_predicate([], []) == ""
-    print("  OK  cluster_gate_predicate (FR-032)")
+    print("  OK  cluster_gate_predicate")
 
 
 def test_run_scoped_tests() -> None:
@@ -614,7 +614,7 @@ def test_run_scoped_tests() -> None:
     run = lambda *a, **k: (-1, "")  # noqa: E731
     ok, n, detail, failed = run_scoped_tests(run, "cargo test", _P, {}, err_cap=1200)
     assert (not ok) and n == -1 and failed == set(), (ok, n, detail, failed)
-    print("  OK  _run_scoped_tests (Plan 10 U1)")
+    print("  OK  _run_scoped_tests")
 
 
 def test_generate_in_parallel() -> None:
@@ -650,7 +650,7 @@ def test_generate_in_parallel() -> None:
         assert mixed == ["resp:A", "", "resp:C"], mixed
     finally:
         pipeline._ask_raw = _orig
-    print("  OK  generate_in_parallel (Plan 8 split-and-merge)")
+    print("  OK  generate_in_parallel")
 
 
 def test_partition_uncovered_lines() -> None:
@@ -680,7 +680,7 @@ def test_partition_uncovered_lines() -> None:
     # n_groups==1 or empty are trivial.
     assert _cov_ann.partition_uncovered_lines(src, uncov, 1) == [uncov]
     assert _cov_ann.partition_uncovered_lines(src, set(), 3) == []
-    print("  OK  _partition_uncovered_lines (Plan 8 split-and-merge)")
+    print("  OK  _partition_uncovered_lines")
 
 
 def test_collect_sibling_filled_bodies() -> None:
@@ -704,7 +704,7 @@ def test_collect_sibling_filled_bodies() -> None:
     # Calling with Foo as target should exclude Foo and find no fillers.
     block_foo = pipeline._collect_sibling_filled_bodies(text, "as_ref", "impl Foo")
     assert block_foo == "", f"Foo's own impl returned as sibling:\n{block_foo}"
-    print("  OK  _collect_sibling_filled_bodies (FR-024)")
+    print("  OK  _collect_sibling_filled_bodies")
 
 
 def test_count_test_fns_cfg_aware() -> None:
@@ -739,7 +739,7 @@ def test_count_test_fns_cfg_aware() -> None:
         cfg_false=set(),
     )
     assert n_nightly == 3, f"nightly count expected 3, got {n_nightly}"
-    print("  OK  _count_test_fns_cfg_aware (FR-024)")
+    print("  OK  _count_test_fns_cfg_aware")
 
 
 def test_validate_task3_strict() -> None:
@@ -761,7 +761,7 @@ def test_validate_task3_strict() -> None:
     # Ignored tests count toward the expected total.
     s, _ = v(pass_count=8, fail_count=0, ignored_count=4, expected_count=12, cluster_name="x")
     assert s == "pass", s
-    print("  OK  validate_task3_output_strict (FR-024)")
+    print("  OK  validate_task3_output_strict")
 
 
 def test_parse_test_counts() -> None:
@@ -788,7 +788,7 @@ def test_parse_test_counts() -> None:
         f"got ({passed}, {failed}, {ignored}), expected (6, 3, 1)"
     # Empty input → (0, 0, 0).
     assert pipeline._parse_test_counts("") == (0, 0, 0)
-    print("  OK  _parse_test_counts (FR-024)")
+    print("  OK  _parse_test_counts")
 
 
 def test_build_test_reverse_map() -> None:
@@ -826,7 +826,7 @@ def test_build_test_reverse_map() -> None:
         names = {n for (_f, n) in rev["t_one"]}
         assert "alpha" in names, f"alpha not attributed to t_one: {names}"
         assert "beta" in names, f"beta not attributed to t_one: {names}"
-    print("  OK  _build_test_reverse_map (FR-024)")
+    print("  OK  _build_test_reverse_map")
 
 
 def test_ast_cluster_merge_preserves_trait_structure() -> None:
@@ -1001,9 +1001,9 @@ def test_strip_preserves_gen_tests_verbatim() -> None:
         # Byte-for-byte is the strongest property.
         assert survivor == fixture, (
             "gen_tests file modified by strip; expected byte-for-byte "
-            "preservation per FR-023."
+            "preservation."
         )
-    print("  OK  strip preserves gen_tests verbatim (FR-023)")
+    print("  OK  strip preserves gen_tests verbatim")
 
 
 def test_file_cfg_predicate_adjacent_mod_decls() -> None:
@@ -2230,7 +2230,7 @@ def test_domain_enums_and_model_caps() -> None:
     import os as _os
     if "TASK1_MODEL" not in _os.environ:
         assert TaskModels.from_env("the-default").task1 == "the-default"
-    print("  OK  pipeline_core domain enums + model_caps + Settings budget + task_models (slice 1+2+3)")
+    print("  OK  pipeline_core domain enums + model_caps + Settings budget + task_models")
 
 
 def test_adapters_satisfy_ports() -> None:
@@ -2262,7 +2262,7 @@ def test_adapters_satisfy_ports() -> None:
 
     import pipeline
     assert isinstance(pipeline.ADAPTERS, Adapters)
-    print("  OK  pipeline_core adapters satisfy ports (slice 4a)")
+    print("  OK  pipeline_core adapters satisfy ports")
 
 
 def test_coverage_workspace_adapters() -> None:
@@ -2329,7 +2329,7 @@ def test_coverage_workspace_adapters() -> None:
     # pipeline shims delegate to the adapter (identity of provider + module funcs).
     import pipeline
     assert isinstance(pipeline._coverage_provider, cov.CoverageProvider)
-    print("  OK  pipeline_core coverage + workspace adapters (slice 4b)")
+    print("  OK  pipeline_core coverage + workspace adapters")
 
 
 def test_slice5a_shims_delegate_to_adapters() -> None:
@@ -2406,7 +2406,7 @@ def test_slice5a_shims_delegate_to_adapters() -> None:
     finally:
         pipeline.ADAPTERS = orig
         pipeline._APP = orig_app
-    print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS (slice 5a)")
+    print("  OK  pipeline extractor + cargo shims delegate to ADAPTERS")
 
 
 def test_slice5b_task0_docs() -> None:
@@ -2440,7 +2440,7 @@ def test_slice5b_task0_docs() -> None:
     r = task0_project_context(Path("/tmp/zz/project_context.md"), tf, "readme", "profile",
                               mk(f"```md\n{body}\n```"))
     assert r == body and written["project_context.md"] == body
-    print("  OK  task0 doc tasks extracted (slice 5b)")
+    print("  OK  task0 doc tasks extracted")
 
 
 def test_slice5b_task0b_discovery() -> None:
@@ -2468,7 +2468,7 @@ def test_slice5b_task0b_discovery() -> None:
                              "readme", "profile", deps)
     # dedup collapsed the repeated "A"
     assert written["s"] == "A\nB" and r == "A\nB"
-    print("  OK  task0b discovery extracted (slice 5b)")
+    print("  OK  task0b discovery extracted")
 
 
 def test_slice5b_task1() -> None:
@@ -2506,7 +2506,7 @@ def test_slice5b_task1() -> None:
                            crate_type="proc-macro", module_name="mycrate"),
               mk(ask_resp='<FILE path="functional_requirements.md">PM REQS</FILE>'))
     assert r is True and calls["fr"] == "PM REQS"
-    print("  OK  task1 (dispatcher + proc-macro) extracted (slice 5b)")
+    print("  OK  task1 (dispatcher + proc-macro) extracted")
 
 
 def test_slice5b_task0c() -> None:
@@ -2527,7 +2527,7 @@ def test_slice5b_task0c() -> None:
 
     import pipeline
     assert isinstance(pipeline._APP.task0c_deps, Task0cDeps)
-    print("  OK  task0c engine extracted behind orchestrator (slice 5b)")
+    print("  OK  task0c engine extracted behind orchestrator")
 
 
 def test_augment_engine_callback_accepts_engine_call_shape() -> None:
@@ -2610,7 +2610,7 @@ def test_slice6_models() -> None:
     # tolerant: no code / no span.
     blank_dg = Diagnostic.from_dict({"message": "linker error"})
     assert blank_dg.code == "" and blank_dg.line == 0 and blank_dg.message == "linker error"
-    print("  OK  domain models for extractor + cargo seams (slice 6)")
+    print("  OK  domain models for extractor + cargo seams")
 
 
 def test_slice6_models_seam_wiring() -> None:
@@ -2630,7 +2630,7 @@ def test_slice6_models_seam_wiring() -> None:
     rec = FnRecord.from_dict({"fn_name": "f", "file": "a.rs"})
     # The pipeline wrapper hands the engine dicts (to_dict), not dataclasses.
     assert rec.to_dict()["fn_name"] == "f"
-    print("  OK  extractor seam typed; engine still dict-fed (slice 6)")
+    print("  OK  extractor seam typed; engine still dict-fed")
 
 
 def test_stub_model() -> None:
@@ -2662,7 +2662,7 @@ def test_stub_model() -> None:
     assert Stub.from_record(fr) == s
     # tolerant: empty dict → all-default Stub, no crash.
     assert Stub.from_dict({}).key == ("", "")
-    print("  OK  Stub model: tolerant from_dict / from_record / key (R3.2)")
+    print("  OK  Stub model: tolerant from_dict / from_record / key")
 
 
 def test_impl_block_model() -> None:
@@ -2698,7 +2698,7 @@ def test_impl_block_model() -> None:
     blank = ImplBlock.from_dict({"file": "a.rs"})
     assert blank.members == () and blank.stub_members == () and blank.related_containers == ()
     assert blank.refill_members == ()
-    print("  OK  ImplBlock model: typed members + round-trip + id (R3.2)")
+    print("  OK  ImplBlock model: typed members + round-trip + id")
 
 
 def test_slice5b_task2() -> None:
@@ -2725,7 +2725,7 @@ def test_slice5b_task2() -> None:
     # fix loop with empty manifest → (False, test_output)
     assert task2_fix_loop(Path("."), Path("m"), set(), "OUT", "cargo test",
                           Path("r"), deps) == (False, "OUT")
-    print("  OK  task2 (dispatcher + inner/fix loops) extracted (slice 5b)")
+    print("  OK  task2 (dispatcher + inner/fix loops) extracted")
 
 
 def test_slice5b_task3_task4() -> None:
@@ -2791,7 +2791,7 @@ def test_slice5b_task3_task4() -> None:
     out = "test result: ok. 3 passed; 1 failed; 0 ignored"
     ok, cur = task4(Path("g"), Path("r"), out, 2, ".", d4, failure_type="test")
     assert ok is True and cur == 3 and t4_written["g"] == "new-genesis-methodology"
-    print("  OK  task3 + task4 extracted behind orchestrator (slice 5b)")
+    print("  OK  task3 + task4 extracted behind orchestrator")
 
 
 def test_slice5b_genesis_audit_task() -> None:
@@ -2883,7 +2883,7 @@ def test_slice5b_genesis_audit_task() -> None:
         assert gone not in GenesisAuditDeps.__dataclass_fields__
     assert set(GenesisAuditDeps.__dataclass_fields__) == {
         "ask", "read", "write", "model", "verbosity_guard"}
-    print("  OK  genesis_audit + test_results + text + infra + llm_output + io (slice 5b)")
+    print("  OK  genesis_audit + test_results + text + infra + llm_output + io")
 
 
 def test_task0b_iter_source_rs_prunes_scratch_dirs() -> None:
@@ -2947,7 +2947,7 @@ def test_validate_task4_output_build_skips_identifier_check() -> None:
                                           failure_type="build")[0] is False
     assert pipeline.validate_task4_output(before, before[:10], compiler_output,
                                           failure_type="build")[0] is False
-    print("  OK  validate_task4_output build-mode skips identifier check (R9.5)")
+    print("  OK  validate_task4_output build-mode skips identifier check")
 
 
 def test_propagate_or_quarantine_orphan_sibling() -> None:
@@ -2986,7 +2986,7 @@ def test_propagate_or_quarantine_orphan_sibling() -> None:
         assert _propagate_or_quarantine_sibling(
             legacy, {}, "lib", 9, log_fn=None, tag="t") is True
         assert legacy.exists()
-        print("  OK  _propagate_or_quarantine_sibling quarantines orphans (R9.6)")
+        print("  OK  _propagate_or_quarantine_sibling quarantines orphans")
 
 
 def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
@@ -3015,7 +3015,7 @@ def test_revert_gen_tests_pass_reconciles_all_siblings() -> None:
         assert parent.read_text() == snapshot
         assert not sib1.exists()
         assert not sib2.exists(), "sib2 orphaned — reconciliation missed it"
-        print("  OK  _revert_gen_tests_pass reconciles all dropped siblings (R9.6)")
+        print("  OK  _revert_gen_tests_pass reconciles all dropped siblings")
 
 
 def test_cluster_filter_type_members_drops_cfg_dead_methods():

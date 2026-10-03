@@ -6,12 +6,14 @@ Two restore points, one family:
   point, tag ``task0c-augmented-<module>``. The generated tests come back from
   the tag; strip / task1+ re-run against them.
 * ``--restart-from-pre-augment`` → :class:`RestoreFromPreAugment`: the
-  PRE-task0c point, tag ``task0c-pre-<module>``, written by the orchestrator
-  right before the cluster augmentation starts. Nothing task0c generated
-  survives and task0c itself re-runs — the lever for a changed test generator
-  or admission rule, which before this needed ``pipeline.py --repo <URL>
-  --clean``: a re-clone that bypasses continue.sh's pre-run gate and discards
-  the task0a/0b outputs along with everything else.
+  PRE-task0c point. Nothing task0c generated survives and task0c itself
+  re-runs — the lever for a changed test generator or admission rule, which
+  before this needed ``pipeline.py --repo <URL> --clean``: a re-clone that
+  bypasses continue.sh's pre-run gate and discards the task0a/0b outputs along
+  with everything else. The commit is the behaviour restore point
+  ``task0d-done-<module>`` (after task0d, which is slow and reads nothing
+  task0c writes) when the workspace has one; ``--reharvest-behaviours``, or a
+  workspace without it, goes back to ``task0c-pre-<module>`` (before task0d).
 
 Both archive the reconstruction directories before the hard reset, describe
 what the reset is about to discard, reset, wipe the artefacts the tag's tree
@@ -33,6 +35,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from ..domain.workspace_layout import (
+    BEHAVIOUR_TAG_PREFIX,
     CLUSTER_AUGMENTED_DIR,
     FAILURE_LOG_NAME,
     MODULE_AUGMENTED_DIR,
@@ -334,22 +337,80 @@ class RestoreFromPreAugment(_WorkspaceRestore):
         ]
         self._wipe_paths(root, paths)
 
-    def run(self, root: Path, project_dir: Path) -> None:
-        """Restore the workspace to the pre-augmentation commit: archive the
+    def _find_behaviour_tags(self, project_dir: Path, pre_commit: str,
+                             module_names: Iterable[str]) -> tuple[list[str], str] | None:
+        """The behaviour restore point (`task0d-done-<module>`), or None when
+        the workspace has none (it predates the point, or its harvest never
+        completed before a task0c). A point that is present but is not one
+        commit, does not cover the pre-augmentation tag's modules or is not
+        built on that tag is refused: keeping it would keep a harvest of some
+        other tree."""
+        tags = list_git_tags(project_dir, f"{BEHAVIOUR_TAG_PREFIX}*")
+        if not tags:
+            return None
+        remedy = ("pass --reharvest-behaviours (restart_from.sh task0d) to delete it and "
+                  "harvest again")
+        commits = {t: _commit_of(project_dir, t) for t in tags}
+        if len(set(commits.values())) > 1:
+            raise RuntimeError(f"task0d-done-* tags name different commits: {commits}; {remedy}.")
+        modules = {t[len(BEHAVIOUR_TAG_PREFIX):] for t in tags}
+        if modules != set(module_names):
+            raise RuntimeError(f"task0d-done-* tags cover module(s) {sorted(modules)}, the "
+                               f"pre-augmentation tags {sorted(module_names)}; {remedy}.")
+        commit = commits[tags[0]]
+        built_on = subprocess.run(["git", "merge-base", "--is-ancestor", pre_commit, commit],
+                                  cwd=project_dir, capture_output=True).returncode == 0
+        if not built_on:
+            raise RuntimeError(f"{tags[0]} ({commit[:10]}) is not built on the pre-augmentation "
+                               f"commit {pre_commit[:10]}; {remedy}.")
+        return tags, commit
+
+    def _delete_tags(self, project_dir: Path, tags: Iterable[str]) -> None:
+        for tag in tags:
+            subprocess.run(["git", "tag", "-d", tag], cwd=project_dir,
+                           check=True, capture_output=True)
+            self.log(f"  [{self.label}] deleted {tag} (the harvest is re-run; the next "
+                     "complete harvest writes it again)")
+
+    def run(self, root: Path, project_dir: Path, *, reharvest: bool = False) -> None:
+        """Restore the workspace to the commit task0c builds on: archive the
         reconstruction, hard-reset, clean untracked files, wipe task0c/strip/
-        task1+ artefacts, and leave pipeline_state.md with only the entries
-        that predate task0c (cfg_scan, test_cmd, task0a*, task0b)."""
-        tags, commit = self._find_restore_tags(project_dir)
+        task1+ artefacts, and rewrite pipeline_state.md.
+
+        The commit is the behaviour restore point (`task0d-done-<module>`,
+        after task0d) when the workspace has one: the harvest and its
+        `task0d/<cluster>` entries are kept and task0d skips. With `reharvest`,
+        or in a workspace without that point, it is `task0c-pre-<module>`
+        (before task0d) and only cfg_scan, test_cmd, task0a* and task0b are
+        kept; `reharvest` also deletes the behaviour tags, which a resumed
+        harvest would otherwise never re-point."""
+        tags, pre_commit = self._find_restore_tags(project_dir)
         module_names = [t[len(PRE_AUGMENT_TAG_PREFIX):] for t in tags]
+        behaviour = None
+        if reharvest:
+            self._delete_tags(project_dir, list_git_tags(project_dir, f"{BEHAVIOUR_TAG_PREFIX}*"))
+        else:
+            behaviour = self._find_behaviour_tags(project_dir, pre_commit, module_names)
+        target, commit = (behaviour[0][0], behaviour[1]) if behaviour else (tags[0], pre_commit)
 
         self._archive_reconstruction(project_dir)
-        self._reset_hard(project_dir, tags[0])
+        self._reset_hard(project_dir, target)
         self.log(f"  [{self.label}] at {commit[:10]} for module(s) {', '.join(module_names)}")
         self._git_clean(project_dir)
         self._wipe_augmentation_artifacts(root, project_dir, module_names)
 
-        self._rewrite_state(project_dir, drop_pre_augment_phases)
+        self._rewrite_state(project_dir, lambda phases: drop_pre_augment_phases(
+            phases, keep_behaviours=behaviour is not None))
+        if behaviour is not None:
+            self.log("  Cleared task0c and later entries from pipeline_state.md "
+                     "(kept cfg_scan, test_cmd, task0a*, task0b, task0d/*)")
+            self.log(f"  Workspace restored to {target}; task0a/0b and the task0d behaviour "
+                     "harvest kept, task0c + strip + task1+ will re-run "
+                     "(--reharvest-behaviours re-runs task0d too).")
+            return
         self.log("  Cleared task0c and later entries from pipeline_state.md "
                  "(kept cfg_scan, test_cmd, task0a*, task0b)")
-        self.log(f"  Workspace restored to {tags[0]}; task0a/0b kept, "
-                 "task0c + strip + task1+ will re-run.")
+        why = ("re-harvest requested" if reharvest else
+               "no task0d-done-* tag in this workspace; the harvest writes it this run")
+        self.log(f"  Workspace restored to {tags[0]}; task0a/0b kept, task0d + task0c + "
+                 f"strip + task1+ will re-run ({why}).")

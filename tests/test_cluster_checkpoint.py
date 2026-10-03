@@ -1,4 +1,4 @@
-"""I5 pins — F2 heal restore tiers are actually POPULATED during phase-c.
+"""Pins — heal restore tiers are actually POPULATED during phase-c.
 
 The catastrophe (22->14) re-opened because both middle heal tiers were dead:
 nothing wrote `.best_tree/<cluster>/` and `.skeleton-filled/` was never

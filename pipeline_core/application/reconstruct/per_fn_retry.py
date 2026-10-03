@@ -1,10 +1,10 @@
 """Per-fn retry use-case — extracted from _task3_inline_retry (V1 / §7.0b).
 
 `fix_one_ref` re-asks the model for one (file, fn) body and splices it in.
-`apply_per_fn_fixes` drives B2 isolation: one fn's exception is logged and
+`apply_per_fn_fixes` drives per-fn isolation: one fn's exception is logged and
 skipped, never aborting the improvement pass or masking the other fns.
 
-Extracted from the closure nest so B2's fault-isolation behaviour is
+Extracted from the closure nest so the per-fn fault-isolation behaviour is
 harness-testable without monkeypatching module globals.
 """
 from __future__ import annotations
@@ -696,7 +696,7 @@ def fix_one_ref(
 
     Frozen tests/gen_tests files: return False (test oracle is immutable).
     Benign no-ops (missing file, fn not located, empty model body): False.
-    Transport/model/splice failures: RAISE — the caller isolates per-fn (B2).
+    Transport/model/splice failures: RAISE — the caller isolates per-fn.
     """
     draft = generate_one_body(rel_f, fn, output, ctx, deps,
                               occurrence=occurrence)
@@ -876,7 +876,7 @@ def apply_per_fn_fixes(
     refs: list[Any], output: str, ctx: RetryContext, deps: RetryDeps,
     *, gate: BodyGate | None = None,
 ) -> int:
-    """Re-ask + splice each (file, fn). B2: one fn's exception is logged and
+    """Re-ask + splice each (file, fn). One fn's exception is logged and
     skipped — never aborts the pass, never masks the other fixable frontier fns.
 
     With a `gate`, each body is measured the moment it lands and reverted on its
@@ -966,7 +966,7 @@ def _drafts_in_windows(
 def _draft_or_none(
     target: RepairTarget, output: str, ctx: RetryContext, deps: RetryDeps,
 ) -> BodyDraft | None:
-    """B2 isolation for the generation half: a transport/model failure on one
+    """Per-fn isolation for the generation half: a transport/model failure on one
     target is logged and skipped, never aborting the pass."""
     try:
         return generate_one_body(target.file, target.fn, output, ctx, deps,

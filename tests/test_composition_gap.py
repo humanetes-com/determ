@@ -1,4 +1,4 @@
-"""Pins for composition-gap targeting + synthesis prompt (F10 M7)."""
+"""Pins for composition-gap targeting + synthesis prompt."""
 
 from __future__ import annotations
 

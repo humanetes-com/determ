@@ -1,4 +1,4 @@
-"""Chunked layout authoring (F11 M6) — split one big connected component into
+"""Chunked layout authoring — split one big connected component into
 model-sized authoring chunks.
 
 A connected component with dozens of items cannot be authored in one reply:

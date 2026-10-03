@@ -162,7 +162,7 @@ class PhaseCFillEngine:
     impl_path: ImplFillPath
     fill_one: FillOneFn
     config: EngineConfig
-    # F10 Use-B (M5): load the cluster's harvested behaviours for the few-shot
+    # Behaviour few-shot: load the cluster's harvested behaviours for the few-shot
     # USAGE_EXAMPLES channel. Injected in composition (bound to the behaviour
     # store); default returns none so the engine stays additive without it.
     behaviour_loader: Callable[[Path, str], tuple[BehaviourSpec, ...]] = (
@@ -746,7 +746,7 @@ class PhaseCFillEngine:
             # are exactly the blockers the recorded re-admission deadlock
             # (`259637-36db9aad`) was locked behind.
             _pass_stub_keys = frozenset(s.key for s in stubs)
-            # Plan 4 — restrict this pass to the TDD frontier's fns when supplied.
+            # Restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
             # behavioral RE-FILL targets: frontier fns that are NOT
@@ -1104,7 +1104,7 @@ class PhaseCFillEngine:
 
             # === Per-pass cargo test ===
             # Always run at end of every pass, even when filled_this_pass is empty.
-            # Plan 4 — TDD driver runs the cluster test in its OUTER loop; skip when asked.
+            # TDD driver runs the cluster test in its OUTER loop; skip when asked.
             if not skip_end_pass_test:
                 self.tel.check_stop(f"per-fn pass {pass_n} test phase")
                 # Union of test files referenced by ANY fn filled this pass. Only

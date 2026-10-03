@@ -1,4 +1,4 @@
-"""Pins for the F11 scaffold rewrite (authored layout → skeleton)."""
+"""Pins for the scaffold rewrite (authored layout → skeleton)."""
 from __future__ import annotations
 
 from pipeline_core.domain.rust_scan import duplicate_attribute_runs

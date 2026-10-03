@@ -59,10 +59,10 @@ class BakeArtifactsDeps:
     extract_skeleton: Callable[..., SkeletoniseResult]
     is_gen_tests_file: Callable[[str], bool]
     gen_tests_origin_cfgs: Callable[[str], dict[int, str]]
-    # F10: persist a harvested behaviour suite (adapter, injected — keeps this
+    # Persist a harvested behaviour suite (adapter, injected — keeps this
     # application module off the adapters layer). Returns the written path.
     save_behaviour_suite: Callable[[Path, BehaviourSuite], Path]
-    # F11 M1: enumerate the skeleton's types/fns (injected extractor) + persist
+    # Private surface: enumerate the skeleton's types/fns (injected extractor) + persist
     # the public-frozen vs private-replaceable marks the t1.5 phase consumes.
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
     enumerate_fns: Callable[[Path], list[FnRecord] | None]
@@ -78,7 +78,7 @@ class BakeArtifactsDeps:
     # because the API-surface capture is elided to match — the two are one
     # decision, taken once per workspace.
     author_private_fields: bool = False
-    # The suite an EARLIER phase (t0d) already wrote for the cluster. The bake
+    # The suite an EARLIER phase already wrote for the cluster. The bake
     # re-harvests from the same source, so its ids coincide with t0d's; what
     # only t0d can produce — probe specs with a recorded stdout, `exercises`
     # filled by coverage — must survive the bake, so the bake MERGES (existing
@@ -130,8 +130,8 @@ def _inline_test_mods_left(skel_src: Path) -> list[str]:
 def _test_layout_sources(project_dir: Path) -> list[tuple[str, str]]:
     """(`rel_path`, `text`) for each integration test file under ``tests/``.
 
-    The layout pins F11's t1.5 must satisfy (`size_of`, NPO, autotraits) live in
-    these test BODIES, not in doc-fences (M12). Read once, pre-strip — a
+    The layout pins t1.5 must satisfy (`size_of`, NPO, autotraits) live in
+    these test BODIES, not in doc-fences. Read once, pre-strip — a
     `size_of` assertion is an observable fact, the same legality class as any
     harvested test assertion, so reading it pre-strip is legitimate."""
     tests_dir = project_dir / "tests"
@@ -261,7 +261,7 @@ def bake_skeleton_artifacts(
                   f"skeleton: {', '.join(_stranded)}. They remain writable by "
                   "the fill routes.")
         phase_step("bake.surface", cluster=cluster.name)
-        # F11 M1: classify the skeleton's private layout (public-frozen vs
+        # Private surface: classify the skeleton's private layout (public-frozen vs
         # private-replaceable) so the t1.5 phase knows what it may re-author.
         # Visibility is an observable structural fact, safe to use post-strip.
         # Additive: a classification failure never blocks the strip.
@@ -306,7 +306,7 @@ def bake_skeleton_artifacts(
             d.log(f"  [bake-skeleton] cluster {cluster.name}: private-surface "
                   f"classification failed (non-fatal): {e}")
         phase_step("bake.harvest", cluster=cluster.name)
-        # F10 t0d: harvest this cfg-cluster's behaviour oracle from live source
+        # t0d: harvest this cfg-cluster's behaviour oracle from live source
         # (pre-strip — behaviours are OBSERVABLE outcomes, the same
         # legality class as a test assertion, never bodies). Additive: a harvest
         # failure never blocks the strip.
@@ -413,10 +413,10 @@ class StripBakeDeps:
     set_current: Callable[[Path, str], None]
     tarpaulin_bin: Path
     coverage_target: float
-    # F11 t1.5 (M2): re-author each cluster's private layout over the baked
+    # Layout authoring (t1.5): re-author each cluster's private layout over the baked
     # skeleton, BEFORE the augmentation commit so the rewrite is captured. A
     # no-op binding disables the phase; any failure inside it degrades to the
-    # frozen skeleton (the run proceeds exactly as before F11).
+    # frozen skeleton (the run proceeds exactly as before layout authoring).
     run_layout_phase: Callable[[Path, str], None] = lambda _p, _m: None
     # Strip rewrites mod declarations (drops `#[cfg(test)] mod`) under the
     # same src path earlier phases already queried — cached mod records
@@ -505,7 +505,7 @@ def strip_and_bake_module(
                 f"{_bake_res.get('reason', 'unknown')}")
         d.log(f"  Baked skeleton for {len(_bake_res['clusters'])} cluster(s): "
               f"{', '.join(_bake_res['clusters'])}")
-    # F11 t1.5: author the private layout over the baked skeleton BEFORE the
+    # Layout authoring (t1.5): author the private layout over the baked skeleton BEFORE the
     # augmentation commit below (so the rewrite is committed with the skeleton).
     # Degrade-safe: a failure here leaves the frozen skeleton untouched.
     with phase_scope("layout", module=module_name) as _t15:

@@ -57,7 +57,7 @@ def _surface():
 
 
 def _suite_with_pin():
-    # avoids the M13 missing-pin gate — ErrorImpl is layout-sensitive (`Error`
+    # avoids the missing-pin gate — ErrorImpl is layout-sensitive (`Error`
     # references it directly) so it needs a pin to be authorable at all.
     return BehaviourSuite(cfg_cluster="stable", specs=(
         BehaviourSpec(

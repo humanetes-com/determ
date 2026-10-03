@@ -26,7 +26,7 @@ def _args() -> SimpleNamespace:
     return SimpleNamespace(
         repo="dummy-repo", project="proj", clean=False, augment_tests=False,
         progress=False, nolog=False, from_spec=False, restart_from_augmented=False,
-        restart_from_pre_augment=False,
+        restart_from_pre_augment=False, reharvest_behaviours=False,
         audit=False, best_models_list=False, vram_gb=32.0,
         phase_a_only=False, phase_b_only=False, phase_c_only=False,
         phase_d_only=False, skeleton_backend=False,
@@ -204,7 +204,7 @@ def test_run_pipeline_restart_from_pre_augment_runs_the_restore(tmp_path: Path) 
     args.restart_from_pre_augment = True
     with pytest.raises(SystemExit):
         orchestrator.run_pipeline(deps, args, tmp_path)
-    deps.restart_from_pre_augment.assert_called_once_with(tmp_path, tmp_path)
+    deps.restart_from_pre_augment.assert_called_once_with(tmp_path, tmp_path, reharvest=False)
     deps.restart_from_augmented.assert_not_called()
 
 
@@ -278,3 +278,78 @@ def test_run_pipeline_refuses_the_harvest_once_the_module_is_augmented(
     deps.cluster_augmentor.run.assert_called_once()
     logged = " ".join(str(c.args[0]) for c in deps.log.call_args_list)
     assert "[task0d] 'mod' already augmented" in logged
+
+
+# --- the behaviour restore point (task0d-done-<module>) ----------------------
+
+def _harvested_deps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                    order: list[str]) -> orchestrator.RunDeps:
+    """Two baked clusters whose harvest is done, task0c not started."""
+    clusters = [SimpleNamespace(name="stable", env_extra={}),
+                SimpleNamespace(name="nightly", env_extra={})]
+    deps = replace(_run_deps(tmp_path), load_baked_clusters=MagicMock(return_value=clusters))
+    deps.list_git_tags.return_value = []
+    deps.read_state.return_value = {"phases": {
+        "task0b": {"status": "done"}, "task0d/stable": {"status": "done"},
+        "task0d/nightly": {"status": "done"}}, "current": ""}
+    deps.augment_store.is_module_augmented.return_value = False
+    deps.git_tag.side_effect = lambda _p, tag: order.append(f"tag {tag}")
+    deps.git_checkpoint.side_effect = lambda *_a: order.append("checkpoint") or True
+    deps.cluster_augmentor.run.side_effect = lambda *_a, **_k: order.append("task0c")
+    monkeypatch.setattr(orchestrator, "run_task0d", lambda *_a, **_k: order.append("task0d"))
+    return deps
+
+
+def test_run_pipeline_writes_the_behaviour_point_after_task0d_and_before_task0c(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The tree is committed whole (the doc tests and the book task0d leaves
+    uncommitted) before the tag, and both happen before task0c writes a test."""
+    order: list[str] = []
+    deps = _harvested_deps(tmp_path, monkeypatch, order)
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert order == ["tag task0c-pre-mod", "task0d", "checkpoint",
+                     "tag task0d-done-mod", "task0c"]
+
+
+def test_run_pipeline_does_not_tag_a_tree_it_could_not_commit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    deps = _harvested_deps(tmp_path, monkeypatch, order)
+    deps.git_checkpoint.side_effect = None
+    deps.git_checkpoint.return_value = False
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert "tag task0d-done-mod" not in order
+    logged = " ".join(str(c.args[0]) for c in deps.log.call_args_list)
+    assert "[task0d-done] NOT tagged" in logged
+
+
+def test_run_pipeline_does_not_tag_a_partial_harvest(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    deps = _harvested_deps(tmp_path, monkeypatch, order)
+    deps.read_state.return_value["phases"]["task0d/nightly"] = {"status": "failed"}
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert "checkpoint" not in order and "tag task0d-done-mod" not in order
+
+
+def test_run_pipeline_reharvest_reaches_the_restore(tmp_path: Path) -> None:
+    deps = _run_deps(tmp_path)
+    args = _args()
+    args.restart_from_pre_augment = True
+    args.reharvest_behaviours = True
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    deps.restart_from_pre_augment.assert_called_once_with(tmp_path, tmp_path, reharvest=True)
+
+
+def test_run_pipeline_reharvest_without_the_pre_augment_restore_aborts(tmp_path: Path) -> None:
+    deps = _run_deps(tmp_path)
+    args = _args()
+    args.reharvest_behaviours = True
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, args, tmp_path)
+    assert exc.value.code == 2
+    deps.cluster_augmentor.run.assert_not_called()

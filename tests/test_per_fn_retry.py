@@ -2,8 +2,8 @@
 
 Covers:
 - fix_one_ref guards (tests/ path, gen_tests file, missing file, no-locate)
-- fix_one_ref B2 contract: transport/model/splice errors RAISE (not swallowed)
-- apply_per_fn_fixes B2 isolation: one fn's exception skipped, others continue
+- fix_one_ref contract: transport/model/splice errors RAISE (not swallowed)
+- apply_per_fn_fixes isolation: one fn's exception skipped, others continue
 - apply_per_fn_fixes return count
 """
 from __future__ import annotations

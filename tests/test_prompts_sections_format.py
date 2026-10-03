@@ -202,7 +202,7 @@ def test_gotcha_ids_are_unique():
 
 
 def test_gotcha_e0424_self_confusion_fires():
-    # M10 (plan_2): confirmed via starvation_miner on run 495747 — a trait
+    # Confirmed via starvation_miner on run 495747 — a trait
     # method's `self` receiver bled into a companion free fn with a
     # differently-named parameter, firing E0424 12+ times identically.
     err = ("error[E0424]: expected value, found module `self`\n"

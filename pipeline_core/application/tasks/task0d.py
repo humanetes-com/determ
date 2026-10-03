@@ -1,4 +1,4 @@
-"""TASK 0d — behaviour harvest, per cluster, BEFORE t0c (F10).
+"""TASK 0d — behaviour harvest, per cluster, BEFORE t0c.
 
 The one phase that reads the original crate for what it PROMISES rather than
 what it contains: test assertions, doc-tests and layout pins are lifted as
@@ -79,12 +79,13 @@ from pipeline_core.domain.rule_probe import (
     without_examples,
 )
 from pipeline_core.domain.use_cases import UseCaseEdge, edges_to_ask
+from pipeline_core.domain.workspace_layout import BEHAVIOUR_PHASE_PREFIX
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
 from pipeline_core.prompts.behaviour_rules import build_rule_probe_prompt, build_then_prediction_prompt
 from pipeline_core.prompts.behaviour_synthesis import build_behaviour_synthesis_prompt
 
-PHASE_PREFIX = "task0d"
+PHASE_PREFIX = BEHAVIOUR_PHASE_PREFIX
 
 
 def phase_key(cluster_name: str) -> str:

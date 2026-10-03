@@ -1,4 +1,4 @@
-"""Pins for the outcome-behaviour determinism gate (F10 M6)."""
+"""Pins for the outcome-behaviour determinism gate."""
 from __future__ import annotations
 
 from pipeline_core.domain.outcome_determinism import (

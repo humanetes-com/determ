@@ -1,4 +1,4 @@
-"""BDD behaviour oracle — pure domain (F10).
+"""BDD behaviour oracle — pure domain.
 
 A BEHAVIOUR is an observable Given/When/Then spec over a crate's PUBLIC API. We
 harvest behaviours from the original library during the legal pre-strip window
@@ -38,7 +38,7 @@ class OutcomeKind(Enum):
     """The observable a behaviour pins. STRUCTURED variants are preferred over
     ``NORMALIZED_STDOUT`` (better attribution, less nondeterminism);
     ``STATIC_ASSERTION`` is the compile-time class (``size_of``/autotraits/niche)
-    that F11's layout-authoring stage consumes as its layout-pinning selector.
+    that the layout-authoring stage consumes as its layout-pinning selector.
 
     ``TYPE_IDENTITY`` and ``ALT_DEBUG_STRING`` were added 2026-08-26 because the
     suite the bake wrote could not express two of the three observables the
@@ -61,7 +61,7 @@ class OutcomeKind(Enum):
 
 class StaticAssertKind(Enum):
     """Which layout property a ``STATIC_ASSERTION`` pins. These are the pins
-    F11's t1.5 MUST satisfy while it is free to author the private layout."""
+    t1.5 MUST satisfy while it is free to author the private layout."""
 
     SIZE = auto()  # `size_of::<T>() == …`
     ALIGN = auto()  # `align_of::<T>() == …`
@@ -204,8 +204,8 @@ class ObservableOutcome:
 
     @property
     def is_runtime(self) -> bool:
-        """True iff checking this outcome needs a running tree (F10 oracle-use
-        gate; STATIC_ASSERTION is compile-time and F11-consumed instead)."""
+        """True iff checking this outcome needs a running tree (oracle-use
+        gate; STATIC_ASSERTION is compile-time and layout-authoring-consumed instead)."""
         return self.kind in RUNTIME_OUTCOME_KINDS
 
     def to_dict(self) -> dict[str, Any]:
@@ -1111,7 +1111,7 @@ def is_probe_id(behaviour_id: str) -> bool:
 def merge_suites(existing: BehaviourSuite, incoming: BehaviourSuite) -> BehaviourSuite:
     """`existing` ∪ `incoming`, keyed by behaviour_id, EXISTING WINS on a
     collision, specs sorted by id. The rule the bake applies so it never
-    overwrites a richer suite a prior phase (t0d) wrote: ids are deterministic
+    overwrites a richer suite a prior phase wrote: ids are deterministic
     per source, so a same-id spec from a later harvest of the same text is the
     same spec, and a spec only the earlier writer could produce (a probe with
     a recorded stdout, an `exercises` set filled by coverage) survives.

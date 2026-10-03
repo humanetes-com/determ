@@ -1,4 +1,4 @@
-"""Pins for the F11 layout-authoring prompt builder."""
+"""Pins for the layout-authoring prompt builder."""
 from __future__ import annotations
 
 import hashlib

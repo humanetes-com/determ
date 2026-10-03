@@ -1,4 +1,4 @@
-"""TASK 4 prompt budget clamp (plan item 5): the additive `max(5_000, …)`
+"""TASK 4 prompt budget clamp: the additive `max(5_000, …)`
 section floors could sum past the model input limit (seen live on anyhow:
 296,417/293,376 → prompt rejected). task4 now renders the REAL prompt and, on
 overflow, re-truncates the test-output section by the exact overage and

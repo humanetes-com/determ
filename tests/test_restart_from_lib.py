@@ -22,12 +22,20 @@ def _keys(stage: str) -> tuple[int, str]:
     return r.returncode, r.stdout.strip()
 
 
-def test_task0c_clears_the_augmentation_and_everything_after():
-    assert _keys("task0c") == (0, "task0c task0d bake strip task1 task2a task2b task2c task2-4")
+def test_task0c_clears_the_augmentation_and_everything_after_but_not_the_harvest():
+    """task0d's keys are not cleared: the restore lands on the behaviour
+    restore point and keeps them (restart_from.sh task0d is the re-harvest)."""
+    assert _keys("task0c") == (0, "task0c bake strip task1 task2a task2b task2c task2-4")
 
 
-def test_short_label_t0c_is_the_same_stage():
+def test_task0d_clears_the_harvest_and_everything_task0c_clears():
+    rc, keys = _keys("task0d")
+    assert rc == 0 and keys.split() == ["task0d", *_keys("task0c")[1].split()]
+
+
+def test_short_labels_are_the_same_stages():
     assert _keys("t0c") == _keys("task0c")
+    assert _keys("t0d") == _keys("task0d")
 
 
 def test_task0b_and_earlier_are_still_refused():

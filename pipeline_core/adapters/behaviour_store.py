@@ -1,5 +1,5 @@
 """Behaviour-suite storage — persist harvested/synthesized behaviours as a baked
-artifact under ``.skeleton/`` (F10).
+artifact under ``.skeleton/``.
 
 Written ONCE in the pre-strip window (Hard Rule 11), read by every post-strip
 phase that needs behaviours: the fill prompt (few-shot RIGHT usage) and the t3

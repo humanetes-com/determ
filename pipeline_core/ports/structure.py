@@ -39,6 +39,6 @@ class StructureReader(Protocol):
 
     def parse_ok(self, path: Path) -> bool:
         """True iff `path` parses as valid Rust (syn). The transactional splice
-        gate (F1) calls this after a write; False → the write is rolled back.
+        gate calls this after a write; False → the write is rolled back.
         Fail-open: inconclusive checks (no binary) return True."""
         ...

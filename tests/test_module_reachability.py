@@ -1,4 +1,4 @@
-"""Pins for crate module-reachability (F11 fix: a `pub` item behind a private
+"""Pins for crate module-reachability (layout fix: a `pub` item behind a private
 `mod` wall is not part of the crate's external API, however it's marked)."""
 from __future__ import annotations
 

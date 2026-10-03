@@ -1,7 +1,7 @@
 """pipeline_core — layered package for the determ reconstruction pipeline.
 
 Strangler-fig migration target. `pipeline.py` stays the entrypoint and progressively
-delegates here. See CODE_ARCHITECTURE.md §1 for the layer rules (enforced by import-linter).
+delegates here. See docs/ARCHITECTURE.md for the layer rules (enforced by import-linter).
 
 Public API (the stable, light surface — re-exported here so consumers don't reach into
 submodules): the domain record types, the `Settings` config object, and the port Protocols.

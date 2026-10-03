@@ -1,4 +1,4 @@
-"""F2 pins — heal hierarchy (surgical excision → best-tree → git → skeleton)."""
+"""Heal pins — heal hierarchy (surgical excision → best-tree → git → skeleton)."""
 from __future__ import annotations
 
 from pipeline_core.application.reconstruct.heal import HealDeps, heal_file

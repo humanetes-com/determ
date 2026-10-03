@@ -1,4 +1,4 @@
-"""Pins for the F11 layout-authoring use-case (t1.5 orchestration)."""
+"""Pins for the layout-authoring use-case (t1.5 orchestration)."""
 from __future__ import annotations
 
 import dataclasses

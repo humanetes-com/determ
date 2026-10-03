@@ -1,4 +1,4 @@
-"""Debt #6: every pipeline.ask() request must get a terminal llm event on its
+"""Every pipeline.ask() request must get a terminal llm event on its
 thread (response or error), carrying the same prompt_sha — so the flow-audit C10
 parallel-stream check can never see a 'vanished response'. Covers the success,
 Exception, and BaseException (the gap the old code missed) paths.

@@ -1,4 +1,4 @@
-"""F6 pins — measurement provenance VO + oracle-drift detector."""
+"""Measurement pins — measurement provenance VO + oracle-drift detector."""
 from __future__ import annotations
 
 from pipeline_core.domain.measurement import Measurement, tree_content_sha

@@ -165,11 +165,29 @@ TASK0C_ATTEMPTS_LOG_NAME = ".task0c_attempts.jsonl"
 
 # pipeline_state.md entries a pre-augmentation restore KEEPS: exactly the
 # phases that ran before task0c. A keep-list rather than a drop-list, because
-# every phase added after task0c (a future task0d, the bake, strip, task1, the
-# reconstruct loop) is by construction something the restore must forget, and
-# a drop-list would have to be extended for each of them.
+# every phase added after task0c (the bake, strip, task1, the reconstruct
+# loop) is by construction something the restore must forget, and a drop-list
+# would have to be extended for each of them. task0d runs between the tag and
+# task0c; its entries are kept only when the restore lands on the behaviour
+# restore point below (`drop_pre_augment_phases(keep_behaviours=True)`).
 PRE_AUGMENT_KEPT_PHASES: tuple[str, ...] = ("cfg_scan", "test_cmd", "task0b")
 PRE_AUGMENT_KEPT_PHASE_PREFIXES: tuple[str, ...] = ("task0a",)   # task0a, task0a-context
+
+# The behaviour restore point, `task0d-done-<module>`. task0d harvests the
+# behaviour specification from the ORIGINAL source and tests, after the
+# pre-augmentation tag and before task0c, and it is the slowest stage before
+# the augmentation. Nothing task0c writes is an input to it, so re-running
+# task0c cannot invalidate it: a pre-augmentation restore lands here by
+# default and keeps the harvest, and only an explicit re-harvest goes back to
+# `task0c-pre-<module>`. Written once, when every cluster's harvest is done
+# and task0c has not started, at a commit that also holds what task0d leaves
+# outside its per-cluster commits (the doc-example tests and the behaviour
+# book).
+BEHAVIOUR_TAG_PREFIX = "task0d-done-"
+
+# task0d's pipeline_state keys are `task0d/<cluster>`. The task0d module takes
+# its key prefix from here, so the restore's keep rule and the writer agree.
+BEHAVIOUR_PHASE_PREFIX = "task0d"
 
 
 def pre_augment_tag(module_name: str) -> str:
@@ -177,16 +195,30 @@ def pre_augment_tag(module_name: str) -> str:
     return f"{PRE_AUGMENT_TAG_PREFIX}{module_name}"
 
 
-def drop_pre_augment_phases(phases: dict[str, object]) -> dict[str, object]:
+def behaviour_tag(module_name: str) -> str:
+    """The behaviour restore tag for `module_name`: `task0d-done-<module>`."""
+    return f"{BEHAVIOUR_TAG_PREFIX}{module_name}"
+
+
+def is_behaviour_phase(key: str) -> bool:
+    """True for a task0d state key (`task0d/<cluster>`)."""
+    return key == BEHAVIOUR_PHASE_PREFIX or key.startswith(f"{BEHAVIOUR_PHASE_PREFIX}/")
+
+
+def drop_pre_augment_phases(phases: dict[str, object], *,
+                            keep_behaviours: bool = False) -> dict[str, object]:
     """Return only the entries of `phases` that predate task0c
     (:data:`PRE_AUGMENT_KEPT_PHASES` + keys under
     :data:`PRE_AUGMENT_KEPT_PHASE_PREFIXES`). Everything task0c and later wrote
     — `task0c/<cluster>`, `task0c/<cluster>/<module>`, strip, task1, the
     reconstruct loop — is dropped so it re-runs from the pre-augmentation
-    commit."""
+    commit. `keep_behaviours` also keeps the `task0d/<cluster>` entries: the
+    restore landed on the behaviour restore point, whose commit holds the
+    harvest those entries say is done."""
     return {
         k: v for k, v in phases.items()
         if k in PRE_AUGMENT_KEPT_PHASES or k.startswith(PRE_AUGMENT_KEPT_PHASE_PREFIXES)
+        or (keep_behaviours and is_behaviour_phase(k))
     }
 
 
@@ -198,18 +230,21 @@ def augmentation_has_started(phases: Iterable[str]) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class PreAugmentTagPlan:
-    """Which `task0c-pre-*` tags to write at HEAD before task0c starts.
+class RestoreTagPlan:
+    """Which restore-point tags (`task0c-pre-*` or `task0d-done-*`) to write
+    at HEAD.
 
     `to_write` are the modules' tags not yet in the workspace; `present` the
     ones already there (never re-pointed: `git tag -f` at a later HEAD would
     silently move the restore point onto a post-augmentation commit, and on a
-    resumed run HEAD is exactly that); `refusal` is set when HEAD cannot be a
-    pre-augmentation commit at all, in which case nothing is written."""
+    resumed run HEAD is exactly that); `refusal` is set when HEAD cannot be
+    the restore point at all, in which case nothing is written. `point` names
+    the restore point in the log line."""
 
     to_write: tuple[str, ...]
     present: tuple[str, ...]
     refusal: str | None = None
+    point: str = "pre-augmentation restore point for --restart-from-pre-augment"
 
     def summary(self) -> str:
         """The one log line the orchestrator prints for this decision."""
@@ -217,8 +252,7 @@ class PreAugmentTagPlan:
             return f"NOT tagged: {self.refusal}"
         parts: list[str] = []
         if self.to_write:
-            parts.append(f"tagged {', '.join(self.to_write)} at HEAD "
-                         "(pre-augmentation restore point for --restart-from-pre-augment)")
+            parts.append(f"tagged {', '.join(self.to_write)} at HEAD ({self.point})")
         if self.present:
             parts.append(f"{', '.join(self.present)} already present — HEAD not re-tagged")
         return "; ".join(parts) or "no modules to tag"
@@ -226,7 +260,7 @@ class PreAugmentTagPlan:
 
 def plan_pre_augment_tags(
     modules: Iterable[str], existing_tags: Iterable[str], phases: Mapping[str, object],
-) -> PreAugmentTagPlan:
+) -> RestoreTagPlan:
     """Decide the pre-augmentation tags for `modules` given the workspace's
     existing tags and its pipeline_state phases. Pure.
 
@@ -235,21 +269,74 @@ def plan_pre_augment_tags(
     then "return" to a stripped tree and run task0c against no source. Such a
     workspace is tagged by hand at its `pipeline: task0b done` commit, which
     the refusal text says."""
-    started = sorted(k for k in phases if k == "task0c" or k.startswith("task0c/"))
+    started = _augmentation_phases(phases)
     if started:
-        shown = ", ".join(started[:3]) + (", …" if len(started) > 3 else "")
-        return PreAugmentTagPlan(
+        return RestoreTagPlan(
             to_write=(), present=(),
-            refusal=(f"task0c has already run in this workspace (phase(s) {shown}), so HEAD is "
+            refusal=(f"task0c has already run in this workspace (phase(s) {started}), so HEAD is "
                      "not a pre-augmentation commit. To add the restore point by hand, tag the "
                      "`pipeline: task0b done` commit: git tag task0c-pre-<module> <sha>"),
         )
     existing = set(existing_tags)
     wanted = [pre_augment_tag(m) for m in modules]
-    return PreAugmentTagPlan(
+    return RestoreTagPlan(
         to_write=tuple(t for t in wanted if t not in existing),
         present=tuple(t for t in wanted if t in existing),
     )
+
+
+_BEHAVIOUR_POINT = "behaviour restore point: a task0c restart keeps the task0d harvest"
+
+
+def plan_behaviour_tags(
+    modules: Iterable[str], existing_tags: Iterable[str], phases: Mapping[str, object],
+    harvest_keys: Iterable[str],
+) -> RestoreTagPlan:
+    """Decide the behaviour restore tags (`task0d-done-<module>`) right after
+    task0d, given the `task0d/<cluster>` keys every cluster's harvest writes.
+    Pure.
+
+    Refused once task0c has started (HEAD then carries generated tests, and
+    the restore would keep them as if they were the original's), when no
+    cluster was harvested, and when any cluster's harvest is not done: a
+    restore point over a partial harvest would keep the missing clusters
+    missing, because the restore keeps every `task0d/*` entry it finds."""
+    started = _augmentation_phases(phases)
+    if started:
+        return RestoreTagPlan(
+            to_write=(), present=(), point=_BEHAVIOUR_POINT,
+            refusal=(f"task0c has already run in this workspace (phase(s) {started}), so HEAD "
+                     "holds generated tests; the behaviour restore point is written by the next "
+                     "run that harvests before task0c"),
+        )
+    keys = sorted(set(harvest_keys))
+    if not keys:
+        return RestoreTagPlan(to_write=(), present=(), point=_BEHAVIOUR_POINT,
+                              refusal="no cluster was harvested")
+    open_keys = [k for k in keys if not _done(phases.get(k))]
+    if open_keys:
+        return RestoreTagPlan(
+            to_write=(), present=(), point=_BEHAVIOUR_POINT,
+            refusal=(f"the behaviour harvest is not done for {', '.join(open_keys)}; a task0c "
+                     "restart re-harvests until every cluster is"),
+        )
+    existing = set(existing_tags)
+    wanted = [behaviour_tag(m) for m in modules]
+    return RestoreTagPlan(
+        to_write=tuple(t for t in wanted if t not in existing),
+        present=tuple(t for t in wanted if t in existing),
+        point=_BEHAVIOUR_POINT,
+    )
+
+
+def _augmentation_phases(phases: Iterable[str]) -> str:
+    """The task0c state keys, shown for a refusal ("" when none)."""
+    started = sorted(k for k in phases if k == "task0c" or k.startswith("task0c/"))
+    return ", ".join(started[:3]) + (", …" if len(started) > 3 else "")
+
+
+def _done(entry: object) -> bool:
+    return isinstance(entry, Mapping) and entry.get("status") == "done"
 
 # Legacy whole-workspace manifest of generated files.
 MANIFEST_NAME = ".generated_files.txt"

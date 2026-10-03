@@ -1,4 +1,4 @@
-"""F1 pins — transactional, parse-gated fill-tree writes."""
+"""Splice-gate pins — transactional, parse-gated fill-tree writes."""
 from __future__ import annotations
 
 from pathlib import Path

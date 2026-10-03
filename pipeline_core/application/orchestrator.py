@@ -20,6 +20,7 @@ from typing import Any, Protocol
 from pipeline_core import phases
 from pipeline_core.application.cluster_augment import AugmentContext
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.application.tasks.task0d import phase_key as task0d_phase_key
 from pipeline_core.application.tasks.task0d import run_task0d
 from pipeline_core.domain.attribution import canon_site
 from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
@@ -38,7 +39,12 @@ from pipeline_core.domain.oracle_guard import OracleDrift
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
 from pipeline_core.domain.stub_inventory import StubInventory
-from pipeline_core.domain.workspace_layout import PRE_AUGMENT_TAG_PREFIX, plan_pre_augment_tags
+from pipeline_core.domain.workspace_layout import (
+    BEHAVIOUR_TAG_PREFIX,
+    PRE_AUGMENT_TAG_PREFIX,
+    plan_behaviour_tags,
+    plan_pre_augment_tags,
+)
 from pipeline_core.phases import phase_scope, phase_skipped
 
 
@@ -318,7 +324,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                             "Keeps task0a/0b outputs. task0c + strip + task1+ re-run — the "
                             "lever for a changed test generator or admission rule, which "
                             "otherwise needs --repo <URL> --clean. The reconstruction dirs "
-                            "are archived beside the workspace first."
+                            "are archived beside the workspace first. When the workspace "
+                            "has the behaviour restore point (tag: task0d-done-{module}, "
+                            "written after task0d) the restore lands there and keeps the "
+                            "task0d harvest; see --reharvest-behaviours."
+                        ))
+    parser.add_argument("--reharvest-behaviours", action="store_true",
+                        help=(
+                            "With --restart-from-pre-augment only: go back to "
+                            "task0c-pre-{module} (before task0d), delete the "
+                            "task0d-done-{module} tag and re-run the behaviour harvest "
+                            "(task0d) as well as task0c. Without it a task0c restart keeps "
+                            "the harvest — the lever for a changed task0d."
                         ))
     parser.add_argument("--audit", action="store_true",
                         help=(
@@ -361,7 +378,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skeleton-backend", action="store_true",
                         help=(
                             "Invoke StaticSkeletonTask2Generator.generate() directly "
-                            "(per-cluster Plan 4 flow). Reads functional_requirements.md "
+                            "(per-cluster flow). Reads functional_requirements.md "
                             "and genesis.md from the project, runs Phase A→D per cluster, "
                             "then merges into project_dir/src/. Standalone test path."
                         ))
@@ -519,8 +536,8 @@ def run_phase_d(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
 
 def run_skeleton_backend(deps: PhaseSubcommandDeps, project_dir: Path) -> int:
     """Standalone harness invoking the static skeleton Task2 generator directly.
-    Drives the full per-cluster Plan 4 flow without task0c/strip/task1."""
-    deps.log(f"\n=== Skeleton backend (Plan 4 per-cluster) for {project_dir.name} ===")
+    Drives the full per-cluster flow without task0c/strip/task1."""
+    deps.log(f"\n=== Skeleton backend (per-cluster) for {project_dir.name} ===")
     fr_path = project_dir / "functional_requirements.md"
     genesis_path = project_dir / "genesis.md"
     manifest_path = project_dir / deps.manifest_name
@@ -811,6 +828,9 @@ class RunDeps:
     # git) + `list_git_tags(project_dir, glob)`, so the tag is never re-pointed.
     git_tag: Callable[..., None]
     list_git_tags: Callable[..., list[str]]
+    # Behaviour restore point: commit the whole tree and say whether HEAD now
+    # holds it, so `task0d-done-<module>` is never tagged over a partial commit.
+    git_checkpoint: Callable[[Path, str], bool]
     source_hash: Callable[..., str]
     log_state_summary: Callable[..., None]
     read: Callable[..., str]
@@ -1004,6 +1024,8 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         _params.append("--restart-from-augmented")
     if plan.restart_from_pre_augment:
         _params.append("--restart-from-pre-augment")
+    if plan.reharvest_behaviours:
+        _params.append("--reharvest-behaviours")
     deps.log(f"  pipeline.py [{_ph}]  monitor.py [{_mh}]  params: {' '.join(_params) or '(none)'}")
 
     _backend = deps.SETTINGS.backend
@@ -1030,6 +1052,10 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         deps.log("\n-- ERROR: --restart-from-pre-augment is mutually exclusive with "
                  "--clean and --restart-from-augmented --")
         sys.exit(2)
+    if plan.reharvest_behaviours and not plan.restart_from_pre_augment:
+        deps.log("\n-- ERROR: --reharvest-behaviours only applies with "
+                 "--restart-from-pre-augment (restart_from.sh task0d) --")
+        sys.exit(2)
 
     if plan.clean:
         deps.log("\n-- --clean requested: wiping all generated state --")
@@ -1049,7 +1075,8 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     if plan.restart_from_pre_augment:
         deps.log("\n-- --restart-from-pre-augment: restoring workspace to the commit before task0c --")
         try:
-            deps.restart_from_pre_augment(root, project_dir)
+            deps.restart_from_pre_augment(root, project_dir,
+                                          reharvest=plan.reharvest_behaviours)
         except Exception as e:
             deps.log(f"  [ABORT] restart-from-pre-augment failed: {e}")
             sys.exit(2)
@@ -1263,7 +1290,9 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     # Refused once t0c has run for the module: the original bodies are gone
     # after strip (a doc-fence tier over the shell reads nothing, a probe
     # cannot compile) and the generated tests would enter the spec. A
-    # workspace restored to its pre-t0c tag has no sentinel and harvests.
+    # workspace restored to its pre-t0c tag has no sentinel and harvests; one
+    # restored to its behaviour restore point keeps the `task0d/<cluster>`
+    # entries, and each cluster skips as already harvested.
     if not _from_spec:
         for _t0d_module in modules:
             if deps.augment_store.is_module_augmented(project_dir, _t0d_module):
@@ -1273,6 +1302,25 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                 continue
             run_task0d(deps.task0d_deps, project_dir, _t0d_module, list(_clusters),
                        _module_dirs[_t0d_module] / "src")
+    # Behaviour restore point (`task0d-done-<module>`), consumed by
+    # --restart-from-pre-augment: a task0c restart lands here and keeps the
+    # harvest instead of paying task0d again. task0d commits each cluster's
+    # suite but leaves the doc-example tests and the book in the working tree
+    # (the first task0c commit would sweep them in), so the tree is committed
+    # whole first, and the tag is written only when HEAD holds all of it.
+    if not _from_spec and deps.run_state.git_managed and _clusters:
+        _behaviour_plan = plan_behaviour_tags(
+            modules, deps.list_git_tags(project_dir, f"{BEHAVIOUR_TAG_PREFIX}*"),
+            deps.read_state(project_dir)["phases"],
+            [task0d_phase_key(c.name) for c in _clusters])
+        if _behaviour_plan.to_write and not deps.git_checkpoint(
+                project_dir, "pipeline: task0d done — behaviour restore point"):
+            deps.log("  [task0d-done] NOT tagged: the working tree could not be committed "
+                     "whole, so HEAD does not hold the harvest; a task0c restart re-harvests.")
+        else:
+            for _tag in _behaviour_plan.to_write:
+                deps.git_tag(project_dir, _tag)
+            deps.log(f"  [task0d-done] {_behaviour_plan.summary()}")
     # THE ORACLE SEAL, checked before task0c's per-launch pass: that pass ends
     # in a whole-workspace checkpoint commit, and on 2026-09-22 (run
     # `92187-f71f12bf`) it committed an edit made outside the pipeline into

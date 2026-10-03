@@ -3,7 +3,7 @@ name = "microcrate"
 version = "0.1.0"
 edition = "2021"
 
-# L3 fixture (CODE_ARCHITECTURE.md R10.1/R10.5). Deliberately dependency-free and
+# L3 fixture. Deliberately dependency-free and
 # tiny so a full pipeline reconstruction run converges in minutes, not the 5h an
 # anyhow single-module run cost. This is the on-demand real-model convergence
 # smoke; anyhow is the L4 release gate.

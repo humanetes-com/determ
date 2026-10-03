@@ -1,10 +1,10 @@
-"""Private-layout surface classification — F11's freeze-scope resolver.
+"""Private-layout surface classification — the freeze-scope resolver.
 
 The baked skeleton freezes EVERY item's shape verbatim, including a crate's
 PRIVATE type-erasure layout (anyhow's ``ErrorImpl``/``ErrorVTable``/``Own``).
 That forces the model to reconstruct unsafe vtable code the test oracle never
 asks for — a self-inflicted wall, not a capability ceiling. This module names
-the boundary the layout-authoring stage (t1.5) redraws: PUBLIC signatures stay
+the boundary the layout-authoring stage redraws: PUBLIC signatures stay
 frozen (they ARE the API contract); PRIVATE definitions become model-authored.
 
 An item is PRIVATE-REPLACEABLE iff it is not part of the public surface. The
@@ -73,7 +73,7 @@ class PrivateSurface:
     ``public_referenced`` = the private type names a FROZEN-PUBLIC type's
     definition points at (e.g. ``pub struct Error { inner: Own<ErrorImpl> }`` →
     ``Own``). These are the layout-sensitive private types: getting their size
-    wrong changes a PUBLIC type's size. The t1.5 missing-pin gate (M13) refuses
+    wrong changes a PUBLIC type's size. The t1.5 missing-pin gate refuses
     to author a component containing one of these UNLESS the layout pins that
     constrain it were actually harvested — otherwise it authors a wrong-sized
     public type that compiles yet fails the repr tests a whole sweep later."""
@@ -341,7 +341,7 @@ def connected_components(
     each `coupled` group (private names a FROZEN item holds together — see
     PrivateSurface.coupled). We use the UNDIRECTED closure — any partition finer
     than the connected component would let two mutually-referencing private
-    types be authored inconsistently (the exact divergence F11 exists to
+    types be authored inconsistently (the exact divergence layout authoring exists to
     prevent). Deterministic order: components sorted by first item's (file,
     name)."""
     by_name: dict[str, list[int]] = {}

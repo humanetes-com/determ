@@ -16,7 +16,7 @@ and grouping inline. This module makes the branch a TYPE:
   enums); :func:`run_generate_fix` — the thin driver over
   :func:`run_callback_loop`.
 
-Splice-unit escalation (s117 #3): a unit whose inner loop floor-stalls WITHOUT
+Splice-unit escalation: a unit whose inner loop floor-stalls WITHOUT
 ever improving on its opening error count (`UnitRunOutcome.escalate`) is retried
 at the next-larger scope — fn → enclosing impl block → whole-file rewrite — so
 a defect that lives outside the unit's window (a sibling member, a type in the

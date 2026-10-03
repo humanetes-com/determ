@@ -129,6 +129,61 @@ def test_plan_is_per_module():
     assert plan.to_write == ("task0c-pre-b",) and plan.present == ("task0c-pre-a",)
 
 
+# --- the behaviour restore point --------------------------------------------
+
+from pipeline_core.domain.workspace_layout import (  # noqa: E402
+    BEHAVIOUR_PHASE_PREFIX,
+    behaviour_tag,
+    plan_behaviour_tags,
+)
+
+_DONE = {"status": "done"}
+_HARVESTED = {"task0b": _DONE, "task0d/stable": _DONE, "task0d/nightly": _DONE}
+_HARVEST_KEYS = ["task0d/stable", "task0d/nightly"]
+
+
+def test_behaviour_phase_prefix_matches_the_writer():
+    from pipeline_core.application.tasks.task0d import phase_key
+    assert phase_key("stable") == f"{BEHAVIOUR_PHASE_PREFIX}/stable"
+
+
+def test_drop_pre_augment_phases_keeps_the_harvest_only_when_asked():
+    phases = dict(_LIVE_PHASES, **{"task0d/stable": "done", "task0d/nightly": "done"})
+    kept = drop_pre_augment_phases(phases, keep_behaviours=True)
+    assert kept == dict(drop_pre_augment_phases(_LIVE_PHASES),
+                        **{"task0d/stable": "done", "task0d/nightly": "done"})
+    # control: the default still forgets it, and nothing after task0c is kept.
+    assert drop_pre_augment_phases(phases) == drop_pre_augment_phases(_LIVE_PHASES)
+    assert not any(k.startswith(("task0c", "strip", "task1", "task2")) for k in kept)
+
+
+def test_behaviour_plan_tags_a_complete_harvest_before_task0c():
+    plan = plan_behaviour_tags(["anyhow"], [], _HARVESTED, _HARVEST_KEYS)
+    assert plan.to_write == (behaviour_tag("anyhow"),) == ("task0d-done-anyhow",)
+    assert "tagged task0d-done-anyhow at HEAD (behaviour restore point" in plan.summary()
+
+
+def test_behaviour_plan_refuses_a_partial_harvest():
+    """A cluster whose harvest failed (`task0d/<c>` failed or absent) would
+    stay missing after every restore, since the restore keeps task0d/*."""
+    phases = dict(_HARVESTED, **{"task0d/nightly": {"status": "failed"}})
+    plan = plan_behaviour_tags(["anyhow"], [], phases, _HARVEST_KEYS)
+    assert plan.to_write == () and "task0d/nightly" in (plan.refusal or "")
+    plan = plan_behaviour_tags(["anyhow"], [], {"task0d/stable": _DONE}, _HARVEST_KEYS)
+    assert plan.to_write == () and "task0d/nightly" in (plan.refusal or "")
+
+
+def test_behaviour_plan_refuses_once_task0c_started_and_with_no_cluster():
+    started = dict(_HARVESTED, **{"task0c/stable": _DONE})
+    assert plan_behaviour_tags(["anyhow"], [], started, _HARVEST_KEYS).refusal
+    assert plan_behaviour_tags(["anyhow"], [], _HARVESTED, []).refusal
+
+
+def test_behaviour_plan_never_repoints_an_existing_tag():
+    plan = plan_behaviour_tags(["anyhow"], ["task0d-done-anyhow"], _HARVESTED, _HARVEST_KEYS)
+    assert plan.to_write == () and plan.present == ("task0d-done-anyhow",)
+
+
 def test_augmentation_has_started_on_bare_and_prefixed_task0c():
     from pipeline_core.domain.workspace_layout import augmentation_has_started
     assert augmentation_has_started(["task0c"]) is True

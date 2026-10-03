@@ -1,11 +1,12 @@
-"""Layout-pinning assertion classifier — the shared primitive for F10 and F11.
+"""Layout-pinning assertion classifier — the shared primitive for
+behaviour harvesting and layout authoring.
 
 Given a test / doc-test body it names the COMPILE-TIME layout facts the code
 pins: ``size_of``/``align_of`` equalities, autotrait bounds (``assert_impl_all!``
 and ``fn _assert() where T: Send + Sync``), and the null-pointer-optimization
-niche (``size_of::<Option<T>>() == size_of::<T>()``). These are the pins F11's
+niche (``size_of::<Option<T>>() == size_of::<T>()``). These are the pins layout authoring's
 t1.5 layout-authoring stage MUST satisfy while it is otherwise free to invent
-the private layout, and the ``STATIC_ASSERTION`` behaviours F10 harvests.
+the private layout, and the ``STATIC_ASSERTION`` behaviours behaviour harvesting collects.
 
 Token-based, whole-word scanning only (Hard Rule: no regex). Pure domain — the
 adapter reads the file, this classifies the text.
@@ -78,7 +79,7 @@ def autotrait_pin_expr(test_src: str, decl_line: str) -> str:
 
     The subject has to be in here or the pin reaches no component. Everything
     that routes a pin reads type names off this string — `_spec_pins_types` in
-    the t1.5 pin selector, `pinned_type_names` in the M13 harvest gate — and the
+    the t1.5 pin selector, `pinned_type_names` in the missing-pin harvest gate — and the
     idiom the crate's own tests use is TWO statements:
 
         fn assert_send<T: Send>() {}
@@ -218,7 +219,7 @@ def _split_top_level_commas(text: str) -> list[str]:
 
 
 def is_layout_pinning(test_src: str) -> bool:
-    """True iff the test pins at least one compile-time layout fact — the F11
+    """True iff the test pins at least one compile-time layout fact — the layout-authoring
     layout-pinning-test selector. Such tests MUST be fed to the t1.5 authoring
     prompt so the model's private layout satisfies them by construction."""
     return bool(classify_layout_assertions(test_src))
@@ -229,7 +230,7 @@ def harvest_layout_pin_behaviours(
 ) -> list[BehaviourSpec]:
     """STATIC_ASSERTION behaviours from a whole integration/unit test FILE.
 
-    The layout pins F11's t1.5 must satisfy (``size_of::<Error>()==usize``, NPO,
+    The layout pins t1.5 must satisfy (``size_of::<Error>()==usize``, NPO,
     ``Send+Sync+Unpin``) live in ``tests/*.rs`` function bodies, NOT in doc-test
     fences — so the doc-test harvester never sees them. This lifts them straight
     from the test source (the whole file is the ``test_src``), the same legality
@@ -251,7 +252,7 @@ def pinned_type_names(specs: tuple[BehaviourSpec, ...]) -> frozenset[str]:
     """The type names any STATIC_ASSERTION in `specs` pins (CamelCase idents in
     the asserted expression). A private type whose name is in here but which
     reaches t1.5 with NO pin fed to the prompt is a HARVEST GAP, not a free
-    layout — the caller (M13 gate) refuses to author it blind."""
+    layout — the caller (missing-pin gate) refuses to author it blind."""
     from pipeline_core.domain.behaviour import OutcomeKind
     from pipeline_core.domain.rust_idents import camelcase_type_names
 

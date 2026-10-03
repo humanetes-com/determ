@@ -1,4 +1,4 @@
-"""Heal-hierarchy domain types + surgical doc-comment excision (pure, F2).
+"""Heal-hierarchy domain types + surgical doc-comment excision (pure).
 
 When a fill-tree file stops parsing, the recovery must NOT default to copying the
 baked skeleton over it — that throws away every accumulated fill (the incident:

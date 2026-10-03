@@ -117,7 +117,7 @@ def test_floor_stall_exhaustion_restores_annotated_stub(monkeypatch, tmp_path):
     assert "unimplemented!()" in text
 
 
-# --- Plan 10 U2 routing through the per-fn loop (FixLoop plan, pre-f2 pins) ---
+# --- U2 routing through the per-fn loop (FixLoop plan, pre-f2 pins) ---
 
 
 def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
@@ -150,7 +150,7 @@ def test_u2_assertion_failure_routes_to_fix_loop(monkeypatch, tmp_path):
 
 def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
     # Compiles, attributed test fails with a "not implemented" panic — a
-    # SIBLING stub's fault (#3 co-dependency). The gate returns
+    # SIBLING stub's fault (co-dependency). The gate returns
     # ACCEPT_EXTERNAL_ONLY → keep the body, no fix loop.
     ws = _setup(monkeypatch, tmp_path)
     install_scripted_model(monkeypatch, per_fn_body="42")

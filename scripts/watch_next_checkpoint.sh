@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # WHY: a live fill has to be read at the next decision, not on a timer and
-#   not on every log line. Session 2026-09-20 asked to be woken when the
+#   not on every log line. The 2026-09-20 session asked to be woken when the
 #   parked session keep, the next judged sweep, a compiling-retry prompt, or
 #   a death became visible. watch_pipeline.sh prints every iteration;
 #   watch_plateau.sh waits for stall>=3. This script is silent until one of

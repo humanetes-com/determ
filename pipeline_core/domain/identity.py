@@ -19,7 +19,7 @@ ModuleName = NewType("ModuleName", str)
 RunId = NewType("RunId", str)
 RetroKey = NewType("RetroKey", str)
 
-# A whitespace/where-clause-STABLE impl-block identity (F5). Minted ONCE by
+# A whitespace/where-clause-STABLE impl-block identity. Minted ONCE by
 # `impl_routing.impl_block_id` from the canonical container, so a block stored
 # under one rendering (`impl<E> From<E> for Error`) and looked up under another
 # (with a newline where-clause) resolve to the SAME key — the routing-table miss

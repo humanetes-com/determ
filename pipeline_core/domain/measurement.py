@@ -1,4 +1,4 @@
-"""Measurement provenance for a tdd iteration (F6, pure domain).
+"""Measurement provenance for a tdd iteration (pure domain).
 
 Pass counts were recorded with NO tree identity and NO test names, so a
 session-to-session claim like "pass climbed 14→22" was unverifiable and the

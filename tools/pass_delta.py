@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rule on pass-count claims ACROSS runs, using the F6 provenance already stamped
+"""Rule on pass-count claims ACROSS runs, using the measurement provenance already stamped
 on every `phase_c.tdd.iter` event.
 
     .venv/bin/python tools/pass_delta.py [--events logs/events.jsonl]
@@ -43,7 +43,7 @@ def _pairs(raw: object) -> frozenset[tuple[str, str]]:
 def load_measurements(events: Path, product: str | None,
                       cluster: str | None) -> list[tuple[str, Measurement]]:
     """(timestamp, Measurement) for every tdd-iteration event, in file order.
-    Torn lines and pre-F6 events (no `oracle_size`) are skipped."""
+    Torn lines and events before measurement provenance (no `oracle_size`) are skipped."""
     out: list[tuple[str, Measurement]] = []
     if not events.exists():
         return out
@@ -126,7 +126,7 @@ def main() -> int:
 
     rows = load_measurements(Path(args.events), args.product, args.cluster)
     if not rows:
-        print("pass-delta: no F6 measurement events found")
+        print("pass-delta: no measurement events found")
         return 0
     for line in report(rows, args.last):
         print(f"PASS-DELTA {line}")

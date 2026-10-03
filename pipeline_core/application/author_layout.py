@@ -1,4 +1,4 @@
-"""Layout-authoring use-case (F11 t1.5) — orchestrates one cfg-cluster's
+"""Layout-authoring use-case — orchestrates one cfg-cluster's
 private-layout design between bake and strip.
 
 Per connected component of the private surface: prompt the model, parse the
@@ -6,7 +6,7 @@ authored layout, require it to COVER every replaceable item, splice it into the
 skeleton scaffold, and accept only if the rewritten scaffold still compiles with
 ``unimplemented!()`` bodies (the same invariant the baked skeleton holds today).
 A component that will not compile after the retry budget is left with its frozen
-layout — degraded, never broken (the run proceeds exactly as before F11).
+layout — degraded, never broken (the run proceeds exactly as before layout authoring).
 
 Collaborators (model, skeleton IO, compile check) are injected — this module is
 pure orchestration over domain VOs.
@@ -123,7 +123,7 @@ class AuthorLayoutDeps:
     # Absent ⇒ falls back to `oracle_sources`, i.e. siblings only.
     frozen_test_sources: Callable[[], Mapping[str, str]] | None = None
     max_attempts: int = 3
-    # M6 chunking: components above `single_shot_max` items are authored in
+    # Chunking: components above `single_shot_max` items are authored in
     # chunks (types first, then fns) instead of demanding one 40-block reply.
     single_shot_max: int = 14
     fns_per_chunk: int = 10
@@ -142,7 +142,7 @@ class ComponentResult:
     item_names: tuple[str, ...]
     authored: bool
     reason: str = ""
-    gated: bool = False   # M13: skipped-on-purpose (harvest gap), not a failure
+    gated: bool = False   # skipped-on-purpose (harvest gap), not a failure
     # (uid, locate-key) per item when authored: the text a future re-author
     # matches against the LIVE skeleton (the baked frozen defs no longer exist
     # there once a splice landed — locating by them fails every attempt).
@@ -168,12 +168,12 @@ class ComponentResult:
 
 class LayoutOutcome(Enum):
     """What became of ONE connected component after a t1.5 pass — the shape
-    the F11 M3 re-trigger mechanism needs to find "which private types are
+    the layout re-trigger mechanism needs to find "which private types are
     still on the ORIGINAL frozen scaffold" (FROZEN = every retry attempt
     failed to compile; the model never got a layout it could work with)."""
 
     AUTHORED = auto()   # a model-authored replacement compiles and was spliced
-    GATED = auto()      # M13 refused to author blind (harvest gap) — left frozen on purpose
+    GATED = auto()      # refused to author blind (harvest gap) — left frozen on purpose
     FROZEN = auto()     # every authoring attempt failed to compile — reverted to the original
 
 
@@ -340,7 +340,7 @@ def author_layout(
     committed to the skeleton only after the rewritten scaffold compiles; a
     failed component is rolled back to its frozen state.
 
-    M13 gate: a component that is LAYOUT-SENSITIVE (its private types feed a
+    missing-pin gate: a component that is LAYOUT-SENSITIVE (its private types feed a
     public type's size/niche) but reaches here with NO layout pins is a harvest
     gap, not a free layout — authoring it blind produces a wrong-sized public
     type that compiles yet fails the repr tests a whole sweep later. Such a

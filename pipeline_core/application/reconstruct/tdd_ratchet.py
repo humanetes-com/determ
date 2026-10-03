@@ -2,7 +2,7 @@
 
 The per-fill regression guard (`regression_guard.py`) reverts any single fill
 that reddens a passing test — but only when the crate is TEST-RUNNABLE at accept
-time. While the crate is red mid-batch (the B3-keep convergence regime) tests
+time. While the crate is red mid-batch (the keep-while-red convergence regime) tests
 can't run, so a body kept there can still lower the cluster pass count once the
 batch greens. This backstop operates at the TDD-iter boundary: snapshot the
 cluster's src tree at each new pass-count high-water, and when a later iter's

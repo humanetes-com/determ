@@ -1,4 +1,4 @@
-"""Pins for the behaviour few-shot selector (F10 Use-B / M5)."""
+"""Pins for the behaviour few-shot selector."""
 
 from __future__ import annotations
 

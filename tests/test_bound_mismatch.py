@@ -95,7 +95,7 @@ def test_retro_fast_path_parks_without_llm_call() -> None:
     assert calls == []  # structural — no LLM call burned
 
 
-# --- edge branches (coverage debt, s119 handover: 13 missed lines) -----------
+# --- edge branches (13 previously missed lines) -----------
 
 
 def test_double_colon_paths_never_split_bound_entries() -> None:

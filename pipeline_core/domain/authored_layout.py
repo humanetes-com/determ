@@ -1,4 +1,4 @@
-"""Model-authored private layout — the reply protocol + coverage check (F11).
+"""Model-authored private layout — the reply protocol + coverage check.
 
 t1.5 asks the model to author a crate's PRIVATE layout (the definitions the
 freeze-scope bug used to freeze verbatim) given only the frozen PUBLIC surface,

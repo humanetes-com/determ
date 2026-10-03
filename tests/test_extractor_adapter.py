@@ -2,7 +2,7 @@
 
 The adapter shells the skeleton-extractor binary; these tests fake `subprocess.run` so the
 ARGV construction (subcommand + `--input` + cfg flags) and the JSON→typed-record parsing
-are exercised without the binary. The seam is sacred (CODE_ARCHITECTURE.md §4), so the
+are exercised without the binary. The seam is sacred, so the
 wire-dict → record mapping and the uniform None-on-failure contract are pinned here.
 """
 from __future__ import annotations

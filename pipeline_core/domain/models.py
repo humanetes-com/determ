@@ -1,4 +1,4 @@
-"""Domain records for the Python↔Rust extractor seam (CODE_ARCHITECTURE.md §4, §5 item 6).
+"""Domain records for the Python↔Rust extractor seam.
 
 These frozen dataclasses mirror the ``serde::Serialize`` structs in
 ``tools/skeleton_extractor/src/lib.rs`` field-for-field (the JSON record contract). They
@@ -1174,7 +1174,7 @@ class Stub:
     cfg_predicates: tuple[str, ...] = ()
     # A BEHAVIORAL RE-FILL target — not an `unimplemented!()` stub but
     # an already-filled body that COMPILES yet whose attributed test fails (the
-    # B3-kept-wrong case). The fill unit then splices with `allow_nonstub=True`
+    # keep-while-red-wrong case). The fill unit then splices with `allow_nonstub=True`
     # and seeds the prompt with the current body + failing test (fix framing),
     # so the TDD driver can CORRECT wrong bodies, not only fill stubs. Default
     # False = ordinary stub fill (all scanned stubs, unchanged).

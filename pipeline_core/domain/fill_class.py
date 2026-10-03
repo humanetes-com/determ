@@ -42,7 +42,7 @@ class FillOutcomeClass(StrEnum):
 
     UNREACHABLE_VERDICT = "unreachable"
     """Body kept, attributed tests cannot run (ACCEPT_EXTERNAL_ONLY /
-    still-stubbed sibling / B3 keep while the crate is red / compiling
+    still-stubbed sibling / keep-while-red while the crate is red / compiling
     accept with no test observed passing)."""
 
     ANSWER_DROPPED = "dropped"
@@ -181,7 +181,7 @@ def class_for_kept(
     priced at run ``1064759-0f23fb68`` (2026-08-15/16): 50 successes
     against a byte-identical verdict vector. ``unreachable`` is always
     :func:`tests_could_not_run` (ACCEPT_EXTERNAL_ONLY, still-stubbed
-    sibling, crash-keep, B3-while-red), never a site's own flag.
+    sibling, crash-keep, keep-while-red), never a site's own flag.
 
     ``reading`` is always :func:`keep_reading`, and it is the ONLY source
     of CASHED. ``passed`` — the unit's attributed tests observed passing

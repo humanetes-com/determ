@@ -6,7 +6,7 @@ per-fn retry builder. No model.
 The class, run `2978-afabe8cb` (2026-09-20): a body compiled, reddened a
 previously-passing test, and `build_per_fn_fix_prompt` opened `broke cargo
 check` with the excerpt in COMPILE_ERRORS even after the attempt-site
-quote (entry 272) sat in that excerpt. Invented crate: `Wide::widen`
+quote sat in that excerpt. Invented crate: `Wide::widen`
 passes on the tree; an attempt indexes past the slice; the gate quotes
 that attempt; the retry prompt must use the compiled-then prefix.
 

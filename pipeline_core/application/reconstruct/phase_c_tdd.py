@@ -2507,7 +2507,7 @@ def run_phase_c_tdd(
                 f"{pass_count} with {_oracle.missing_count} test(s) unmeasured "
                 f"does not beat the stored {_checkpoint_best} — an equal count "
                 "needs a full oracle.")
-        # F6 — measurement provenance: stamp every iter event with the tree it
+        # Measurement provenance: stamp every iter event with the tree it
         # measured (content hash), the oracle size (denominator), and the actual
         # test names, so cross-run pass-count claims are verifiable and oracle
         # drift is detectable.
@@ -3415,7 +3415,7 @@ def run_phase_c_tdd(
 
         # Attribute failures via the full chain (panics → compile → behavior →
         # classifier → recently_filled → reverse_map). The cluster's in-memory
-        # test pairs feed the deterministic behavior path (s117 stable-51/72).
+        # test pairs feed the deterministic behavior path.
         # One admission per iteration under the cluster's dead sites: every
         # insert into the frontier — the map filters below, the pairs, the
         # measured-owner admits, the session's owners and slices — goes
@@ -4040,7 +4040,7 @@ def run_phase_c_tdd(
                 permanently_exhausted.discard(key)
             eligible[key] = tests
 
-        # F4 core-first dispatch: a unit whose every failing test panics inside
+        # Core-first dispatch: a unit whose every failing test panics inside
         # a DIFFERENT still-stubbed producer can't be helped by filling it —
         # defer it (NOT exhaust) so the producer gets the LLM budget first. This
         # is stateless: recomputed each iter from the current stub set, so a
@@ -4831,8 +4831,8 @@ def run_phase_c_tdd(
                                    for k in _crash_retracted)[:8]))
         # BLOCKER-HISTOGRAM ORDERING. First-fill already admits the live-stub
         # producers into the batch; constructor-first ranking used to wait on
-        # `_esc_keys`, which is empty on the first pass because census P15
-        # defers escalation until those units have been dispatched (run
+        # `_esc_keys`, which is empty on the first pass because escalation
+        # is deferred until those units have been dispatched (run
         # `155810-cbb3b9fc`). The histogram does not need a fire: post-fill
         # counts from the previous iter's payoff when bodies landed blocked,
         # else the pre-dispatch deferral map. Crash still outranks this.

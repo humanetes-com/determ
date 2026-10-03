@@ -1,6 +1,6 @@
 """Behaviour-probe runner — compile-and-run one model-authored program against
-the ORIGINAL crate, in the pre-strip window, and capture its stdout (F10 tier
-3, the adapter half of `domain/behaviour_probe.py`).
+the ORIGINAL crate, in the pre-strip window, and capture its stdout (the
+adapter half of `domain/behaviour_probe.py`).
 
 Until 2026-08-26 there was no compile-and-run adapter in production:
 `run_behaviour_oracle` takes an injected `run_spec` and the synthesis prompt

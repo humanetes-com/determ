@@ -1,4 +1,4 @@
-"""Determinism gate for outcome-behaviours (F10 M6) — pure domain.
+"""Determinism gate for outcome-behaviours — pure domain.
 
 An outcome-behaviour compares a CAPTURED observable to a frozen golden. Captured
 output that varies run-to-run (pointer addresses, HashMap order, backtrace

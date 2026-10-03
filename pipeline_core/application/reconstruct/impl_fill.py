@@ -3319,7 +3319,7 @@ def prepare_impl_fill(
         # entries withhold the budget-off escalation, and a signature three
         # blocks share this pass stops the group (`_shared_failing`).
         _sig_history: list[frozenset[str]] = []
-        # B3: baseline = the crate's error signature with THIS block's
+        # Keep-while-red: baseline = the crate's error signature with THIS block's
         # stubs still unimplemented. A fill is "non-regressing" if it adds no
         # error beyond this baseline and none on the filled fns — then we keep
         # it even when the crate doesn't fully compile, so prerequisites of an
@@ -3722,10 +3722,10 @@ def prepare_impl_fill(
                              f"— {_jb.site_movement}")
                 # Global monotone ratchet: a compiled fill is rejected if it
                 # reddened ANY previously-passing cluster test — even when the
-                # block's own U2 tests pass (or it would be B3-kept). This is
+                # block's own U2 tests pass (or it would be kept while red). This is
                 # the guard the pass-count oscillation was slipping through:
                 # both accept paths below verified compile/own-tests only. When
-                # rc==0 the crate compiles clean, so B3's compile-signature is
+                # rc==0 the crate compiles clean, so the keep-while-red compile-signature is
                 # empty and one of the two paths WILL accept — hence the check
                 # runs exactly once per green attempt (never wasted). Red
                 # attempts skip it (tests can't run; deferred to the TDD loop).
@@ -3922,13 +3922,13 @@ def prepare_impl_fill(
                             "fix_attempts": fix_attempt,
                         })
                     return FixOutcome("accepted")
-                # B3: keep a NON-REGRESSING fill even when the crate
+                # Keep-while-red: keep a NON-REGRESSING fill even when the crate
                 # doesn't fully compile — it adds no error beyond baseline and
                 # none on the filled fns, so it's a correct prerequisite of the
                 # interdependent web, not a failure to discard. This dissolves
                 # the convergence deadlock where every correct piece is reverted
                 # for not single-handedly making rc==0.
-                # B3 keeps ONLY while the crate is RED (rc!=0),
+                # Keep-while-red keeps ONLY while the crate is RED (rc!=0),
                 # its actual purpose — accumulating prerequisites of a web that
                 # can't yet compile. When rc==0 the crate compiles and tests CAN
                 # run, so reaching here means U2 FAILED (own tests red): keeping a
@@ -3949,7 +3949,7 @@ def prepare_impl_fill(
                         members_filled_this_block = spliced_now
                         fns_filled_total += spliced_now
                         impls_filled += 1
-                        # B3 keeps land while the crate is RED, so no test ran
+                        # Keep-while-red keeps land while the crate is RED, so no test ran
                         # and no site can be blamed. Recorded as landed with no
                         # blocker, which makes the payoff verdict conservative:
                         # one such block is enough to withhold "payoff zero".
@@ -4022,7 +4022,7 @@ def prepare_impl_fill(
                 if deps.retire_contradicted_notes is not None and fr_path:
                     deps.retire_contradicted_notes(fr_path, cargo_out)
                 # The fill regressed (a new error, or an error on the filled
-                # fns) — B3 already accepted non-regressing fills
+                # fns) — keep-while-red already accepted non-regressing fills
                 # above. Revert; the driver decides whether to retry.
                 # A compiling attempt is banked first: the regression gate above
                 # already cleared this file image against the pre-splice

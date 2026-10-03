@@ -1,7 +1,7 @@
-"""Behaviour-oracle use-case (F10 Use-A / M4) — run the harvested positive
+"""Behaviour-oracle use-case — run the harvested positive
 behaviours against the reconstruction and tally the verdicts.
 
-Cost gate (plan_2 M4): the oracle is a SECOND gate on an already-unit-passing
+Cost gate: the oracle is a SECOND gate on an already-unit-passing
 tree — running N behaviour programs multiplies an hours-long t3, so it fires
 ONLY when the caller confirms unit tests are green for the cluster. On a
 unit-failing tree it is a no-op (the unit failures are the actionable signal).

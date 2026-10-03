@@ -77,8 +77,8 @@ exactly the events where today's rule throws the cursor away.
                    at or near 100 % is the finding — it means R2 collapses to
                    R1 and the module list is not the lever.
 
-THE DECISION RULE, PRE-REGISTERED (technical_debt.md 198.4)
-----------------------------------------------------------
+THE DECISION RULE, PRE-REGISTERED
+---------------------------------
 Ship R2 if its preserved fraction is >= 0.30 over the window AND no single
 module accounts for > 80 % of its drops. Otherwise ship R3, provided its
 retry delay stays inside one traversal of the run's own cohort on >= 90 % of

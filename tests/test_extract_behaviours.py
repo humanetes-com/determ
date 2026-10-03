@@ -1,4 +1,4 @@
-"""Pins for the behaviour-suite assembler (F10 harvest + M12 layout pins)."""
+"""Pins for the behaviour-suite assembler (harvest + layout pins)."""
 from __future__ import annotations
 
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
@@ -32,7 +32,7 @@ def test_suite_harvests_doctest_and_test_layout_pins():
     # layout pin from tests/ present as a STATIC_ASSERTION
     statics = [s for s in suite.specs
                if s.then is not None and s.then.kind is OutcomeKind.STATIC_ASSERTION]
-    assert statics, "layout pin from tests/*.rs must reach the suite (M12)"
+    assert statics, "layout pin from tests/*.rs must reach the suite"
     from pipeline_core.domain.behaviour import BehaviourClass
     assert all(s.klass is BehaviourClass.LAYOUT_PIN for s in statics), (
         "the assembler classifies every tier's specs, not only the test-assertion tier")

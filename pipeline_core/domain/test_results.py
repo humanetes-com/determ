@@ -179,7 +179,7 @@ class TestOutcome:
 
 
 class TestRunOutcome(NamedTuple):
-    """Result of a scoped test run (Plan 10 U1): whether it passed, the failing
+    """Result of a scoped test run : whether it passed, the failing
     count, the failing-output tail for the next prompt, and the failing-test
     names. On timeout ``fail_count`` is ``-1`` (INCONCLUSIVE — caller falls back
     to compile-based acceptance). A ``NamedTuple`` so it stays a drop-in for the

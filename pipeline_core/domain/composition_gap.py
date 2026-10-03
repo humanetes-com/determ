@@ -1,4 +1,4 @@
-"""Composition-coverage gap finder (F10 synthesis tier / M7) — pure domain.
+"""Composition-coverage gap finder — pure domain.
 
 The user's lego argument: unit tests under-determine how units COMPOSE. Harvested
 behaviours cover the compositions the library's own tests/examples happen to

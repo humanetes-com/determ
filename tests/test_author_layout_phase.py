@@ -1,4 +1,4 @@
-"""Pins for the t1.5 layout-authoring PHASE (F11 M2 orchestration)."""
+"""Pins for the t1.5 layout-authoring PHASE (orchestration)."""
 from __future__ import annotations
 
 import dataclasses

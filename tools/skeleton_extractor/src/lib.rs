@@ -1,7 +1,7 @@
 //! Skeleton extractor — Phase A of the 4-phase TASK 2 reconstruction.
 //!
 //! Reads a pre-strip Rust source tree and provides two capabilities to the Python pipeline
-//! over a JSON CLI (the seam — see `CODE_ARCHITECTURE.md` §4):
+//! over a JSON CLI (the seam):
 //!
 //!   - **Skeletonise** ([`extract_tree`]): emit per-file skeletons where every fn/method body
 //!     becomes `unimplemented!()`, `#[cfg(test)] mod ...` items are dropped, and types / macros

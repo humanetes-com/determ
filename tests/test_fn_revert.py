@@ -1,4 +1,4 @@
-"""Pins for the F11 M3 surgical fn-revert adapter."""
+"""Pins for the surgical fn-revert adapter."""
 from __future__ import annotations
 
 from pipeline_core.adapters.fn_revert import revert_fns_to_stub

@@ -1,6 +1,5 @@
 """Private-surface marks storage — persist the public-frozen vs
-private-replaceable classification as a baked artifact under ``.skeleton/`` (F11
-M1).
+private-replaceable classification as a baked artifact under ``.skeleton/``.
 
 Written ONCE in the pre-strip bake (Hard Rule 11 — the marks are derived from a
 type's *visibility*, an observable structural fact, never from a body), read by
@@ -69,7 +68,7 @@ def save_private_surface(project_dir: Path, surface: PrivateSurface) -> Path:
 def load_private_surface(project_dir: Path, cfg_cluster: str) -> PrivateSurface:
     """Read a cluster's baked private surface. Missing/corrupt → empty surface
     (t1.5 is ADDITIVE — its absence must never break a run; the run proceeds on
-    the frozen skeleton exactly as before F11)."""
+    the frozen skeleton exactly as before layout authoring)."""
     p = _surface_path(project_dir, cfg_cluster)
     try:
         d = json.loads(p.read_text(encoding="utf-8"))

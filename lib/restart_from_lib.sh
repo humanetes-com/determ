@@ -16,8 +16,13 @@
 #             caller must ALSO launch with --restart-from-pre-augment, which
 #             resets the workspace to the task0c-pre-<module> tag (restart_from.sh
 #             does; run_hardcrate.sh/run_microcrate.sh do not and refuse it).
-#             task0d and bake are listed for the phase keys those stages will
-#             write; a key that never appears in the state file clears nothing.
+#             The task0d harvest is KEPT: the restore lands on the behaviour
+#             restore point (task0d-done-<module>) and its commit carries the
+#             task0d/<cluster> entries. bake is listed for the phase key that
+#             stage writes; a key never in the state file clears nothing.
+#   task0d  → task0c plus the behaviour harvest: the caller ALSO passes
+#             --reharvest-behaviours, which resets to task0c-pre-<module>
+#             (before task0d) and deletes the task0d-done-<module> tag.
 # task0a/task0b and earlier still need redo.sh or a re-clone.
 restart_from_keys() {
     # Accept the monitor's short labels too (t1, t2, t2a, t2b, t2c, t3, t4): a
@@ -26,7 +31,8 @@ restart_from_keys() {
     local s="$1"
     [[ "$s" =~ ^t[0-9] ]] && s="task${s#t}"
     case "$s" in
-        task0c)        echo "task0c task0d bake strip task1 task2a task2b task2c task2-4" ;;
+        task0d)        echo "task0d task0c bake strip task1 task2a task2b task2c task2-4" ;;
+        task0c)        echo "task0c bake strip task1 task2a task2b task2c task2-4" ;;
         task1)         echo "task1 task2a task2b task2c task2-4" ;;
         task2|task2a)  echo "task2a task2b task2c task2-4" ;;
         task2b|task2c) echo "task2b task2c task2-4" ;;

@@ -1,4 +1,4 @@
-//! TRAP T7 (HARD, level 4) — frozen-bound mismatch (R2/R3 / debt #28 reproducer).
+//! TRAP T7 (HARD, level 4) — frozen-bound mismatch.
 //!
 //! `Tagged::tagged` is a generic method whose impl carries the FROZEN bound
 //! `where T: Describe` (skeletonise stubs only fn BODIES — the trait def, the

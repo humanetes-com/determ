@@ -1,4 +1,4 @@
-"""Structured test-run report + blame partition (pure domain, F3).
+"""Structured test-run report + blame partition (pure domain).
 
 `parse_test_output` turns raw `cargo test` text into a typed
 :class:`TestRunReport`; :func:`partition_blame` splits a unit's failing tests
@@ -1046,7 +1046,7 @@ def cap_at_line_boundary(text: str, cap: int) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FailureExcerpt:
-    """One place the excerpt rule lives (F8): the failing-test NAME list is
+    """One place the excerpt rule lives: the failing-test NAME list is
     NEVER truncated (names are short and identify the target); only the panic
     BODIES are capped, and only at line boundaries."""
 

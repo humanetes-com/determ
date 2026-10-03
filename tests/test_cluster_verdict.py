@@ -3,7 +3,7 @@ failing targets.
 
 On 2026-08-01 `nightly` stopped with two rustc errors in its TEST binaries and
 was still recorded `done — validated`: the verdict ran `cargo check`, which
-builds the lib alone. Session 311 stopped a `baseline_broken` cluster being
+builds the lib alone. An earlier fix stopped a `baseline_broken` cluster being
 checkpointed; the verdict itself still could not observe the failure.
 """
 from __future__ import annotations

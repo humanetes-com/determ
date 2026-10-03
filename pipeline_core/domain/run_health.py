@@ -104,7 +104,7 @@ class IterReading:
     fail_count: int
     stall: int
     stall_max: int
-    oracle: int | None = None   # F6: the denominator (tests reporting a verdict)
+    oracle: int | None = None   # the denominator (tests reporting a verdict)
 
 
 def _int_after(text: str, marker: str) -> int | None:
@@ -141,7 +141,7 @@ def parse_iter_readings(lines: list[str]) -> list[IterReading]:
         m = _int_after(ln[i:], "/") if i != -1 else None
         if None in (it, p, f, s, m):
             continue
-        oracle = _int_after(ln, "oracle=")   # F6 — may be absent on older lines
+        oracle = _int_after(ln, "oracle=")   # may be absent on older lines
         out.append(IterReading(it, p, f, s, m, oracle))  # type: ignore[arg-type]
     return out
 
@@ -384,7 +384,7 @@ def analyze(
                 "writer, do not let the heal loop mask it",
             ))
 
-    # -- 7. frozen-zero tree (F7): pass=0 fail=0 for ≥3 trailing iters -------
+    # -- 7. frozen-zero tree: pass=0 fail=0 for ≥3 trailing iters -------
     # No test ever reports a verdict → the crate is not compiling/parsing, but
     # the loop marches on marking fns exhausted from a broken state (the ~30h
     # error.rs corruption freeze had zero alarm). A pass=0 fail=0 STREAK is the
@@ -406,7 +406,7 @@ def analyze(
                 "— inspect the cluster tree, do not trust exhaustion",
             ))
 
-    # -- 7b. oracle (denominator) drift (F6) --------------------------------
+    # -- 7b. oracle (denominator) drift --------------------------------
     # The test corpus grew 61→68 between runs unflagged, making pass counts
     # incomparable. A within-run change in the number of tests reporting a
     # verdict is the same class of hazard (a test target started/stopped
@@ -530,7 +530,7 @@ def analyze(
             "can never reach 'done' while the denominator is inflated",
         ))
 
-    # -- 8. skeleton-fallback fill loss (F7 pairs with F2) ------------------
+    # -- 8. skeleton-fallback fill loss (pairs with the heal hierarchy) ------------------
     for ln in segment_lines:
         if "restored whole file from skeleton" not in ln:
             continue
@@ -540,7 +540,7 @@ def analyze(
             _unit_of(ln, "restored") or "heal",
             f"whole-file skeleton restore discarded ~{lost or 0} fill(s)",
             "a writer left the file unparseable past surgical/best-tree/git "
-            "recovery — find the writer bypassing the F1 splice gate",
+            "recovery — find the writer bypassing the splice gate",
         ))
 
     # -- 9. capped-retry futility (session-241 plateau class) ---------------

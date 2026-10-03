@@ -215,7 +215,7 @@ def run_scoped_tests(
     err_cap: int,
     only: set[str] | None = None,
 ) -> TestRunOutcome:
-    """Plan 10 U1 — the reusable test-validation step (runtime analog of a
+    """The reusable test-validation step (runtime analog of a
     compile check). Runs `test_cmd` via the injected `run_cargo_fn` and returns
     a :class:`TestRunOutcome` (passed, fail_count, detail, failed_names).
 
@@ -711,7 +711,7 @@ def u2_test_gate(
     guard: Callable[[str, str], None],
     baseline: TestStateReading | None = None,
 ) -> U2Verdict:
-    """Plan 10 / F3 — the SINGLE reusable test-acceptance gate, called by every
+    """The SINGLE reusable test-acceptance gate, called by every
     fill loop (per-fn, per-impl, post-merge) at the point a unit compiles.
 
     Runs the unit's own tests (`fn_tests`), parses the structured report, and

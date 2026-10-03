@@ -297,7 +297,7 @@ def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) ->
     assert "is::<" not in fmt
 
 
-# --- splice-unit escalation on identical-error stall (s117 #3) ---------------
+# --- splice-unit escalation on identical-error stall ---------------
 
 
 class _StuckChecker:

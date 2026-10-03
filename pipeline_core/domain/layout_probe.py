@@ -1,4 +1,4 @@
-"""Layout pins as a COMPILE-TIME gate (F11 t1.5) — pure domain.
+"""Layout pins as a COMPILE-TIME gate — pure domain.
 
 t1.5 feeds the harvested layout pins (``size_of::<Error>() == size_of::<usize>()``,
 the NPO niche, ``Send + Sync + Unpin``) into the authoring prompt and then accepts

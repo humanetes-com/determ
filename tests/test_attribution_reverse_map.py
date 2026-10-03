@@ -128,7 +128,7 @@ def test_assertion_panic_falls_through_to_reverse_map(
     assert ("lib.rs", "extra_cap_limit") not in frontier
 
 
-# --- s117 lever: deterministic behavior attribution in the TDD chain ------- #
+# --- deterministic behavior attribution in the TDD chain ------- #
 
 def test_behavior_path_fires_before_classifier(tmp_path: Path) -> None:
     """Assertion failure with a clean build and test texts available → the

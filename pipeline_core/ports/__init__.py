@@ -38,7 +38,7 @@ class LLM(Protocol):
 class Extractor(Protocol):
     """The Rust skeleton_extractor, invoked over its JSON CLI contract.
 
-    The seam is sacred (see CODE_ARCHITECTURE.md §4): each method maps to one subcommand
+    The seam is sacred: each method maps to one subcommand
     and returns the parsed JSON record(s). Bodies are never read after strip.
 
     The real CLI is *path-based*, not source-string-based: every subcommand takes an

@@ -1,6 +1,6 @@
 """When to re-run t1.5 layout authoring for a cluster — pure domain.
 
-The frozen skeleton's layout gets ONE authoring pass at bake time (M2). Several
+The frozen skeleton's layout gets ONE authoring pass at bake time. Several
 distinct signals say that pass produced a layout the reconstruction cannot live
 with, and EACH must re-trigger a whole-cluster re-author (coarse but correct):
 

@@ -36,8 +36,8 @@ class PerFnSections:
     # The crate blueprint slice — the model's OWN design sections
     # relevant to this fn. "" when no blueprint exists.
     blueprint: str = ""
-    # Harvested behaviours that demonstrate this fn's public usage (F10 Use-B /
-    # M5) — concrete RIGHT examples. "" when none matched / no suite baked.
+    # Harvested behaviours that demonstrate this fn's public usage — concrete RIGHT examples.
+    # "" when none matched / no suite baked.
     usage_examples: str = ""
     # The behaviour book's instruction (`behaviour_must_instruction`: the
     # identity MUST and the rules aimed at this fn), rendered as an

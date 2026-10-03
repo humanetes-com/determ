@@ -1,8 +1,8 @@
-"""Layout-authoring PHASE (F11 t1.5) — the composition step that runs
+"""Layout-authoring PHASE — the composition step that runs
 :func:`author_layout` for every cfg-cluster between bake and strip, then
 recomputes the leaf-first order over the rewritten scaffold.
 
-Placement (plan_2 M2): bake writes the frozen skeleton + private-surface marks +
+Placement: bake writes the frozen skeleton + private-surface marks +
 behaviour suite; THIS phase lets the model re-author each cluster's private
 layout so the reconstruction is not forced to reproduce the original's unsafe
 internals; THEN the leaf-first order + fn-ref-counts are recomputed over the
@@ -11,7 +11,7 @@ counts keyed to the frozen names would be stale). Strip runs after.
 
 Fully DI + degrade-safe: an empty surface, an unavailable model, or a compile
 adapter that always says "no" all reduce to a no-op — the run proceeds on the
-frozen skeleton exactly as before F11.
+frozen skeleton exactly as before layout authoring.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def make_pin_selector(
 ) -> Callable[[tuple[PrivateSurfaceItem, ...]], list[BehaviourSpec]]:
     """A per-component pin selector: the STATIC_ASSERTION specs in `suite` whose
     pinned type names intersect the component's item names. This is what feeds
-    the t1.5 prompt AND drives the M13 gate (empty selection on a layout-
+    the t1.5 prompt AND drives the missing-pin gate (empty selection on a layout-
     sensitive component = harvest gap).
 
     A pin often names only the PUBLIC type (``size_of::<Error>()``), never the
@@ -89,10 +89,10 @@ class LayoutPhaseDeps:
     symbol_inventory_text: Callable[[Path, str], str]
     author_deps_for: Callable[[Path, str], AuthorLayoutDeps]
     recompute_leaf_order: Callable[[Path, str], None]
-    # F11 M3 precondition: persist which component ended up authored/gated/
+    # Layout re-trigger precondition: persist which component ended up authored/gated/
     # frozen, so a later re-trigger can find "still on the original scaffold"
     # without re-deriving reachability. Optional — an omitted store is a no-op
-    # (additive; the phase runs exactly as before F11 M3 existed).
+    # (additive; the phase runs exactly as before the layout re-trigger existed).
     save_layout_outcomes: Callable[[Path, AuthorLayoutResult], Path] | None = None
     # Crate-wide layout registry (uid → the crate's ONE definition of that
     # private item). Read once at phase start so a re-run adopts what a previous
@@ -212,7 +212,7 @@ def run_layout_phase(
             f"{len(res.gated)} gated (harvest gap); "
             f"{len(res.components) - authored - len(res.gated)} left frozen.")
         # The model may have renamed private helpers → recompute leaf-first
-        # order + fn-ref-counts over the REWRITTEN scaffold (plan_2 M2).
+        # order + fn-ref-counts over the REWRITTEN scaffold.
         if authored:
             try:
                 deps.recompute_leaf_order(project_dir, cluster)

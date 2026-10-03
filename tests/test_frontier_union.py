@@ -3,7 +3,7 @@
 Pins the behaviour that lets a helper stub with NO directly-attributed test
 (a leaf called only transitively) still enter the phase-c frontier, instead of
 surviving to the post-TASK3 whole-file sweep while its tested callers thrash as
-"blocked by an unfilled sibling stub". See CODE_ARCHITECTURE §3 / handover.
+"blocked by an unfilled sibling stub".
 """
 from __future__ import annotations
 

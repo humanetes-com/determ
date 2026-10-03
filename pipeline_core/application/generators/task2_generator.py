@@ -2209,7 +2209,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                              "alphabetical fn ordering.")
             # Per-crate FR is the home for model self-correction notes.
             _fr_for_notes = project_dir / f"functional_requirements_{module}.md"
-            # Plan 4 — PHASE_C_DRIVER=tdd switches to the TDD outer loop (cargo
+            # PHASE_C_DRIVER=tdd switches to the TDD outer loop (cargo
             # test → frontier → fill). Default `fn_walk` keeps the legacy per-fn-
             # walk driver.
             if self.cfg.phase_c_tdd:
@@ -2282,7 +2282,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
         # Phase D — residual cleanup (per cluster).
         phase_step("t2a.residual", cluster=cluster.name)
-        # Plan 4 — under driver=tdd, the outer loop fills exactly the fns
+        # Under driver=tdd, the outer loop fills exactly the fns
         # reachable from failing tests. Residuals are by-design unreachable from
         # any test → leaving them `unimplemented!()` is correct under tests-only
         # reconstruction. Skip Phase D.
@@ -2413,7 +2413,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     project_dir, filled_dir, skeleton_dir, cluster.name, rel),
             )
 
-        # F7: the tree still does not compile/parse after every heal attempt.
+        # Tree health: the tree still does not compile/parse after every heal attempt.
         # Emit a LOUD halt so the run never silently marches on mis-exhausting
         # fns from a broken state (the ~30h corruption freeze had no alarm).
         if not validate_ok:
@@ -2499,7 +2499,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
 
     def _heal_deps(self, project_dir: Path, filled_dir: Path,
                    skeleton_dir: Path, cluster_name: str) -> HealDeps | None:
-        """Build the F2 heal collaborators, or None when no parse gate is wired
+        """Build the heal collaborators, or None when no parse gate is wired
         (→ caller keeps the legacy whole-file skeleton restore)."""
         if self.structure is None:
             return None
@@ -3457,7 +3457,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 tdd_frontier_tests=FailureFrontier.build(
                     _batch_eligible, _attr.convicting,
                     sources=_attr.sources),
-                tdd_test_cmd=test_cmd,         # Plan 10 U2
+                tdd_test_cmd=test_cmd,
                 skip_end_pass_test=True,
             )
             _pass_attempted = (set() if _batch.completes_pass

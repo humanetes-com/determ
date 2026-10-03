@@ -1,4 +1,4 @@
-"""Pins for the layout-pinning classifier (shared F10/F11 primitive)."""
+"""Pins for the layout-pinning classifier (shared behaviour/layout primitive)."""
 from __future__ import annotations
 
 from pipeline_core.domain.behaviour import OutcomeKind, StaticAssertKind
@@ -53,7 +53,7 @@ def test_dedup_repeated_assertions():
     assert len(classify_layout_assertions(src)) == 1
 
 
-# --- M12: harvest layout pins from a whole test file --------------------------
+# --- harvest layout pins from a whole test file --------------------------
 
 _REPR_TEST = """
 #[test]

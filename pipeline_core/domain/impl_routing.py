@@ -381,7 +381,7 @@ def impl_block_id(file_rel: str, container: str) -> ContainerId:
     (`canon_container`) so the SAME impl rendered two ways — a block's own
     verbatim container vs a `related_containers` entry carrying a newline
     where-clause — produces the SAME id. Keying on the raw string let a related
-    block miss the routing table, dropping its whole model reply (F5,
+    block miss the routing table, dropping its whole model reply (
     `response_unused` on `impl<E> From<E> for Error`)."""
     return ContainerId(f"{file_rel}::{canon_container(container)}")
 

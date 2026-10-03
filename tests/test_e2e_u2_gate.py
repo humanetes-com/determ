@@ -2,7 +2,7 @@
 but fails its attributed tests, and the fill loop must retry until the correct
 body is found.
 
-The gate (Plan 10 U2, _u2_test_gate) is enabled by default —
+The gate (_u2_test_gate) is enabled by default —
 _UNIFIED_FILL_LOOP = os.getenv("UNIFIED_FILL_LOOP", "1") == "1".
 
 Observable: without the gate, the wrong-but-compiling body (a - b) is accepted

@@ -1,4 +1,4 @@
-"""Regression for #3 (CODE_ARCHITECTURE R-followup): a per-fn fill that COMPILES
+"""Regression: a per-fn fill that COMPILES
 but whose attributed test fails because a SIBLING is still an unfilled stub must be
 kept + deferred, not reverted/marked GENUINELY_HARD. The robust signal (immune to
 first-panic-order attribution) is the failure TYPE: stub-panic vs assertion."""

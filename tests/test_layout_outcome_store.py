@@ -1,4 +1,4 @@
-"""Pins for the layout-outcome store (F11 M3 precondition — persist which
+"""Pins for the layout-outcome store (Layout re-trigger precondition — persist which
 component t1.5 authored/gated/froze plus each authored item's locate-key, so a
 re-trigger can find it later and re-author against the LIVE skeleton)."""
 from __future__ import annotations

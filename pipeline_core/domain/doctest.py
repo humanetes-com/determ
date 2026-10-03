@@ -1,4 +1,4 @@
-"""Doc-test harvester (F10 extraction tier 1) — the free behaviours. Pure
+"""Doc-test harvester — the free behaviours. Pure
 domain: text in, behaviour VOs out. No IO (the adapter reads the file).
 
 A Rust doc-comment code fence IS a Given/When/Then: ``let e = anyhow!("boom");
@@ -148,7 +148,7 @@ def harvest_doctest_behaviours(
 def harvest_static_assertions(
     source: str, *, source_file: str, cfg_cluster: str = "default",
 ) -> list[BehaviourSpec]:
-    """Layout-pinning STATIC_ASSERTION behaviours from doc-tests — the pins F11's
+    """Layout-pinning STATIC_ASSERTION behaviours from doc-tests — the pins layout authoring's
     t1.5 must satisfy. One outcome-behaviour per distinct static assertion."""
     out: list[BehaviourSpec] = []
     for blk in extract_doc_code_blocks(source):

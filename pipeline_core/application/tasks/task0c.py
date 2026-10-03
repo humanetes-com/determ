@@ -749,8 +749,8 @@ def _engine_mutation_pass(
     cluster: Any,
     rel_files: list[str],
 ) -> int:
-    """M4: behaviour-hardening pass over a cluster's source files. For each file
-    with surviving mutants, generate black-box tests (M3) and persist the kept
+    """Behaviour-hardening pass over a cluster's source files. For each file
+    with surviving mutants, generate black-box tests and persist the kept
     ones as a `tests/{stem}_gen_N.rs` integration file so they survive strip
     and reattach per-cluster. Opt-in via TASK0C_MUTATION_HARDEN=1 (mutation-kill as the strength
     metric on top of coverage). Returns the number of files hardened.

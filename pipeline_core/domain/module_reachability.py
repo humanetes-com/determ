@@ -41,7 +41,7 @@ def externally_reachable_files(
     """Every file in `all_files` reachable from the crate root by following
     ONLY "public" mod edges. Fails OPEN (marks a file reachable) whenever the
     declaration graph can't confidently place it — losing a real private-mod
-    wall wrongly widens what t1.5 may rewrite (caught later by the M13 gate's
+    wall wrongly widens what t1.5 may rewrite (caught later by the missing-pin gate's
     own layout-sensitivity check), which is far cheaper than wrongly treating
     a genuinely public file as private-replaceable and corrupting the API."""
     root_files = {f for f in all_files if posixpath.basename(f) in ROOT_BASENAMES}

@@ -1,4 +1,4 @@
-"""F7 pins — tree-health classification + frozen-zero / skeleton-loss detectors."""
+"""Tree-health pins — tree-health classification + frozen-zero / skeleton-loss detectors."""
 from __future__ import annotations
 
 from pipeline_core.domain.models import Diagnostic

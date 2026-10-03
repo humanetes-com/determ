@@ -1,4 +1,4 @@
-"""Composition wiring for the F11 t1.5 layout-authoring phase.
+"""Composition wiring for the t1.5 layout-authoring phase.
 
 Assembles the phase runner from the adapter-level ports (behaviour store,
 private-surface store, skeleton compile-check, API surface) so pipeline.py only
@@ -103,7 +103,7 @@ def build_retrigger_layout(
     max_attempts: int,
     parse_ok: Callable[[Path], bool] | None = None,
 ) -> Callable[[Path, str, str, Path, str], RetriggerResult]:
-    """The F11 M3 layout re-trigger action, bound to the resident adapters —
+    """The layout re-trigger action, bound to the resident adapters —
     same building blocks `build_layout_phase_runner` uses (this IS t1.5,
     invoked again mid-run for one component instead of the whole surface)."""
     # Taken ONCE, at composition: it stamps a mechanical-failure streak with the

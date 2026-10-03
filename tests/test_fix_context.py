@@ -1,6 +1,6 @@
 """FixContextAssembler — the single derivation point for per-fn fix-prompt
 sections, extracted from pipeline.py's `_gather_fn_fix_context` family
-(god-file shrink slice 2026-07-04)."""
+(god-file shrink, 2026-07-04)."""
 from __future__ import annotations
 
 from pathlib import Path

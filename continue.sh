@@ -42,6 +42,7 @@ _YES=false
 _FORCE=false
 _KEEP_AUGMENTED=false
 _RESTART_FROM_PRE_AUGMENT=false
+_REHARVEST_BEHAVIOURS=false
 _NO_TAIL=false
 _NO_PRE_RUN=false
 for _arg in "$@"; do
@@ -60,11 +61,14 @@ for _arg in "$@"; do
         exit 2
     }
     [[ "$_arg" == "--keep-augmented" ]] && _KEEP_AUGMENTED=true
-    # Resets the workspace to the task0c-pre-<module> tag (the commit BEFORE the
-    # test augmentation) so task0c itself re-runs — the lever for a changed
-    # test generator or admission rule. --keep-augmented restores the POST-t0c
-    # tag and keeps the generated tests. Same name as the pipeline.py flag.
+    # Resets the workspace to the commit BEFORE the test augmentation so task0c
+    # itself re-runs — the lever for a changed test generator or admission
+    # rule. It keeps the task0d behaviour harvest (task0d-done-<module>);
+    # --reharvest-behaviours goes back before task0d and re-runs it too.
+    # --keep-augmented restores the POST-t0c tag and keeps the generated
+    # tests. Same names as the pipeline.py flags.
     [[ "$_arg" == "--restart-from-pre-augment" ]] && _RESTART_FROM_PRE_AUGMENT=true
+    [[ "$_arg" == "--reharvest-behaviours" ]] && _REHARVEST_BEHAVIOURS=true
     [[ "$_arg" == "--no-tail" ]]        && _NO_TAIL=true
     [[ "$_arg" == "--no-pre-run" ]]     && _NO_PRE_RUN=true
 done
@@ -280,7 +284,13 @@ if [[ "$_KEEP_AUGMENTED" == true && "$_RESTART_FROM_PRE_AUGMENT" == true ]]; the
     exit 2
 fi
 [[ "$_KEEP_AUGMENTED" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-augmented --audit"
+if [[ "$_REHARVEST_BEHAVIOURS" == true && "$_RESTART_FROM_PRE_AUGMENT" != true ]]; then
+    echo "continue.sh: --reharvest-behaviours only applies with --restart-from-pre-augment" >&2
+    echo "  (restart_from.sh task0d passes both)." >&2
+    exit 2
+fi
 [[ "$_RESTART_FROM_PRE_AUGMENT" == true ]] && _PIPELINE_ARGS="--project anyhow --restart-from-pre-augment --audit"
+[[ "$_REHARVEST_BEHAVIOURS" == true ]] && _PIPELINE_ARGS="$_PIPELINE_ARGS --reharvest-behaviours"
 
 # Final guard against a duplicate slipping in despite the flock (e.g. if
 # someone bypassed the lock or pgrep was momentarily wrong above).

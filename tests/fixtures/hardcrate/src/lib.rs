@@ -44,7 +44,7 @@ pub use cap::wrapping_total;
 /// Capability buffer limit — larger when the `extra_cap` capability is compiled in.
 /// The dual `#[cfg]`/`#[cfg(not)]` form is what makes `extra_cap` a 2-state TOGGLE,
 /// so the cluster scan identifies it as a second compiler cluster (the single-form
-/// gating in the first cut left it undetected → 1 cluster → the test-count bug #15).
+/// gating in the first cut left it undetected → 1 cluster → the test-count bug).
 #[cfg(any(extra_cap, feature = "extra_cap"))]
 pub fn cap_limit() -> usize {
     255

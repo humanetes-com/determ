@@ -104,7 +104,7 @@ def task2_fill_groups(
           - and EVERY matched function has a non-stub body
         Otherwise returns 1 (treat as needing work) — including the ambiguous
         case where the target_symbols are type names that don't map to any fn.
-        That ambiguity caused F7's over-firing and is the safer default.
+        That ambiguity caused the tree-health alarm's over-firing and is the safer default.
         """
         target_names: set[str] = set()
         for sym in group.get("target_symbols", []):

@@ -1,11 +1,11 @@
-"""Behaviour-oracle report (F10 Use-A / M4) — pure domain.
+"""Behaviour-oracle report — pure domain.
 
 Running the harvested positive behaviours against the reconstruction yields a
 :class:`BehaviourVerdict` per spec. This VO tallies them and, for each MISMATCH,
 names the units the failing behaviour EXERCISES — the localizer a mismatch
 escalates through (the reconstruction reproduces a compiles-but-wrong observable
 a unit test did not catch). Attribution over a large ``exercises`` set is weak by
-nature (see M9: bisection is the real localizer); this report just carries the
+nature (see bisection is the real localizer); this report just carries the
 evidence, it does not claim a single culprit.
 """
 from __future__ import annotations
@@ -52,7 +52,7 @@ class BehaviourOracleReport:
     @property
     def suspect_units(self) -> frozenset[str]:
         """Union of the units every MISMATCH exercises — the escalation frontier
-        the behaviour oracle contributes (weak localizer; see M9)."""
+        the behaviour oracle contributes (weak localizer; see bisection)."""
         out: set[str] = set()
         for o in self.mismatches:
             out |= o.exercises

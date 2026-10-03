@@ -1,7 +1,7 @@
-"""Behaviour-synthesis prompt (F10 tier 3 / M7).
+"""Behaviour-synthesis prompt.
 
 Ask the model to author NEW public-API usage programs for the units the harvest
-missed. Legality (Hard Rule 11 / plan_1 caveat #2): the ONLY inputs are the
+missed. Legality: the ONLY inputs are the
 PUBLIC API surface + existing tests + the in-scope symbol inventory — the model's
 already-allowed set, with no path to stripped bodies. A synthesized program that
 does not compile+run against the REAL lib is discarded (self-filtering), so a

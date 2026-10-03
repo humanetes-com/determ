@@ -25,7 +25,7 @@ from pipeline_core.domain.rust_idents import (
 
 
 def test_impl_block_id_stable_across_renderings() -> None:
-    # F5: the same impl rendered with vs without a newline where-clause must
+    # The same impl rendered with vs without a newline where-clause must
     # produce the SAME id, or a related-block routing-table lookup misses and
     # the whole reply is dropped (response_unused on impl<E> From<E> for Error).
     verbatim = "impl<E> From<E> for Error\nwhere\n    E: StdError,"

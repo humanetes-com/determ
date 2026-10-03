@@ -3,12 +3,18 @@
 # all existing fills in .skeleton-filled/.
 #
 # Resumable boundaries (where the pipeline_state has a real phase entry):
-#   task0c  → re-run the test augmentation and everything after it. Needs the
-#             original source back, so the launch adds --restart-from-pre-augment:
-#             the pipeline resets the workspace to the task0c-pre-<module> tag
-#             (the `pipeline: task0b done` commit), archives the reconstruction
-#             beside the workspace, and re-runs task0c → strip → task1 → task2.
-#             Refused here, before anything is stopped, when that tag is absent.
+#   task0c  → re-run the test augmentation and everything after it, KEEPING the
+#             task0d behaviour harvest. Needs the original source back, so the
+#             launch adds --restart-from-pre-augment: the pipeline resets the
+#             workspace to the task0d-done-<module> tag (the commit after the
+#             harvest), archives the reconstruction beside the workspace, and
+#             re-runs task0c → strip → task1 → task2. A workspace without that
+#             tag (its harvest predates it) resets to task0c-pre-<module> and
+#             harvests once more, which writes the tag.
+#             Refused here, before anything is stopped, when task0c-pre-* is absent.
+#   task0d  → as task0c, plus the behaviour harvest (--reharvest-behaviours):
+#             resets to task0c-pre-<module> (the `pipeline: task0b done` commit)
+#             and deletes task0d-done-<module>. Only when task0d itself changed.
 #   task1   → re-run FR synthesis + the whole reconstruct loop
 #   task2   → re-run the reconstruct loop (task2a per-cluster → task2b merge →
 #             task2c merged-fill → task3 test → task4 genesis)
@@ -41,8 +47,9 @@ source "$SCRIPT_DIR/lib/restart_from_lib.sh"
 source "$SCRIPT_DIR/lib/pipeline_pids.sh"
 if ! _KEYS_STR=$(restart_from_keys "$STAGE"); then
     echo "usage: restart_from.sh <stage> [--force]"
-    echo "  stage ∈ task0c | task1 | task2 | task2a | task2b | task2c | task3 | task4"
-    echo "    task0c = re-run the test augmentation (resets to the task0c-pre-<module> tag)"
+    echo "  stage ∈ task0d | task0c | task1 | task2 | task2a | task2b | task2c | task3 | task4"
+    echo "    task0d = re-run the behaviour harvest AND the test augmentation (resets to task0c-pre-<module>)"
+    echo "    task0c = re-run the test augmentation, keeping the harvest (resets to task0d-done-<module>)"
     echo "    task2c = re-run only the merged-tree fill (skip per-cluster + merge)"
     echo "  earlier stages (task0a/task0b) → use redo.sh"
     exit 2
@@ -55,7 +62,7 @@ echo "[restart-from] stage=$STAGE → clearing phase entries: ${_KEYS[*]}"
 # aborts inside pipeline.py would leave the state keys cleared with nothing
 # restored.
 _LAUNCH_ARGS=(--y --no-tail)
-if [[ "$STAGE" == "task0c" || "$STAGE" == "t0c" ]]; then
+if [[ "$STAGE" =~ ^(task0c|t0c|task0d|t0d)$ ]]; then
     if [[ -z "$(git -C "$PROJECT_DIR" tag -l 'task0c-pre-*' 2>/dev/null)" ]]; then
         echo "[restart-from] ERROR: no task0c-pre-* tag in $PROJECT_DIR." >&2
         echo "  The pipeline writes it before task0c on a git-managed run; a workspace" >&2
@@ -65,6 +72,7 @@ if [[ "$STAGE" == "task0c" || "$STAGE" == "t0c" ]]; then
         exit 2
     fi
     _LAUNCH_ARGS+=(--restart-from-pre-augment)
+    [[ "$STAGE" == "task0d" || "$STAGE" == "t0d" ]] && _LAUNCH_ARGS+=(--reharvest-behaviours)
 fi
 
 # 1. Stop any running pipeline.

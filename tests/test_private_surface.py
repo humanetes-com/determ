@@ -1,4 +1,4 @@
-"""Pins for F11 private-surface classification (freeze-scope boundary)."""
+"""Pins for private-surface classification (freeze-scope boundary)."""
 from __future__ import annotations
 
 from pipeline_core.domain.models import (

@@ -1,4 +1,4 @@
-"""Behaviour extraction use-case (F10 t0d) — harvest a cfg-cluster's behaviour
+"""Behaviour extraction use-case — harvest a cfg-cluster's behaviour
 suite from the original library in the pre-strip window.
 
 Three harvest tiers share one assembler: doc-tests (assertion-behaviours and
@@ -38,7 +38,7 @@ def harvest_behaviour_suite(
     ``sources`` = crate ``src/*.rs`` ``(rel, text)`` pairs → doc-test
     assertion-behaviours + doc-test STATIC_ASSERTION pins. ``test_sources`` =
     integration/unit ``tests/*.rs`` pairs → the layout pins (`size_of`, NPO,
-    autotraits) that live in test bodies (M12 — the source M2's selector reads
+    autotraits) that live in test bodies (the source the selector reads
     from) AND the test-assertion OUTCOME behaviours (runtime `then`).
     ``default_cluster`` names the crate's default cluster for the CFG_WORLD
     class (None = this cluster). Deterministic: specs sorted + deduped by id."""

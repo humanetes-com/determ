@@ -1,4 +1,4 @@
-"""Skeleton compile-check for the t1.5 layout gate (F11 M2).
+"""Skeleton compile-check for the t1.5 layout gate.
 
 t1.5 accepts a model-authored private layout ONLY if the rewritten skeleton
 still compiles with ``unimplemented!()`` bodies — the exact invariant the baked

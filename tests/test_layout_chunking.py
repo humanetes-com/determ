@@ -1,4 +1,4 @@
-"""Pins for M6 chunked layout authoring: uid identity for duplicate-named
+"""Pins for chunked layout authoring: uid identity for duplicate-named
 items, occurrence-ordered multi-splice, the chunk plan, and the chunked
 authoring pass end-to-end."""
 from __future__ import annotations

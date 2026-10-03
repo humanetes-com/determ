@@ -1,6 +1,6 @@
 """Pure domain helpers in pipeline_core.domain.generation: filename parsing,
 test-prefix stripping, TESTFILE marker scan, topo-sort, and the regex-free
-gen_tests decl-strip (#9). All assert equivalence to the legacy regex behaviour."""
+gen_tests decl-strip. All assert equivalence to the legacy regex behaviour."""
 from __future__ import annotations
 
 from pipeline_core.domain.generation import (

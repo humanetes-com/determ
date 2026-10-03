@@ -1,5 +1,5 @@
 """Exercises writer — fill `BehaviourSpec.exercises` from LINE COVERAGE of
-each behaviour's run against the original crate (F10, the attribution
+each behaviour's run against the original crate (the attribution
 channel a MISMATCH escalates through).
 
 No writer existed before 2026-08-26 (`layout_pins.py:235` says "the caller

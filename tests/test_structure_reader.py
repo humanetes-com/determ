@@ -67,7 +67,7 @@ class _FakeStructure:
 def test_phase_c_engine_uses_constructor_injected_structure() -> None:
     """`_build_phase_c_engine(structure=fake)` swaps the fake StructureReader into
     the WorkspaceModel adapter so enumerate reads route through it — no module-global
-    monkeypatch. This is the reversed test-seam (debt: anti-pattern B)."""
+    monkeypatch. This is the reversed test-seam."""
     import pipeline
     fake = _FakeStructure(fns=[{"fn_name": "answer", "file": "src/lib.rs"}])
     engine = pipeline._build_phase_c_engine(structure=fake)

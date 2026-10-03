@@ -144,11 +144,11 @@ def test_reset_exhaustion_fires_once_after_progress_then_stays_quiet(
 
 def test_layout_retrigger_resets_stall_and_continues_the_loop(
         tmp_path: Path, monkeypatch) -> None:
-    # F11 M3: on the FIRST stall-exit, a successful retrigger must reset the
+    # Layout re-trigger: on the FIRST stall-exit, a successful retrigger must reset the
     # stall budget and let the loop keep going (proven by MORE cargo runs
     # than a bare TDD_MAX_STALLS=3 would allow) instead of marking fns
     # exhausted and breaking. On the SECOND stall-exit (simulating a spent
-    # cap), it reports not-fired and the loop exits exactly as before F11 M3.
+    # cap), it reports not-fired and the loop exits exactly as before the layout re-trigger.
     cargo_calls = [0]
     retrig_calls: list[tuple] = []
     events: list[tuple[str, dict]] = []
@@ -212,7 +212,7 @@ def test_the_stall_retrigger_is_told_the_pass_floor_it_fired_at(
 def test_omitting_retrigger_layout_preserves_prior_stall_exit_behaviour(
         tmp_path: Path, monkeypatch) -> None:
     # retrigger_layout defaults to None — the exit must behave EXACTLY as
-    # before F11 M3 (regression guard on the shared stall-exit hook).
+    # before the layout re-trigger (regression guard on the shared stall-exit hook).
     cargo_calls = [0]
 
     def _run_cargo(*a, **k):

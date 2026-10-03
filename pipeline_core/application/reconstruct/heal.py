@@ -1,4 +1,4 @@
-"""Heal-hierarchy use-case (F2): recover an unparseable fill-tree file with the
+"""Heal-hierarchy use-case: recover an unparseable fill-tree file with the
 LEAST destructive option that yields a parseable result.
 
 The old recovery jumped straight to copying the baked skeleton over the file,
@@ -6,7 +6,7 @@ discarding every accumulated fill (22→14 in the incident). This tries, in orde
 surgical excision of doc-comment-intruding code → this cluster's best-tree
 snapshot → the newest workspace-git version that parses → and only then the
 baked skeleton (loud loss event). Each candidate is committed through the same
-parse-gated write as F1, so a candidate that doesn't parse is never left on disk.
+parse-gated write as the splice gate, so a candidate that doesn't parse is never left on disk.
 """
 
 from __future__ import annotations

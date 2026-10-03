@@ -346,3 +346,155 @@ def test_the_augmented_restore_on_the_same_repo_keeps_the_generated_tests(tmp_pa
     assert (repo / ".task0c_attempts.jsonl").exists()
     assert not (repo / "functional_requirements_x.md").exists()   # strip/task1+ still wiped
     assert not (repo / ".module_stripped").exists()
+
+
+# --- the behaviour restore point (task0d-done-<module>) ----------------------
+# The history a fresh run writes: A = `pipeline: task0b done` (task0c-pre-x),
+# H = task0d's harvest plus the doc-example tests and book it leaves in the
+# working tree, committed whole (task0d-done-x), B = task0c + strip + a fill.
+
+_STATE_H = _STATE_A.replace("\ncurrent: task0b\n", """[task0d/stable]  done          hash=-  227 behaviours
+[task0d/nightly]  done          hash=-  227 behaviours
+
+current: task0d
+""")
+_STATE_HB = _STATE_B.replace("[task0c/stable]  done", """[task0d/stable]  done          hash=-  227 behaviours
+[task0d/nightly]  done          hash=-  227 behaviours
+[task0c/stable]  done""")
+
+
+def _repo_with_a_behaviour_point(tmp_path, *, tag=True):
+    repo = tmp_path / "ws"
+    _init_repo(repo)
+    (repo / ".gitignore").write_text("/target/\n/Cargo.lock\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    (repo / "src" / "lib.rs").write_text("pub fn f() {}", encoding="utf-8")
+    (repo / "pipeline_state.md").write_text(_STATE_A, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pipeline: task0b done")
+    _git(repo, "tag", "task0c-pre-x")
+    (repo / ".skeleton").mkdir()
+    (repo / ".skeleton" / "_behaviours_stable.json").write_text('{"specs": [1]}', encoding="utf-8")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "doc_lib_gen_1.rs").write_text("#[test] fn d() {}", encoding="utf-8")
+    (repo / "pipeline_state.md").write_text(_STATE_H, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pipeline: task0d done — behaviour restore point")
+    if tag:
+        _git(repo, "tag", "task0d-done-x")
+    (repo / ".skeleton" / "_behaviours_stable.json").write_text(
+        '{"specs": [1, "baked at strip"]}', encoding="utf-8")
+    (repo / "src" / "x.gen_tests_1.rs").write_text("#[test] fn t() {}", encoding="utf-8")
+    for sentinel in (repo / ".cluster_augmented" / "stable__x", repo / ".module_augmented" / "x"):
+        sentinel.parent.mkdir()
+        sentinel.write_text("97.8\n", encoding="utf-8")
+    (repo / ".module_stripped").mkdir()
+    (repo / "pipeline_state.md").write_text(_STATE_HB, encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "pipeline: task2a checkpoint - stable:95 passing")
+    return repo
+
+
+def _tags(repo):
+    out = subprocess.run(["git", "tag", "-l"], cwd=repo, capture_output=True, text=True)
+    return set(out.stdout.split())
+
+
+def test_pre_augment_restore_keeps_the_behaviour_harvest_by_default(tmp_path):
+    repo = _repo_with_a_behaviour_point(tmp_path)
+    lines: list[str] = []
+
+    _pre_augment_restore(lines.append).run(tmp_path, repo)
+
+    # the harvest as task0d wrote it (not the strip bake's merge), its doc tests
+    # and its state entries survive; everything task0c and later wrote is gone.
+    assert (repo / ".skeleton" / "_behaviours_stable.json").read_text(encoding="utf-8") == '{"specs": [1]}'
+    assert (repo / "tests" / "doc_lib_gen_1.rs").exists()
+    assert not (repo / "src" / "x.gen_tests_1.rs").exists()
+    assert not (repo / ".cluster_augmented").exists() and not (repo / ".module_stripped").exists()
+    phases = set(read_state(repo)["phases"])
+    assert phases == {"cfg_scan", "test_cmd", "task0a-context", "task0a", "task0b",
+                      "task0d/stable", "task0d/nightly"}
+    assert "task0d-done-x" in _tags(repo)
+    assert any("Workspace restored to task0d-done-x" in ln for ln in lines), lines
+
+
+def test_reharvest_goes_back_before_task0d_and_deletes_the_point(tmp_path):
+    """The explicit lever: the same repo with reharvest=True loses the harvest
+    and the tag, so the next complete harvest can write the tag again."""
+    repo = _repo_with_a_behaviour_point(tmp_path)
+
+    _pre_augment_restore().run(tmp_path, repo, reharvest=True)
+
+    assert not (repo / ".skeleton").exists()
+    assert not (repo / "tests" / "doc_lib_gen_1.rs").exists()
+    assert set(read_state(repo)["phases"]) == {"cfg_scan", "test_cmd", "task0a-context",
+                                               "task0a", "task0b"}
+    assert _tags(repo) == {"task0c-pre-x"}
+
+
+def test_a_workspace_without_the_point_re_harvests_and_says_why(tmp_path):
+    """The live tmp/anyhow on 2026-10-03: task0d ran but no task0d-done-* tag
+    exists. Same as before this change: back to task0c-pre-x, task0d re-runs."""
+    repo = _repo_with_a_behaviour_point(tmp_path, tag=False)
+    lines: list[str] = []
+
+    _pre_augment_restore(lines.append).run(tmp_path, repo)
+
+    assert not (repo / ".skeleton").exists()
+    assert "task0d/stable" not in read_state(repo)["phases"]
+    assert any("no task0d-done-* tag" in ln for ln in lines), lines
+
+
+def test_a_behaviour_point_not_built_on_the_pre_augment_commit_is_refused(tmp_path):
+    """A tag left on an older history (a re-clone, a hand-moved pre tag) would
+    restore a harvest of another tree; the restore refuses before touching it."""
+    repo = _repo_with_a_behaviour_point(tmp_path)
+    _git(repo, "tag", "-f", "task0c-pre-x", "HEAD")      # pre now AFTER the point
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True).stdout
+
+    with pytest.raises(RuntimeError, match="not built on the pre-augmentation commit.*--reharvest-behaviours"):
+        _pre_augment_restore().run(tmp_path, repo)
+    assert subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                          capture_output=True, text=True).stdout == head
+
+
+def test_a_behaviour_point_for_other_modules_is_refused(tmp_path):
+    repo = _repo_with_a_behaviour_point(tmp_path)
+    _git(repo, "tag", "task0d-done-y", "task0d-done-x")
+    with pytest.raises(RuntimeError, match=r"cover module\(s\) \['x', 'y'\]"):
+        _pre_augment_restore().run(tmp_path, repo)
+
+
+# --- git_checkpoint: the commit the behaviour point is tagged on -------------
+
+from pipeline_core.adapters.workspace import git_checkpoint  # noqa: E402
+
+
+def _ws_deps():
+    from types import SimpleNamespace
+    return SimpleNamespace(log=lambda *_: None, emit=lambda *_a, **_k: None)
+
+
+def test_git_checkpoint_commits_untracked_files_and_reports_a_clean_tree(tmp_path):
+    repo = tmp_path / "ws"
+    _init_repo(repo)
+    (repo / "tests").mkdir()
+    (repo / "tests" / "doc_lib_gen_1.rs").write_text("#[test] fn d() {}", encoding="utf-8")
+    assert git_checkpoint(_ws_deps(), repo, "m", managed=True) is True
+    assert git_checkpoint(_ws_deps(), repo, "m", managed=True) is True   # nothing to commit
+    assert git_checkpoint(_ws_deps(), repo, "m", managed=False) is False
+
+
+def test_git_checkpoint_is_false_when_the_commit_fails(tmp_path):
+    """Control for the reason it exists: `git_commit` says False for a failed
+    commit and for "nothing to commit" alike. A pre-commit hook that rejects
+    the commit leaves the tree dirty, and the checkpoint must say so."""
+    repo = tmp_path / "ws"
+    _init_repo(repo)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    (repo / "book.json").write_text("{}", encoding="utf-8")
+    assert git_checkpoint(_ws_deps(), repo, "m", managed=True) is False

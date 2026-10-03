@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WHY. The consolidation program's step 2 makes authority conditional on
+"""WHY. The consolidation program makes authority conditional on
 calibration: the shadow zero-payoff detector
 (`domain/zero_payoff.py`, rebuilt 2026-08-16 onto the per-binary verdict axis)
 may only graduate from logging to acting once its firings have been compared
@@ -10,8 +10,7 @@ cluster `stable`, iter 4, rule `unpaid_streak`, 30 targets — sat unexamined in
 later (12:31:20Z), i.e. the shadow led the authoritative stop by one sweep with
 a correct verdict, and nobody could cite that without re-deriving it by hand.
 This script IS the tally: run it after any run in which the shadow fired (or
-did not) and append the row it prints to that calibration record in
-technical_debt.md.
+did not) and append the row it prints to that calibration record.
 
 USAGE.  python scripts/zp_shadow_calibration.py [--events logs/events.jsonl]
         [--horizon 3]

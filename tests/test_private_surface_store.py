@@ -1,4 +1,4 @@
-"""Pins for the private-surface marks store (F11 M1 baked artifact)."""
+"""Pins for the private-surface marks store (baked artifact)."""
 from __future__ import annotations
 
 import dataclasses
