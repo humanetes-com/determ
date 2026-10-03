@@ -7,15 +7,18 @@ is real filesystem mutation against a temp workspace.
 from __future__ import annotations
 
 import tempfile
+import uuid
 from pathlib import Path
 
 from pipeline_core.adapters.workspace_lifecycle import clean_state
 from pipeline_core.domain.workspace_layout import (
     CLUSTER_AUGMENTED_DIR,
+    COVERAGE_SCRATCH_DIR,
     FAILURE_LOG_NAME,
     LOCKED_MODULES_DIR,
     MODULE_AUGMENTED_DIR,
     PROJECT_PROFILE_NAME,
+    STREAM_LOG_DIR,
 )
 
 
@@ -68,3 +71,31 @@ def test_clean_state_skips_delete_when_no_manifest() -> None:
         clean_state(root, proj, proj / "absent.txt", proj / "g.md", proj / "fr.md",
                     delete_source_files=lambda *a: calls.append(a))
         assert calls == []
+
+
+def test_clean_state_wipes_its_own_scratch_and_nothing_outside_the_workspace() -> None:
+    """The coverage outputs and stream logs live in the workspace's scratch and
+    go with it. A coverage file of another run must survive: the wipe used to
+    unlink `/tmp/grcov_*.json`, `/tmp/llvmcov_*.lcov` and `/tmp/tarp_*` by
+    absolute glob, and this test calls the real function under every
+    `check.sh`, so it deleted the files of whatever run was live (2026-10-03,
+    run `69851-f9e61bdd`: the overview emptied). The planted `/tmp` file below
+    is that live run's file; the pre-fix code deletes it."""
+    foreign = Path("/tmp") / f"grcov_filecache_cleanstate{uuid.uuid4().hex}.json"
+    foreign.write_text("{}")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            proj = root / "ws"
+            for rel in (COVERAGE_SCRATCH_DIR, STREAM_LOG_DIR):
+                (proj / rel).mkdir(parents=True)
+            (proj / COVERAGE_SCRATCH_DIR / "llvmcov_mod.lcov").write_text("SF:src/lib.rs\n")
+            (proj / STREAM_LOG_DIR / "stream_loop_1_src_lib_rs_gen0.log").write_text("x")
+            clean_state(root, proj, proj / "absent.txt", proj / "g.md", proj / "fr.md",
+                        delete_source_files=lambda *a: None)
+            assert not (proj / COVERAGE_SCRATCH_DIR).exists()
+            assert not (proj / STREAM_LOG_DIR).exists()
+            assert (proj / "target").is_dir()      # cargo's own build output is not scratch
+        assert foreign.exists()
+    finally:
+        foreign.unlink(missing_ok=True)

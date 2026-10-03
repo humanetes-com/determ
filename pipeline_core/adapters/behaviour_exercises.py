@@ -10,8 +10,8 @@ objects compiled without instrumentation yield no profraw), then per spec a
 run with its own `LLVM_PROFILE_FILE` — a test-assertion spec through
 `cargo test --test <stem> -- --exact <name>`, a probe spec by
 re-materialising its program as an example — and grcov over that spec's
-profraw alone (the same invocation `coverage.quick_file_coverage_grcov`
-uses). The per-file hit lines map onto the extractor's fn records in the
+profraw alone (the base flags of `coverage._grcov_cmd`, which both crate
+readings use). The per-file hit lines map onto the extractor's fn records in the
 domain (`behaviour_coverage.units_for_hit_lines`, the `line_to_fn_record`
 contract, crate-root file paths).
 
@@ -68,8 +68,10 @@ def instrumented_env(cluster: BuildCluster | None) -> dict[str, str]:
 
 def grcov_command(grcov: Path, profraw_dir: Path, project_dir: Path,
                   out_json: Path) -> list[str]:
-    """grcov over one profraw dir → coveralls JSON at `out_json`; the flag set
-    `quick_file_coverage_grcov` uses, so the two readings agree."""
+    """grcov over one profraw dir → coveralls JSON at `out_json`; the base
+    flag set of `coverage._grcov_cmd`, so the hit lines agree with the crate
+    readings (no cluster exclusions: a spec's hits map onto fn records, not a
+    denominator)."""
     return [
         str(grcov), str(profraw_dir),
         "--binary-path", str(project_dir / "target" / "debug"),

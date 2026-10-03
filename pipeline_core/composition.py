@@ -1653,6 +1653,19 @@ def build_app(
             ask=ports.ask, model=settings.task_models.task1, log=ports.log,
             load_skeleton_files=_load_skeleton_files)
 
+    def _coverage_event_data(measured: CoverageMeasurement, project_dir: Path) -> dict[str, Any]:
+        # `files` is the whole per-file reading, keyed as task0c names files:
+        # the monitor's overview and projection are built from it, scoped by
+        # run_id, and from nothing on disk.
+        return {"pct": measured.pct, "covered": measured.covered,
+                "coverable": measured.coverable,
+                "backend": settings.coverage_backend,
+                "file_count": len(measured.files),
+                "files": {rel: list(row) for rel, row
+                          in measured.file_lines(project_dir).items()},
+                "function_records": (None if measured.functions is None
+                                     else len(measured.functions))}
+
     def measure_coverage(project_dir: Path, module_name: str) -> CoverageMeasurement:
         t0 = _time.monotonic()
         measured = coverage_provider.measure(project_dir, module_name)
@@ -1660,15 +1673,26 @@ def build_app(
             "coverage.measured", module=module_name,
             cluster=scope.active.name if scope.active is not None else None,
             duration_ms=int((_time.monotonic() - t0) * 1000),
-            data={"pct": measured.pct, "covered": measured.covered,
-                  "coverable": measured.coverable,
-                  "backend": settings.coverage_backend,
-                  "file_count": len(measured.files),
-                  "function_records": (None if measured.functions is None
-                                       else len(measured.functions))})
+            data=_coverage_event_data(measured, project_dir))
         # Returned whole: re-packing the four line fields dropped the function
         # counts the augmentation stop now reads.
         return measured
+
+    def quick_file_coverage(project_dir: Path, module_name: str,
+                            rel_path: str) -> tuple[int, int] | None:
+        """Task0c's quick per-file check. The backend measures the whole crate;
+        the whole reading is emitted (`coverage.quick_measured`) and task0c
+        gets the row of the file it asked about."""
+        t0 = _time.monotonic()
+        measured = coverage_provider.measure_quick(project_dir, module_name)
+        if measured is None:
+            return None
+        ports.emit(
+            "coverage.quick_measured", module=module_name, file=rel_path,
+            cluster=scope.active.name if scope.active is not None else None,
+            duration_ms=int((_time.monotonic() - t0) * 1000),
+            data=_coverage_event_data(measured, project_dir))
+        return measured.file_row(project_dir, rel_path)
 
     def test_augmentor_factory() -> Any:
         backend = _os.getenv("TEST_AUGMENTOR", "static").lower()
@@ -2919,7 +2943,7 @@ def build_app(
             parse_retrospective_categories=_parse_retro_categories,
             partition_uncovered_lines=_cov_partition_uncovered_lines,
             prelude_import_names=_gen_prelude_import_names,
-            quick_file_coverage=coverage_provider.measure_file,
+            quick_file_coverage=quick_file_coverage,
             read_all_gen_tests=_gts_read_all_gen_tests,
             read_state=_state_read_state,
             revert_gen_tests_pass=_gts_revert_gen_tests_pass,

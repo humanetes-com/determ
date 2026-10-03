@@ -29,9 +29,8 @@ def test_no_sentinel_no_event_is_a_noop():
 
 
 def test_first_caller_unlinks_sentinel_and_exits(monkeypatch, tmp_path):
-    sentinel = tmp_path / "sentinel"
+    sentinel = graceful_stop.sentinel_path()   # under this test's control dir
     sentinel.touch()
-    monkeypatch.setattr(graceful_stop, "SENTINEL_PATH", sentinel)
     with pytest.raises(SystemExit):
         graceful_stop.check_graceful_stop(lambda _m: None, "worker-a")
     assert not sentinel.exists()
@@ -40,9 +39,8 @@ def test_first_caller_unlinks_sentinel_and_exits(monkeypatch, tmp_path):
 def test_second_caller_still_exits_after_sentinel_is_gone(monkeypatch, tmp_path):
     # The bug this guards: sentinel already consumed by another "thread" —
     # the OLD code's file-existence check alone would silently no-op here.
-    sentinel = tmp_path / "sentinel"
+    sentinel = graceful_stop.sentinel_path()   # under this test's control dir
     sentinel.touch()
-    monkeypatch.setattr(graceful_stop, "SENTINEL_PATH", sentinel)
     with pytest.raises(SystemExit):
         graceful_stop.check_graceful_stop(lambda _m: None, "worker-a")
     assert not sentinel.exists()

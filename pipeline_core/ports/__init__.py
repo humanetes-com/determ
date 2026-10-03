@@ -83,12 +83,13 @@ class Coverage(Protocol):
     Matches the relocated provider seam: ``measure`` returns a
     :class:`~pipeline_core.domain.coverage.CoverageMeasurement`
     ``(pct, files, covered, coverable)`` that downstream pragma/uncovered-line passes
-    consume; ``measure_file`` is the fast per-file snapshot; ``load_cached`` restores a
-    prior measurement without re-running.
+    consume; ``measure_quick`` is the fast whole-crate snapshot (None when the
+    backend has none); ``load_cached`` restores the last full measurement without
+    re-running.
     """
 
     def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement: ...
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None: ...
+    def measure_quick(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None: ...
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None: ...
 
 

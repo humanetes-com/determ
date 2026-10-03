@@ -24,8 +24,13 @@ from contextlib import suppress
 from pathlib import Path
 
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
+from pipeline_core.domain.runtime_paths import GRACEFUL_STOP, control_path
 
-SENTINEL_PATH = Path("/tmp/pipeline_graceful_stop")
+
+def sentinel_path() -> Path:
+    """The stop sentinel `touch`ed by the monitor and `lib/graceful_stop.sh`
+    (resolved per call, so a redirected control dir is honoured)."""
+    return control_path(GRACEFUL_STOP)
 
 _STOP_EVENT = threading.Event()
 
@@ -34,9 +39,10 @@ def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
     """Exit cleanly when the graceful-stop sentinel is set. Call from inside
     every long-running loop — including worker threads — so a graceful stop
     stays responsive regardless of which thread notices first."""
-    if SENTINEL_PATH.exists():
+    sentinel = sentinel_path()
+    if sentinel.exists():
         with suppress(OSError):
-            SENTINEL_PATH.unlink()
+            sentinel.unlink()
         _STOP_EVENT.set()
     # Wall-clock bound on one TDD fill phase. Armed from the TDD driver;
     # ``0`` leaves the clock idle so this is a no-op. First expiry logs

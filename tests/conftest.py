@@ -16,7 +16,7 @@ from collections.abc import Generator
 
 import pytest
 
-from pipeline_core.domain import graceful_stop
+from pipeline_core.domain import graceful_stop, runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -31,52 +31,49 @@ def _no_backoff_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_graceful_stop(monkeypatch: pytest.MonkeyPatch, tmp_path) -> Generator[None, None, None]:
-    """Tests that exercise the real, composition-wired fix loop (e2e tests
-    calling `pipeline._phase_c_fill_impl_blocks`/etc directly, not a mocked
-    deps object) go through the ACTUAL `check_graceful_stop`, which by
-    default reads a hardcoded OS-level path (`/tmp/pipeline_graceful_stop`)
-    — ambient state shared with whatever ELSE is running on the machine. A
-    real pipeline run's own graceful-stop request (e.g. an operator
-    restarting it mid-session) can leave that sentinel file briefly present
-    while `check.sh` happens to run, causing every such test to
-    self-terminate with `SystemExit: 0` — a real, reproduced failure with
-    nothing wrong in the code under test.
+def _isolate_control_dir(monkeypatch: pytest.MonkeyPatch,
+                         tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Every control channel (graceful stop, shutdown-on-finish, automode,
+    operator pass lock and last fire, run registry, vLLM container id) resolves
+    under `runtime_paths.control_dir()` at call time; point it at a dir of this
+    test's own. One redirect covers every channel, including ones added later.
 
-    Two prior versions of this fixture tried to coordinate around the SHARED
-    real path (delete-then-restore, then hide-and-restore with a
-    process-unique temp name) and both failed live: `check.sh` runs pytest
-    under xdist, so MULTIPLE WORKER PROCESSES run this autouse fixture
-    concurrently, over and over (once per test, ~1500 times) — any scheme
-    that touches the real shared path repeatedly across racing processes
-    eventually loses the race and silently drops a real pending sentinel
-    (reproduced live both times). The actually-robust fix is to never touch
-    the shared path AT ALL: redirect `SENTINEL_PATH` to this test's own
-    `tmp_path` (pytest's built-in per-test-unique temp dir) for the
-    duration of the test. No other test or process can ever see or write to
-    it, so there is no shared state left to race on, and the real
-    production sentinel is never read, written, or renamed by any test."""
-    monkeypatch.setattr(graceful_stop, "SENTINEL_PATH",
-                        tmp_path / "graceful-stop-sentinel-unused-by-real-pipeline")
+    The class this closes, recorded three times before it was fixed for good.
+    Tests reached machine-wide `/tmp` files a live pipeline uses: the
+    graceful-stop sentinel (a test's cleanup deleted a live run's pending stop
+    request, and that run kept going 1.5 h; a live stop made 15 tests exit
+    with `SystemExit: 0`), the auto-operator sentinel (stakes: a billed,
+    unattended operator pass), then the coverage artefacts (`check.sh` emptied
+    a live run's coverage overview on 2026-10-03). Each earlier fix
+    monkeypatched one module constant, and none of them could reach a path
+    built as a literal inside a function body. `xdist` workers race each
+    other over a shared path, so the redirect is to a per-test dir, never a
+    coordinated use of the real one. The root `conftest.py` also points the
+    control dir at a temp dir for the whole process, before any import.
+    `tools/check_no_tmp_literals.py` keeps new `/tmp` paths out of the
+    pipeline's code."""
+    monkeypatch.setenv(runtime_paths.CONTROL_DIR_ENV, str(tmp_path_factory.mktemp("control")))
+    monkeypatch.delenv("PIPELINE_RUN_REGISTRY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_graceful_stop() -> Generator[None, None, None]:
+    """The process-wide stop event outlives a test: a test that trips it would
+    stop every later test in the same worker."""
     graceful_stop.reset_for_tests()
     yield
     graceful_stop.reset_for_tests()
 
 
 @pytest.fixture(autouse=True)
-def _isolate_auto_operator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    """Auto-operator's sentinel is the same ambient-`/tmp`-state hazard as the
-    graceful-stop sentinel above (a live pipeline's real /tmp/pipeline_automode
-    could be present while check.sh runs) — but the stakes here are higher: a
-    fired episode spawns a REAL, billed, unattended `claude -p` operator pass
-    via operator_run.sh. Redirect every /tmp path it touches to per-test tmp
-    ones, force the `.env` AUTO_DEFAULT fallback off (`.env` sets it to 1 for
-    real runs), reset the fire/re-arm state machine, and stub the launch itself
-    so no test can ever spawn the real subprocess even if a future test
-    mistakenly drives stall past the trigger with the mode enabled. Redirection
-    only works because the module reads these as globals at call time: as
-    default ARGUMENT values they would bind at def time and monkeypatching the
-    module attribute would silently be a no-op."""
+def _isolate_auto_operator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fired auto-operator episode spawns a REAL, billed, unattended
+    `claude -p` operator pass via operator_run.sh. Its files are already
+    isolated (`_isolate_control_dir`); here: force the `.env` AUTO_DEFAULT
+    fallback off (`.env` sets it to 1 for real runs), reset the fire/re-arm
+    state machine, and stub the launch itself so no test can ever spawn the
+    real subprocess even if a future test mistakenly drives stall past the
+    trigger with the mode enabled."""
     import pipeline_core.adapters.auto_operator as _auto_operator
     from pipeline_core.domain.auto_operator import AutoOperator
 
@@ -84,11 +81,6 @@ def _isolate_auto_operator(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         raise AssertionError(
             "test attempted to launch the real operator_run.sh subprocess")
 
-    for _attr, _name in (("SENTINEL_PATH", "automode-sentinel"),
-                         ("PASS_LOCK_PATH", "operator-pass.lock"),
-                         ("LAST_FIRE_PATH", "operator-last-fire")):
-        monkeypatch.setattr(_auto_operator, _attr,
-                            tmp_path / f"{_name}-unused-by-real-pipeline")
     monkeypatch.setenv("AUTO_DEFAULT", "0")
     monkeypatch.setattr(
         _auto_operator, "_OP", AutoOperator(trigger=_auto_operator._OP.trigger))

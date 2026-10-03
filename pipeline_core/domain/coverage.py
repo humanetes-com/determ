@@ -71,6 +71,21 @@ class CoverageMeasurement(NamedTuple):
     coverable: int
     functions: dict[tuple[str, int], int] | None = None
 
+    def file_lines(self, project_dir: str | os.PathLike[str]) -> dict[str, tuple[int, int]]:
+        """``{path relative to project_dir: (covered, coverable)}`` for every
+        file of the measurement, with ``/`` separators — the key task0c names
+        a file by and the monitor's files overview shows."""
+        root = os.fspath(project_dir)
+        return {os.path.relpath(f.abs_path, root).replace(os.sep, "/"): (f.covered, f.coverable)
+                for f in self.files}
+
+    def file_row(self, project_dir: str | os.PathLike[str],
+                 rel_path: str) -> tuple[int, int] | None:
+        """One file's ``(covered, coverable)``, or None when the measurement
+        does not hold it (a failed run holds no file at all)."""
+        key = os.path.normpath(rel_path).replace(os.sep, "/")
+        return self.file_lines(project_dir).get(key)
+
 
 def coverage_pass_outcome(*, actionable_lines: int, had_model_call: bool) -> str:
     """Why a task0c coverage pass ended, from what it measured.

@@ -2,7 +2,7 @@
 
 `clean_state` wipes every pipeline-generated artefact from a project workspace so
 the next run starts fresh: manifest-tracked source, per-iteration documents,
-augmentation/strip/lock sentinels, the chunk cache, stale `/tmp` coverage files,
+augmentation/strip/lock sentinels, the chunk cache, the coverage/stream-log scratch,
 and all `gen_tests` siblings/decls. Pure filesystem mutation ⇒ an adapter; the
 on-disk vocabulary comes from `domain.workspace_layout`, the gen_tests text rules
 from `domain.generation`. The one collaborator with its own manifest logic
@@ -10,8 +10,6 @@ from `domain.generation`. The one collaborator with its own manifest logic
 """
 from __future__ import annotations
 
-import glob as _glob
-import os
 import shutil
 from collections.abc import Callable
 from contextlib import suppress
@@ -27,6 +25,7 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.workspace_layout import (
     CHUNK_CACHE_DIR,
     CLUSTER_AUGMENTED_DIR,
+    COVERAGE_SCRATCH_DIR,
     COVERAGE_STRATEGY_HASH_NAME,
     COVERAGE_STRATEGY_NAME,
     FAILURE_LOG_NAME,
@@ -36,6 +35,7 @@ from pipeline_core.domain.workspace_layout import (
     PROJECT_CONTEXT_NAME,
     PROJECT_INPUTS_HASH_NAME,
     PROJECT_PROFILE_NAME,
+    STREAM_LOG_DIR,
 )
 
 
@@ -121,35 +121,16 @@ def clean_state(
         p.unlink()
         _log.log(f"  Deleted {p.name}")
 
-    # Stale per-run coverage artifacts in /tmp/ — these live outside the
-    # workspace dir, so they survive every wipe of tmp/{project}/. Without
-    # cleaning them, the monitor reads stale per-file coverage from
-    # /tmp/grcov_filecache_*.json (and the lcov / json outputs themselves)
-    # and shows misleading carry-over numbers until the next full coverage
-    # measurement overwrites them.
-    _tmp_patterns = [
-        "/tmp/grcov_*.json",
-        "/tmp/grcov_filecache_*.json",
-        "/tmp/llvmcov_*.lcov",
-        "/tmp/llvmcov_*.lcov.json",
-    ]
-    _tmp_deleted = 0
-    for _pat in _tmp_patterns:
-        for _p in _glob.glob(_pat):
-            try:
-                os.unlink(_p)
-                _tmp_deleted += 1
-            except OSError:
-                pass
-    for _tarp in _glob.glob("/tmp/tarp_*"):
-        try:
-            if os.path.isdir(_tarp):
-                shutil.rmtree(_tarp)
-                _tmp_deleted += 1
-        except OSError:
-            pass
-    if _tmp_deleted:
-        _log.log(f"  Deleted {_tmp_deleted} stale coverage artifact(s) from /tmp/")
+    # Per-workspace scratch: coverage tool outputs and saved stream logs. They
+    # used to be `/tmp/<tool>_<module>` files, and this wipe deleted them by an
+    # absolute glob — the coverage files of WHATEVER run was live, since
+    # `tests/test_clean_state.py` calls this function for real under every
+    # `check.sh`. Scoped to this workspace, a wipe can only reach its own.
+    for _rel in (COVERAGE_SCRATCH_DIR, STREAM_LOG_DIR):
+        _scratch = project_dir / _rel
+        if _scratch.is_dir():
+            shutil.rmtree(_scratch)
+            _log.log(f"  Deleted {_rel}/")
 
     # Strip all gen_tests artifacts from source files: delete sibling files and
     # remove path-mod declarations. Also clean up legacy inline blocks (from

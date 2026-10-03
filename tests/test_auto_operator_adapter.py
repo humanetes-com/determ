@@ -1,8 +1,8 @@
 """Pins for the auto-operator adapter (sentinel I/O + `.env` fallback + the
 detached-launch call, mirroring `pipeline_core.adapters.power`'s
 SHUTDOWN_ON_FINISH sentinel authority). The autouse `_isolate_auto_operator`
-fixture in conftest.py already redirects SENTINEL_PATH to a per-test tmp path,
-forces AUTO_DEFAULT=0, and stubs the real launch — tests here further
+fixture in conftest.py forces AUTO_DEFAULT=0 and stubs the real launch, and
+`_isolate_control_dir` points every control channel at a per-test dir — tests here further
 monkeypatch as needed to exercise both branches without ever touching the
 real /tmp/pipeline_automode or spawning operator_run.sh."""
 from __future__ import annotations
@@ -11,6 +11,7 @@ import fcntl
 import time
 
 import pipeline_core.adapters.auto_operator as auto_operator
+from pipeline_core.domain.runtime_paths import OPERATOR_LAST_FIRE, control_path
 
 
 def test_sentinel_presence_overrides_env_default(monkeypatch, tmp_path) -> None:
@@ -54,8 +55,7 @@ def test_cooldown_survives_the_restart_a_pass_performs(monkeypatch, tmp_path) ->
     """The in-process `armed` flag dies with the pipeline that an operator pass
     kills; only the on-disk timestamp stops the restarted process from firing
     the next pass the moment the same plateau reappears."""
-    last_fire = tmp_path / "last-fire"
-    monkeypatch.setattr(auto_operator, "LAST_FIRE_PATH", last_fire)
+    last_fire = control_path(OPERATOR_LAST_FIRE)   # under this test's control dir
     monkeypatch.setenv("AUTO_COOLDOWN_SEC", "7200")
 
     assert not auto_operator._cooling_down()                    # no file → free

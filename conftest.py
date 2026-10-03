@@ -25,6 +25,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 _TEST_OBS_DIR = Path(tempfile.mkdtemp(prefix="pipeline-test-obs-"))
 os.environ.setdefault("PIPELINE_EVENTS_LOG", str(_TEST_OBS_DIR / "events.jsonl"))
 os.environ.setdefault("PIPELINE_PROMPTS_DIR", str(_TEST_OBS_DIR / "prompts"))
+# The control channels (graceful stop, automode, run registry, ...) are
+# machine-wide files a live pipeline reads; assigned, not defaulted, so an
+# exported value can never aim the suite at the real ones. Per test,
+# tests/conftest.py moves it again to a dir of that test's own.
+(_TEST_OBS_DIR / "control").mkdir()
+os.environ["DETERM_CONTROL_DIR"] = str(_TEST_OBS_DIR / "control")
 
 # The SERVING config the suite runs against, pinned for the same reason and in the
 # same window — `pipeline.MODEL_CONTEXT_CHARS` is `Settings.from_env(...)`

@@ -95,6 +95,15 @@ COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
 # Persistent chunk cache (task1 chunked synthesis); only wiped on explicit --clean.
 CHUNK_CACHE_DIR = ".chunk_cache"
 
+# Per-workspace scratch for files one run writes and only that workspace reads:
+# coverage tool outputs (lcov, grcov JSON, the tarpaulin report dir, grcov's
+# profraw) and saved stream logs. Under `target/`, which the workspace repo
+# ignores and SKIP_DIR_NAMES skips, so nothing here is committed, stripped or
+# restored. They used to be `/tmp/<tool>_<module>` files shared by every
+# process on the machine (see `runtime_paths`).
+COVERAGE_SCRATCH_DIR = "target/coverage"
+STREAM_LOG_DIR = "target/stream_logs"
+
 # pipeline_state.md phase-key prefixes that belong to iteration state (strip /
 # task1+). A "restart from augmented" keeps task0a/0b/0c entries and drops these
 # so they re-run from the augmentation commit.

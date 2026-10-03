@@ -14,7 +14,6 @@ import contextlib
 import functools
 import json
 import os
-import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -62,6 +61,7 @@ from ...domain.oracle_visibility import declared_items, fn_line_spans, public_it
 from ...domain.refine import Attempt, FixProgress, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
+from ...domain.workspace_layout import STREAM_LOG_DIR
 from ...log import emit, log
 from ...prompts.sections import trait_dispatch_route
 from ..fix_loop import FixOutcome, drive_fix_loop
@@ -2165,8 +2165,9 @@ project-specific import paths, type construction patterns, and hard constraints.
         def _save_stream_log(gen_attempt: int | str, query: str, resp: str, reason: str, *,
                              rel_path: str = rel_path, attempt: int = attempt) -> None:
             _fname = rel_path.replace("/", "_").replace(".", "_")
-            _path = Path(f"/tmp/stream_loop_{attempt}_{_fname}_gen{gen_attempt}.log")
+            _path = project_dir / STREAM_LOG_DIR / f"stream_loop_{attempt}_{_fname}_gen{gen_attempt}.log"
             try:
+                _path.parent.mkdir(parents=True, exist_ok=True)
                 _path.write_text(
                     f"# reason: {reason}\n"
                     f"# file: {rel_path}  outer_attempt: {attempt}  gen_attempt: {gen_attempt}\n"
@@ -2604,14 +2605,6 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _log(f"  [{module_name}] {rel_path} quick-cov: {_qcov}/{_qcov_able} ({_qpct:.1f}%)")
                 _emit("task0c.quick_cov", file=rel_path,
                       data={"covered": _qcov, "coverable": _qcov_able, "pct": _qpct})
-                # Persist result so the monitor can merge it into the files overview.
-                _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
-                try:
-                    _cache = json.loads(_qcache.read_text()) if _qcache.exists() else {}
-                    _cache[rel_path] = {"covered": _qcov, "coverable": _qcov_able, "ts": time.time()}
-                    _qcache.write_text(json.dumps(_cache))
-                except Exception:
-                    pass
                 # Track whether THIS block actually moved the metric. If the
                 # previous quick-cov for this file was already known and the
                 # new value didn't increase, this block is concrete evidence
@@ -2729,14 +2722,6 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _qr_pct = (_qr_cov / _qr_able * 100.0) if _qr_able else 0.0
                     _log(f"  [{module_name}] {rel_path} quick-retry {_ir + 1} cov: "
                          f"{_qr_cov}/{_qr_able} ({_qr_pct:.1f}%)")
-                    _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
-                    try:
-                        _cache = json.loads(_qcache.read_text()) if _qcache.exists() else {}
-                        _cache[rel_path] = {"covered": _qr_cov, "coverable": _qr_able,
-                                            "ts": time.time()}
-                        _qcache.write_text(json.dumps(_cache))
-                    except Exception:
-                        pass
                     if _qr_cov > _qcov_after:
                         _log(f"  [{module_name}] Quick-retry {_ir + 1}: improvement "
                              f"+{_qr_cov - _qcov_after} lines — stopping inner retries.")
@@ -2835,13 +2820,6 @@ project-specific import paths, type construction patterns, and hard constraints.
                                 _pp_pct = (_pp_cov / _pp_able * 100.0) if _pp_able else 100.0
                                 _log(f"  [{module_name}] {rel_path} post-pragma quick-cov: "
                                      f"{_pp_cov}/{_pp_able} ({_pp_pct:.1f}%)")
-                                _qcache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
-                                try:
-                                    _cache = json.loads(_qcache.read_text()) if _qcache.exists() else {}
-                                    _cache[rel_path] = {"covered": _pp_cov, "coverable": _pp_able, "ts": time.time()}
-                                    _qcache.write_text(json.dumps(_cache))
-                                except Exception:
-                                    pass
                                 if _pp_cov >= _pp_able and not _file_fn_targets:
                                     _log(f"  [{module_name}] {rel_path} fully covered after pragma — "
                                          f"skipping further generation.")

@@ -188,7 +188,7 @@ def test_the_lcov_reader_and_the_json_export_reader_agree_on_one_measurement(
 def test_premise_llvm_cov_emits_zero_count_function_records(
         measured: tuple[Path, CoverageMeasurement]) -> None:
     crate, _m = measured
-    lcov = Path("/tmp") / f"llvmcov_{_MODULE}.lcov"
+    lcov = LlvmCovProvider.lcov_path(crate, _MODULE)
     text = lcov.read_text(encoding="utf-8")
     fn_line: dict[str, int] = {}
     hits: dict[str, int] = {}

@@ -190,7 +190,7 @@ def test_fire_logs_emits_and_takes_the_graceful_stop() -> None:
     with pytest.raises(SystemExit):
         graceful_stop.check_graceful_stop(logged.append, "unit b")
     assert "[graceful] LLM cut-rate stop at unit b" in logged[-1]
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
 
 
 def test_rearm_keeps_the_process_window() -> None:

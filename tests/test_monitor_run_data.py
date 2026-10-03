@@ -68,20 +68,6 @@ def test_find_project_dir_and_stage(tmp_path, monkeypatch):
     assert rd.current_stage_label() == "task2c/anyhow / fill"
 
 
-def test_parse_coverage_json_tarpaulin(tmp_path, monkeypatch):
-    import os
-    monkeypatch.setattr(rd.events_data, "pipeline_start_time", lambda: 0.0)
-    tj = tmp_path / "tarpaulin-report.json"
-    tj.write_text(json.dumps({"files": [
-        {"path": ["src", "b.rs"], "covered": 5, "coverable": 8},
-    ]}))
-    # Deterministic: no grcov files, one tarpaulin report (so the fallback runs).
-    monkeypatch.setattr(rd.glob, "glob",
-                        lambda pat: [str(tj)] if pat.startswith("/tmp/tarp_") else [])
-    cov = rd.parse_coverage_json(None)
-    assert cov.get(os.path.join("src", "b.rs")) == (5, 8)
-
-
 def test_baked_cluster_order(tmp_path, monkeypatch):
     log = tmp_path / "p.log"
     log.write_text("loaded 1 baked cluster(s): old\n"
@@ -95,19 +81,6 @@ def test_read_backend(tmp_path, monkeypatch):
     assert rd.read_backend() == "ollama"  # no .env → default
     (tmp_path / ".env").write_text("FOO=1\nBACKEND = VLLM\n")
     assert rd.read_backend() == "vllm"
-
-
-def test_parse_coverage_json_grcov(tmp_path, monkeypatch):
-    monkeypatch.setattr(rd.events_data, "pipeline_start_time", lambda: 0.0)
-    gj = tmp_path / "grcov_unit.json"
-    gj.write_text(json.dumps({"source_files": [
-        {"name": "src/a.rs", "coverage": [1, 0, None, 2]},
-    ]}))
-    # Deterministic file set: one main grcov report, no filecache/tarpaulin.
-    monkeypatch.setattr(rd.glob, "glob",
-                        lambda pat: [str(gj)] if pat == "/tmp/grcov_*.json" else [])
-    cov = rd.parse_coverage_json(None)
-    assert cov["src/a.rs"] == (2, 3)  # 2 covered (>0), 3 coverable (non-None)
 
 
 def test_configure_sets_paths(tmp_path, monkeypatch):

@@ -13,6 +13,7 @@ import subprocess
 import time
 import urllib.request
 
+from pipeline_core.domain.runtime_paths import VLLM_CONTAINER_ID, control_path
 from pipeline_core.monitor.render import dim, green, yellow
 from pipeline_core.monitor.run_data import read_backend
 
@@ -64,7 +65,7 @@ def vllm_status_rows(width: int) -> list[str]:
     if cache_age >= 8.0 or not _cache[1]:   # docker logs are slow, re-fetch rarely
         try:
             cid = ""
-            cid_file = "/tmp/vllm_container.id"
+            cid_file = control_path(VLLM_CONTAINER_ID)
             if os.path.exists(cid_file):
                 with open(cid_file) as f:
                     cid = f.read().strip()

@@ -13,14 +13,13 @@ import tty
 from typing import Any
 
 _LOG_DIR     = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-_RUN_REGISTRY = os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json")
 REFRESH      = 2
 
 
 def _discover_running_runs() -> list[dict]:
     """Read the pipeline registry and return entries whose PIDs are still alive."""
     try:
-        with open(_RUN_REGISTRY) as fh:
+        with open(_rp.run_registry_path()) as fh:
             reg = _json.load(fh)
         if not isinstance(reg, list):
             return []
@@ -89,6 +88,7 @@ EVENTS_LOG   = os.getenv("PIPELINE_EVENTS_LOG", _pick_log(
 # file keeps the renderer + live loop. `_`-aliases preserve the in-file call sites.
 # (Tests point the readers via pipeline_core.monitor.events_data.configure / globals.)
 from pipeline_core.domain import graceful_stop  # noqa: E402
+from pipeline_core.domain import runtime_paths as _rp  # noqa: E402
 from pipeline_core.monitor import bottom_bar as _bb  # noqa: E402
 from pipeline_core.monitor import events_data as _ed  # noqa: E402
 from pipeline_core.monitor import exit_record as _exit  # noqa: E402
@@ -194,7 +194,7 @@ _cut_rate_reading = _ed.cut_rate_reading
 
 _rd.configure(script_dir=os.path.dirname(os.path.abspath(__file__)),
               pipeline_log=PIPELINE_LOG)
-_parse_coverage_json = _rd.parse_coverage_json
+_coverage_reading = _ed.coverage_reading
 _baked_cluster_order = _rd.baked_cluster_order
 _find_project_dir = _rd.find_project_dir
 _parse_pipeline_state = _rd.parse_pipeline_state
@@ -510,17 +510,17 @@ def pipeline_status(width: int):
     rows.extend(_pv.strip_rows(_pp.load_board(EVENTS_LOG, _find_project_dir(), running), w, time.time()))
 
     # ── Header: status + coverage ────────────────────────────────────────────
-    _cov_data = _parse_coverage_json(_find_project_dir())
+    _cov_reading = _coverage_reading()   # this run's events only, never a file on disk
+    _cov_data = _cov_reading.files
     _total_cov  = sum(c for c, _ in _cov_data.values())
     _total_cvbl = sum(v for _, v in _cov_data.values())
-    _lines_str  = f"  {_total_cov}/{_total_cvbl}" if _total_cvbl else ""
-
-    # Projection: sum of per-file coverage (which includes quick-cov updates
-    # newer than the last full grcov run) gives the live total. If it's
-    # strictly higher than the value carried in pipeline_state.md / log, show
-    # it as a parenthesised target alongside the committed value.
+    _lines_str  = (f"  files {len(_cov_data)}/{_cov_reading.file_count}" if _cov_reading.blind
+                   else f"  {_total_cov}/{_total_cvbl}" if _total_cvbl else "")
+    # Projection: the latest whole-crate reading (a quick check measures every
+    # file) when it is above the committed value. A blind map is a subset of
+    # the crate, so it says `files n/m` above and projects nothing.
     _proj_str = ""
-    if _total_cvbl > 0:
+    if _total_cvbl > 0 and not _cov_reading.blind:
         proj_pct = _total_cov / _total_cvbl * 100.0
         try:
             cur_pct = float(cov.rstrip("%"))
@@ -596,7 +596,6 @@ def pipeline_status(width: int):
         rows.append(dim((last[:w] + "…") if len(last) > w else last))
 
     # ── Files overview ──────────────────────────────────────────────────────
-    proj_dir = _find_project_dir()
 
     # Flow self-audit verdicts (pipeline --audit) — shown whenever present.
     _audit_data = _latest_flow_audit()
@@ -662,7 +661,7 @@ def pipeline_status(width: int):
             if tcell:
                 rows.append(f"  {r['file'].split('/')[-1].ljust(max_name)}  {tcell}")
 
-    cov_data = _parse_coverage_json(proj_dir)
+    cov_data = _cov_data
     if cov_data and not ((_compile_stats or _test_stats) and _in_fix_phase):
         cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
         # For non-default clusters, restrict to files the cluster is actually targeting.
@@ -783,7 +782,7 @@ _layout      = SplitLayout(enabled=os.getenv("MONITOR_SPLIT", "0") == "1",
 _last_detail = "stream"       # the detail view the right column shows while _view is monitor
 _page        = 1              # rows of the last drawn scroll region: what PgUp/PgDn move
 _confirm          = None   # pending confirmation: "continue" | "wipe" | "stop" | "poweroff" | None
-_graceful_pending = graceful_stop.SENTINEL_PATH.exists()  # survives monitor restart
+_graceful_pending = graceful_stop.sentinel_path().exists()  # survives monitor restart
 
 # Auto-operator toggle: sentinel presence enables stall-triggered operator_run.sh
 # passes, mirroring the graceful-stop sentinel's touch/remove convention above.
@@ -791,25 +790,21 @@ _graceful_pending = graceful_stop.SENTINEL_PATH.exists()  # survives monitor res
 # TDD loop, via pipeline_core.adapters.auto_operator) so it stays live whether or
 # not the monitor is attached; a fresh pipeline start seeds this file from `.env`
 # AUTO_DEFAULT. The monitor is just the remote toggle switch + status display.
-_AUTO_SENTINEL = "/tmp/pipeline_automode"
-
 def _auto_armed() -> bool:
-    return os.path.exists(_AUTO_SENTINEL)
+    return _rp.control_path(_rp.AUTOMODE).exists()
 
 def _set_auto_armed(on: bool) -> None:
     if on:
-        open(_AUTO_SENTINEL, "w").close()
+        _rp.control_path(_rp.AUTOMODE).touch()
     else:
         with contextlib.suppress(FileNotFoundError):
-            os.remove(_AUTO_SENTINEL)
+            _rp.control_path(_rp.AUTOMODE).unlink()
 
 # Power-off-on-finish toggle: sentinel ("1"/"0") overrides .env SHUTDOWN_ON_FINISH,
 # mirroring pipeline._shutdown_on_finish_enabled. Monitor reads it every frame.
-_SHUTDOWN_SENTINEL = "/tmp/pipeline_shutdown_on_finish"
-
 def _shutdown_armed() -> bool:
     try:
-        with open(_SHUTDOWN_SENTINEL) as f:
+        with open(_rp.control_path(_rp.SHUTDOWN_ON_FINISH)) as f:
             return f.read().strip() == "1"
     except OSError:
         pass
@@ -824,7 +819,7 @@ def _shutdown_armed() -> bool:
     return False
 
 def _set_shutdown_armed(on: bool) -> None:
-    with open(_SHUTDOWN_SENTINEL, "w") as f:
+    with open(_rp.control_path(_rp.SHUTDOWN_ON_FINISH), "w") as f:
         f.write("1" if on else "0")
 _term_settings = None         # saved terminal settings for cooked-mode URL prompt
 
@@ -970,7 +965,7 @@ def _detail_box(view, width, inner, pipeline_rows, gen_rows) -> list[str]:
     cw = content_width(width)
     if view == "health":
         title, rows = ("Run health (60s cache) — tools/run_health.py",
-                       _health_lines(PIPELINE_LOG, SCRIPT_DIR + "/tmp/anyhow")[:inner])
+                       _health_lines(PIPELINE_LOG, os.path.join(SCRIPT_DIR, "tmp", "anyhow"))[:inner])
     elif view == "fields":
         title, rows = ("Field glossary — what each stat/label on screen means",
                        _field_glossary_window(cw, inner, _scroll["fields"]))
@@ -1127,7 +1122,7 @@ def _apply_key(key):
     if _confirm == "graceful":
         if key == "y":
             _graceful_pending = True
-            graceful_stop.SENTINEL_PATH.touch()
+            graceful_stop.sentinel_path().touch()
             _action_msg = cyan("◑ graceful stop requested — pipeline will exit at next checkpoint")
         else:
             _action_msg = dim("graceful cancelled")
@@ -1152,7 +1147,7 @@ def _apply_key(key):
         if _graceful_pending:
             _graceful_pending = False
             with contextlib.suppress(FileNotFoundError):
-                graceful_stop.SENTINEL_PATH.unlink()
+                graceful_stop.sentinel_path().unlink()
             _action_msg = dim("graceful cancelled")
         elif _pipeline_running():
             _confirm    = "graceful"
@@ -1268,7 +1263,7 @@ def main():
                 _repaint_error(e)
 
             if _graceful_pending:
-                if not graceful_stop.SENTINEL_PATH.exists():
+                if not graceful_stop.sentinel_path().exists():
                     _graceful_pending = False
                     _action_msg = ""
                 else:

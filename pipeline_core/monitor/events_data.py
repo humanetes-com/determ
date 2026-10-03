@@ -15,7 +15,8 @@ import json as _json
 import os
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -343,6 +344,68 @@ def coverage_from_events() -> str:
         return f"{float(pct):.1f}%" if pct is not None else ""
     except (TypeError, ValueError):
         return ""
+
+
+@dataclass(frozen=True, slots=True)
+class CoverageReading:
+    """This run's per-file coverage: ``files`` is ``{rel path: (covered,
+    coverable)}``, ``file_count`` how many files the latest whole reading
+    measured (None before any). ``blind`` when the map holds fewer files than
+    that — a run recorded before the measurement events carried their files,
+    whose map is only the quick-cov rows since."""
+
+    files: dict[str, tuple[int, int]]
+    file_count: int | None
+
+    @property
+    def blind(self) -> bool:
+        return self.file_count is not None and len(self.files) < self.file_count
+
+
+_COVERAGE_READING_EVENTS = ("coverage.measured", "coverage.quick_measured", "task0c.quick_cov")
+
+
+def _rows(raw: object) -> dict[str, tuple[int, int]]:
+    rows: dict[str, tuple[int, int]] = {}
+    if isinstance(raw, dict):
+        for rel, row in raw.items():
+            if (isinstance(rel, str) and isinstance(row, list | tuple) and len(row) == 2
+                    and all(isinstance(n, int) for n in row) and row[1] > 0):
+                rows[rel] = (row[0], row[1])
+    return rows
+
+
+def coverage_reading_of(events: Iterable[dict[str, Any]]) -> CoverageReading:
+    """Fold one run's coverage events, oldest first, into its per-file map.
+
+    A whole reading (``coverage.measured``, or ``coverage.quick_measured``,
+    which a quick check emits because the backend measures every file anyway)
+    REPLACES the map: a test written for one file can move another, so
+    overlaying one row on an older map keeps stale rows. ``task0c.quick_cov``
+    sets its one row, which is all a run recorded before the whole readings
+    carried ``files`` has. The map used to come from `/tmp` files any process
+    could write or delete; this reads only events, and the caller scopes them
+    by run_id."""
+    files: dict[str, tuple[int, int]] = {}
+    file_count: int | None = None
+    for ev in events:
+        name = ev.get("event")
+        d = ev.get("data") or {}
+        if name in ("coverage.measured", "coverage.quick_measured"):
+            if "files" in d or name == "coverage.measured":
+                # A full measurement without `files` still dates every row
+                # before it: those rows are not the crate any more.
+                files = _rows(d.get("files"))
+            if isinstance(d.get("file_count"), int):
+                file_count = d["file_count"]
+        elif name == "task0c.quick_cov" and isinstance(ev.get("file"), str):
+            files.update(_rows({ev["file"]: [d.get("covered"), d.get("coverable")]}))
+    return CoverageReading(files, file_count)
+
+
+def coverage_reading() -> CoverageReading:
+    """The live run's :class:`CoverageReading`, from its own events."""
+    return coverage_reading_of(read_recent_events(lambda n: n in _COVERAGE_READING_EVENTS))
 
 
 def _record_error_codes(out: dict[str, Any], d: dict[str, Any]) -> None:

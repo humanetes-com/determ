@@ -127,6 +127,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.run_state import RunPlan as _RunPlan
 from pipeline_core.domain.run_state import RunState
+from pipeline_core.domain.runtime_paths import run_registry_path
 from pipeline_core.domain.rust_fn_headers import (  # noqa: F401  (smoke pin: test_sig_tighten_guard_and_where_parse)
     is_pub_fn as _is_pub_fn,
 )
@@ -303,7 +304,6 @@ _PIPELINE_LOG     = os.getenv("PIPELINE_LOG",         str(Path(__file__).parent 
 _LOG_MAX_BYTES    = 512 * 1024   # roll pipeline_anyhow.log at 512 KB (.1, .2, … keep the rest)
 _LOG_TRIM_EVERY   = 50           # check file size every N _log() calls
 _log_trim_counter = 0
-_RUN_REGISTRY     = Path(os.getenv("PIPELINE_RUN_REGISTRY", "/tmp/determ_pipelines.json"))
 
 
 def _guard(location: str, msg: str) -> None:
@@ -611,7 +611,7 @@ def _register_run(project_dir: Path) -> None:
         cwd=os.getcwd(),
         started_at=int(time.time()),
     )
-    FileRunRegistry(_RUN_REGISTRY).register(entry.as_dict())
+    FileRunRegistry(run_registry_path()).register(entry.as_dict())
 
 
 def init_log(root: Path, nolog: bool = False, progress_mode: bool = False):

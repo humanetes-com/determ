@@ -1,7 +1,7 @@
 """Log / state / backend readers for the monitor — the rest of the data half.
 
 Companion to :mod:`events_data`: where that reads the structured `events.jsonl`, this
-reads `pipeline_state.md`, the coverage JSON dumps, the raw pipeline-log tail, and
+reads `pipeline_state.md`, the raw pipeline-log tail, and
 `.env`/`/proc`/git for backend + run facts. Everything here returns plain data (no
 ANSI); `monitor.py` formats it.
 
@@ -15,16 +15,13 @@ functions resolve it at call time so tests can repoint the readers.
 """
 from __future__ import annotations
 
-import glob
 import json as _json
 import os
 import subprocess
 import time
 from typing import Any
 
-from pipeline_core.domain import reasoning_cap
-
-from . import events_data
+from pipeline_core.domain import reasoning_cap, runtime_paths
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -37,73 +34,6 @@ def configure(*, script_dir: str, pipeline_log: str) -> None:
     global SCRIPT_DIR, PIPELINE_LOG
     SCRIPT_DIR = script_dir
     PIPELINE_LOG = pipeline_log
-
-
-def parse_coverage_json(project_dir: str | None) -> dict[str, tuple[int, int]]:
-    """Read per-file coverage from the most recent grcov/tarpaulin JSON output.
-    Returns {rel_path: (covered, coverable)}, e.g. {'src/error.rs': (248, 285)}.
-    Files older than the current pipeline process start time are ignored (stale from prior run)."""
-    result: dict[str, tuple[int, int]] = {}
-    main_mtime: float = 0.0
-    _run_start = events_data.pipeline_start_time()
-
-    # grcov coveralls JSON (pipeline writes /tmp/grcov_{module}.json).
-    # Exclude quick/filecache variants — those are not full measurements.
-    _main_paths = [p for p in glob.glob("/tmp/grcov_*.json")
-                   if not os.path.basename(p).startswith(("grcov_quick_", "grcov_filecache_"))
-                   and (_run_start == 0.0 or os.path.getmtime(p) >= _run_start)]
-    for path in sorted(_main_paths, key=os.path.getmtime, reverse=True)[:1]:
-        try:
-            main_mtime = os.path.getmtime(path)
-            with open(path) as _f:
-                data = _json.load(_f)
-            for sf in data.get("source_files", []):
-                name      = sf.get("name", "")
-                cov       = sf.get("coverage", [])
-                covered   = sum(1 for c in cov if isinstance(c, int) and c > 0)
-                coverable = sum(1 for c in cov if c is not None)
-                if coverable > 0 and name:
-                    result[name] = (covered, coverable)
-        except Exception:
-            pass
-
-    # Merge per-file quick-cov updates that are newer than the last full measurement.
-    for _qpath in [p for p in glob.glob("/tmp/grcov_filecache_*.json")
-                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]:
-        try:
-            with open(_qpath) as _f:
-                _qdata = _json.load(_f)
-            for _rel, _d in _qdata.items():
-                if _d.get("ts", 0) > main_mtime and _d.get("coverable", 0) > 0:
-                    result[_rel] = (_d["covered"], _d["coverable"])
-        except Exception:
-            pass
-
-    if result:
-        return result
-
-    # tarpaulin JSON fallback (pipeline writes /tmp/tarp_{module}/tarpaulin-report.json)
-    _tarp_paths = [p for p in glob.glob("/tmp/tarp_*/tarpaulin-report.json")
-                   if _run_start == 0.0 or os.path.getmtime(p) >= _run_start]
-    for path in sorted(_tarp_paths, key=os.path.getmtime, reverse=True)[:1]:
-        try:
-            with open(path) as _f:
-                data = _json.load(_f)
-            for f in data.get("files", []):
-                parts     = f.get("path", [])
-                name      = os.path.join(*parts) if parts else ""
-                if project_dir and name.startswith(str(project_dir) + os.sep):
-                    name = os.path.relpath(name, project_dir)
-                covered   = f.get("covered", 0)
-                coverable = f.get("coverable", 0)
-                if coverable > 0 and name:
-                    result[name] = (covered, coverable)
-            if result:
-                return result
-        except Exception:
-            pass
-
-    return result
 
 
 def baked_cluster_order() -> list[str]:
@@ -401,8 +331,7 @@ def pipeline_running() -> bool:
     is not "running" either; ``/proc`` is the arbiter.
     """
     try:
-        with open(os.getenv("PIPELINE_RUN_REGISTRY",
-                            "/tmp/determ_pipelines.json")) as fh:
+        with open(runtime_paths.run_registry_path()) as fh:
             reg = _json.load(fh)
     except Exception:
         return False

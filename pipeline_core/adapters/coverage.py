@@ -28,10 +28,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from ..domain.coverage import CoverageMeasurement, PerFileCoverage
 from ..domain.enums import CoverageBackend
+from ..domain.workspace_layout import COVERAGE_SCRATCH_DIR
 
 
 class ClusterView(Protocol):
@@ -60,6 +61,19 @@ def glob_to_filename_regex(pat: str) -> str:
     return re.escape(os.path.basename(pat.lstrip("*/")))
 
 
+def coverage_output(project_dir: Path, name: str) -> Path:
+    """A coverage tool's output path in the workspace's scratch dir, deleted
+    first. The output belongs to this workspace (a `/tmp/<tool>_<module>` path
+    was shared with every other process on the machine, the test suite
+    included). Deleting it before the tool runs is what lets "the file exists"
+    mean "this run wrote it": a run that fails without writing used to leave
+    the PREVIOUS measurement in place, and the reader parsed it as fresh."""
+    out = project_dir / COVERAGE_SCRATCH_DIR / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.unlink(missing_ok=True)
+    return out
+
+
 def cluster_exclude_patterns(deps: CoverageDeps) -> list[str]:
     cluster = deps.cluster()
     if cluster is None or cluster.is_default:
@@ -73,8 +87,8 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> Co
     Returns (coverage_pct 0-100, files_list, covered_lines, coverable_lines).
     Returns (0.0, [], 0, 0) on any failure.
     """
-    out_dir = Path("/tmp") / f"tarp_{module_name}"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    json_path = coverage_output(project_dir, f"tarp_{module_name}/tarpaulin-report.json")
+    out_dir = json_path.parent
     # Exclude files based on current cluster:
     # - stable/default: exclude nightly.rs (cfg-excluded, not in coverage denominator)
     # - non-default cluster: use cluster's own exclusion list (may be empty to include nightly.rs)
@@ -101,7 +115,6 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> Co
             cmd, cwd=project_dir, capture_output=True, text=True,
             timeout=deps.build_timeout, env=deps.cargo_env(),
         )
-        json_path = out_dir / "tarpaulin-report.json"
         if not json_path.exists():
             deps.log(f"  tarpaulin: no JSON report produced. stderr: {result.stderr[:300]}")
             return CoverageMeasurement(0.0, [], 0, 0)
@@ -120,15 +133,78 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> Co
         return CoverageMeasurement(0.0, [], 0, 0)
 
 
-def quick_file_coverage_grcov(deps: CoverageDeps, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
+def _grcov_cmd(deps: CoverageDeps, profraw_dir: Path, project_dir: Path,
+               out_json: Path) -> list[str]:
+    """The grcov invocation both grcov readings share, so a quick reading is
+    the same measurement as a full one (same files, same exclusions). The
+    quick one used to skip the cluster exclusions and `*/build.rs`, which
+    did not matter while it was read for one file and does once its whole
+    map is the reading."""
+    cmd = [
+        str(deps.grcov_bin),
+        str(profraw_dir),
+        "--binary-path", str(project_dir / "target" / "debug"),
+        "--source-dir", str(project_dir),
+        "--output-type", "coveralls",
+        "--token", "unused",   # required by grcov 0.10+ for coveralls output
+        "--branch",
+        "--ignore-not-existing",
+        "--output-path", str(out_json),
+        # Exclude dependency and toolchain sources — only measure project code.
+        "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
+        "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
+        "--ignore", str(Path.home() / ".rustup" / "*"),
+        "--ignore", "*/target/*",
+        "--ignore", "*/build.rs",  # build scripts run at compile time, not under test
+        "--ignore", "build.rs",    # root-level build.rs (no parent dir prefix)
+        "--ignore", "*/tests/*",   # integration test files — measure src/ coverage only
+        "--ignore", "tests/*",     # relative-path variant (grcov * doesn't cross /)
+        "--ignore", "*.gen_tests_*.rs",  # pipeline-generated test siblings
+        "--excl-start", "GRCOV_EXCL_START",
+        "--excl-stop",  "GRCOV_EXCL_STOP",
+        "--excl-line",  "GRCOV_EXCL_LINE",
+    ]
+    for pat in cluster_exclude_patterns(deps):
+        cmd += ["--ignore", pat]
+    return cmd
+
+
+def _parse_coveralls(out_json: Path, project_dir: Path) -> CoverageMeasurement:
+    """grcov's coveralls JSON -> a measurement in the tarpaulin-compatible
+    schema, so all downstream code (pragma pass, uncovered-line extraction)
+    works unchanged. ``coverage[i]`` is null (not coverable), 0 (uncovered)
+    or the hit count of line i+1."""
+    data = json.loads(out_json.read_text())
+    files_data: list[PerFileCoverage] = []
+    for sf in data.get("source_files", []):
+        cov_arr = sf.get("coverage", [])
+        abs_path = str(project_dir / sf.get("name", ""))
+        files_data.append(PerFileCoverage(
+            abs_path=abs_path,
+            path=abs_path.split(os.sep),  # tarpaulin-compat schema
+            traces=[{"line": i + 1, "stats": {"Line": c}}
+                    for i, c in enumerate(cov_arr) if c is not None],
+            covered=sum(1 for c in cov_arr if c is not None and c > 0),
+            coverable=sum(1 for c in cov_arr if c is not None),
+        ))
+    total_covered = sum(f.covered for f in files_data)
+    total_coverable = sum(f.coverable for f in files_data)
+    pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
+    return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
+
+
+def quick_coverage_grcov(deps: CoverageDeps, project_dir: Path,
+                         module_name: str) -> CoverageMeasurement | None:
     """
-    Fast per-file coverage snapshot using grcov + LLVM instrumentation.
-    Returns (covered, coverable) for rel_path only, or None on failure.
+    Fast whole-crate coverage snapshot using grcov + LLVM instrumentation
+    (incremental build, no clean). Every file is measured either way, so the
+    whole measurement is returned and the caller picks the file it asked
+    about. None when grcov is absent or the run produced nothing.
     """
     if not deps.grcov_bin.exists():
         return None
 
-    profraw_dir = project_dir / "target" / "coverage" / f"{module_name}_quick"
+    profraw_dir = project_dir / COVERAGE_SCRATCH_DIR / f"{module_name}_quick"
     profraw_dir.mkdir(parents=True, exist_ok=True)
     for f in profraw_dir.glob("*.profraw"):
         f.unlink(missing_ok=True)
@@ -147,42 +223,10 @@ def quick_file_coverage_grcov(deps: CoverageDeps, project_dir: Path, module_name
         )
         if not list(profraw_dir.glob("*.profraw")):
             return None
-
-        out_json = Path("/tmp") / f"grcov_quick_{module_name}.json"
-        cmd = [
-            str(deps.grcov_bin),
-            str(profraw_dir),
-            "--binary-path", str(project_dir / "target" / "debug"),
-            "--source-dir", str(project_dir),
-            "--output-type", "coveralls",
-            "--token", "unused",
-            "--branch",
-            "--ignore-not-existing",
-            "--output-path", str(out_json),
-            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
-            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
-            "--ignore", str(Path.home() / ".rustup" / "*"),
-            "--ignore", "*/target/*",
-            "--ignore", "*/tests/*",
-            "--ignore", "tests/*",
-            "--ignore", "build.rs",
-            "--ignore", "*.gen_tests_*.rs",   # pipeline-generated test siblings
-            "--excl-start", "GRCOV_EXCL_START",
-            "--excl-stop",  "GRCOV_EXCL_STOP",
-            "--excl-line",  "GRCOV_EXCL_LINE",
-        ]
-        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
-
-        data = json.loads(out_json.read_text())
-        abs_target = str(project_dir / rel_path)
-        for sf in data.get("source_files", []):
-            sf_abs = str(project_dir / sf.get("name", ""))
-            if sf_abs == abs_target or sf.get("name", "") == rel_path:
-                cov_arr = sf.get("coverage", [])
-                covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-                coverable = sum(1 for c in cov_arr if c is not None)
-                return covered, coverable
-        return None
+        out_json = coverage_output(project_dir, f"grcov_quick_{module_name}.json")
+        subprocess.run(_grcov_cmd(deps, profraw_dir, project_dir, out_json),
+                       cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
+        return _parse_coveralls(out_json, project_dir)
     except Exception:
         return None
 
@@ -198,7 +242,7 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
       - cargo install grcov
       - COVERAGE_BACKEND=grcov in .env
     """
-    profraw_dir = project_dir / "target" / "coverage" / module_name
+    profraw_dir = project_dir / COVERAGE_SCRATCH_DIR / module_name
     profraw_dir.mkdir(parents=True, exist_ok=True)
     # Clean stale profraw files so old runs don't pollute results.
     for f in profraw_dir.glob("*.profraw"):
@@ -212,13 +256,6 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
     # produce no profraw data.
     env["CARGO_INCREMENTAL"] = "0"
 
-    # Cluster exclude patterns reused from tarpaulin path.
-    cluster = deps.cluster()
-    if cluster is None or cluster.is_default:
-        _exclude_patterns = ["*/nightly.rs"]
-    else:
-        _exclude_patterns = list(cluster.tarpaulin_exclude_files)
-
     try:
         # Step 1: run tests with instrumentation.
         result = subprocess.run(
@@ -231,67 +268,11 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
             return CoverageMeasurement(0.0, [], 0, 0)
 
         # Step 2: run grcov to produce coveralls JSON.
-        out_json = Path("/tmp") / f"grcov_{module_name}.json"
-        cmd = [
-            str(deps.grcov_bin),
-            str(profraw_dir),
-            "--binary-path", str(project_dir / "target" / "debug"),
-            "--source-dir", str(project_dir),
-            "--output-type", "coveralls",
-            "--token", "unused",   # required by grcov 0.10+ for coveralls output
-            "--branch",
-            "--ignore-not-existing",
-            "--output-path", str(out_json),
-            # Exclude dependency and toolchain sources — only measure project code.
-            "--ignore", str(Path.home() / ".cargo" / "registry" / "*"),
-            "--ignore", str(Path.home() / ".cargo" / "git" / "*"),
-            "--ignore", str(Path.home() / ".rustup" / "*"),
-            "--ignore", "*/target/*",
-            "--ignore", "*/build.rs",  # build scripts run at compile time, not under test
-            "--ignore", "build.rs",    # root-level build.rs (no parent dir prefix)
-            "--ignore", "*/tests/*",   # integration test files — measure src/ coverage only
-            "--ignore", "tests/*",     # relative-path variant (grcov * doesn't cross /)
-            "--ignore", "*.gen_tests_*.rs",  # pipeline-generated test siblings
-            "--excl-start", "GRCOV_EXCL_START",
-            "--excl-stop",  "GRCOV_EXCL_STOP",
-            "--excl-line",  "GRCOV_EXCL_LINE",
-        ]
-        for pat in _exclude_patterns:
-            cmd += ["--ignore", pat]
-        subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+        out_json = coverage_output(project_dir, f"grcov_{module_name}.json")
+        subprocess.run(_grcov_cmd(deps, profraw_dir, project_dir, out_json),
+                       cwd=project_dir, capture_output=True, text=True,
                        timeout=120, check=True)
-
-        data = json.loads(out_json.read_text())
-        source_files = data.get("source_files", [])
-
-        total_covered = total_coverable = 0
-        # Build files_data in tarpaulin-compatible format so all downstream
-        # code (pragma pass, uncovered-line extraction) works unchanged.
-        files_data = []
-        for sf in source_files:
-            cov_arr = sf.get("coverage", [])
-            # null = not coverable, 0 = uncovered, N = hit count
-            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-            coverable = sum(1 for c in cov_arr if c is not None)
-            total_covered   += covered
-            total_coverable += coverable
-            # Build traces list matching tarpaulin schema: [{line, stats:{Line:N}}]
-            traces = [
-                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
-                for i, c in enumerate(cov_arr)
-                if c is not None
-            ]
-            abs_path = str(project_dir / sf.get("name", ""))
-            files_data.append(PerFileCoverage(
-                abs_path=abs_path,
-                path=abs_path.split(os.sep),  # tarpaulin-compat schema
-                traces=traces,
-                covered=covered,
-                coverable=coverable,
-            ))
-
-        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
+        return _parse_coveralls(out_json, project_dir)
 
     except subprocess.TimeoutExpired:
         deps.log(f"  grcov: timeout after {deps.build_timeout}s")
@@ -302,59 +283,22 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
 
 
 def load_grcov_json(project_dir: Path, module_name: str) -> CoverageMeasurement | None:
-    """Parse the existing grcov JSON + filecache without re-running grcov.
+    """The workspace's last FULL grcov measurement, without re-running grcov.
 
-    Returns (pct, files_data, covered, coverable) if the JSON exists, else None.
-    Used on resume to restore coverage state without an expensive re-run.
-    """
-    out_json = Path("/tmp") / f"grcov_{module_name}.json"
+    None if there is none (or it holds no file). Used on resume to restore
+    coverage state without an expensive re-run. Quick readings are not merged
+    in: the llvm-cov provider restores its last full lcov the same way, and the
+    per-file cache that used to carry quick values here was a `/tmp` file any
+    process could write (a test's `microcrate` row once stood in a live run's
+    overview)."""
+    out_json = project_dir / COVERAGE_SCRATCH_DIR / f"grcov_{module_name}.json"
     if not out_json.exists():
         return None
     try:
-        main_mtime = out_json.stat().st_mtime
-        data = json.loads(out_json.read_text())
-        source_files = data.get("source_files", [])
-        if not source_files:
-            return None
-
-        # Build per-file map from main JSON.
-        file_map: dict[str, dict[str, Any]] = {}
-        for sf in source_files:
-            cov_arr = sf.get("coverage", [])
-            covered   = sum(1 for c in cov_arr if c is not None and c > 0)
-            coverable = sum(1 for c in cov_arr if c is not None)
-            abs_path  = str(project_dir / sf.get("name", ""))
-            traces    = [
-                {"line": i + 1, "stats": {"Line": (c if c is not None else 0)}}
-                for i, c in enumerate(cov_arr) if c is not None
-            ]
-            file_map[sf.get("name", "")] = {
-                "path": abs_path.split(os.sep),
-                "abs_path": abs_path,
-                "traces": traces,
-                "covered": covered,
-                "coverable": coverable,
-            }
-
-        # Merge filecache entries newer than the main JSON (written by quick-cov).
-        filecache = Path("/tmp") / f"grcov_filecache_{module_name}.json"
-        if filecache.exists():
-            try:
-                for rel, d in json.loads(filecache.read_text()).items():
-                    if d.get("ts", 0) > main_mtime and d.get("coverable", 0) > 0 and rel in file_map:
-                        entry = file_map[rel]
-                        entry["covered"]   = d["covered"]
-                        entry["coverable"] = d["coverable"]
-            except Exception:
-                pass
-
-        files_data = [PerFileCoverage.from_dict(v) for v in file_map.values()]
-        total_covered   = sum(f.covered   for f in files_data)
-        total_coverable = sum(f.coverable for f in files_data)
-        pct = (total_covered / total_coverable * 100.0) if total_coverable > 0 else 0.0
-        return CoverageMeasurement(pct, files_data, total_covered, total_coverable)
+        measured = _parse_coveralls(out_json, project_dir)
     except Exception:
         return None
+    return measured if measured.files else None
 
 
 # ── Coverage provider interface ───────────────────────────────────────────────
@@ -376,8 +320,10 @@ class CoverageProvider(ABC):
         """Run instrumented tests. Returns (pct, files_data, covered, coverable)."""
 
     @abstractmethod
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        """Quick per-file snapshot. Returns (covered, coverable) or None on failure."""
+    def measure_quick(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
+        """Fast whole-crate snapshot (no clean rebuild). None when the backend
+        has no quick path. Whole, not one file: every backend measures every
+        file anyway, and a test written for one file can move another."""
 
     @abstractmethod
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
@@ -388,8 +334,8 @@ class TarpaulinProvider(CoverageProvider):
     def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         return run_tarpaulin(self._deps, project_dir, module_name)
 
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        return None  # tarpaulin is too slow for per-file quick checks
+    def measure_quick(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
+        return None  # tarpaulin is too slow for quick checks
 
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         return None
@@ -402,8 +348,8 @@ class GrcovProvider(CoverageProvider):
             return run_tarpaulin(self._deps, project_dir, module_name)
         return run_grcov(self._deps, project_dir, module_name)
 
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        return quick_file_coverage_grcov(self._deps, project_dir, module_name, rel_path)
+    def measure_quick(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
+        return quick_coverage_grcov(self._deps, project_dir, module_name)
 
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
         return load_grcov_json(project_dir, module_name)
@@ -412,11 +358,13 @@ class GrcovProvider(CoverageProvider):
 class LlvmCovProvider(CoverageProvider):
     """Coverage backend using cargo-llvm-cov (lcov output, src-based coverage)."""
 
-    def _lcov_path(self, module_name: str, suffix: str = "") -> Path:
-        return Path("/tmp") / f"llvmcov_{module_name}{suffix}.lcov"
+    @staticmethod
+    def lcov_path(project_dir: Path, module_name: str, suffix: str = "") -> Path:
+        """Where a measurement's lcov lands: the workspace's coverage scratch."""
+        return project_dir / COVERAGE_SCRATCH_DIR / f"llvmcov_{module_name}{suffix}.lcov"
 
     def _run(self, project_dir: Path, module_name: str, suffix: str = "") -> CoverageMeasurement:
-        lcov_path = self._lcov_path(module_name, suffix)
+        lcov_path = coverage_output(project_dir, f"llvmcov_{module_name}{suffix}.lcov")
         env = self._deps.cargo_env()
         # llvm-cov uses LLVM's regex (POSIX-ERE-ish): no `\d`, use `[0-9]` instead.
         ignore_patterns = [
@@ -545,16 +493,14 @@ class LlvmCovProvider(CoverageProvider):
     def measure(self, project_dir: Path, module_name: str) -> CoverageMeasurement:
         return self._run(project_dir, module_name)
 
-    def measure_file(self, project_dir: Path, module_name: str, rel_path: str) -> tuple[int, int] | None:
-        files_data = self._run(project_dir, module_name, suffix="_quick")[1]
-        abs_target = str(project_dir / rel_path)
-        for fd in files_data:
-            if fd.abs_path == abs_target:
-                return fd.covered, fd.coverable
-        return None
+    def measure_quick(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
+        # The same `cargo llvm-cov` as `measure`, into its own lcov so the
+        # last FULL measurement stays the one `load_cached` restores.
+        measured = self._run(project_dir, module_name, suffix="_quick")
+        return measured if measured.files else None
 
     def load_cached(self, project_dir: Path, module_name: str) -> CoverageMeasurement | None:
-        lcov_path = self._lcov_path(module_name)
+        lcov_path = self.lcov_path(project_dir, module_name)
         if not lcov_path.exists():
             return None
         try:

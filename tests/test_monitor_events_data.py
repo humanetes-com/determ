@@ -674,3 +674,60 @@ def test_fill_reading_sets_the_next_sweep_pass_and_a_sweep_clears_it(tmp_path) -
                 "event": "phase_c.tdd.iter", "cluster": "stable", "iter": 2, "pass": 182})
     log.write_text("\n".join(json.dumps(e) for e in evs) + "\n")
     assert ed.phase_c_state()["tdd_fill_pass"] is None
+
+
+_COVERAGE_FIXTURES = Path(__file__).parent / "fixtures" / "coverage_reading"
+
+
+def test_coverage_reading_of_a_run_recorded_before_the_events_carried_files():
+    """Run `69851-f9e61bdd` (2026-10-03), its four coverage records verbatim:
+    one `coverage.measured` (84.8%, `file_count` 10, no per-file list) and
+    three `task0c.quick_cov`. The overview it can honestly show is those three
+    rows, flagged blind (`files 3/10`), with no projection. The `/tmp` reader
+    it replaces showed one row, `src/lib.rs` 3/10, written by a test."""
+    recs = [json.loads(line) for line in
+            (_COVERAGE_FIXTURES / "run_69851-f9e61bdd.jsonl").read_text().splitlines()]
+    reading = ed.coverage_reading_of(recs)
+    assert reading.files == {"src/error.rs": (359, 387), "src/ensure.rs": (55, 56),
+                             "src/lib.rs": (19, 20)}
+    assert reading.file_count == 10 and reading.blind
+
+
+def _measured(run: str, name: str, files: dict[str, list[int]], **top) -> dict:
+    return {"run_id": run, "event": name, **top,
+            "data": {"file_count": len(files), "files": files}}
+
+
+def test_coverage_reading_is_this_runs_latest_whole_reading(tmp_path, monkeypatch):
+    """A quick check measures every file, and its whole map replaces the
+    previous one: the block written for error.rs also moved lib.rs, which an
+    overlay of error.rs's row onto the first measurement would have kept at
+    its old value. Another run's records in the same stream (a test's
+    microcrate quick check, an earlier run) change nothing."""
+    ev = tmp_path / "events.jsonl"
+    _write(
+        ev,
+        _measured("A-old", "coverage.measured", {"src/lib.rs": [1, 10]}),
+        _measured("B-live", "coverage.measured",
+                  {"src/error.rs": [300, 387], "src/lib.rs": [15, 20]}),
+        {"run_id": "B-live", "event": "task0c.quick_cov", "file": "src/error.rs",
+         "data": {"covered": 359, "coverable": 387}},
+        _measured("B-live", "coverage.quick_measured",
+                  {"src/error.rs": [359, 387], "src/lib.rs": [19, 20]}, file="src/error.rs"),
+        {"run_id": "B-live", "event": "task0c.quick_cov", "file": "src/error.rs",
+         "data": {"covered": 359, "coverable": 387}},
+    )
+    _patch(monkeypatch, ev)
+    reading = ed.coverage_reading()
+    assert reading.files == {"src/error.rs": (359, 387), "src/lib.rs": (19, 20)}
+    assert reading.file_count == 2 and not reading.blind
+
+
+def test_coverage_reading_drops_rows_older_than_a_full_measurement():
+    """A full measurement dates every row before it, even one recorded
+    without its files: those rows are not the crate any more."""
+    reading = ed.coverage_reading_of([
+        {"event": "task0c.quick_cov", "file": "src/a.rs", "data": {"covered": 1, "coverable": 2}},
+        {"event": "coverage.measured", "data": {"file_count": 4}},
+    ])
+    assert reading.files == {} and reading.file_count == 4 and reading.blind

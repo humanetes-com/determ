@@ -3,8 +3,9 @@
 The pipeline measures coverage with cargo-llvm-cov, whose only transcription-risk logic is
 the pure lcov parser `_parse_lcov` (SF/DA/end_of_record → tarpaulin-compatible files_data)
 plus the small selectors around it. These tests drive that logic from lcov *strings* — no
-cargo, no subprocess — and stub `_run` for the measure/cache lookups. The unused
-tarpaulin/grcov subprocess backends are intentionally out of scope.
+cargo, no subprocess — and stub `_run` for the measure/cache lookups. The grcov
+backend is not the configured one but must keep working when it is selected:
+its readings are pinned with a stubbed subprocess.
 """
 from __future__ import annotations
 
@@ -39,14 +40,12 @@ def test_load_grcov_json_parses_external_json(tmp_path: Path) -> None:
     # CoverageMeasurement of PerFileCoverage (previously untested path).
     import json as _json
     mod = "boundarytest_xyz"
-    grcov_json = Path("/tmp") / f"grcov_{mod}.json"
+    grcov_json = tmp_path / "target" / "coverage" / f"grcov_{mod}.json"
+    grcov_json.parent.mkdir(parents=True)
     grcov_json.write_text(_json.dumps({"source_files": [
         {"name": "src/f.rs", "coverage": [None, 5, 0, 2]},   # 2 covered, 3 coverable
     ]}), encoding="utf-8")
-    try:
-        m = cov.load_grcov_json(tmp_path, mod)
-    finally:
-        grcov_json.unlink(missing_ok=True)
+    m = cov.load_grcov_json(tmp_path, mod)
     assert isinstance(m, CoverageMeasurement)
     assert (m.covered, m.coverable) == (2, 3)
     assert len(m.files) == 1 and isinstance(m.files[0], PerFileCoverage)
@@ -235,18 +234,26 @@ def test_parse_lcov_pragma_unreadable_source_is_tolerated(tmp_path: Path) -> Non
     assert (covered, coverable) == (1, 2)
 
 
-# --------------------------------------------------------------------------- measure_file / load_cached / measure
+# --------------------------------------------------------------------------- measure_quick / load_cached / measure
 
-def test_measure_file_returns_matching_file_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """measure_file runs a quick measurement then looks up rel_path by abs_path."""
+def test_measure_quick_returns_the_whole_measurement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The quick run measures every file; all of them come back, and the
+    caller picks its row (`CoverageMeasurement.file_row`)."""
     prov = _provider()
-    target_abs = str(tmp_path / "src" / "f.rs")
-    canned = (50.0, [PerFileCoverage.from_dict(
-        {"abs_path": target_abs, "covered": 3, "coverable": 6})], 3, 6)
-    monkeypatch.setattr(prov, "_run", lambda *a, **k: canned)
-    assert prov.measure_file(tmp_path, "mod", "src/f.rs") == (3, 6)
-    # Not in the file list → None.
-    assert prov.measure_file(tmp_path, "mod", "src/other.rs") is None
+    canned = CoverageMeasurement(50.0, [
+        PerFileCoverage.from_dict({"abs_path": str(tmp_path / "src" / "f.rs"), "covered": 3, "coverable": 6}),
+        PerFileCoverage.from_dict({"abs_path": str(tmp_path / "src" / "g.rs"), "covered": 1, "coverable": 2}),
+    ], 4, 8)
+    suffixes: list[str] = []
+    monkeypatch.setattr(prov, "_run", lambda pd, mod, suffix="": suffixes.append(suffix) or canned)
+    m = prov.measure_quick(tmp_path, "mod")
+    assert m is not None and suffixes == ["_quick"]
+    assert m.file_lines(tmp_path) == {"src/f.rs": (3, 6), "src/g.rs": (1, 2)}
+    assert m.file_row(tmp_path, "src/f.rs") == (3, 6)
+    assert m.file_row(tmp_path, "src/other.rs") is None
+    # A failed run measured nothing: no reading, not an empty one.
+    monkeypatch.setattr(prov, "_run", lambda *a, **k: CoverageMeasurement(0.0, [], 0, 0))
+    assert prov.measure_quick(tmp_path, "mod") is None
 
 
 def test_measure_delegates_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -256,25 +263,102 @@ def test_measure_delegates_to_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert prov.measure(tmp_path, "mod") == sentinel
 
 
-def test_load_cached_reads_existing_lcov(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """load_cached parses the provider's on-disk lcov without re-running cargo."""
+def test_load_cached_reads_the_workspace_lcov(tmp_path: Path) -> None:
+    """load_cached parses the workspace's last FULL lcov without re-running
+    cargo; the lcov lives under the workspace's coverage scratch, not /tmp."""
     prov = _provider()
     (tmp_path / "src").mkdir()
-    module = f"covtest_{os.getpid()}"
-    # Redirect the /tmp lcov path into tmp_path so the test is hermetic.
-    lcov_path = tmp_path / "cached.lcov"
-    monkeypatch.setattr(prov, "_lcov_path", lambda mod, suffix="": lcov_path)
+    lcov_path = cov.LlvmCovProvider.lcov_path(tmp_path, "mod")
+    assert lcov_path == tmp_path / "target" / "coverage" / "llvmcov_mod.lcov"
+    lcov_path.parent.mkdir(parents=True)
     _write_lcov(lcov_path, "SF:src/f.rs\nDA:1,1\nDA:2,0\nend_of_record\n")
-    result = prov.load_cached(tmp_path, module)
+    # A newer QUICK lcov is not what a resume restores.
+    _write_lcov(cov.LlvmCovProvider.lcov_path(tmp_path, "mod", "_quick"),
+                "SF:src/f.rs\nDA:1,1\nDA:2,1\nend_of_record\n")
+    result = prov.load_cached(tmp_path, "mod")
     assert result is not None
     _pct, _files, covered, coverable, _functions = result
     assert (covered, coverable) == (1, 2)
 
 
-def test_load_cached_missing_returns_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    prov = _provider()
-    monkeypatch.setattr(prov, "_lcov_path", lambda mod, suffix="": tmp_path / "nope.lcov")
-    assert prov.load_cached(tmp_path, "mod") is None
+def test_load_cached_missing_returns_none(tmp_path: Path) -> None:
+    assert _provider().load_cached(tmp_path, "mod") is None
+
+
+def test_a_failed_llvm_cov_run_does_not_return_the_previous_measurement(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`cargo llvm-cov` exiting non-zero without writing used to leave the
+    PREVIOUS lcov at the output path, and `_run` parsed it as this run's
+    reading. The output is deleted before the tool runs, so "the file
+    exists" means "this run wrote it"."""
+    (tmp_path / "src").mkdir()
+    stale = cov.LlvmCovProvider.lcov_path(tmp_path, "mod")
+    stale.parent.mkdir(parents=True)
+    _write_lcov(stale, "SF:src/f.rs\nDA:1,1\nDA:2,1\nend_of_record\n")
+
+    class _Failed:
+        returncode, stdout, stderr = 101, "", "error: could not compile"
+
+    monkeypatch.setattr(cov.subprocess, "run", lambda *a, **k: _Failed())
+    m = _provider().measure(tmp_path, "mod")
+    assert (m.pct, m.files, m.covered, m.coverable) == (0.0, [], 0, 0)
+    assert not stale.exists()
+
+
+def test_grcov_readings_are_one_measurement_in_the_workspace(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both grcov readings run the same grcov command (cluster exclusions
+    included), write into the workspace's coverage scratch, and come back
+    whole. A resume restores the FULL one even when a quick one is newer."""
+    import json as _json
+    grcov_bin = tmp_path / "grcov"
+    grcov_bin.touch()
+    named = _FakeCluster(is_default=False, tarpaulin_exclude_files=["*/legacy.rs"])
+    deps = cov.CoverageDeps(log=lambda _m: None, cargo_env=dict, cluster=lambda: named,
+                            tarpaulin_bin=Path("/nonexistent/tarp"), grcov_bin=grcov_bin,
+                            build_timeout=1, ignore_pragma="")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    grcov_cmds: list[list[str]] = []
+    hits = iter([[1, 0], [1, 1]])   # quick reading first, then the full one
+
+    class _Done:
+        returncode, stdout, stderr = 0, "", ""
+
+    def _run(cmd: list[str], **kw: object) -> _Done:
+        if cmd[0] == "cargo":
+            env = kw["env"]
+            assert isinstance(env, dict)
+            Path(env["LLVM_PROFILE_FILE"]).parent.joinpath("1-1.profraw").touch()
+        else:
+            grcov_cmds.append(cmd)
+            out = Path(cmd[cmd.index("--output-path") + 1])
+            out.write_text(_json.dumps({"source_files": [
+                {"name": "src/a.rs", "coverage": next(hits)},
+                {"name": "src/b.rs", "coverage": [None, 3]}]}), encoding="utf-8")
+        return _Done()
+
+    monkeypatch.setattr(cov.subprocess, "run", _run)
+    quick = cov.quick_coverage_grcov(deps, ws, "mod")
+    full = cov.run_grcov(deps, ws, "mod")
+    assert quick is not None
+    assert quick.file_lines(ws) == {"src/a.rs": (1, 2), "src/b.rs": (1, 1)}
+    assert full.file_lines(ws) == {"src/a.rs": (2, 2), "src/b.rs": (1, 1)}
+
+    def _shape(c: list[str]) -> list[str]:
+        out = list(c)
+        out[1] = "<profraw>"
+        out[out.index("--output-path") + 1] = "<out>"
+        return out
+
+    assert _shape(grcov_cmds[0]) == _shape(grcov_cmds[1])
+    assert grcov_cmds[0][grcov_cmds[0].index("*/legacy.rs") - 1] == "--ignore"
+    scratch = ws / "target" / "coverage"
+    assert [Path(c[c.index("--output-path") + 1]).parent for c in grcov_cmds] == [scratch, scratch]
+    # The quick JSON is newer, and still not what a resume restores.
+    (scratch / "grcov_quick_mod.json").touch()
+    restored = cov.load_grcov_json(ws, "mod")
+    assert restored is not None and restored.covered == 3
 
 
 # --------------------------------------------------------------------------- function records

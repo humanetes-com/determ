@@ -23,8 +23,7 @@ from pipeline_core.domain import graceful_stop
 @pytest.fixture(autouse=True)
 def _reset_monitor_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     """Ensure clean monitor state and redirect sentinel path for each test."""
-    sentinel = tmp_path / "pipeline_graceful_stop"
-    monkeypatch.setattr(graceful_stop, "SENTINEL_PATH", sentinel)
+    sentinel = graceful_stop.sentinel_path()   # under this test's control dir
 
     monitor._confirm = None
     monitor._graceful_pending = False
@@ -55,7 +54,7 @@ def test_confirmed_g_while_running_creates_sentinel_without_detach(
     detached_calls: list[Any] = []
     monkeypatch.setattr(monitor, "_detach", lambda cmd: detached_calls.append(cmd))
 
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
     assert not monitor._graceful_pending
     assert monitor._confirm is None
 
@@ -63,7 +62,7 @@ def test_confirmed_g_while_running_creates_sentinel_without_detach(
     monitor._run_action("g")
     assert monitor._confirm == "graceful"
     assert not monitor._graceful_pending
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
     assert detached_calls == []
     assert "confirm" in monitor._action_msg.lower()
     assert "exit" in monitor._action_msg.lower()
@@ -73,7 +72,7 @@ def test_confirmed_g_while_running_creates_sentinel_without_detach(
     monitor._run_action("y")
     assert monitor._confirm is None
     assert monitor._graceful_pending is True
-    assert graceful_stop.SENTINEL_PATH.exists()
+    assert graceful_stop.sentinel_path().exists()
     assert detached_calls == []  # Crucial: _detach / continue.sh is NOT called
     assert "exit" in monitor._action_msg.lower() or "stop" in monitor._action_msg.lower()
     assert "reload" not in monitor._action_msg.lower()
@@ -90,12 +89,12 @@ def test_g_while_not_running_does_not_detach_and_creates_no_sentinel(
     detached_calls: list[Any] = []
     monkeypatch.setattr(monitor, "_detach", lambda cmd: detached_calls.append(cmd))
 
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
 
     monitor._run_action("g")
 
     assert detached_calls == []
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
     assert not monitor._graceful_pending
     assert monitor._confirm is None
     assert "not running" in monitor._action_msg.lower()
@@ -112,13 +111,13 @@ def test_g_while_pending_cancels_and_removes_sentinel(
     monkeypatch.setattr(monitor, "_detach", lambda cmd: detached_calls.append(cmd))
 
     # Pre-condition: pending graceful stop with sentinel file on disk
-    graceful_stop.SENTINEL_PATH.touch()
+    graceful_stop.sentinel_path().touch()
     monitor._graceful_pending = True
     monitor._confirm = None
 
     monitor._run_action("g")
 
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
     assert not monitor._graceful_pending
     assert monitor._confirm is None
     assert detached_calls == []
@@ -139,6 +138,6 @@ def test_g_confirmation_cancelled_with_n(
     monitor._run_action("n")
     assert monitor._confirm is None
     assert not monitor._graceful_pending
-    assert not graceful_stop.SENTINEL_PATH.exists()
+    assert not graceful_stop.sentinel_path().exists()
     assert detached_calls == []
     assert "cancelled" in monitor._action_msg.lower()

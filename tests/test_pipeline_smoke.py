@@ -1841,32 +1841,32 @@ def test_shutdown_on_finish_toggle() -> None:
 
     import monitor
     from pipeline_core.adapters.power import shutdown_on_finish_enabled
+    from pipeline_core.domain.runtime_paths import SHUTDOWN_ON_FINISH, control_path
 
     with tempfile.TemporaryDirectory() as td:
-        sentinel = os.path.join(td, "shutdown_sentinel")
-        spath = Path(sentinel)
-        old_mon = monitor._SHUTDOWN_SENTINEL
+        # Both sides resolve the channel themselves (the per-test control dir):
+        # agreeing on the PATH is half of what this pins.
+        spath = control_path(SHUTDOWN_ON_FINISH)
+        sentinel = str(spath)
         old_script_dir = monitor.SCRIPT_DIR
         old_env = os.environ.get("SHUTDOWN_ON_FINISH")
-        monitor._SHUTDOWN_SENTINEL = sentinel
         monitor.SCRIPT_DIR = td  # no .env here → monitor falls back to False
         try:
             os.environ["SHUTDOWN_ON_FINISH"] = "1"
-            assert shutdown_on_finish_enabled(spath)           # env default applies
+            assert shutdown_on_finish_enabled()           # env default applies
             monitor._set_shutdown_armed(False)                 # monitor disable wins
-            assert not shutdown_on_finish_enabled(spath)
+            assert not shutdown_on_finish_enabled()
             assert not monitor._shutdown_armed()
             monitor._set_shutdown_armed(True)                  # monitor re-arm wins
-            assert shutdown_on_finish_enabled(spath)
+            assert shutdown_on_finish_enabled()
             assert monitor._shutdown_armed()
             os.unlink(sentinel)
             os.environ["SHUTDOWN_ON_FINISH"] = "0"
-            assert not shutdown_on_finish_enabled(spath)       # back to env default
+            assert not shutdown_on_finish_enabled()       # back to env default
             with open(os.path.join(td, ".env"), "w") as fh:    # monitor's .env fallback
                 fh.write("OTHER=x\nSHUTDOWN_ON_FINISH=1\n")
             assert monitor._shutdown_armed()
         finally:
-            monitor._SHUTDOWN_SENTINEL = old_mon
             monitor.SCRIPT_DIR = old_script_dir
             if old_env is None:
                 os.environ.pop("SHUTDOWN_ON_FINISH", None)
@@ -2302,15 +2302,15 @@ def test_coverage_workspace_adapters() -> None:
         assert (covd, total) == (1, 2)  # line 2 dropped by pragma; 1 of {1,3} hit
         assert files and files[0].abs_path.endswith("src/f.rs")
 
-        # grcov-json parse (load_grcov_json reads /tmp/grcov_<mod>.json).
+        # grcov-json parse (load_grcov_json reads the workspace's coverage scratch).
         mod = f"covtest_{os.getpid()}"
-        gj = Path("/tmp") / f"grcov_{mod}.json"
+        gj = proj / "target" / "coverage" / f"grcov_{mod}.json"
+        gj.parent.mkdir(parents=True)
         gj.write_text(_json.dumps({"source_files": [{"name": "src/f.rs", "coverage": [1, 0, None, 2]}]}))
-        try:
-            pct, files, covd, total, _functions = cov.load_grcov_json(proj, mod)
-            assert (covd, total) == (2, 3)
-        finally:
-            gj.unlink(missing_ok=True)
+        loaded = cov.load_grcov_json(proj, mod)
+        assert loaded is not None
+        pct, files, covd, total, _functions = loaded
+        assert (covd, total) == (2, 3)
 
         # GitWorkspace: read/write/commit on a real temp repo.
         subprocess.run(["git", "init", "-q"], cwd=proj, check=True)
