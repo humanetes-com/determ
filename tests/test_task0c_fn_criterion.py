@@ -18,6 +18,7 @@ measurement with the function still unexecuted.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -28,6 +29,7 @@ import pipeline_core.application.tasks.task0c as task0c_mod
 from pipeline_core.application.tasks.task0c import Task0cDeps, _PhaseCOutcome, task0c_augment_module
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.fn_execution import FnCoverageRecord
+from pipeline_core.domain.fn_reachability import WorldReading
 
 _SRC = """\
 pub fn called() -> u32 {
@@ -61,6 +63,7 @@ class _Loop:
         self.logs: list[str] = []
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.store: dict[tuple[str, str], FnCoverageRecord] = {}
+        self.reach: Any = None
         monkeypatch.setenv("TASK0C_FN_ATTEMPTS", str(budget))
         monkeypatch.setattr(task0c_mod, "log", self.logs.append)
         monkeypatch.setattr(task0c_mod, "emit",
@@ -98,6 +101,8 @@ class _Loop:
                 measure_coverage=self._measure),
             enumerate_fns=lambda d: [_record("called"), _record("never")],
             enumerate_mods=lambda d: [],
+            measure_reachability=(self.reach if self.reach is not None
+                                  else (lambda *a, **k: None)),
             load_fn_record=lambda pd, c, m: self.store.get((c, m)),
             save_fn_record=lambda pd, c, m, rec: self.store.__setitem__((c, m), rec),
         )
@@ -174,3 +179,84 @@ def test_negative_control_the_pre_fix_stop_breaks_with_the_function_unexecuted(
     loop.run()
     assert loop.phase_c_targets == [] and loop.measurements == 1
     assert [p.target.site.fn_name for p in loop.record.pending] == ["never"]
+
+
+# --- the functions no test can execute are proved, not attempted -----
+
+_RUSTDOC = json.dumps({"index": {"1": {
+    "name": "called", "span": {"filename": "src/lib.rs", "begin": [1, 1], "end": [3, 2]},
+    "inner": {"function": {"sig": {"inputs": [], "output": {"primitive": "u32"}}}}}}})
+
+
+def _mir(*, calls_never: bool = False) -> str:
+    use = "        _1 = never() -> [return: bb1, unwind continue];\n" if calls_never else ""
+    return ("fn called() -> u32 {\n    bb0: {\n" + use + "        return;\n    }\n}\n\n"
+            "fn never() -> u32 {\n    bb0: {\n        return;\n    }\n}\n")
+
+
+def _reader(mir: str, reason: str = "") -> Any:
+    calls: list[str] = []
+
+    def read(project_dir: Path, cluster: Any) -> WorldReading:
+        calls.append("read")
+        return (WorldReading("stable", reason=reason) if reason
+                else WorldReading("stable", mir=mir, rustdoc=_RUSTDOC))
+    read.calls = calls  # type: ignore[attr-defined]
+    return read
+
+
+def test_a_function_the_compiler_proves_unreachable_is_never_aimed_at(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[0])
+    loop.reach = _reader(_mir())
+    loop.run()
+    # No targeted pass at all, one measurement, the stop reads the line target.
+    assert loop.phase_c_targets == [] and loop.measurements == 1
+    rec = loop.record
+    assert rec.accounted and rec.pending == () and rec.unreached == ()
+    assert [(p.site.fn_name, "never" in p.proof) for p in rec.by_construction] == [("never", True)]
+    assert any("1 function(s) no test can execute, proved" in ln and "src/lib.rs::never" in ln
+               for ln in loop.logs)
+    ev = [f for e, f in loop.events if e == "task0c.fn_reachability"]
+    assert ev and ev[0]["data"]["status"] == "ok" and len(ev[0]["data"]["proved"]) == 1
+    assert any("95.0% coverage reached" in ln for ln in loop.logs)
+
+
+def test_negative_control_a_call_in_the_dump_leaves_the_function_to_the_budget(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[0])
+    loop.reach = _reader(_mir(calls_never=True))
+    loop.run()
+    assert loop.phase_c_targets == [["never"], ["never"], ["never"]]
+    assert loop.record.by_construction == ()
+    assert [u.site.fn_name for u in loop.record.unreached] == ["never"]
+
+
+def test_no_reading_means_the_budget_decides_alone_and_the_log_says_why(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[0])
+    loop.reach = _reader("", reason="cargo rustc rc=101: error")
+    loop.run()
+    assert loop.phase_c_targets == [["never"], ["never"], ["never"]]
+    assert any("no reachability proof taken (cargo rustc rc=101: error)" in ln for ln in loop.logs)
+
+
+def test_the_measurement_beats_a_proof_and_the_counterexample_is_loud(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[2])
+    loop.reach = _reader(_mir())
+    loop.run()
+    assert {s.fn_name for s in loop.record.executed} == {"called", "never"}
+    assert loop.record.by_construction == ()
+    assert any("COUNTEREXAMPLE to the reachability proof: src/lib.rs::never" in ln
+               for ln in loop.logs)
+    assert any(e == "task0c.fn_reachability_contradicted" for e, _ in loop.events)
+
+
+def test_the_kill_switch_never_calls_the_reader(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TASK0C_FN_REACHABILITY", "0")
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[0])
+    loop.reach = _reader(_mir())
+    loop.run()
+    assert loop.reach.calls == [] and loop.record.by_construction == ()

@@ -32,6 +32,7 @@ from pipeline_core.domain.fn_execution import (
     FnCoverageRecord,
     FnTarget,
     PendingFn,
+    ProvenFn,
     UnreachedFn,
 )
 from pipeline_core.domain.models import FnLocator, FnSite
@@ -58,7 +59,7 @@ def test_an_unreached_stub_is_its_own_bucket_and_not_counted() -> None:
     log: list[str] = []
     assert report_stub_verdict(verdict, log.append, 2) is True
     text = "\n".join(log)
-    assert "MEASURED them unreached" in text
+    assert "MEASURED them unreached" in text and "PROVED them unreachable" in text
     assert ("src/wrap.rs::provide [impl Error for Boxed] (compiled only under its "
             "cluster's cfg) — targeted attempt(s) 2, 3, 4") in text
 
@@ -147,3 +148,22 @@ def test_the_cluster_close_reports_each_stub_by_the_record() -> None:
     assert report_close_stubs(stubs=StubInventory(), record=_RECORD, cluster_name="gizmo",
                               close_kind="green", tag="[m]", log=log.append,
                               emit=lambda e, **f: None) is None
+
+
+def test_a_stub_proved_unreachable_by_construction_is_excused_and_says_why() -> None:
+    proved = FnSite("src/ptr.rs", "clone", "impl Clone for Own<T>")
+    record = FnCoverageRecord(measured=True, candidates=3, by_construction=(
+        ProvenFn(proved, "`Own` is not nameable and no MIR use reaches it"),))
+    verdict = classify_remaining_stubs(_inventory(proved).site_preds(), [], (), [record])
+    assert verdict.unreached_by_tests == (FnLocator("src/ptr.rs", "clone"),)
+    assert verdict.orphaned == ()
+    assert verdict.unreached_evidence == (
+        "src/ptr.rs::clone [impl Clone for Own<T>] — unreachable by construction: "
+        "`Own` is not nameable and no MIR use reaches it",)
+    # Negative control: the same stub with no record is orphaned and fails the run.
+    bare = classify_remaining_stubs(_inventory(proved).site_preds(), [], (), [])
+    assert bare.orphaned == (FnLocator("src/ptr.rs", "clone"),)
+    # A cluster that measured the function EXECUTED outweighs the other's proof.
+    other = FnCoverageRecord(measured=True, executed=(proved,))
+    both = classify_remaining_stubs(_inventory(proved).site_preds(), [], (), [record, other])
+    assert both.orphaned == (FnLocator("src/ptr.rs", "clone"),)

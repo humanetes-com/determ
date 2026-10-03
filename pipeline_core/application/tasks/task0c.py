@@ -41,6 +41,7 @@ from ...domain.fn_execution import (
     note_verdicts,
     site_label,
     unambiguous_verdicts,
+    withhold_pending,
 )
 from ...domain.generation import (
     as_integration_test,
@@ -62,9 +63,15 @@ from ...domain.refine import Attempt, FixProgress, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
 from ...domain.text import strip_think_blocks
 from ...log import emit, log
+from ...prompts.sections import trait_dispatch_route
 from ..fix_loop import FixOutcome, drive_fix_loop
 from ..reconstruct.cargo_errors import error_type_signals
-from .fn_criterion import FnCriterionInputs, fold_reading, read_function_execution
+from .fn_criterion import (
+    FnCriterionInputs,
+    fold_reading,
+    read_by_construction,
+    read_function_execution,
+)
 
 TASK0C_ATTEMPTS_LOG = ".task0c_attempts.jsonl"
 
@@ -170,6 +177,11 @@ class Task0cDeps:
     load_fn_record: Any = None
     save_fn_record: Any = None
     other_fn_records: Any = None
+    # (crate root, cluster) -> `WorldReading`: rustc's generic MIR and public
+    # index for the cluster's world, from which the functions no test can
+    # execute are PROVED rather than asked of a model. Absent: nothing is
+    # proved and the budget behaves as it did.
+    measure_reachability: Any = None
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -472,7 +484,12 @@ def _engine_retrospective(
         f"(a) TESTABLE — coverable with a different approach; describe the specific approach\n"
         f"(b) CFG_GATED — inside #[cfg(feature=...)] or excluded by the test environment above; untestable in this run\n"
         f"(c) UNREACHABLE — unreachable!() arm, dead branch, or intrinsically dead code; add tarpaulin ignore\n"
-        f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from inline tests\n"
+        f"(d) NEEDS_INTERNALS — requires private state, unsafe vtable dispatch, env vars not set in the parent process, or internal construction not accessible from the crate's public API\n\n"
+        f"Before you classify a function (c) or (d), name the public call that would NOT reach it. "
+        f"A trait-impl method has no caller by name: it runs whenever the trait is dispatched on a value "
+        f"of its type, including a value handed out as `dyn Trait` or `Box<dyn Error>` and formatting "
+        f"with `{{:?}}`, `{{:#?}}` or `{{}}`. \"Nothing in the crate calls it\" is not a reason; "
+        f"a type that no public item can ever return is.\n"
     )
     result = ask(prompt, model=_TASK0C_MODEL, think=None)
     lines = [ln.strip() for ln in result.splitlines() if ln.strip().startswith("FUNCTION")]
@@ -828,7 +845,10 @@ def _render_unexecuted_fns(source_text: str, targets: tuple[FnTarget, ...]) -> s
         body = "\n".join(
             f"{n:4d} | {lines[n - 1]}"
             for n in range(max(1, tgt.first_line), min(tgt.last_line, len(lines)) + 1))
-        blocks.append(f"// NEVER EXECUTED by any test: {tgt.label}{world}\n{body}")
+        route = trait_dispatch_route(tgt.site.container)
+        via = (f"// Reached through the trait, not by a direct call: {route}\n"
+               if route else "")
+        blocks.append(f"// NEVER EXECUTED by any test: {tgt.label}{world}\n{via}{body}")
     return "\n\n".join(blocks)
 
 
@@ -2792,7 +2812,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                     # test generation for code that is intrinsically unmeasurable.
                     _retro_cats = _parse_retrospective_categories(retro)
                     _fn_verdicts.update(unambiguous_verdicts(_file_fn_targets, _retro_cats))
-                    _pragma_fns = _retro_cats["UNREACHABLE"] + _retro_cats["CFG_GATED"]
+                    _pragma_fns, _pragma_withheld = withhold_pending(
+                        _retro_cats["UNREACHABLE"] + _retro_cats["CFG_GATED"],
+                        _file_fn_targets)
+                    if _pragma_withheld:
+                        _log(f"  [{module_name}] {rel_path} — not pragma'd, still inside the "
+                             f"function attempt budget: {_pragma_withheld} (the classification "
+                             "is a hypothesis until the budget is spent).")
                     if _pragma_fns:
                         _log(f"  [{module_name}] Targeted pragma for: {_pragma_fns}")
                         _pragma_ok = _task0c_targeted_pragma(
@@ -3140,7 +3166,28 @@ def task0c_augment_module(
     # already spent.
     _fn_budget = max(1, int(os.getenv("TASK0C_FN_ATTEMPTS", "3")))
     _fn_inputs = FnCriterionInputs(enumerate_fns=deps.enumerate_fns,
-                                   enumerate_mods=deps.enumerate_mods)
+                                   enumerate_mods=deps.enumerate_mods,
+                                   measure_reachability=(
+                                       deps.measure_reachability
+                                       if os.getenv("TASK0C_FN_REACHABILITY", "1") != "0"
+                                       else None))
+    # Which functions no test can execute, proved from the compiler's MIR and
+    # public index before the first targeted attempt. Taken once
+    # per cluster entry: the tree's callers do not change while this runs.
+    _fn_proofs, _fn_proof_reason = read_by_construction(
+        project_dir, _current_cluster, _fn_inputs)
+    _emit("task0c.fn_reachability", data={
+        "cluster": _cluster_label, "module": module_name,
+        "status": "ok" if not _fn_proof_reason else "unavailable",
+        "reason": _fn_proof_reason,
+        "proved": [{"site": site_label(k), "proof": v} for k, v in sorted(_fn_proofs.items())]})
+    if _fn_proofs:
+        _log(f"  [{module_name}/{_cluster_label}] {len(_fn_proofs)} function(s) no test can "
+             "execute, proved from the compiler's MIR and public index: "
+             + ", ".join(site_label(k) for k in sorted(_fn_proofs)[:12]))
+    elif _fn_proof_reason:
+        _log(f"  [{module_name}/{_cluster_label}] no reachability proof taken "
+             f"({_fn_proof_reason}); the attempt budget decides alone.")
     # What the other clusters already spent on a body both compile. Read once
     # at entry: they are finished (or frozen) while this one runs.
     _fn_inherited: dict[Any, int] = {}
@@ -3232,8 +3279,22 @@ def task0c_augment_module(
             _log(f"  [{module_name}/{_cluster_label}] Coverage: {coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
         _fn_record = fold_reading(
             _fn_record,
-            read_function_execution(project_dir, _current_cluster, _functions, _fn_inputs),
+            read_function_execution(project_dir, _current_cluster, _functions, _fn_inputs,
+                                    _fn_proofs),
             attempt_budget=_fn_budget, inherited=_fn_inherited)
+        _contradicted = [site_label(k) for k in _fn_proofs
+                         if k in set(getattr(_fn_record, "executed", ()))]
+        if _contradicted:
+            # A proved-unreachable function that a test executed. The proof
+            # speaks for `tests/`; an in-crate unit test can run a private fn,
+            # which is benign, and anything else is a defect in the proof.
+            # Either way the measurement wins (the record already holds the
+            # function as executed).
+            _log(f"  [{module_name}/{_cluster_label}] COUNTEREXAMPLE to the reachability proof: "
+                 + ", ".join(_contradicted)
+                 + " (executed although proved unreachable from tests/)")
+            _emit("task0c.fn_reachability_contradicted", data={
+                "cluster": _cluster_label, "module": module_name, "sites": _contradicted})
         _record_fn_reading(deps, project_dir, module_name, _cluster_label, attempt, _fn_record)
         _mark_phase(project_dir, f"task0c/{_cluster_label}/{module_name}", "in_progress",
                     detail=f"{coverage:.1f}% attempt {attempt}", source_hash=_source_hash(project_dir))

@@ -61,13 +61,15 @@ def _files(h: _Harness, lines: dict[str, list[int]]) -> list[PerFileCoverage]:
 
 
 def _run(h: _Harness, cluster: Any, lines: dict[str, list[int]],
-         targets: tuple[FnTarget, ...], *, split_n: int = 1) -> _PhaseCOutcome:
+         targets: tuple[FnTarget, ...], *, split_n: int = 1,
+         hist: Task0cFileHistory | None = None) -> _PhaseCOutcome:
     deps = h.deps
     object.__setattr__(deps, "nightly_rules_for_cluster", lambda: nightly_rules_for(cluster))
     return _run_phase_c(
         project_dir=h.ws, module_name="microcrate", module_dir=h.ws,
         project_context="", coverage_strategy="", attempt=4, coverage=95.0,
-        covered_lines=3, files_data=_files(h, lines), hist=Task0cFileHistory(),
+        covered_lines=3, files_data=_files(h, lines),
+        hist=hist if hist is not None else Task0cFileHistory(),
         ctx=_PhaseCCtx(deps=deps, current_cluster=cluster, cluster_label=cluster.name,
                        split_n=split_n, allow_line="", prelude_block="", prelude_names="",
                        file_stall_limit=5, retro_deep_at_stall=1, stall_context=False),
@@ -239,3 +241,57 @@ def test_a_block_that_does_not_compile_is_still_an_attempt_at_its_function(
     assert outcome.blocks_admitted == 0
     assert outcome.fn_attempted == {_HINT.site}
     assert dict(outcome.fn_outcomes) == {_HINT.site: "compile_failed"}
+
+
+_NO_GAIN = "FUNCTION {name}: UNREACHABLE — dead code, add an ignore pragma"
+
+
+def _stalled_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
+                  targets: tuple[FnTarget, ...]) -> tuple[list[list[str]], list[str]]:
+    """Two passes whose blocks add no line (quick coverage stays at the seed),
+    so the file stalls on the second and the retrospective runs; it classifies
+    `name` UNREACHABLE. Returns the pragma calls and the log."""
+    from pipeline_core.domain.refine import parse_retrospective_categories
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs",
+                 replies=[EXACT, EXACT, _NO_GAIN.format(name=name)], target=0.0, specs=())
+    object.__setattr__(h.deps, "quick_file_coverage", lambda pd, m, rel: (3, 10))
+    object.__setattr__(h.deps, "parse_retrospective_categories", parse_retrospective_categories)
+    calls: list[list[str]] = []
+
+    def _pragma(deps: Any, project_dir: Path, module_name: str, rel_path: str,
+                uncov: set[int], fns: list[str], model: str) -> bool:
+        calls.append(list(fns))
+        return False
+
+    monkeypatch.setattr(task0c_mod, "_engine_targeted_pragma", _pragma)
+    hist = Task0cFileHistory()
+    for _ in range(2):
+        _run(h, _EXTRA, {"src/lib.rs": [48]}, targets, hist=hist)
+    return calls, h.logs
+
+
+def test_a_retrospective_verdict_does_not_pragma_a_function_still_in_its_budget(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """nightly `ErrorImpl::fmt` / `thiserror_provide`: the retrospective said
+    UNREACHABLE for functions the record still held pending, a pragma hid
+    their lines, and the function reading kept counting them unexecuted. The
+    verdict is a hypothesis until the budget is spent."""
+    calls, logs = _stalled_pass(tmp_path, monkeypatch, "capacity_hint", (_HINT,))
+    assert calls == []
+    assert any("not pragma'd, still inside the function attempt budget: ['capacity_hint']" in ln
+               for ln in logs)
+
+
+def test_negative_control_the_same_verdict_on_a_function_not_pending_pragmas(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls, _ = _stalled_pass(tmp_path / "ctl", monkeypatch, "target", ())
+    assert calls == [["target"]]
+
+
+def test_a_trait_impl_target_is_told_the_route_that_reaches_it() -> None:
+    src = "impl<E> Debug for ErrorImpl<E> {\n    fn fmt(&self) {}\n}\n"
+    dbg = FnTarget(FnSite("src/error.rs", "fmt", "impl < E > Debug for ErrorImpl < E >"), 2, 2, False)
+    inherent = FnTarget(FnSite("src/error.rs", "new", "impl Error"), 2, 2, False)
+    out = task0c_mod._render_unexecuted_fns(src, (dbg,))
+    assert "Reached through the trait, not by a direct call: `{:?}`, `{:#?}`" in out
+    assert "Reached through the trait" not in task0c_mod._render_unexecuted_fns(src, (inherent,))

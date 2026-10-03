@@ -11,6 +11,7 @@ measured it unreached.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 from pipeline_core.domain.cfg import CfgSet
@@ -36,6 +37,7 @@ from pipeline_core.domain.fn_execution import (
     note_attempt,
     note_verdicts,
     unambiguous_verdicts,
+    withhold_pending,
 )
 from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
 
@@ -345,3 +347,59 @@ def test_a_verdict_is_evidence_on_the_record_and_changes_no_budget() -> None:
     again = advance_record(said, FunctionExecution(unexecuted=(_S,)), attempt_budget=3)
     assert again.pending[0].verdict == "NEEDS_INTERNALS"
     assert FnCoverageRecord.from_json(said.to_json()) == said
+
+
+def test_a_pragma_is_withheld_from_a_function_the_record_still_holds_pending() -> None:
+    kept, withheld = withhold_pending(["_assert_send_sync", "fmt", "Own::clone"], [_S, FnTarget(
+        FnSite("src/e.rs", "fmt", "impl Debug for E"), 5, 7, False)])
+    assert withheld == ["fmt"] and kept == ["_assert_send_sync", "Own::clone"]
+    assert withhold_pending(["fmt"], []) == (["fmt"], [])             # nothing pending: untouched
+
+
+# --- unreachable by construction (domain.fn_reachability feeds these) --------
+
+_PS = _S.site
+
+
+def _reading_with(*targets: FnTarget, executed: tuple[FnSite, ...] = ()) -> FunctionExecution:
+    return FunctionExecution(executed=frozenset(executed), unexecuted=tuple(targets))
+
+
+def test_a_proof_moves_an_unexecuted_function_out_of_what_the_tests_are_asked() -> None:
+    from pipeline_core.domain.fn_execution import apply_proofs
+    other = FnTarget(FnSite("src/e.rs", "other", ""), 9, 11, False)
+    out = apply_proofs(_reading_with(_S, other), {_PS: "private and never used"})
+    assert [t.site for t in out.unexecuted] == [other.site]
+    assert out.by_construction == ((_PS, "private and never used"),)
+    assert out.candidates == 2 and out.contradicted == ()
+
+
+def test_a_proved_function_a_test_executed_is_a_counterexample_and_stays_executed() -> None:
+    from pipeline_core.domain.fn_execution import apply_proofs
+    out = apply_proofs(_reading_with(executed=(_PS,)), {_PS: "wrongly proved"})
+    assert out.contradicted == (_PS,) and out.by_construction == () and _PS in out.executed
+
+
+def test_the_record_keeps_a_proved_function_without_spending_a_budget_on_it() -> None:
+    from pipeline_core.domain.fn_execution import apply_proofs
+    reading = apply_proofs(_reading_with(_S), {_PS: "private and never used"})
+    rec = advance_record(None, reading, attempt_budget=3)
+    assert rec.pending == () and rec.accounted
+    assert [(p.site, p.proof) for p in rec.by_construction] == [(_PS, "private and never used")]
+    assert "unreachable by construction 1" in rec.summary()
+    assert FnCoverageRecord.from_json(rec.to_json()) == rec
+    # A record written before this field existed still reads, with none.
+    old = json.loads(rec.to_json())
+    del old["by_construction"]
+    assert FnCoverageRecord.from_json(json.dumps(old)).by_construction == ()
+
+
+def test_the_end_gate_reads_a_proved_function_as_unreached_with_its_proof() -> None:
+    rec = advance_record(None, FunctionExecution(
+        by_construction=((_PS, "private and never used"),)), attempt_budget=3)
+    assert rec.classify_stub(_PS) == "unreached" and rec.speaks_about(_PS)
+    entry = rec.unreached_entry(_PS)
+    assert entry is not None and entry.proof == "private and never used"
+    assert entry.outcomes == ("by_construction",) and entry.attempts == ()
+    # Negative control: a site the record does not list is not accounted.
+    assert rec.classify_stub(FnSite("src/e.rs", "elsewhere", "")) is None

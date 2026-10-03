@@ -140,6 +140,7 @@ from pipeline_core.adapters.fill_engine_roles import (
     WorkspaceModelAdapter,
 )
 from pipeline_core.adapters.flow_audit import FlowAuditor
+from pipeline_core.adapters.fn_reachability import measure_world_reachability
 from pipeline_core.adapters.fn_reseed import (
     current_bodies,
     current_signatures,
@@ -2946,6 +2947,11 @@ def build_app(
             load_fn_record=augment_store.cluster_fn_record,
             save_fn_record=augment_store.save_cluster_fn_record,
             other_fn_records=augment_store.other_cluster_fn_records,
+            # The functions no test can execute are proved from rustc's own
+            # MIR and public index for the cluster's world, not asked of a model.
+            measure_reachability=functools.partial(
+                measure_world_reachability, cluster_env=cluster_cargo_env,
+                timeout=cfg.test_timeout),
         ),
         gen_fix_loop_deps=GenerateFixLoopDeps(
             set_current=set_current,

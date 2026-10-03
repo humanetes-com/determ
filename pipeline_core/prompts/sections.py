@@ -197,6 +197,40 @@ def trait_contract_for(container: str) -> str:
     return TRAIT_CONTRACTS.get(name, "")
 
 
+# How a trait-impl method is reached. The method has no caller by name: it runs
+# when something dispatches the trait on a value of the type (including one
+# handed out as `dyn Trait`), so "no code calls it" is not "no public path
+# reaches it". Observed 2026-10-03 (anyhow): the generation model wrote tests
+# asserting `Debug for DisplayError` was "never called by the public API" while
+# `format!("{:#?}", err)` on an `Option::context` error runs it, and
+# `format!("{:?}", Box<dyn Error>)` runs `Debug for ErrorImpl<E>`.
+TRAIT_DISPATCH_ROUTES: dict[str, str] = {
+    "Debug": "`{:?}`, `{:#?}` or `dbg!` on a value of this type or on a `dyn Debug`/`dyn Error` holding it; "
+             "a wrapper's own Debug may take another branch for `{:#?}` than for `{:?}`",
+    "Display": "`{}`, `format!`, `.to_string()` on a value of this type or on a `dyn Display`/`dyn Error` holding it",
+    "Clone": "an explicit `.clone()` / `Clone::clone` call on the type (a plain copy of a `Copy` value does NOT call it), "
+             "or a container's clone/`cloned()`/`to_vec()` that clones this element type",
+    "Drop": "a value of this type going out of scope or being passed to `drop`",
+    "Default": "`Default::default()`, `T::default()` or `..Default::default()` for this type",
+    "PartialEq": "`==`, `!=` or `assert_eq!` between values of this type",
+    "PartialOrd": "`<`, `>`, `<=`, `>=` or `.partial_cmp()` between values of this type",
+    "Ord": "`.cmp()`, `.max()`, `.min()` or sorting values of this type",
+    "Hash": "using a value of this type as a `HashMap`/`HashSet` key or calling `.hash(&mut hasher)`",
+    "Iterator": "`.next()`, a `for` loop, or any adapter (`.map`, `.collect`, ...) over a value of this type",
+    "Deref": "`*value` or an auto-deref'd method call on a value of this type",
+    "From": "`T::from(x)`, `x.into()` or the `?` operator converting into this type",
+    "Error": "`Error::source()` / `Error::provide` called on a value of this type or on a `dyn Error` holding it "
+             "(`std::error::request_ref` drives `provide`)",
+}
+
+
+def trait_dispatch_route(container: str) -> str:
+    """Where a trait-impl method is reached from, or "" for an inherent
+    method and a trait the table does not know."""
+    name = extract_trait_from_container(container)
+    return TRAIT_DISPATCH_ROUTES.get(name, "") if name else ""
+
+
 # Six Rust confusion classes seen recurrently in overnight runs.
 # Each has a one-line summary (always shown in the prompt) and a fuller
 # detail block (injected only when the current cargo error trips the

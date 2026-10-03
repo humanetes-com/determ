@@ -164,8 +164,10 @@ def classify_remaining_stubs(
         unreached_evidence=tuple(
             f"{site_label(s)}"
             + (" (compiled only under its cluster's cfg)" if unreached[s].cluster_gated else "")
-            + " — targeted attempt(s) "
-            + (", ".join(str(a) for a in unreached[s].attempts) or "none recorded")
+            + (f" — unreachable by construction: {unreached[s].proof}"
+               if unreached[s].proof else
+               " — targeted attempt(s) "
+               + (", ".join(str(a) for a in unreached[s].attempts) or "none recorded"))
             for s in candidates if s in unreached),
         executed_upstream=frozenset(FnLocator(s.file, s.fn_name) for s in executed),
     )
@@ -224,11 +226,12 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
             log(f"    {loc.file}::{loc.fn_name}")
     if verdict.unreached_by_tests:
         log(f"\nNOTE: {len(verdict.unreached_by_tests)} fn(s) remain "
-            "unimplemented!() and test augmentation MEASURED them unreached: "
-            "test blocks written for each compiled and ran, and the coverage "
-            "run after them still counted 0 executions. No test in this suite "
-            "enters them, so no fill for them could have been verified. Not "
-            "counted against this run:")
+            "unimplemented!() and no test can execute them: augmentation either "
+            "MEASURED them unreached (test blocks written for each compiled and "
+            "ran, and the coverage run after them still counted 0 executions) or "
+            "PROVED them unreachable by construction from the compiler's MIR and "
+            "public index. No test in this suite enters them, so no fill for "
+            "them could have been verified. Not counted against this run:")
         for line in verdict.unreached_evidence:
             log(f"    {line}")
     if verdict.dead_in_tree:

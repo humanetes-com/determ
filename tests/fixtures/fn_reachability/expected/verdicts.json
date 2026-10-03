@@ -1,0 +1,24 @@
+{
+  "_about": "What domain.fn_reachability must say about tests/fixtures/fn_reachability/src/lib.rs. `flagged` are proved unreachable by construction; `kept` map a label to a substring of the fact that keeps the function testable. Labels are `file::fn [container]`.",
+  "flagged": [
+    "src/lib.rs::clone [impl Clone for Token]",
+    "src/lib.rs::never_called [impl Token]",
+    "src/lib.rs::dead_helper",
+    "src/lib.rs::private_unused [impl Api]"
+  ],
+  "kept": {
+    "src/lib.rs::clone [impl Clone for Called]": "<Called as Clone>::clone",
+    "src/lib.rs::fmt [impl fmt::Debug for Inner]": "unsize-coerced",
+    "src/lib.rs::fmt [impl fmt::Display for Inner]": "unsize-coerced",
+    "src/lib.rs::fmt [impl fmt::Debug for Sq]": "unsize-coerced",
+    "src/lib.rs::area [impl Shape for Sq]": "unsize-coerced",
+    "src/lib.rs::write_str [impl fmt::Write for Sink]": "write_fmt",
+    "src/lib.rs::clone [impl Clone for Boxed]": "dup_generic::<Boxed>",
+    "src/lib.rs::clone [impl Clone for Leaked]": "public signature",
+    "src/lib.rs::drop [impl Drop for Guard]": "scope exit",
+    "src/lib.rs::live_helper": "live_helper()",
+    "src/lib.rs::hidden_api": "public index",
+    "src/lib.rs::macro_named": "macro body",
+    "src/lib.rs::value [impl Api]": "public index"
+  }
+}

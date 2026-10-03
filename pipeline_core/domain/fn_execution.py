@@ -260,10 +260,37 @@ class FunctionExecution:
     executed: frozenset[FnSite] = frozenset()
     unexecuted: tuple[FnTarget, ...] = ()
     unmeasured: tuple[FnSite, ...] = ()
+    # Functions no test can execute, each with the proof
+    # (`domain.fn_reachability`): they are not asked of any test.
+    by_construction: tuple[tuple[FnSite, str], ...] = ()
+    # Sites a proof named that a measurement saw EXECUTED: counterexamples to
+    # the proof. The measurement wins and the proof is dropped.
+    contradicted: tuple[FnSite, ...] = ()
 
     @property
     def candidates(self) -> int:
-        return len(self.executed) + len(self.unexecuted) + len(self.unmeasured)
+        return (len(self.executed) + len(self.unexecuted) + len(self.unmeasured)
+                + len(self.by_construction))
+
+
+def apply_proofs(reading: FunctionExecution,
+                 proofs: Mapping[FnSite, str]) -> FunctionExecution:
+    """Move the unexecuted functions a proof names out of the set the tests are
+    asked about. A proved site that was EXECUTED is a counterexample: it stays
+    executed and is reported in `contradicted`. A proved site no counted body
+    resolved to stays unmeasured: an absence is not evidence either way."""
+    if not proofs:
+        return reading
+    kept: list[FnTarget] = []
+    proved: list[tuple[FnSite, str]] = []
+    for t in reading.unexecuted:
+        if t.site in proofs:
+            proved.append((t.site, proofs[t.site]))
+        else:
+            kept.append(t)
+    return replace(
+        reading, unexecuted=tuple(kept), by_construction=tuple(proved),
+        contradicted=tuple(sorted(s for s in reading.executed if s in proofs)))
 
 
 def function_execution(
@@ -351,6 +378,17 @@ class UnreachedFn:
     cluster_gated: bool = False
     outcomes: tuple[str, ...] = ()
     verdict: str = ""
+    # Non-empty when no budget was spent: the function was proved unreachable
+    # by construction (`domain.fn_reachability`) and this is the proof.
+    proof: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenFn:
+    """A function no test can execute, and why (`domain.fn_reachability`)."""
+
+    site: FnSite
+    proof: str
 
 
 # How a stub reads against augmentation's record, for the gates downstream.
@@ -375,6 +413,7 @@ class FnCoverageRecord:
     unreached: tuple[UnreachedFn, ...] = ()
     unmeasured: tuple[FnSite, ...] = ()
     reason: str = ""
+    by_construction: tuple[ProvenFn, ...] = ()
 
     @property
     def accounted(self) -> bool:
@@ -393,6 +432,8 @@ class FnCoverageRecord:
         return (f"functions: executed {len(self.executed)}/{self.candidates}, "
                 f"unexecuted {len(self.pending)} (cluster-gated "
                 f"{self.gated_pending}), unreached {len(self.unreached)}"
+                + (f", unreachable by construction {len(self.by_construction)}"
+                   if self.by_construction else "")
                 + (f", unmeasured {len(self.unmeasured)}"
                    if self.unmeasured else ""))
 
@@ -433,6 +474,9 @@ class FnCoverageRecord:
         for u in self.unreached:
             if u.site == want:
                 return u
+        for p in self.by_construction:
+            if p.site == want:
+                return UnreachedFn(p.site, (), False, ("by_construction",), "", p.proof)
         return None
 
     def _statuses(self, match: Callable[[FnSite], bool]) -> list[str]:
@@ -440,6 +484,7 @@ class FnCoverageRecord:
         out += [STUB_EXECUTED for s in self.executed if match(s)]
         out += ["pending" for p in self.pending if match(p.target.site)]
         out += [STUB_UNREACHED for u in self.unreached if match(u.site)]
+        out += [STUB_UNREACHED for p in self.by_construction if match(p.site)]
         out += ["unmeasured" for s in self.unmeasured if match(s)]
         return out
 
@@ -463,6 +508,8 @@ class FnCoverageRecord:
                  "verdict": u.verdict}
                 for u in self.unreached],
             "unmeasured": [_site_json(s) for s in self.unmeasured],
+            "by_construction": [{**_site_json(p.site), "proof": p.proof}
+                                for p in self.by_construction],
         }, indent=2) + "\n"
 
     @classmethod
@@ -496,6 +543,9 @@ class FnCoverageRecord:
                             str(u.get("verdict", "")))
                 for u in raw.get("unreached", [])),
             unmeasured=tuple(_site_of(s) for s in raw.get("unmeasured", [])),
+            by_construction=tuple(
+                ProvenFn(_site_of(p), str(p.get("proof", "")))
+                for p in raw.get("by_construction", []) if isinstance(p, dict)),
         )
 
 
@@ -548,6 +598,8 @@ def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
         pending=tuple(pending),
         unreached=tuple(unreached),
         unmeasured=reading.unmeasured,
+        by_construction=tuple(ProvenFn(site, why)
+                              for site, why in reading.by_construction),
     )
 
 
@@ -583,6 +635,27 @@ def unambiguous_verdicts(targets: Iterable[FnTarget],
         if len(said) == 1:
             out[t.site] = said[0]
     return out
+
+
+def withhold_pending(names: Iterable[str],
+                     pending: Iterable[FnTarget]) -> tuple[list[str], list[str]]:
+    """Split the names a retrospective classified unreachable into those a
+    pragma may act on and those it may not.
+
+    A function still pending in the function-execution record has not had its
+    attempt budget spent: the classification is the model's hypothesis, and
+    the record owns the decision with evidence (attempts aimed at the function
+    that executed nothing). A pragma written on the hypothesis hides the
+    function's lines and keeps it counted unexecuted, so the two readings
+    disagree for the rest of the run. Matching is by bare name — the
+    retrospective names functions that way — so a name any pending target
+    carries is withheld."""
+    held = {t.site.fn_name for t in pending}
+    kept: list[str] = []
+    withheld: list[str] = []
+    for n in names:
+        (withheld if n.rsplit("::", 1)[-1] in held else kept).append(n)
+    return kept, withheld
 
 
 def inherited_attempts(others: Iterable[FnCoverageRecord]) -> dict[FnSite, int]:
