@@ -355,11 +355,13 @@ def test_the_augmented_restore_on_the_same_repo_keeps_the_generated_tests(tmp_pa
 
 _STATE_H = _STATE_A.replace("\ncurrent: task0b\n", """[task0d/stable]  done          hash=-  227 behaviours
 [task0d/nightly]  done          hash=-  227 behaviours
+[task0d/x/book]  done          hash=-  2 world(s) booked (nightly+stable)
 
 current: task0d
 """)
 _STATE_HB = _STATE_B.replace("[task0c/stable]  done", """[task0d/stable]  done          hash=-  227 behaviours
 [task0d/nightly]  done          hash=-  227 behaviours
+[task0d/x/book]  done          hash=-  2 world(s) booked (nightly+stable)
 [task0c/stable]  done""")
 
 
@@ -407,14 +409,16 @@ def test_pre_augment_restore_keeps_the_behaviour_harvest_by_default(tmp_path):
     _pre_augment_restore(lines.append).run(tmp_path, repo)
 
     # the harvest as task0d wrote it (not the strip bake's merge), its doc tests
-    # and its state entries survive; everything task0c and later wrote is gone.
+    # and its state entries survive (the book stage's included, read from the
+    # tagged commit's copy, so the restored run skips the book); everything
+    # task0c and later wrote is gone.
     assert (repo / ".skeleton" / "_behaviours_stable.json").read_text(encoding="utf-8") == '{"specs": [1]}'
     assert (repo / "tests" / "doc_lib_gen_1.rs").exists()
     assert not (repo / "src" / "x.gen_tests_1.rs").exists()
     assert not (repo / ".cluster_augmented").exists() and not (repo / ".module_stripped").exists()
     phases = set(read_state(repo)["phases"])
     assert phases == {"cfg_scan", "test_cmd", "task0a-context", "task0a", "task0b",
-                      "task0d/stable", "task0d/nightly"}
+                      "task0d/stable", "task0d/nightly", "task0d/x/book"}
     assert "task0d-done-x" in _tags(repo)
     assert any("Workspace restored to task0d-done-x" in ln for ln in lines), lines
 

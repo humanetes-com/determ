@@ -392,6 +392,7 @@ class LLMController:
             "model": model,
             "finish_reason": meta.finish_reason,
             "prompt_tokens": meta.prompt_tokens,
+            "completion_tokens": meta.completion_tokens,
             "content_chars": len(result),
             "reasoning_chars": len(reasoning_text),
             "stop": cap.stop,
@@ -411,6 +412,7 @@ class LLMController:
             "model": model,
             "finish_reason": meta.finish_reason,
             "prompt_tokens": meta.prompt_tokens,
+            "completion_tokens": meta.completion_tokens,
             "content_chars": len(result),
             "reasoning_chars": len(reasoning_text),
             "stop": cap.stop,
@@ -561,6 +563,7 @@ class LLMController:
         self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(usable)}")
         self._emit_followup_meta(
             prompt_sha=prompt_sha, model=model, finish_reason=meta.finish_reason,
+            prompt_tokens=meta.prompt_tokens, completion_tokens=meta.completion_tokens,
             result=raw, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
             messages=messages, fu_messages=fu_messages,
             request_max=fu_plan.request_max, followup_think=followup_think,
@@ -575,7 +578,8 @@ class LLMController:
         result: str, fu_reasoning: str, reasoning_text: str,
         messages: list[dict[str, Any]], fu_messages: list[dict[str, Any]],
         request_max: int | None, followup_think: bool, stop: str | None,
-        salvaged_chars: int = 0,
+        salvaged_chars: int = 0, prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
     ) -> None:
         """`result` is the RAW reply, so `content_chars` measures what the
         stream produced; `salvaged_chars` is how much of it survived the cut
@@ -586,6 +590,8 @@ class LLMController:
             "prompt_sha": prompt_sha,
             "model": model,
             "finish_reason": finish_reason,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "content_chars": len(result),
             "salvaged_chars": salvaged_chars,
             "reasoning_chars": len(fu_reasoning),

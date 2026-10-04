@@ -188,15 +188,20 @@ PRE_AUGMENT_KEPT_PHASE_PREFIXES: tuple[str, ...] = ("task0a",)   # task0a, task0
 # the augmentation. Nothing task0c writes is an input to it, so re-running
 # task0c cannot invalidate it: a pre-augmentation restore lands here by
 # default and keeps the harvest, and only an explicit re-harvest goes back to
-# `task0c-pre-<module>`. Written once, when every cluster's harvest is done
-# and task0c has not started, at a commit that also holds what task0d leaves
-# outside its per-cluster commits (the doc-example tests and the behaviour
-# book).
+# `task0c-pre-<module>`. Written once, when every cluster's harvest AND the
+# module's book stage are done and task0c has not started, at a commit that
+# holds both and the state entries saying so: the restore rewrites
+# pipeline_state.md from the tagged commit's copy, so an entry the commit does
+# not hold is a stage the restored run pays again.
 BEHAVIOUR_TAG_PREFIX = "task0d-done-"
 
-# task0d's pipeline_state keys are `task0d/<cluster>`. The task0d module takes
-# its key prefix from here, so the restore's keep rule and the writer agree.
+# task0d's pipeline_state keys: `task0d/<cluster>` for each cluster's harvest
+# and `task0d/<module>/book` for the module's book stage (doc examples, the
+# behaviour book, rule probes), which runs once after every cluster. The
+# task0d module takes its keys from here, so the restore's keep rule, the tag
+# plan and the writer agree.
 BEHAVIOUR_PHASE_PREFIX = "task0d"
+BEHAVIOUR_BOOK_SEGMENT = "book"
 
 
 def pre_augment_tag(module_name: str) -> str:
@@ -209,8 +214,19 @@ def behaviour_tag(module_name: str) -> str:
     return f"{BEHAVIOUR_TAG_PREFIX}{module_name}"
 
 
+def behaviour_harvest_key(cluster_name: str) -> str:
+    """The state key of one cluster's harvest: `task0d/<cluster>`."""
+    return f"{BEHAVIOUR_PHASE_PREFIX}/{cluster_name}"
+
+
+def behaviour_book_key(module_name: str) -> str:
+    """The state key of a module's book stage: `task0d/<module>/book`. Three
+    segments, so it can never be read as a cluster's two-segment harvest key."""
+    return f"{BEHAVIOUR_PHASE_PREFIX}/{module_name}/{BEHAVIOUR_BOOK_SEGMENT}"
+
+
 def is_behaviour_phase(key: str) -> bool:
-    """True for a task0d state key (`task0d/<cluster>`)."""
+    """True for a task0d state key (`task0d/<cluster>`, `task0d/<module>/book`)."""
     return key == BEHAVIOUR_PHASE_PREFIX or key.startswith(f"{BEHAVIOUR_PHASE_PREFIX}/")
 
 
@@ -302,32 +318,36 @@ def plan_behaviour_tags(
     harvest_keys: Iterable[str],
 ) -> RestoreTagPlan:
     """Decide the behaviour restore tags (`task0d-done-<module>`) right after
-    task0d, given the `task0d/<cluster>` keys every cluster's harvest writes.
-    Pure.
+    task0d, given the `task0d/<cluster>` keys every cluster's harvest writes;
+    each module's `task0d/<module>/book` key is required too. Pure.
 
     Refused once task0c has started (HEAD then carries generated tests, and
     the restore would keep them as if they were the original's), when no
-    cluster was harvested, and when any cluster's harvest is not done: a
-    restore point over a partial harvest would keep the missing clusters
-    missing, because the restore keeps every `task0d/*` entry it finds."""
+    cluster was harvested, and when any cluster's harvest or any module's
+    book stage is not done: the restore keeps every `task0d/*` entry it
+    finds, so a point over a partial stage would keep the missing part
+    missing, and a point over a harvest whose book never ran would hand
+    every restored run a book stage to pay."""
     started = _augmentation_phases(phases)
     if started:
         return RestoreTagPlan(
             to_write=(), present=(), point=_BEHAVIOUR_POINT,
             refusal=(f"task0c has already run in this workspace (phase(s) {started}), so HEAD "
                      "holds generated tests; the behaviour restore point is written by the next "
-                     "run that harvests before task0c"),
+                     "run that harvests before task0c (restart_from.sh task0d)"),
         )
+    modules = list(modules)
     keys = sorted(set(harvest_keys))
     if not keys:
         return RestoreTagPlan(to_write=(), present=(), point=_BEHAVIOUR_POINT,
                               refusal="no cluster was harvested")
-    open_keys = [k for k in keys if not _done(phases.get(k))]
+    open_keys = [k for k in [*keys, *(behaviour_book_key(m) for m in modules)]
+                 if not _done(phases.get(k))]
     if open_keys:
         return RestoreTagPlan(
             to_write=(), present=(), point=_BEHAVIOUR_POINT,
-            refusal=(f"the behaviour harvest is not done for {', '.join(open_keys)}; a task0c "
-                     "restart re-harvests until every cluster is"),
+            refusal=(f"the behaviour stage is not done for {', '.join(open_keys)}; the next "
+                     "launch before task0c runs what is missing"),
         )
     existing = set(existing_tags)
     wanted = [behaviour_tag(m) for m in modules]

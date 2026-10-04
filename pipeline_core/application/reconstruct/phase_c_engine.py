@@ -117,6 +117,7 @@ from pipeline_core.prompts.retry_turn import (
     EvidenceSection,
     types_new_to,
 )
+from pipeline_core.threads import context_thread
 
 
 def _best_fails(gauge: FloorStall) -> int:
@@ -1058,8 +1059,8 @@ class PhaseCFillEngine:
                 _nw = min(_parallelism, len(_level))
                 if _nw > 1:
                     _workers = [
-                        _threading.Thread(target=_worker, args=(_work_queue,),
-                                          name=f"per-fn-{cluster_name}-w{i}")
+                        context_thread(_worker, args=(_work_queue,),
+                                       name=f"per-fn-{cluster_name}-w{i}")
                         for i in range(_nw)
                     ]
                     for _t in _workers:

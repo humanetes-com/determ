@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.tasks.task0d import Task0dDeps, run_task0d
@@ -136,7 +138,9 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     suite = w.saved["stable"]
     assert suite.specs and w.committed == [
-        ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)")
+        ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)"),
+        ("task0d/anyhow/book", "done",
+         "pipeline: task0d/anyhow/book — 1 world(s) booked (stable), rule probes on none"),
     ]
     reading = [ln for ln in w.logs if ln.startswith("  [task0d] cluster stable:") and "behaviours —" in ln]
     assert len(reading) == 1
@@ -171,11 +175,12 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     assert "write ONE behaviour for each of these classes" in w.prompts[0]
 
 
-def test_done_cluster_is_skipped(tmp_path: Path) -> None:
-    w = _World(done={"task0d/stable"})
+def test_done_cluster_and_done_book_stage_are_skipped(tmp_path: Path) -> None:
+    w = _World(done={"task0d/stable", "task0d/anyhow/book"})
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
-    assert not w.saved and not w.committed and not w.prompts
+    assert not w.saved and not w.committed and not w.marked and not w.prompts
     assert any("already harvested" in ln for ln in w.logs)
+    assert any("book stage already done" in ln for ln in w.logs)
 
 
 def test_failing_probe_is_dropped_negative_control(tmp_path: Path) -> None:
@@ -214,14 +219,17 @@ def test_harvest_failure_leaves_the_phase_open(tmp_path: Path) -> None:
         raise RuntimeError("bad source")
 
     run_task0d(w.deps(harvest=boom), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
-    assert not w.committed and w.marked == [("task0d/stable", "failed")]
+    assert w.marked == [("task0d/stable", "failed")]
+    # Nothing on disk to book: the stage is done with nothing, and the tag
+    # plan still refuses on the failed harvest.
+    assert w.committed == [("task0d/anyhow/book", "done", "pipeline: task0d/anyhow/book — no suite to book")]
 
 
 def test_each_cluster_gets_its_own_suite(tmp_path: Path) -> None:
     w = _World()
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
     assert set(w.saved) == {"stable", "nightly"}
-    assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/nightly"]
+    assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/nightly", "task0d/anyhow/book"]
     s = w.saved["nightly"].specs[0]
     assert replace(s, cfg_cluster="stable") != s and s.cfg_cluster == "nightly"
 
@@ -436,7 +444,7 @@ def test_a_held_out_capture_reaches_no_emitted_test_no_saved_suite_and_no_book(t
     emitted: list[tuple[str, ...]] = []
 
     def emit_tests(pd: Path, c: str, specs: object, **_k: object) -> tuple[None, tuple[str, ...], list[dict[str, str]], tuple[()]]:
-        emitted.append(tuple(s.behaviour_id for s in specs))  # type: ignore[attr-defined]
+        emitted.append(tuple(s.behaviour_id for s in specs))
         return None, (), [], ()
 
     over: dict[str, object] = {
@@ -460,3 +468,84 @@ def test_a_held_out_capture_reaches_no_emitted_test_no_saved_suite_and_no_book(t
     run_task0d(w0.deps(emit_tests=emit_tests), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     assert probe_ids <= {i for ids in emitted for i in ids}
     assert probe_ids <= {s.behaviour_id for s in w0.saved["stable"].specs}
+
+
+# --------------------------------------------------------------------------
+# The book stage has its own state key, `task0d/<module>/book`.
+# --------------------------------------------------------------------------
+
+
+def _on_disk(w: _World, tmp_path: Path, names: tuple[str, ...]) -> dict[str, BehaviourSuite]:
+    """Each world's harvested suite, as an earlier launch saved it."""
+    d = w.deps()
+    return {n: d.harvest(d.read_sources(tmp_path / "src"), cfg_cluster=n,
+                         test_sources=d.read_test_sources(tmp_path), default_cluster="stable")
+            for n in names}
+
+
+def _probed(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    import pipeline_core.application.tasks.task0d as t0d
+    seen: list[str] = []
+
+    def record(deps: object, pd: Path, mod: str, cluster: BuildCluster, book: BehaviourSuite,
+               **_k: object) -> BehaviourSuite:
+        seen.append(cluster.name)
+        return book
+
+    monkeypatch.setattr(t0d, "run_rule_probes", record)
+    return seen
+
+
+def test_a_launch_that_died_in_the_book_resumes_only_the_book(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every cluster harvested in an earlier launch, the book stage not done
+    (the launch died in its 93-125 min): the book runs over the suites on
+    disk, rule probes run for every world (no completed book stage covers
+    any), and the stage is committed and marked. No harvest, no probe.
+    Negative control: the pre-change rule (`if passed:`) built nothing."""
+    w = _World(done={"task0d/stable", "task0d/nightly"})
+    disk = _on_disk(w, tmp_path, ("stable", "nightly"))
+    probed = _probed(monkeypatch)
+
+    def no_harvest(*_a: object, **_k: object) -> BehaviourSuite:
+        raise AssertionError("a done cluster was harvested again")
+
+    run_task0d(w.deps(harvest=no_harvest, load_suite=lambda pd, c: disk[c], RULE_PROBES_MAX=1),
+               tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)],
+               tmp_path / "src")
+    assert set(w.saved) == {"stable", "nightly"} and all(s.book_worlds for s in w.saved.values())
+    assert probed == ["stable", "nightly"]
+    assert w.committed == [("task0d/anyhow/book", "done",
+                            "pipeline: task0d/anyhow/book — 2 world(s) booked (nightly+stable), "
+                            "rule probes on nightly+stable")]
+    assert not w.probes_run and not w.marked
+    assert any("no cluster harvested in this launch" in ln for ln in w.logs)
+
+
+def test_re_harvesting_a_cluster_reopens_a_done_book_stage_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The book key goes back to pending before the harvest starts, so dying
+    between the harvest and the rebuilt book cannot leave the old book marked
+    done over a new suite. Rule probes run for the re-harvested world only:
+    the done stage already probed the other."""
+    w = _World(done={"task0d/stable", "task0d/anyhow/book"})
+    disk = _on_disk(w, tmp_path, ("stable",))
+    probed = _probed(monkeypatch)
+    run_task0d(w.deps(load_suite=lambda pd, c: disk.get(c, BehaviourSuite(cfg_cluster=c)),
+                      RULE_PROBES_MAX=1),
+               tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)],
+               tmp_path / "src")
+    assert w.marked == [("task0d/anyhow/book", "pending")]
+    assert [c[0] for c in w.committed] == ["task0d/nightly", "task0d/anyhow/book"]
+    assert probed == ["nightly"]
+
+
+def test_a_failed_book_marks_the_stage_failed_and_commits_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pipeline_core.application.tasks.task0d as t0d
+
+    def boom(*_a: object, **_k: object) -> dict[str, BehaviourSuite]:
+        raise RuntimeError("model unreachable")
+
+    monkeypatch.setattr(t0d, "build_book_from_source", boom)
+    w = _World()
+    run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    assert [c[0] for c in w.committed] == ["task0d/stable"]
+    assert w.marked == [("task0d/anyhow/book", "failed")]

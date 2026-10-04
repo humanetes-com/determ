@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.coverage import CoverageMeasurement
+from pipeline_core.domain.file_coverage_floor import FileFloor
 from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.models import AugmentVerdict, BuildCluster
 
@@ -82,6 +83,7 @@ class AugmentStore(Protocol):
         self, project_dir: Path, cluster_name: str, module_name: str, cov: float,
         *, reason: str = "", code_id: str = "",
         functions: FnCoverageRecord | None = None,
+        file_floor: FileFloor | None = None,
     ) -> None:
         """Record the coverage, the terminating status ("done" / "ceiling" /
         "hard_block" / "precheck_failed") and the pipeline `code_identity` it
@@ -95,6 +97,17 @@ class AugmentStore(Protocol):
     ) -> FnCoverageRecord | None:
         """The function-execution record augmentation persisted for (cluster,
         module), or None."""
+        ...
+    def cluster_file_floor(
+        self, project_dir: Path, cluster_name: str, module_name: str,
+    ) -> FileFloor | None:
+        """The per-file floor reading augmentation persisted for (cluster,
+        module), or None."""
+        ...
+    def module_file_floors(
+        self, project_dir: Path, module_name: str,
+    ) -> dict[str, FileFloor]:
+        """Every cluster's per-file floor reading for the module, by cluster."""
         ...
     def cluster_augmented_value(
         self, project_dir: Path, cluster_name: str, module_name: str,

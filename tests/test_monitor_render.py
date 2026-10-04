@@ -239,7 +239,7 @@ def _render_frame(monkeypatch, cols: int, split: bool, view: str) -> list[str]:
     monkeypatch.setattr(m, "_view", view)
     monkeypatch.setattr(m, "gpu", lambda: ["gpu row " + "x" * 300])
     monkeypatch.setattr(m, "pipeline_status", lambda width: ["pipeline row " + "y" * 300])
-    monkeypatch.setattr(m, "generation", lambda width: ["gen row"])
+    monkeypatch.setattr(m, "generation", lambda width, fill_rows=None: ["gen row"])
     m._buf.clear()
     m._render_all()
     frame = list(m._buf)

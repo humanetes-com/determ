@@ -86,6 +86,8 @@ class HealthKind(StrEnum):
     PLATEAU_ACROSS_RUNS = "plateau_across_runs"  # same score in N consecutive RUNS — invisible inside any one of them
     WORKSPACE_RESET = "workspace_reset"          # reconstruction was wiped; scores before it describe a tree that no longer exists
     NO_SEGMENT_EVIDENCE = "no_segment_evidence"  # nothing to analyse — every segment detector is silently vacuous
+    PHASE_COST_REGRESSION = "phase_cost_regression"  # this code buys more work for a phase than the earlier codes did
+    PHASE_OVERRUN = "phase_overrun"              # a phase still running past the earlier codes' p90 wall
 
 
 @dataclass(frozen=True, slots=True)

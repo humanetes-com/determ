@@ -291,7 +291,8 @@ def _harvested_deps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     deps.list_git_tags.return_value = []
     deps.read_state.return_value = {"phases": {
         "task0b": {"status": "done"}, "task0d/stable": {"status": "done"},
-        "task0d/nightly": {"status": "done"}}, "current": ""}
+        "task0d/nightly": {"status": "done"}, "task0d/mod/book": {"status": "done"}},
+        "current": ""}
     deps.augment_store.is_module_augmented.return_value = False
     deps.git_tag.side_effect = lambda _p, tag: order.append(f"tag {tag}")
     deps.git_checkpoint.side_effect = lambda *_a: order.append("checkpoint") or True
@@ -333,6 +334,41 @@ def test_run_pipeline_does_not_tag_a_partial_harvest(
     with pytest.raises(SystemExit):
         orchestrator.run_pipeline(deps, _args(), tmp_path)
     assert "checkpoint" not in order and "tag task0d-done-mod" not in order
+
+
+def test_run_pipeline_does_not_tag_a_harvest_whose_book_stage_is_open(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: list[str] = []
+    deps = _harvested_deps(tmp_path, monkeypatch, order)
+    del deps.read_state.return_value["phases"]["task0d/mod/book"]
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert "checkpoint" not in order and "tag task0d-done-mod" not in order
+    logged = " ".join(str(c.args[0]) for c in deps.log.call_args_list)
+    assert "[task0d-done] NOT tagged: the behaviour stage is not done for task0d/mod/book" in logged
+
+
+def test_run_pipeline_refuses_task0d_once_any_task0c_entry_exists(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The live tmp/anyhow on 2026-10-04: task0c/nightly in progress, so no
+    module sentinel yet, with generated tests in the tree. A book stage
+    resumed there would read them; task0d is refused and task0c resumes.
+    Negative control: the same state without the task0c entry runs task0d."""
+    order: list[str] = []
+    deps = _harvested_deps(tmp_path, monkeypatch, order)
+    del deps.read_state.return_value["phases"]["task0d/mod/book"]
+    deps.read_state.return_value["phases"]["task0c/nightly"] = {"status": "in_progress"}
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert "task0d" not in order and "task0c" in order
+    logged = " ".join(str(c.args[0]) for c in deps.log.call_args_list)
+    assert "task0c has started in this workspace" in logged
+
+    order.clear()
+    del deps.read_state.return_value["phases"]["task0c/nightly"]
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert "task0d" in order
 
 
 def test_run_pipeline_reharvest_reaches_the_restore(tmp_path: Path) -> None:

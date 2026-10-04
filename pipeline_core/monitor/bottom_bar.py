@@ -16,7 +16,7 @@ __all__ = ["bottom_rows"]
 
 def bottom_rows(
     *, views: Sequence[tuple[str, str, str]], shown: Collection[str], running: bool,
-    split: bool, split_enabled: bool, hints_on: bool, shutdown_armed: bool,
+    split: bool, split_enabled: bool, shutdown_armed: bool,
     auto_armed: bool, demo: bool, demo_interval: int, action_msg: str,
 ) -> list[str]:
     """`[message, legend]`. `shown` holds the ids of the views on screen."""
@@ -38,7 +38,6 @@ def bottom_rows(
         view_tag("legend", "[l]egend"), view_tag("phases", "[e]xplain"),
         view_tag("health", "[h]ealth"), view_tag("fields", "[f]ields"),
         split_tag,
-        cyan("[t]ips on") if hints_on else dim("[t]ips off"),
         green("[c]ontinue"), cyan("[g]raceful"), yellow("[w]ipe"),
         (red if running else dim)("[s]top"),
         red("[p]⏻armed") if shutdown_armed else dim("[p]oweroff"),

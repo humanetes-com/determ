@@ -6,8 +6,9 @@ injected (the composition root binds the real client + truncation logger), so
 this stays engine-independent and testable with fakes."""
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable
+
+from pipeline_core.threads import context_thread
 
 
 def generate_in_parallel(
@@ -41,7 +42,7 @@ def generate_in_parallel(
             guard("task0c/candidate_error", f"request {i}: {type(_e).__name__}: {_e}")
             results[i] = ""
 
-    threads = [threading.Thread(target=_worker, args=(i,), name=f"task0c-gen-{i}")
+    threads = [context_thread(_worker, args=(i,), name=f"task0c-gen-{i}")
                for i in range(len(queries))]
     for t in threads:
         t.start()

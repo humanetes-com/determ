@@ -13,7 +13,6 @@ import json
 import os
 import shlex
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -67,6 +66,7 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.prompts.context import PerFnFixSections
 from pipeline_core.prompts.sections import render_types_section
+from pipeline_core.threads import ContextPool
 
 
 @dataclass(frozen=True, slots=True)
@@ -956,8 +956,8 @@ def _drafts_in_windows(
         return
     for start in range(0, len(targets), width):
         window = targets[start:start + width]
-        with ThreadPoolExecutor(max_workers=min(width, len(window)),
-                                thread_name_prefix="task3-retry") as pool:
+        with ContextPool(max_workers=min(width, len(window)),
+                         thread_name_prefix="task3-retry") as pool:
             drafts = list(pool.map(
                 lambda t: _draft_or_none(t, output, ctx, deps), window))
         yield from zip(window, drafts, strict=True)

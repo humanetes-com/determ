@@ -79,7 +79,11 @@ from pipeline_core.domain.rule_probe import (
     without_examples,
 )
 from pipeline_core.domain.use_cases import UseCaseEdge, edges_to_ask
-from pipeline_core.domain.workspace_layout import BEHAVIOUR_PHASE_PREFIX
+from pipeline_core.domain.workspace_layout import (
+    BEHAVIOUR_PHASE_PREFIX,
+    behaviour_book_key,
+    behaviour_harvest_key,
+)
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
 from pipeline_core.prompts.behaviour_rules import build_rule_probe_prompt, build_then_prediction_prompt
@@ -89,7 +93,7 @@ PHASE_PREFIX = BEHAVIOUR_PHASE_PREFIX
 
 
 def phase_key(cluster_name: str) -> str:
-    return f"{PHASE_PREFIX}/{cluster_name}"
+    return behaviour_harvest_key(cluster_name)
 
 
 @dataclass(frozen=True)
@@ -764,9 +768,21 @@ def run_task0d(
 ) -> None:
     """Harvest → probes → exercises → save, per cluster; skips a cluster whose
     phase is already marked done. The harvested part is committed even when
-    a later stage raises. Then, when any cluster ran, ONE behaviour book for
-    every world (`_book_once`)."""
+    a later stage raises. Then the module's book stage (doc examples, ONE
+    behaviour book for every world, rule probes; `_book_once`) under its own
+    state key `task0d/<module>/book`, committed and marked like a cluster's
+    harvest.
+
+    The book stage runs when any cluster was harvested in this launch or when
+    its key is not done: a launch that died during the book (an hour and more
+    of model calls) resumes it here over the suites on disk, instead of
+    finding every cluster done and leaving the book to nobody. Re-harvesting a
+    cluster first sets a done book key back to pending, so a launch that dies
+    between that harvest and the rebuilt book cannot leave a book built over
+    the old suite marked done. The caller runs this only before task0c."""
     default_cluster = next((c.name for c in clusters if c.is_default), clusters[0].name if clusters else "default")
+    book_key = behaviour_book_key(module_name)
+    book_was_done = book_done = deps.phase_valid(project_dir, book_key)
     passed: dict[str, BehaviourSuite] = {}
     for cluster in clusters:
         key = phase_key(cluster.name)
@@ -774,6 +790,10 @@ def run_task0d(
             deps.log(f"  [task0d] cluster {cluster.name}: already harvested — skipping.")
             phase_skipped("t0d", "already harvested", cluster=cluster.name, module=module_name)
             continue
+        if book_done:
+            deps.mark_phase(project_dir, book_key, "pending",
+                            detail=f"cluster {cluster.name} re-harvested; the book is rebuilt")
+            book_done = False
         _ph = phase_scope("t0d", cluster=cluster.name, module=module_name).open()
         _ph.step("t0d.harvest")
         t0 = time.monotonic()
@@ -877,9 +897,24 @@ def run_task0d(
             ),
         )
         _ph.close()
-    if passed:
-        _doc_examples_once(deps, project_dir, module_name, clusters)
-        _book_once(deps, project_dir, module_name, clusters, passed, src_dir)
+    if book_done:
+        deps.log(f"  [task0d] {module_name}: book stage already done — skipping.")
+        phase_skipped("t0d", "book stage already done", module=module_name)
+        return
+    if not passed:
+        deps.log(f"  [task0d] {module_name}: no cluster harvested in this launch and the book "
+                 "stage is not done — running it over the suites on disk.")
+    _doc_examples_once(deps, project_dir, module_name, clusters)
+    # Rule probes are owed by every world when no completed book stage
+    # covers any of them; after one did, only by the worlds harvested again.
+    probe_worlds = frozenset(passed) if book_was_done else frozenset(c.name for c in clusters)
+    status, detail = _book_once(deps, project_dir, module_name, clusters, passed, src_dir,
+                                probe_worlds=probe_worlds)
+    if status == "done":
+        deps.commit_and_mark(project_dir, book_key, "done",
+                             commit_message=f"pipeline: {book_key} — {detail}", detail=detail)
+    else:
+        deps.mark_phase(project_dir, book_key, status, detail=detail)
 
 
 def _doc_examples_once(
@@ -911,19 +946,22 @@ def _book_once(
     clusters: list[BuildCluster],
     passed: Mapping[str, BehaviourSuite],
     src_dir: Path,
-) -> None:
+    *,
+    probe_worlds: frozenset[str],
+) -> tuple[str, str]:
     """The book last, once for every world: its features group each pass's
     FINAL examples (a rule citing a capture the emitter withdrew would cite
     nothing), and a world that was harvested in an earlier pass contributes
     its suite from disk, so the union the book is built over is always every
     world's. Additive like every stage after the harvest: a failure keeps the
     suites without a book, says so, and the strip bake's book (which runs
-    when a suite on disk has none) builds it."""
+    when a suite on disk has none) builds it. Returns the book stage's
+    (status, detail) for its state entry."""
     suites = {c.name: passed[c.name] if c.name in passed else deps.load_suite(project_dir, c.name)
               for c in clusters}
     suites = {k: v for k, v in suites.items() if v.specs and not v.is_legacy}
     if not suites:
-        return
+        return "done", "no suite to book"
     with phase_scope("t0d", module=module_name) as ph:
         ph.step("t0d.book")
         try:
@@ -931,10 +969,10 @@ def _book_once(
         except Exception as e:
             deps.log(f"  [task0d] behaviour book failed (non-fatal, suites kept "
                      f"without rules): {e}")
-            return
-        # Rule probes: only for a world whose captures were taken THIS pass
-        # (the original is in front of it, and its phase just ran), each
-        # judged on its own store. Asks and judge calls are shared across
+            return "failed", f"behaviour book failed: {e}"[:200]
+        # Rule probes: only for a world in `probe_worlds`, each judged on its
+        # own store. The original is in front of every world here: the stage
+        # runs only before task0c. Asks and judge calls are shared across
         # worlds by prompt: the one book projects the same sentences into
         # each.
         if deps.RULE_PROBES_MAX > 0:
@@ -943,7 +981,7 @@ def _book_once(
             default_cluster = next((c.name for c in clusters if c.is_default),
                                    clusters[0].name if clusters else "default")
             for c in clusters:
-                if c.name not in passed or c.name not in books:
+                if c.name not in probe_worlds or c.name not in books:
                     continue
                 try:
                     books[c.name] = run_rule_probes(
@@ -954,3 +992,6 @@ def _book_once(
                              f"the book is kept as built): {e}")
         for book in books.values():
             deps.save_suite(project_dir, book)
+    probed = sorted(probe_worlds & set(books)) if deps.RULE_PROBES_MAX > 0 else []
+    return "done", (f"{len(books)} world(s) booked ({'+'.join(sorted(books))}), rule probes on "
+                    f"{'+'.join(probed) or 'none'}")

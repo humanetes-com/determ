@@ -4,6 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.adapters.augment_store import FileAugmentStore
+from pipeline_core.domain.file_coverage_floor import (
+    FILE_ACCOUNTED,
+    FILE_MET,
+    FileFloor,
+    FileFloorReading,
+)
 from pipeline_core.domain.models import FN_EXECUTION_CRITERION, AugmentVerdict
 from pipeline_core.domain.workspace_layout import CLUSTER_AUGMENTED_DIR, MODULE_AUGMENTED_DIR
 
@@ -179,3 +185,22 @@ def test_the_other_clusters_records_for_the_module_exclude_its_own(tmp_path: Pat
     assert s.other_cluster_fn_records(tmp_path, "nightly", "m") == [stable]
     assert s.other_cluster_fn_records(tmp_path, "stable", "m") == [nightly]
     assert s.other_cluster_fn_records(tmp_path / "none", "stable", "m") == []
+
+
+def test_the_file_floor_round_trips_and_stamps_the_verdict(tmp_path: Path) -> None:
+    s = FileAugmentStore()
+    floor = FileFloor(90.0, (
+        FileFloorReading("src/wrapper.rs", 21, 24, 21, 24, FILE_ACCOUNTED,
+                         "attempt budget spent on src/wrapper.rs::fmt", (40, 41, 42)),
+        FileFloorReading("src/ptr.rs", 79, 79, 79, 88, FILE_MET)))
+    assert s.cluster_file_floor(tmp_path, "stable", "anyhow") is None
+    s.save_cluster_file_floor(tmp_path, "stable", "anyhow", floor)
+    assert s.cluster_file_floor(tmp_path, "stable", "anyhow") == floor
+    assert s.module_file_floors(tmp_path, "anyhow") == {"stable": floor}
+    assert s.module_file_floors(tmp_path, "other") == {}
+    s.mark_cluster_augmented(tmp_path, "stable", "anyhow", 96.4, reason="done",
+                             code_id="c", file_floor=floor)
+    v = s.cluster_augmented_verdict(tmp_path, "stable", "anyhow")
+    assert v is not None and v.file_floor == 90.0
+    assert v.files_below == ("src/wrapper.rs 87.5% accounted",)
+    assert v.still_binding("c", 90.0) and not v.still_binding("c", 95.0)

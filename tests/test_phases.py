@@ -121,3 +121,37 @@ def test_skipped_phase_is_an_exit_without_an_enter(wire):
     phases.phase_skipped("t0d", "already harvested", cluster="stable")
     assert _kinds(events) == [("phase.exit", "t0d", "skipped")]
     assert events[0][1]["cluster"] == "stable"
+
+
+def test_scopes_and_steps_announce_their_ids_and_parents(wire):
+    events, _lines, _current = wire
+    assert phases.current_scope() is None
+    with phases.phase_scope("bake", module="m") as ph:
+        outer = phases.current_scope()
+        ph.step("bake.preserve")
+        inner = phases.current_scope()
+        with phases.phase_scope("strip") as nested:
+            assert phases.current_scope() == (nested.scope_id, "strip")
+        assert phases.current_scope() == inner
+    assert phases.current_scope() is None
+    enter = {f["phase"]: f for e, f in events if e == "phase.enter"}
+    exits = {f["phase"]: f for e, f in events if e == "phase.exit"}
+    assert outer == (enter["bake"]["scope"], "bake")
+    assert inner == (enter["bake.preserve"]["scope"], "bake.preserve")
+    assert enter["bake"]["parent_scope"] is None
+    assert enter["bake.preserve"]["parent_scope"] == enter["bake"]["scope"]
+    # A nested scope opened while a step is open belongs to the step.
+    assert enter["strip"]["parent_scope"] == enter["bake.preserve"]["scope"]
+    for pid in ("bake", "bake.preserve", "strip"):
+        assert exits[pid]["scope"] == enter[pid]["scope"]
+        assert exits[pid]["parent_scope"] == enter[pid]["parent_scope"]
+    assert len({f["scope"] for f in enter.values()}) == 3
+
+
+def test_a_step_closing_returns_the_context_to_its_scope(wire):
+    with phases.phase_scope("bake") as ph:
+        ph.step("bake.preserve")
+        ph.step("bake.api")
+        assert phases.current_scope()[1] == "bake.api"
+        ph.skip("checkpoint says done")
+    assert phases.current_scope() is None

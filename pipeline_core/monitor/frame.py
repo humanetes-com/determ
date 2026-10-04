@@ -27,6 +27,7 @@ __all__ = [
     "box",
     "content_width",
     "fit",
+    "flow_columns",
     "scroll_box",
     "side_by_side",
     "tail_lines",
@@ -104,6 +105,29 @@ def wrap_visible(s: str, width: int) -> list[str]:
         i += 1
     if visible or not rows:
         rows.append("".join(cur))
+    return rows
+
+
+def flow_columns(cells: Sequence[str], width: int, gap: int = 3) -> list[str]:
+    """Lay `cells` out like inline blocks: as many columns as fit in `width`
+    visible columns, filled left to right then top to bottom, so a narrower
+    box reflows to fewer columns (down to one) and a wider one to more. Each
+    column is only as wide as its own widest cell."""
+    if not cells:
+        return []
+    widths = [len(plain(c)) for c in cells]
+    n = 1
+    for k in range(len(cells), 1, -1):
+        col_w = [max(widths[j::k]) for j in range(k)]
+        if sum(col_w) + gap * (k - 1) <= width:
+            n = k
+            break
+    col_w = [max(widths[j::n]) for j in range(n)]
+    rows = []
+    for i in range(0, len(cells), n):
+        chunk = cells[i:i + n]
+        parts = [fit(c, col_w[j]) for j, c in enumerate(chunk[:-1])]
+        rows.append((" " * gap).join([*parts, chunk[-1]]))
     return rows
 
 

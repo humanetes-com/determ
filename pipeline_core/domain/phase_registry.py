@@ -138,8 +138,9 @@ PHASES: tuple[Phase, ...] = (
        writes=".skeleton/_behaviours_<cluster>.json, .skeleton/_heldout_<cluster>.json "
               "(captures held out for the agreement reading), emitted behaviour tests, "
               "feature files",
-       skipped_when="the cluster is already harvested, or on an augmented restart, "
-                    "where the strip's bake builds the suite and the book instead",
+       skipped_when="the cluster is already harvested and the module's book stage is done, "
+                    "or once task0c has started (an augmented restart included), where the "
+                    "strip's bake builds a missing suite or book instead",
        per_cluster=True, state_keys=("task0d/*",)),
     _p("t0d.harvest", "harvest", "Harvest", "Suite from assertions, doc-tests and layout pins.", per_cluster=True),
     _p("t0d.probes", "probes", "Probes", "Probes run on the original; stdout is the Then.", per_cluster=True),

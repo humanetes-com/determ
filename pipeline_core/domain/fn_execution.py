@@ -266,6 +266,9 @@ class FunctionExecution:
     # Sites a proof named that a measurement saw EXECUTED: counterexamples to
     # the proof. The measurement wins and the proof is dropped.
     contradicted: tuple[FnSite, ...] = ()
+    # The proved functions with their line spans: the lines no test can
+    # reach, which the generation pass and the per-file floor leave out.
+    proved_targets: tuple[FnTarget, ...] = ()
 
     @property
     def candidates(self) -> int:
@@ -283,13 +286,16 @@ def apply_proofs(reading: FunctionExecution,
         return reading
     kept: list[FnTarget] = []
     proved: list[tuple[FnSite, str]] = []
+    proved_targets: list[FnTarget] = []
     for t in reading.unexecuted:
         if t.site in proofs:
             proved.append((t.site, proofs[t.site]))
+            proved_targets.append(t)
         else:
             kept.append(t)
     return replace(
         reading, unexecuted=tuple(kept), by_construction=tuple(proved),
+        proved_targets=tuple(proved_targets),
         contradicted=tuple(sorted(s for s in reading.executed if s in proofs)))
 
 

@@ -102,8 +102,8 @@ from pipeline_core.monitor.engine_metrics import (  # noqa: E402
 from pipeline_core.monitor.field_glossary import (  # noqa: E402
     field_glossary_window as _field_glossary_window,
 )
-from pipeline_core.monitor.field_glossary import (
-    hint_lines as _hint_lines,
+from pipeline_core.monitor.files_overview import (  # noqa: E402
+    files_overview_rows as _files_overview_rows,
 )
 from pipeline_core.monitor.frame import (  # noqa: E402
     SplitLayout,
@@ -118,6 +118,7 @@ from pipeline_core.monitor.generation_panel import (  # noqa: E402
     generation_rows as _generation_rows,
 )
 from pipeline_core.monitor.health_view import health_lines as _health_lines  # noqa: E402
+from pipeline_core.monitor.health_view import health_window as _health_window  # noqa: E402
 from pipeline_core.monitor.key_input import REPORTING_OFF as _REPORTING_OFF  # noqa: E402
 from pipeline_core.monitor.key_input import KeyReader as _KeyReader  # noqa: E402
 from pipeline_core.monitor.legend import legend_window as _legend_window  # noqa: E402
@@ -280,7 +281,6 @@ def gpu():
             bw_sum += card_bw * mi / 100
     if bw_sum > 0 and mem_gb > 0:
         rows.append(f"  {bold('≈ tokens/s:')} {bw_sum/mem_gb:.1f}")
-    rows.append(dim("  ") + green("■ >60%") + dim("  ") + yellow("■ 20–60%") + dim("  □ idle"))
     return rows
 
 
@@ -663,68 +663,7 @@ def pipeline_status(width: int):
 
     cov_data = _cov_data
     if cov_data and not ((_compile_stats or _test_stats) and _in_fix_phase):
-        cur_base = os.path.basename(prog["current_file"]) if prog["current_file"] != "?" else ""
-        # For non-default clusters, restrict to files the cluster is actually targeting.
-        # If the cluster hasn't processed any files yet (e.g. harness fix running), show all.
-        _cluster_filter: set[str] | None = None
-        if cur_cl and cur_cl not in ("stable", ""):
-            cf = prog["cluster_files"]
-            if cf:
-                _cluster_filter = set(cf)
-
-        # Sort: pipeline processing order for current pass (same index as file counter 8/8),
-        # then files from older passes not yet reprocessed, then unknown files by coverage asc.
-        # Only show src/ files — tests/ and build.rs are excluded from pipeline coverage.
-        _this_pass_order = {f: i for i, f in enumerate(prog["files_this_pass"])}
-        _n = len(_this_pass_order)
-        _extra = {f: _n + i for i, f in enumerate(prog["all_files"]) if f not in _this_pass_order}
-        _order = {**_this_pass_order, **_extra}
-        _fallback = _n + len(_extra)
-        sorted_files = sorted(
-            [(name, cov, cvbl) for name, (cov, cvbl) in cov_data.items()
-             if name.startswith("src/")
-             and (_cluster_filter is None or name in _cluster_filter)],
-            key=lambda x: _order.get(x[0], _fallback + (x[1] / x[2] if x[2] else 0)),
-        )
-        # Ensure files_this_pass entries always appear (even if not in grcov JSON)
-        _in_sorted = {name for name, *_ in sorted_files}
-        for _f in prog["files_this_pass"]:
-            if _f not in _in_sorted and _f.startswith("src/"):
-                if _cluster_filter is None or _f in _cluster_filter:
-                    sorted_files.append((_f, 0, 0))
-        sorted_files.sort(key=lambda x: _order.get(x[0], _fallback + (x[1] / x[2] if x[2] else 0)))
-        max_name = max((len(os.path.basename(n)) for n, *_ in sorted_files), default=10)
-        n_total  = len(sorted_files)
-        n_done   = sum(1 for _, cov, cvbl in sorted_files if cov >= cvbl)
-        rows.append(dim(f"  {'─' * max(4, min(w - 2, 60))}"))
-        rows.append(f"  files overview — {n_done}/{n_total} complete")
-        queue_hist   = prog["queue_history"]
-        qcov_hist    = prog.get("quick_cov_history", {})
-        for name, covered, coverable in sorted_files:
-            short   = os.path.basename(name)
-            is_cur  = (short == cur_base)
-            arrow   = yellow("▶") if is_cur else " "
-            hist    = queue_hist.get(short, [])
-            trend   = dim("  " + "→ ".join(str(c) for c in hist[-5:])) if hist else ""
-            qhist   = qcov_hist.get(name, qcov_hist.get(short, []))
-            if len(qhist) >= 2:
-                qtrend = dim(f"  {qhist[-2]:.1f}%→ ") + f"{qhist[-1]:.1f}%"
-            elif len(qhist) == 1:
-                qtrend = dim(f"  {qhist[-1]:.1f}%")
-            else:
-                qtrend = ""
-            if coverable == 0:
-                rows.append(f"{arrow} {short.ljust(max_name)}  [{_bar(0, 14, ' n/a ')}] {dim('  n/a')}{qtrend}{trend}")
-                continue
-            pct     = covered / coverable * 100
-            done    = covered >= coverable
-            col     = green if done else (yellow if pct >= 80 else red)
-            tick    = green(" ✓") if done else ""
-            _label  = f"{pct:.1f}%"
-            rows.append(
-                f"{arrow} {short.ljust(max_name)}  [{col(_bar(pct, 14, _label))}]"
-                f"  {covered}/{coverable}{tick}{qtrend}{trend}"
-            )
+        rows.extend(_files_overview_rows(prog, cov_data, cur_cl, w))
 
     return rows
 
@@ -736,7 +675,7 @@ def pipeline_status(width: int):
 _THINK_CAP_CHARS = 40_000
 
 
-def generation(width: int):
+def generation(width: int, fill_rows: int | None = None):
     """The Generation box — see pipeline_core.monitor.generation_panel.
 
     It follows the freshest stream file rather than the base one: under the
@@ -752,7 +691,7 @@ def generation(width: int):
     return _generation_rows(
         stream_log=STREAM_LOG, width=width, now=time.time(),
         runtime=_vllm_runtime(), refresh=REFRESH,
-        think_cap_chars=_THINK_CAP_CHARS,
+        think_cap_chars=_THINK_CAP_CHARS, fill_rows=fill_rows,
         cut_rate=_cut_rate_reading(_cut_knobs), cut_knobs=_cut_knobs)
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -771,8 +710,10 @@ def _detach(cmd):
     )
 _view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields|phases
 _phases = _pp.PhasePanel()    # the [e] view's scroll and expand state
-_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": 0, "fields": 0}   # lines scrolled up from bottom (0=bottom)
-_show_hints  = True           # inline field-hint strip under the monitor view (toggle: [t])
+# Scrolled this far up, a view's window clamps to its first row: the health
+# view opens on its findings, not on the end of the phase-cost table.
+HEALTH_TOP = 1_000_000
+_scroll      = {"pipeline": 0, "stream": 0, "events": 0, "legend": 0, "health": HEALTH_TOP, "fields": 0}   # lines scrolled up from bottom (0=bottom)
 # Split layout (toggle: [v], or MONITOR_SPLIT=1 at start): [1]Monitor stays in
 # a narrow left column and the selected detail view renders in the wide right
 # one; MONITOR_SPLIT_WIDTH sets the left width (0 = the cap), [<]/[>] resize
@@ -869,7 +810,7 @@ def _bottom_bar() -> list[str]:
     return _bb.bottom_rows(
         views=VIEWS, shown={"monitor", _pane_view()} if split else {_view},
         running=_pipeline_running(), split=split, split_enabled=_layout.enabled,
-        hints_on=_show_hints, shutdown_armed=_shutdown_armed(), auto_armed=_auto_armed(),
+        shutdown_armed=_shutdown_armed(), auto_armed=_auto_armed(),
         demo=_DEMO, demo_interval=DEMO_INTERVAL, action_msg=_action_msg)
 
 # ── Views ─────────────────────────────────────────────────────────────────────
@@ -936,15 +877,9 @@ def _split_widths() -> tuple[int, int] | None:
 
 
 def _monitor_column(width, height, gpu_rows, pipeline_rows, gen_rows) -> list[str]:
-    """View 1: GPU, Pipeline, Generation and the field hints."""
+    """View 1: GPU, Pipeline and Generation."""
     rows = [*box("GPU", gpu_rows, width), *box("Pipeline", pipeline_rows, width),
             *box("Generation", gen_rows, width)]
-    if _show_hints:
-        hints = _hint_lines("\n".join(_plain(r) for r in pipeline_rows + gen_rows),
-                            content_width(width))
-        if hints:
-            rows += box("field hints — [t] hide, [f] full glossary",
-                        [dim(hh) for hh in hints], width)
     return rows[:height] + [""] * (height - len(rows))
 
 
@@ -964,8 +899,13 @@ def _detail_box(view, width, inner, pipeline_rows, gen_rows) -> list[str]:
     _page = inner
     cw = content_width(width)
     if view == "health":
-        title, rows = ("Run health (60s cache) — tools/run_health.py",
-                       _health_lines(PIPELINE_LOG, os.path.join(SCRIPT_DIR, "tmp", "anyhow"))[:inner])
+        _lines = _health_lines(PIPELINE_LOG, os.path.join(SCRIPT_DIR, "tmp", "anyhow"),
+                               EVENTS_LOG, running=_pipeline_running())
+        # Clamp so the first scroll key moves the view from where it is drawn.
+        _scroll["health"] = min(_scroll["health"], max(0, len(_lines) - inner))
+        title, rows = ("Run health + phase cost (60s cache) — tools/run_health.py, "
+                       "tools/perf_ledger.py phases",
+                       _health_window(_lines, inner, _scroll["health"]))
     elif view == "fields":
         title, rows = ("Field glossary — what each stat/label on screen means",
                        _field_glossary_window(cw, inner, _scroll["fields"]))
@@ -1015,8 +955,13 @@ def _frame(total_w: int, h: int) -> list[str]:
     panel_w = widths[0] if widths else total_w
     gpu_rows = gpu()
     pipeline_rows = pipeline_status(panel_w)
-    gen_rows = generation(panel_w)
     body_h = h - BOTTOM_LINES
+    # The monitor column's Generation box takes whatever height the GPU and
+    # Pipeline boxes leave, down to the bottom bar; other layouts keep it compact.
+    fill = None
+    if widths or _view == "monitor":
+        fill = body_h - (len(gpu_rows) + 2) - (len(pipeline_rows) + 2) - 2
+    gen_rows = generation(panel_w, fill_rows=fill)
     if widths:
         left_w, right_w = widths
         body = side_by_side(
@@ -1067,7 +1012,7 @@ def _run_action(key):
 
 
 def _apply_key(key):
-    global _action_msg, _view, _confirm, _graceful_pending, _show_hints, _layout
+    global _action_msg, _view, _confirm, _graceful_pending, _layout
     global _DEMO
     if _DEMO and key in ("1", "2", "3", "4", "l", "h", "f", "e"):
         _DEMO = False   # picking a view yourself means you want it to stay
@@ -1180,6 +1125,7 @@ def _apply_key(key):
         _view = "monitor" if _view == "legend" else "legend"
     elif key == "h":
         _view = "monitor" if _view == "health" else "health"
+        _scroll["health"] = HEALTH_TOP   # findings first
     elif key == "d":
         _DEMO = not _DEMO
         _action_msg = (yellow(f"[d]emo mode enabled — switching every {DEMO_INTERVAL}s")
@@ -1191,8 +1137,6 @@ def _apply_key(key):
         _phases.toggle_expand()
     elif key == "f":
         _view = "monitor" if _view == "fields" else "fields"
-    elif key == "t":
-        _show_hints = not _show_hints
     elif key == "a":
         _set_auto_armed(not _auto_armed())
         _action_msg = (green("[a]uto mode ON — pipeline will fire operator_run.sh on stall")

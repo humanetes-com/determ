@@ -3,15 +3,14 @@
 Complements legend.py (which explains pipeline *phases*) — this explains the
 individual fields/symbols printed inside the Pipeline/Generation panels
 (e.g. `in-flight`, `notes=`, `hot fn`, `frontier:`). Content lives here (pure,
-testable) so monitor.py only wires the [f] key, the inline hint strip, and
-the box rendering.
+testable) so monitor.py only wires the [f] key and the box rendering.
 """
 
 from __future__ import annotations
 
 import textwrap
 
-__all__ = ["FIELDS", "CORE_TAGS", "field_glossary_lines", "field_glossary_window", "hint_lines"]
+__all__ = ["FIELDS", "field_glossary_lines", "field_glossary_window"]
 
 # (label as it appears on screen, what it means) — full reference, [f] view.
 FIELDS: list[tuple[str, str]] = [
@@ -48,15 +47,6 @@ FIELDS: list[tuple[str, str]] = [
     ("≈ tokens/s", "Estimated throughput, computed from GPU memory bandwidth ÷ loaded model size — not a measured rate."),
 ]
 
-# Subset shown in the always-on inline hint strip: fields with no self-evident
-# meaning from the label alone (unlike cluster/attempt/file/test/docs, which
-# read fine cold). Everything is still covered in FIELDS for the [f] view.
-CORE_TAGS: set[str] = {
-    "in-flight", "notes=", "hot fn", "stall=", "fills", "err", "≈ tokens/s",
-    "fill", "unit", "llm cut",
-}
-
-
 def field_glossary_lines(width: int) -> list[str]:
     """Wrapped `label  description` rows fitting `width` visible columns."""
     tag_w = max(len(t) for t, _ in FIELDS) + 2
@@ -77,22 +67,3 @@ def field_glossary_window(width: int, inner: int, scroll_from_bottom: int) -> li
     top = max(0, len(rows) - inner - off)
     return rows[top:top + inner]
 
-
-def hint_lines(plain_text: str, width: int, max_entries: int = 6) -> list[str]:
-    """Compact `label — description` strip for CORE_TAGS labels present in `plain_text`.
-
-    Context-sensitive tooltip equivalent: only surfaces fields actually on
-    screen this frame, so the strip changes as the run moves through phases
-    instead of repeating a fixed reference block.
-    """
-    matched = [(t, d) for t, d in FIELDS if t in CORE_TAGS and t in plain_text]
-    if not matched:
-        return []
-    shown = matched[:max_entries]
-    out = []
-    for t, d in shown:
-        line = f"{t} — {d}"
-        out.append(line if len(line) <= width else line[:max(0, width - 1)] + "…")
-    if len(matched) > max_entries:
-        out.append(f"… +{len(matched) - max_entries} more — [f] full field glossary")
-    return out

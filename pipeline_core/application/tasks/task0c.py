@@ -14,7 +14,7 @@ import contextlib
 import functools
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -30,9 +30,11 @@ from ...domain.behaviour_pinning import (
 from ...domain.behaviour_select import drop_capture_owned
 from ...domain.cluster_plan import target_scope_rule
 from ...domain.coverage import PerFileCoverage, coverage_pass_outcome
+from ...domain.file_coverage_floor import FileFloor, UncoveredSplit, judge_files, lines_in
 from ...domain.fn_execution import (
     FnCoverageRecord,
     FnTarget,
+    FunctionExecution,
     aimed_fn_outcomes,
     flipped_cfg_set,
     inherited_attempts,
@@ -182,6 +184,13 @@ class Task0cDeps:
     # execute are PROVED rather than asked of a model. Absent: nothing is
     # proved and the budget behaves as it did.
     measure_reachability: Any = None
+    # The per-file line floor (`COVERAGE_FILE_FLOOR`, percent over the lines a
+    # test can reach; 0 = off, and the stop reads the module aggregate alone)
+    # and its per-cluster store: `(project_dir, cluster, module) -> FileFloor|None`
+    # and its writer.
+    COVERAGE_FILE_FLOOR: Any = 0.0
+    load_file_floor: Any = None
+    save_file_floor: Any = None
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -1563,6 +1572,7 @@ def _run_phase_c(
     hist: Task0cFileHistory,
     ctx: _PhaseCCtx,
     fn_targets: tuple[FnTarget, ...] = (),
+    proved: tuple[FnTarget, ...] = (),
 ) -> _PhaseCOutcome:
     """Generate/augment tests for the attempt's uncovered lines, commit each block
     through its compile-fix loop, and update per-file history. Returns the loop
@@ -1576,6 +1586,9 @@ def _run_phase_c(
     block written for a file charges one attempt to each target its prompt
     carried (`_PhaseCOutcome.fn_attempted`), with what the block did as the
     reason it did or did not reach them (`fn_outcomes`).
+
+    `proved` are the functions the compiler proved no test can execute; their
+    uncovered lines are filtered like a cfg-compiled-out line, never aimed at.
     """
     deps = ctx.deps
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
@@ -1669,6 +1682,8 @@ def _run_phase_c(
     for _ft in fn_targets:
         if str(project_dir / _ft.site.file).startswith(mod_prefix):
             fn_targets_by_file.setdefault(_ft.site.file, []).append(_ft)
+    _proved_lines = {rel: lines_in(t for t in proved if t.site.file == rel)
+                     for rel in {t.site.file for t in proved}}
     _fn_attempted: set[Any] = set()
     _fn_outcomes: dict[Any, str] = {}
     _fn_verdicts: dict[Any, str] = {}
@@ -1816,60 +1831,26 @@ def _run_phase_c(
         # the path-mod declaration lines so the line numbers match the original src.
         existing_text = _strip_gen_tests_decls(_raw_text).rstrip() + "\n"
 
-        _src_line_count = existing_text.count('\n')
-        uncov_lines = {ln for ln in uncov_lines if ln <= _src_line_count}
-
-        # Filter LLVM/grcov instrumentation artifacts:
-        # 1. Comment-only lines (// …) — grcov sometimes marks these coverable, they never are
-        # 2. Structural-only tokens (}, } else {) — LLVM region counter stays 0 even when
-        #    the surrounding code executes (known grcov/LLVM quirk)
-        # Only strip if at least one adjacent line IS covered (confirming the block runs).
         _file_cov_hits: dict[int, int] = {}
         for _fd in files_data:
-            _fd_abs = _fd.abs_path
-            if _fd_abs == str(abs_path):
+            if _fd.abs_path == str(abs_path):
                 _file_cov_hits = {t["line"]: t["stats"].get("Line", 0) for t in _fd.traces}
                 break
-        _src_lines_list = existing_text.splitlines()
-        _artifact_lines: set[int] = set()
-        for _al in sorted(uncov_lines):
-            if _al > len(_src_lines_list):
-                continue
-            _al_txt = _src_lines_list[_al - 1].strip()
-            _is_comment    = _al_txt.startswith("//")
-            _is_structural = _is_structural_line(_al_txt) and bool(_al_txt)
-            if _is_comment or _is_structural:
-                # Confirm by checking that at least one adjacent line is covered
-                if any(_file_cov_hits.get(n, 0) > 0 for n in range(max(1, _al - 5), _al + 6) if n != _al):
-                    _artifact_lines.add(_al)
-        if _artifact_lines:
-            _log(f"  [{module_name}] {rel_path} — filtered {len(_artifact_lines)} LLVM artifact line(s): {sorted(_artifact_lines)}")
-            uncov_lines -= _artifact_lines
-
-        # Filter lines inside cfg blocks incompatible with the current cluster
-        # (e.g. #[cfg(not(error_generic_member_access))] under the nightly cluster).
-        # These lines don't compile here — no test can cover them. Filter only, no EXCL.
-        if _current_cluster and _current_cluster.active_cfg:
-            _incompat = _filter_cfg_incompatible_lines(
-                existing_text, uncov_lines, _current_cluster.active_cfg
-            )
-            if _incompat:
-                _log(f"  [{module_name}] {rel_path} — filtered {len(_incompat)} cfg-incompatible line(s) "
-                     f"(compiled out under {_current_cluster.name}): {sorted(_incompat)}")
-                uncov_lines -= _incompat
-
-        # Filter lines inside cfg blocks that are excluded in this cluster
-        # (e.g. #[cfg(error_generic_member_access)] under the stable cluster).
-        # No EXCL pragmas written — these lines ARE coverable in the nightly cluster
-        # pass and must not be permanently marked ignored.
-        if _current_cluster and _current_cluster.excluded_cfg:
-            _cfg_excl = _filter_cfg_excluded_lines(
-                existing_text, uncov_lines, _current_cluster.excluded_cfg
-            )
-            if _cfg_excl:
-                _log(f"  [{module_name}] {rel_path} — filtered {len(_cfg_excl)} excluded-cfg line(s) "
-                     f"(compiled out in {_current_cluster.name}): {sorted(_cfg_excl)}")
-                uncov_lines -= _cfg_excl
+        _split = split_uncovered(existing_text, uncov_lines, _file_cov_hits,
+                                 _proved_lines.get(rel_path, frozenset()),
+                                 cluster=_current_cluster, **_line_filters(deps))
+        if _split.artifact:
+            _log(f"  [{module_name}] {rel_path} — filtered {len(_split.artifact)} LLVM artifact line(s): {sorted(_split.artifact)}")
+        if _split.cfg_incompatible:
+            _log(f"  [{module_name}] {rel_path} — filtered {len(_split.cfg_incompatible)} cfg-incompatible line(s) "
+                 f"(compiled out under {_current_cluster.name}): {sorted(_split.cfg_incompatible)}")
+        if _split.cfg_excluded:
+            _log(f"  [{module_name}] {rel_path} — filtered {len(_split.cfg_excluded)} excluded-cfg line(s) "
+                 f"(compiled out in {_current_cluster.name}): {sorted(_split.cfg_excluded)}")
+        if _split.proved:
+            _log(f"  [{module_name}] {rel_path} — filtered {len(_split.proved)} line(s) in functions "
+                 f"proved unreachable from tests/: {sorted(_split.proved)}")
+        uncov_lines = set(_split.actionable)
 
         _file_fn_targets = tuple(fn_targets_by_file.get(rel_path, ()))
         for _ft in _file_fn_targets:
@@ -3178,6 +3159,16 @@ def task0c_augment_module(
     if callable(deps.load_fn_record):
         _loaded = deps.load_fn_record(project_dir, _cluster_label, module_name)
         _fn_record = _loaded if isinstance(_loaded, FnCoverageRecord) else None
+    # The per-file line floor. A file the generation pass already gave up on
+    # (its stall limit, in an earlier entry of this cluster) stays given up:
+    # re-entering must not buy it a second budget.
+    _file_floor_pct = _file_floor_of(deps)
+    _file_floor: FileFloor | None = None
+    _floor_stalled: frozenset[str] = frozenset()
+    if _file_floor_pct > 0 and callable(deps.load_file_floor):
+        _prior_floor = deps.load_file_floor(project_dir, _cluster_label, module_name)
+        if isinstance(_prior_floor, FileFloor):
+            _floor_stalled = _prior_floor.stalled
     # On resume, reload coverage from the previous run's grcov JSON + filecache
     # to avoid an expensive full re-run before the first gen attempt.
     if attempt > 0:
@@ -3255,11 +3246,12 @@ def task0c_augment_module(
                 _measured[0], _measured[1], _measured[2], _measured[3])
             _functions = getattr(_measured, "functions", None)
             _log(f"  [{module_name}/{_cluster_label}] Coverage: {coverage:.1f}% ({covered_lines}/{coverable_lines} lines)")
-        _fn_record = fold_reading(
-            _fn_record,
-            read_function_execution(project_dir, _current_cluster, _functions, _fn_inputs,
-                                    _fn_proofs),
-            attempt_budget=_fn_budget, inherited=_fn_inherited)
+        _fn_reading = read_function_execution(project_dir, _current_cluster, _functions,
+                                              _fn_inputs, _fn_proofs)
+        _fn_record = fold_reading(_fn_record, _fn_reading,
+                                  attempt_budget=_fn_budget, inherited=_fn_inherited)
+        _proved_targets = (_fn_reading.proved_targets
+                           if isinstance(_fn_reading, FunctionExecution) else ())
         _contradicted = [site_label(k) for k in _fn_proofs
                          if k in set(getattr(_fn_record, "executed", ()))]
         if _contradicted:
@@ -3274,6 +3266,15 @@ def task0c_augment_module(
             _emit("task0c.fn_reachability_contradicted", data={
                 "cluster": _cluster_label, "module": module_name, "sites": _contradicted})
         _record_fn_reading(deps, project_dir, module_name, _cluster_label, attempt, _fn_record)
+        if _file_floor_pct > 0:
+            _file_floor = _read_file_floor(
+                deps, project_dir, module_dir, _current_cluster, files_data, _fn_reading,
+                _fn_record, stalled=_floor_stalled | _hist.skipped_files, floor=_file_floor_pct)
+            _log(f"  [{module_name}/{_cluster_label}] file floor: {_file_floor.summary()}")
+            _emit("task0c.file_floor", data={"cluster": _cluster_label, "module": module_name,
+                                             "attempt": attempt, **_file_floor.event_data()})
+            if callable(deps.save_file_floor):
+                deps.save_file_floor(project_dir, _cluster_label, module_name, _file_floor)
         _mark_phase(project_dir, f"task0c/{_cluster_label}/{module_name}", "in_progress",
                     detail=f"{coverage:.1f}% attempt {attempt}", source_hash=_source_hash(project_dir))
         _set_current(project_dir, f"task0c/{_cluster_label}/{module_name} / {coverage:.1f}% attempt {attempt}")
@@ -3288,6 +3289,15 @@ def task0c_augment_module(
                 _emit("task0c.fn_stop_held", data={
                     "cluster": _cluster_label, "module": module_name, "attempt": attempt,
                     "coverage_pct": coverage, "pending": _held})
+            elif _file_floor is not None and _file_floor.held:
+                _held_files = _file_floor.held
+                _log(f"  [{module_name}/{_cluster_label}] {coverage:.1f}% line coverage meets the "
+                     f"target, but {len(_held_files)} file(s) are below the "
+                     f"{_file_floor_pct:.0f}% floor on the lines a test can reach — NOT stopping: "
+                     + "; ".join(f.describe() for f in _held_files))
+                _emit("task0c.file_floor_held", data={
+                    "cluster": _cluster_label, "module": module_name, "attempt": attempt,
+                    "coverage_pct": coverage, "held": [f.rel for f in _held_files]})
             else:
                 if not _fn_record.measured:
                     _log(f"  [{module_name}/{_cluster_label}] function execution NOT measured "
@@ -3359,6 +3369,7 @@ def task0c_augment_module(
             files_data=files_data,
             hist=_hist,
             fn_targets=_fn_record.targets() if _fn_record.measured else (),
+            proved=_proved_targets,
             ctx=_PhaseCCtx(
                 deps=deps,
                 current_cluster=_current_cluster,
@@ -3421,6 +3432,97 @@ def task0c_augment_module(
     return coverage, covered_lines, _at_ceiling, ""
 
 
+def split_uncovered(existing_text: str, uncovered: Iterable[int], hits: Mapping[int, int],
+                    proved_lines: frozenset[int], *, cluster: Any,
+                    is_structural_line: Callable[[str], Any],
+                    cfg_incompatible: Callable[..., Any],
+                    cfg_excluded: Callable[..., Any]) -> UncoveredSplit:
+    """Which of a file's uncovered lines a generation prompt is aimed at, and
+    why each other one is not. The one definition of an actionable line: the
+    generation pass targets `actionable`, and the per-file floor leaves
+    `not_actionable` out of its denominator, so the stop never waits on a line
+    no prompt will be aimed at.
+
+    `existing_text` is the file with its gen_tests declarations stripped (the
+    view the prompt shows, numbered like the original source); a line past its
+    end is dropped, as the pass always did."""
+    lines = existing_text.splitlines()
+    rest = {ln for ln in uncovered if ln <= existing_text.count("\n")}
+    # LLVM/grcov instrumentation artifacts: comment-only lines (`// …`), which
+    # grcov sometimes marks coverable, and structural-only tokens (`}`,
+    # `} else {`), whose region counter stays 0 while the code around them
+    # runs. Only when an adjacent line IS covered, confirming the block runs.
+    artifact: set[int] = set()
+    for ln in sorted(rest):
+        if ln > len(lines):
+            continue
+        txt = lines[ln - 1].strip()
+        if (txt.startswith("//") or (is_structural_line(txt) and bool(txt))) and any(
+                hits.get(n, 0) > 0 for n in range(max(1, ln - 5), ln + 6) if n != ln):
+            artifact.add(ln)
+    rest -= artifact
+    # Lines inside cfg blocks the cluster compiles out: incompatible with its
+    # active cfg (`#[cfg(not(x))]` under a cluster that sets x), or excluded
+    # from it (`#[cfg(x)]` under one that does not). No test here can run them;
+    # no EXCL pragma either, since another cluster's pass covers them.
+    incompat: set[int] = set()
+    if cluster and cluster.active_cfg:
+        incompat = set(cfg_incompatible(existing_text, rest, cluster.active_cfg) or ())
+        rest -= incompat
+    excluded: set[int] = set()
+    if cluster and cluster.excluded_cfg:
+        excluded = set(cfg_excluded(existing_text, rest, cluster.excluded_cfg) or ())
+        rest -= excluded
+    proved = rest & proved_lines
+    return UncoveredSplit(frozenset(rest - proved), frozenset(artifact), frozenset(incompat),
+                          frozenset(excluded), frozenset(proved))
+
+
+def _line_filters(deps: Task0cDeps) -> dict[str, Any]:
+    return {"is_structural_line": deps.is_structural_line,
+            "cfg_incompatible": deps.filter_cfg_incompatible_lines,
+            "cfg_excluded": deps.filter_cfg_excluded_lines}
+
+
+def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, cluster: Any,
+                     files_data: Sequence[PerFileCoverage],
+                     reading: FunctionExecution | str, record: FnCoverageRecord,
+                     *, stalled: Iterable[str], floor: float) -> FileFloor:
+    """The per-file floor over this measurement: the files the generation pass
+    would queue (module source, not tests, not `build.rs`, not cfg-gated out
+    of the cluster), each read over the lines a test can reach."""
+    proved = reading.proved_targets if isinstance(reading, FunctionExecution) else ()
+    unexecuted = reading.unexecuted if isinstance(reading, FunctionExecution) else ()
+    unreached = {u.site for u in record.unreached}
+    spent = [t for t in unexecuted if t.site in unreached]
+    gated = cluster.gated_files if cluster is not None and cluster.gated_files else set()
+    mod_prefix = str(module_dir) + "/"
+    files: list[tuple[str, int, int, frozenset[int]]] = []
+    not_actionable: dict[str, frozenset[int]] = {}
+    for fdata in files_data:
+        if not fdata.abs_path.startswith(mod_prefix):
+            continue
+        abs_path = Path(fdata.abs_path)
+        rel = str(abs_path.relative_to(project_dir))
+        if deps.is_test_file(abs_path, project_dir) or abs_path.name == "build.rs" or rel in gated:
+            continue
+        unc = frozenset(t["line"] for t in fdata.traces if t["stats"].get("Line", 1) == 0)
+        if unc:
+            try:
+                raw = abs_path.read_text(encoding="utf-8")
+            except OSError:
+                raw = ""
+            view = deps.strip_gen_tests_decls(raw).rstrip() + "\n"
+            hits = {t["line"]: t["stats"].get("Line", 0) for t in fdata.traces}
+            split = split_uncovered(view, unc, hits,
+                                    lines_in(t for t in proved if t.site.file == rel),
+                                    cluster=cluster, **_line_filters(deps))
+            # A line past the view's end is never aimed at either.
+            not_actionable[rel] = split.not_actionable | (unc - split.actionable - split.not_actionable)
+        files.append((rel, fdata.covered, fdata.coverable, unc))
+    return judge_files(floor, files, not_actionable=not_actionable, spent=spent, stalled=stalled)
+
+
 def _record_fn_reading(deps: Task0cDeps, project_dir: Path, module_name: str,
                        cluster_label: str, attempt: int,
                        record: FnCoverageRecord) -> None:
@@ -3444,6 +3546,15 @@ def _behaviour_target_of(deps: Task0cDeps) -> float:
     number (a stub in a fakes-built deps) is 0 = off."""
     try:
         return max(0.0, float(deps.BEHAVIOUR_COVERAGE_TARGET))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _file_floor_of(deps: Task0cDeps) -> float:
+    """`deps.COVERAGE_FILE_FLOOR` as a percent; anything unreadable as a number
+    (a stub in a fakes-built deps) is 0 = off."""
+    try:
+        return max(0.0, float(deps.COVERAGE_FILE_FLOOR))
     except (TypeError, ValueError):
         return 0.0
 

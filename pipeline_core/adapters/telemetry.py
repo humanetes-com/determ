@@ -19,6 +19,7 @@ from typing import Any
 from ..domain.phase_registry import PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS
 from ..domain.test_results import build_test_name_index, per_file_test_stats
 from ..log import emit, log
+from ..phases import current_scope
 
 PHASE_EVENTS = frozenset({PHASE_ENTER, PHASE_EXIT, PHASE_PROGRESS})
 
@@ -33,7 +34,13 @@ class JsonlEventEmitter:
     events stay small (~90% of context repeats across calls → strong dedup).
     Holds a live reference to the run-context dict (product / pipeline_sha /
     run_id), which the composition root mutates via `init_events`. Never
-    raises — observability must not crash the pipeline."""
+    raises — observability must not crash the pipeline.
+
+    Every event other than a phase announcement is stamped with `in_scope` /
+    `in_phase`: the phase scope open in the emitting context
+    (`phases.current_scope`), so a call or a cargo run names the phase that
+    paid for it. Observers (`observe`) see each finished record in-process —
+    the run-stats recorder folds them into per-phase cost."""
 
     def __init__(
         self, events_log: Callable[[], str], run_context: dict[str, str],
@@ -42,10 +49,21 @@ class JsonlEventEmitter:
         # composition root can rebind the sink — and tests redirect it.
         self._events_log = events_log
         self._ctx = run_context
+        self._observers: list[Callable[[dict[str, Any]], None]] = []
+
+    @property
+    def events_log(self) -> str:
+        return self._events_log()
+
+    def observe(self, observer: Callable[[dict[str, Any]], None]) -> None:
+        """Call `observer(record)` after every emitted record. An observer
+        that raises is skipped for that record, never propagated."""
+        self._observers.append(observer)
 
     def emit(self, event: str, **fields: Any) -> None:
+        record: dict[str, Any] | None = None
         try:
-            record: dict[str, Any] = {
+            record = {
                 "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
                 "product": self._ctx.get("product", "unknown"),
                 "pipeline_sha": self._ctx.get("pipeline_sha", "unknown"),
@@ -56,6 +74,10 @@ class JsonlEventEmitter:
                 # OS thread id — distinguishes a real name-collision from reentrancy.
                 "tid": threading.get_ident(),
             }
+            if event not in PHASE_EVENTS:
+                scope = current_scope()
+                if scope is not None:
+                    record["in_scope"], record["in_phase"] = scope
             for k, v in fields.items():
                 if v is not None:
                     record[k] = v
@@ -81,6 +103,12 @@ class JsonlEventEmitter:
                     fh.write(line)
         except Exception:
             pass  # observability must never crash the pipeline
+        # Outside the write's try: an unwritable log must not also blind the
+        # in-process observers to a record that was built.
+        if record is not None and "event" in record:
+            for observer in self._observers:
+                with suppress(Exception):
+                    observer(record)
 
     @contextmanager
     def phase(self, prefix: str, **fields: Any) -> Iterator[dict[str, Any]]:

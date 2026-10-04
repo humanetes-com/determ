@@ -30,6 +30,7 @@ class StreamMeta:
 
     finish_reason: str | None = None     # "length" ⇒ truncated at max_tokens; "stop" ⇒ EOS
     prompt_tokens: int | None = None     # actual input tokens, when the server reports them
+    completion_tokens: int | None = None  # generated tokens (reasoning included), when reported
 
 
 class InputTooLong(Exception):

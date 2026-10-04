@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass, replace
 
 from pipeline_core.domain.behaviour import (
@@ -73,6 +73,7 @@ from pipeline_core.prompts.behaviour_rules import (
     build_rule_authoring_prompt,
     build_then_prediction_prompt,
 )
+from pipeline_core.threads import ContextPool
 
 
 @dataclass(frozen=True)
@@ -289,7 +290,7 @@ def _on_lanes[T, R](fn: Callable[[T], R], items: Sequence[T], lanes: int,
     if not items:
         return []
     if lanes > 1 and len(items) > 1:
-        with ThreadPoolExecutor(max_workers=lanes, thread_name_prefix="behaviour-book") as pool:
+        with ContextPool(max_workers=lanes, thread_name_prefix="behaviour-book") as pool:
             pending = {pool.submit(fn, item): i for i, item in enumerate(items)}
             done: dict[int, R] = {}
             for fut in as_completed(pending):

@@ -20,6 +20,14 @@ the ambient form `step("bake.book", cluster=cluster.name)`, which finds the
 innermost open scope whose phase is the step's parent. Steps are sequential:
 entering one closes the previous, and leaving the scope closes the last.
 
+Every scope and step gets a `scope` id, announced on its enter and exit with
+the `parent_scope` it was opened under, and becomes the current scope of the
+context that opened it (:func:`current_scope`). The event emitter stamps that
+scope on every other event, so an `llm.request` or a cargo spawn names the
+phase that paid for it, including from a pooled worker thread (see
+:mod:`pipeline_core.threads`): `domain.phase_cost.PhaseCostFold` folds the
+stream into per-phase cost.
+
 Only ids the registry knows are announced as themselves. An unknown id is
 emitted anyway, flagged `unknown`, and logged loudly: observability must not
 crash a run, and `tests/test_phase_registry.py` scans every literal id at every
@@ -27,10 +35,12 @@ call site so an unknown one cannot ship.
 """
 from __future__ import annotations
 
+import itertools
 import threading
 import time
 from collections.abc import Callable
 from contextlib import suppress
+from contextvars import ContextVar
 from types import TracebackType
 from typing import Any
 
@@ -39,11 +49,24 @@ from .domain.phase_registry import phase as _phase
 from .log import emit, log
 
 __all__ = ["PhaseScope", "phase_scope", "phase_skipped", "step", "note_work",
-           "bind_current"]
+           "bind_current", "current_scope"]
 
 _current_sink: Callable[[str], None] | None = None
 _open: list[PhaseScope] = []
 _lock = threading.Lock()
+# (scope id, phase id) of the innermost scope or step open in THIS context.
+_scope: ContextVar[tuple[str, str] | None] = ContextVar("phase_scope", default=None)
+_scope_ids = itertools.count(1)
+
+
+def current_scope() -> tuple[str, str] | None:
+    """`(scope id, phase id)` of the innermost phase or step open in the
+    calling context, or None outside every phase."""
+    return _scope.get()
+
+
+def _new_scope_id() -> str:
+    return str(next(_scope_ids))
 
 
 def bind_current(sink: Callable[[str], None] | None) -> None:
@@ -69,9 +92,11 @@ def _label(phase_id: str, cluster: str | None) -> str:
 
 
 def _fields(phase_id: str, cluster: str | None, module: str | None,
-            attempt: int | None, detail: str | None) -> dict[str, Any]:
+            attempt: int | None, detail: str | None, *,
+            scope: str | None = None, parent_scope: str | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"phase": phase_id, "cluster": cluster, "module": module,
-                           "attempt": attempt}
+                           "attempt": attempt, "scope": scope,
+                           "parent_scope": parent_scope}
     data: dict[str, Any] = {}
     if detail:
         data["detail"] = detail
@@ -97,7 +122,10 @@ class PhaseScope:
         self.detail = detail
         self._t0 = 0.0
         self._step: tuple[str, str | None, float] | None = None
+        self._step_scope: str | None = None
         self._closed = False
+        self.scope_id = ""
+        self._outer: tuple[str, str] | None = None
 
     # -- open / close ------------------------------------------------------
     def open(self) -> PhaseScope:
@@ -105,10 +133,15 @@ class PhaseScope:
         too long to indent under a `with` (the orchestrator's setup) calls it
         and `close` directly."""
         self._t0 = time.monotonic()
+        self.scope_id = _new_scope_id()
+        self._outer = _scope.get()
         with _lock:
             _open.append(self)
-        emit(PHASE_ENTER, **_fields(self.phase_id, self.cluster, self.module,
-                                    self.attempt, self.detail))
+        emit(PHASE_ENTER, **_fields(
+            self.phase_id, self.cluster, self.module, self.attempt, self.detail,
+            scope=self.scope_id,
+            parent_scope=self._outer[0] if self._outer else None))
+        _scope.set((self.scope_id, self.phase_id))
         _set_current(_label(self.phase_id, self.cluster))
         return self
 
@@ -142,7 +175,11 @@ class PhaseScope:
                 f"{self.phase_id!r}")
         cl = cluster if cluster is not None else self.cluster
         self._step = (child_id, cl, time.monotonic())
-        emit(PHASE_ENTER, **_fields(child_id, cl, self.module, self.attempt, detail))
+        self._step_scope = _new_scope_id()
+        emit(PHASE_ENTER, **_fields(child_id, cl, self.module, self.attempt, detail,
+                                    scope=self._step_scope,
+                                    parent_scope=self.scope_id))
+        _scope.set((self._step_scope, child_id))
         _set_current(_label(child_id, cl))
 
     def skip(self, reason: str) -> None:
@@ -156,9 +193,11 @@ class PhaseScope:
         if self._step is None:
             return
         child_id, cl, t0 = self._step
-        self._step = None
-        emit(PHASE_EXIT, **_fields(child_id, cl, self.module, self.attempt, None),
+        sid, self._step, self._step_scope = self._step_scope, None, None
+        emit(PHASE_EXIT, **_fields(child_id, cl, self.module, self.attempt, None,
+                                   scope=sid, parent_scope=self.scope_id),
              outcome=outcome, duration_ms=int((time.monotonic() - t0) * 1000))
+        _scope.set((self.scope_id, self.phase_id))
 
     def _exit(self, outcome: str, *, detail: str | None = None) -> None:
         if self._closed:
@@ -167,9 +206,12 @@ class PhaseScope:
         with _lock:
             if self in _open:
                 _open.remove(self)
-        emit(PHASE_EXIT, **_fields(self.phase_id, self.cluster, self.module,
-                                   self.attempt, detail),
+        emit(PHASE_EXIT, **_fields(
+            self.phase_id, self.cluster, self.module, self.attempt, detail,
+            scope=self.scope_id,
+            parent_scope=self._outer[0] if self._outer else None),
              outcome=outcome, duration_ms=int((time.monotonic() - self._t0) * 1000))
+        _scope.set(self._outer)
 
 
 def phase_scope(phase_id: str, *, cluster: str | None = None,

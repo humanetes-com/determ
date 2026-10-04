@@ -97,6 +97,13 @@ def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
     return 8_192, 0  # huggingface / unrecognised → safe fallback
 
 
+def _file_floor_pct(coverage_target: float) -> float:
+    """`COVERAGE_FILE_FLOOR`: unset or blank follows the aggregate target, so
+    an `.env` that names one coverage number gets it per file too."""
+    raw = (os.getenv("COVERAGE_FILE_FLOOR") or "").strip()
+    return float(raw) if raw else coverage_target
+
+
 def _optional_float(raw: str | None) -> float | None:
     """An env float, None when unset or blank (the server default)."""
     return float(raw) if raw and raw.strip() else None
@@ -127,6 +134,11 @@ class Settings:
     # pin requirement and the extra behaviour passes off. Probe cap = admitted
     # public-API programs per cluster, each one model batch plus one cargo run.
     behaviour_coverage_target: float = 0.0
+    # The task0c line stop: the module aggregate percent, and the per-file
+    # floor over the lines a test can reach (unset = the aggregate target;
+    # 0 = off). See `domain.file_coverage_floor`.
+    coverage_augmentation_target: float = 98.0
+    coverage_file_floor: float = 0.0
     task0d_probe_max: int = 12
     # Compositions of two public items t0d asks about per cluster: edges of
     # the public API (one item's result type is another's receiver or
@@ -217,6 +229,7 @@ class Settings:
         safe = safe_input_char_limit(ctx, thinking, _MIN_CONTENT_TOKENS_GENERAL)
         safe_t0c = safe_input_char_limit(ctx, thinking, _MIN_CONTENT_TOKENS_TASK0C)
         single_call = min(safe, mcc * 3 // 4)
+        _coverage_target = float(os.getenv("COVERAGE_AUGMENTATION_TARGET", "98"))
 
         return cls(
             backend=backend,
@@ -238,6 +251,8 @@ class Settings:
             task_models=TaskModels.from_env(model),
             fix_caps=FixLoopCaps.from_env(single_call),
             behaviour_coverage_target=float(os.getenv("BEHAVIOUR_COVERAGE_TARGET", "0")),
+            coverage_augmentation_target=_coverage_target,
+            coverage_file_floor=_file_floor_pct(_coverage_target),
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
             task0d_probe_edges=int(os.getenv("TASK0D_PROBE_EDGES", "8")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",

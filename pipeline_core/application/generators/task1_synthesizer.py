@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import hashlib
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +36,7 @@ from ...ports.synthesizer import (
 )
 from ...prompts.genesis_seed import GENESIS_SEED
 from ...retry import with_retry
+from ...threads import ContextPool
 
 
 class Task1Synthesizer(ABC):
@@ -445,7 +445,7 @@ Output a plain structured list of the merged requirements. No filler, no code, n
 
         if pending:
             workers = min(_PARALLELISM, len(pending))
-            with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="task1-chunk") as pool:
+            with ContextPool(max_workers=workers, thread_name_prefix="task1-chunk") as pool:
                 for i, entry in pool.map(_run_chunk, pending):
                     partial_requirements[i - 1] = entry
 

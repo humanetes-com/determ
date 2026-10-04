@@ -847,6 +847,10 @@ class AugmentVerdict:
     fn_measured: bool = False
     unexecuted: int = 0
     unreached: tuple[str, ...] = ()
+    # The per-file line floor the stop applied (0 = none) and the files it
+    # left below that floor, each as `<file> <pct>% <verdict>`.
+    file_floor: float = 0.0
+    files_below: tuple[str, ...] = ()
 
     def is_final(self) -> bool:
         """True when the verdict is a claim about the tree rather than about the
@@ -854,7 +858,7 @@ class AugmentVerdict:
         augmented at all."""
         return self.reason == "done"
 
-    def still_binding(self, code_id: str) -> bool:
+    def still_binding(self, code_id: str, file_floor: float = 0.0) -> bool:
         """True when this verdict still answers "skip this cluster".
 
         A final verdict binds under any pipeline code, but only when the stop
@@ -864,10 +868,14 @@ class AugmentVerdict:
         provenance — a bare-number sentinel written before this field existed
         — never binds, so the first run after the change re-measures instead
         of inheriting an unattributable claim.
-        """
-        return not self.unbinding_reason(code_id)
 
-    def unbinding_reason(self, code_id: str) -> str:
+        `file_floor` is the per-file line floor the current stop applies: a
+        final verdict written under a laxer floor (or none) binds no longer,
+        since the files it left below that floor were never asked of a test.
+        """
+        return not self.unbinding_reason(code_id, file_floor)
+
+    def unbinding_reason(self, code_id: str, file_floor: float = 0.0) -> str:
         """Why this verdict no longer binds ("" when it does)."""
         if self.is_final():
             if self.criterion != FN_EXECUTION_CRITERION:
@@ -875,6 +883,9 @@ class AugmentVerdict:
                         f"execution criterion (recorded "
                         f"'{self.criterion or 'none'}', now "
                         f"'{FN_EXECUTION_CRITERION}')")
+            if self.file_floor < file_floor:
+                return ("written by a stop that applied a per-file floor of "
+                        f"{self.file_floor:g}%, now {file_floor:g}%")
             return ""
         if not self.code_id:
             return "no recorded pipeline identity"
@@ -894,6 +905,9 @@ class AugmentVerdict:
                      f"fn_measured={'yes' if self.fn_measured else 'no'}\n"
                      f"unexecuted={self.unexecuted}\n"
                      f"unreached={';'.join(self.unreached)}\n")
+        if self.file_floor:
+            text += (f"file_floor={self.file_floor:g}\n"
+                     f"files_below={';'.join(self.files_below)}\n")
         return text
 
     @classmethod
@@ -916,13 +930,19 @@ class AugmentVerdict:
             unexecuted = int(fields.get("unexecuted", "0") or 0)
         except ValueError:
             unexecuted = 0
+        try:
+            file_floor = float(fields.get("file_floor", "0") or 0)
+        except ValueError:
+            file_floor = 0.0
         return cls(coverage=coverage,
                    reason=fields.get("reason", ""),
                    code_id=fields.get("code_id") or fields.get("source_hash", ""),
                    criterion=fields.get("criterion", ""),
                    fn_measured=fields.get("fn_measured", "") == "yes",
                    unexecuted=unexecuted,
-                   unreached=tuple(u for u in fields.get("unreached", "").split(";") if u))
+                   unreached=tuple(u for u in fields.get("unreached", "").split(";") if u),
+                   file_floor=file_floor,
+                   files_below=tuple(f for f in fields.get("files_below", "").split(";") if f))
 
 
 @dataclass
@@ -938,8 +958,9 @@ class ModuleAugmentState:
       record_pass(...) is called after each task0c_augment_module() return.
       status(crate_type) returns one of:
         'done'       — coverage at target AND no function the cluster compiles is
-                       still unexecuted within its attempt budget, or crate is
-                       proc-macro (cannot augment)
+                       still unexecuted within its attempt budget AND no file is
+                       held under the per-file floor, or crate is proc-macro
+                       (cannot augment)
         'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
         'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
         'retry'      — keep going
@@ -959,17 +980,22 @@ class ModuleAugmentState:
     # criterion could not be measured — the pass logged why).
     last_fns_pending: int = 0
     best_fns_pending: int = -1
+    # Files under the per-file line floor on reachable lines and not accounted
+    # for (`domain.file_coverage_floor`), as of the last pass; 0 when the floor
+    # is off.
+    last_files_held: int = 0
 
     STALL_LIMIT: int = 10
     CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
 
     def record_pass(self, pct: float, covered: int, at_ceiling: bool,
-                    fns_pending: int = 0) -> None:
+                    fns_pending: int = 0, files_held: int = 0) -> None:
         self.total_passes += 1
         self.last_pct = pct
         self.last_covered = covered
         self.last_at_ceiling = at_ceiling
         self.last_fns_pending = fns_pending
+        self.last_files_held = files_held
         if at_ceiling:
             self.ceiling_passes += 1
         else:
@@ -986,7 +1012,8 @@ class ModuleAugmentState:
             self.stall_passes += 1
 
     def status(self, crate_type: str) -> str:
-        if self.last_pct >= self.target_pct and self.last_fns_pending == 0:
+        if (self.last_pct >= self.target_pct and self.last_fns_pending == 0
+                and self.last_files_held == 0):
             return 'done'
         if crate_type == 'proc-macro':
             return 'done'

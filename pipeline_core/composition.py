@@ -277,6 +277,10 @@ from pipeline_core.adapters.retros import (
     suspend_futile_guidance as _suspend_futile_guidance,
 )
 from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
+from pipeline_core.adapters.run_stats_recorder import (
+    start_run_stats as _start_run_stats_recorder,
+)
+from pipeline_core.adapters.run_stats_store import run_stats_path
 from pipeline_core.adapters.rust_parse import ParseCheck
 from pipeline_core.adapters.skeleton_compile import compile_filled_check
 from pipeline_core.adapters.state import (
@@ -2602,6 +2606,14 @@ def build_app(
     # come from settings/cfg/domain vocabulary; drivers bind DIRECT to the
     # pipeline_core impls; only logging/telemetry init + the audit thread stay
     # helpers-late-bound (they mutate pipeline-side run globals).
+    def _start_run_stats(root: Path, project_dir: Path, crate: str) -> None:
+        _ctx = run_context if run_context is not None else {}
+        _start_run_stats_recorder(
+            store_path=run_stats_path(events_log()), observe=_emitter.observe,
+            root=root, project_dir=project_dir, crate=crate,
+            run_id=_ctx.get("run_id", ""), commit=_ctx.get("pipeline_sha"),
+            env=_os.environ, argv=sys.argv)
+
     run_deps = RunDeps(
         WORKSPACE_DIR=_WORKSPACE_DIR,
         MANIFEST_NAME=_MANIFEST_NAME,
@@ -2651,6 +2663,7 @@ def build_app(
         git_checkpoint=git_checkpoint,
         oracle_drift=_workspace_oracle_drift,
         set_current=set_current,
+        start_run_stats=_start_run_stats,
         source_hash=source_hash,
         log_state_summary=_state_log_state_summary,
         read=_io_read,
@@ -2977,6 +2990,9 @@ def build_app(
             load_fn_record=augment_store.cluster_fn_record,
             save_fn_record=augment_store.save_cluster_fn_record,
             other_fn_records=augment_store.other_cluster_fn_records,
+            COVERAGE_FILE_FLOOR=settings.coverage_file_floor,
+            load_file_floor=augment_store.cluster_file_floor,
+            save_file_floor=augment_store.save_cluster_file_floor,
             # The functions no test can execute are proved from rustc's own
             # MIR and public index for the cluster's world, not asked of a model.
             measure_reachability=functools.partial(

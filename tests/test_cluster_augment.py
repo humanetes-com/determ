@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.cluster_augment import AugmentContext, ClusterAugmentor
+from pipeline_core.domain.file_coverage_floor import FILE_ACCOUNTED, FILE_HELD, FILE_MET, FileFloor, FileFloorReading
 from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.models import FN_EXECUTION_CRITERION, AugmentVerdict, BuildCluster
 
@@ -42,6 +43,10 @@ class FakeAdapter:
         # without function counts.
         self.fn_scripts: dict[tuple[str, str], list[FnCoverageRecord]] = {}
         self.marked_functions: dict[tuple[str, str], FnCoverageRecord | None] = {}
+        # Scripted per-file floor readings, one consumed per augment pass (the
+        # last repeats); absent → no reading, as with the floor off.
+        self.floor_scripts: dict[tuple[str, str], list[FileFloor]] = {}
+        self.marked_floors: dict[tuple[str, str], FileFloor | None] = {}
         self.module_sentinels: dict[str, float] = {}
         self.active: list[str | None] = []
         self.commits: list[str] = []
@@ -68,11 +73,23 @@ class FakeAdapter:
 
     def mark_cluster_augmented(self, pd: Path, c: str, m: str, cov: float, *,
                                reason: str = "", code_id: str = "",
-                               functions: FnCoverageRecord | None = None) -> None:
+                               functions: FnCoverageRecord | None = None,
+                               file_floor: FileFloor | None = None) -> None:
         self.cluster_sentinels[(c, m)] = AugmentVerdict(
             cov, reason, code_id, criterion=FN_EXECUTION_CRITERION,
-            fn_measured=functions is not None and functions.measured)
+            fn_measured=functions is not None and functions.measured,
+            file_floor=file_floor.floor if file_floor is not None else 0.0)
         self.marked_functions[(c, m)] = functions
+        self.marked_floors[(c, m)] = file_floor
+
+    def cluster_file_floor(self, pd: Path, c: str, m: str) -> FileFloor | None:
+        seq = self.floor_scripts.get((c, m))
+        if not seq:
+            return None
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def module_file_floors(self, pd: Path, m: str) -> dict[str, FileFloor]:
+        return {c: f for (c, mm), f in self.marked_floors.items() if mm == m and f is not None}
 
     def cluster_fn_record(self, pd: Path, c: str, m: str) -> FnCoverageRecord | None:
         seq = self.fn_scripts.get((c, m))
@@ -141,6 +158,7 @@ class _TruthyPath:
 def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
          module_coverage: dict[str, float] | None = None,
          behaviour_target_pct: float = 0.0,
+         file_floor_pct: float = 0.0,
          target_pct: float = 100.0,
          src_hash: str = "crate-hash",
          code_id: str = "abc") -> AugmentContext:
@@ -158,6 +176,7 @@ def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
         target_pct=target_pct,
         tarpaulin_bin=_TruthyPath(),  # type: ignore[arg-type]
         behaviour_target_pct=behaviour_target_pct,
+        file_floor_pct=file_floor_pct,
     )
 
 
@@ -453,3 +472,52 @@ def test_the_terminating_status_is_what_gets_recorded() -> None:
     fake = FakeAdapter(augment_script={}, pre_check=False)
     _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["a"]))
     assert fake.cluster_sentinels[("nightly", "a")].reason == "precheck_failed"
+
+
+# --- the per-file floor -------------------------------------------------
+
+def _floor(verdict: str) -> FileFloor:
+    return FileFloor(90.0, (
+        FileFloorReading("src/w.rs", 17, 20, 17, 20, verdict),
+        FileFloorReading("src/e.rs", 380, 380, 380, 380, FILE_MET)))
+
+
+def test_a_held_file_keeps_a_met_module_open_until_it_is_accounted() -> None:
+    # Pass 1 meets the aggregate with src/w.rs held under the floor → retry;
+    # pass 2 reads it accounted → done, and the sentinel names it below.
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [
+        (97.5, 805, False, ""), (97.5, 805, False, "")]})
+    fake.floor_scripts[("nightly", "anyhow")] = [_floor(FILE_HELD), _floor(FILE_ACCOUNTED)]
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0,
+                              file_floor_pct=90.0))
+    assert any("meets 90% but 1 file(s) are below the 90% floor" in m for m in fake.logs)
+    assert fake.events.count("task.done") == 2
+    v = fake.cluster_sentinels[("nightly", "anyhow")]
+    assert v.reason == "done" and v.file_floor == 90.0
+    assert any("1 file(s) below the 90% floor on reachable lines (0 held)" in m
+               for m in fake.logs)
+
+
+def test_negative_control_the_floor_off_reads_no_floor_and_stops_on_pass_one() -> None:
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [
+        (97.5, 805, False, ""), (97.5, 805, False, "")]})
+    fake.floor_scripts[("nightly", "anyhow")] = [_floor(FILE_HELD), _floor(FILE_ACCOUNTED)]
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    assert fake.events.count("task.done") == 1
+    assert fake.cluster_sentinels[("nightly", "anyhow")].file_floor == 0.0
+
+
+def test_a_done_written_without_the_floor_reopens_under_it() -> None:
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [(97.5, 805, False, "")]})
+    fake.cluster_sentinels[("nightly", "anyhow")] = AugmentVerdict(
+        97.5, "done", "abc", criterion=FN_EXECUTION_CRITERION, fn_measured=True)
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0,
+                              file_floor_pct=90.0))
+    assert "cluster.sentinel.reopened" in fake.events
+    assert any("per-file floor of 0%, now 90%" in m for m in fake.logs)
+    # Control: the same sentinel under the floor off still binds.
+    fake = FakeAdapter(augment_script={("nightly", "anyhow"): [(97.5, 805, False, "")]})
+    fake.cluster_sentinels[("nightly", "anyhow")] = AugmentVerdict(
+        97.5, "done", "abc", criterion=FN_EXECUTION_CRITERION, fn_measured=True)
+    _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
+    assert any("already done — skipping" in m for m in fake.logs)

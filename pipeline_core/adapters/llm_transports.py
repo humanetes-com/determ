@@ -474,12 +474,14 @@ class OllamaTransport(_BaseTransport):
                max_tokens: int | None, enable_thinking: bool,
                meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         if _model_use_native_ollama(model):
-            yield from self._stream_native(messages, model, enable_thinking, temperature)
+            yield from self._stream_native(messages, model, enable_thinking, meta, temperature)
         else:
-            yield from self._stream_compat(messages, model, max_tokens, enable_thinking, temperature)
+            yield from self._stream_compat(messages, model, max_tokens, enable_thinking,
+                                           meta, temperature)
 
     def _stream_native(self, messages: list[dict[str, Any]], model: str,
-                       enable_thinking: bool, temperature: float | None = None) -> Iterator[Delta]:
+                       enable_thinking: bool, meta: StreamMeta,
+                       temperature: float | None = None) -> Iterator[Delta]:
         import ollama as _ollama
         options: dict[str, Any] = {"num_ctx": self._num_ctx}
         if temperature is not None:
@@ -490,6 +492,9 @@ class OllamaTransport(_BaseTransport):
                              stream=True, options=options),
                 _CHUNK_TIMEOUT,
             ):
+                # The final chunk (`done`) carries the server's own counts.
+                if getattr(part, "done", False):
+                    _read_ollama_usage(part, meta)
                 thinking = getattr(part.message, "thinking", None)
                 if thinking:
                     yield Delta(reasoning=thinking)
@@ -501,7 +506,7 @@ class OllamaTransport(_BaseTransport):
 
     def _stream_compat(self, messages: list[dict[str, Any]], model: str,
                        max_tokens: int | None, enable_thinking: bool,
-                       temperature: float | None = None) -> Iterator[Delta]:
+                       meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
         from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="ollama", timeout=300)
         # Qwen3 compat layer has no think param — /no_think suppresses reasoning.
@@ -521,9 +526,11 @@ class OllamaTransport(_BaseTransport):
                 max_tokens=max_tokens,
                 extra_body={"options": {"num_ctx": self._num_ctx}},
                 stream=True,
+                stream_options={"include_usage": True},
                 **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
+                    _read_openai_usage(chunk, meta)
                     if not chunk.choices:
                         continue
                     _d = chunk.choices[0].delta
@@ -667,6 +674,8 @@ class HuggingFaceTransport(_BaseTransport):
                 pad_token_id=self._tokenizer.eos_token_id,
             )
         new_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+        meta.prompt_tokens = int(inputs["input_ids"].shape[1])
+        meta.completion_tokens = int(len(new_ids))
         out = str(self._tokenizer.decode(new_ids, skip_special_tokens=True))
         if out:
             yield Delta(content=out)
@@ -716,9 +725,15 @@ class SGLangTransport(_BaseTransport):
                 max_tokens=max_tokens,
                 extra_body=extra_body or None,
                 stream=True,
+                stream_options={"include_usage": True},
                 **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
+                    # The usage chunk has no choices: reading `choices[0]`
+                    # first would raise on it.
+                    _read_openai_usage(chunk, meta)
+                    if not chunk.choices:
+                        continue
                     delta = chunk.choices[0].delta
                     reasoning = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
                     if reasoning:
@@ -734,6 +749,31 @@ class SGLangTransport(_BaseTransport):
                           *, model: str) -> list[dict[str, Any]]:
         tail = reasoning_text[-6000:] if len(reasoning_text) > 6000 else reasoning_text
         return self._refeed_as_user_turn(base_messages, tail)
+
+
+def _read_openai_usage(chunk: Any, meta: StreamMeta) -> None:
+    """Copy an OpenAI-protocol stream chunk's `usage` into `meta`. Asked for
+    with `stream_options.include_usage`; the counts arrive on the final chunk
+    (one with no choices), and a server that ignores the option sends none."""
+    usage = getattr(chunk, "usage", None)
+    if not usage:
+        return
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if prompt:
+        meta.prompt_tokens = int(prompt)
+    if completion:
+        meta.completion_tokens = int(completion)
+
+
+def _read_ollama_usage(part: Any, meta: StreamMeta) -> None:
+    """Ollama's native final chunk: `prompt_eval_count` / `eval_count`."""
+    prompt = getattr(part, "prompt_eval_count", None)
+    completion = getattr(part, "eval_count", None)
+    if prompt:
+        meta.prompt_tokens = int(prompt)
+    if completion:
+        meta.completion_tokens = int(completion)
 
 
 def _parse_input_token_overflow(msg: str) -> int | None:
@@ -899,8 +939,7 @@ class VLLMTransport(_BaseTransport):
                 **({"temperature": temperature} if temperature is not None else {}),
             ) as stream:
                 for chunk in stream:
-                    if chunk.usage and chunk.usage.prompt_tokens:
-                        meta.prompt_tokens = chunk.usage.prompt_tokens
+                    _read_openai_usage(chunk, meta)
                     if not chunk.choices:
                         continue
                     _fr = chunk.choices[0].finish_reason

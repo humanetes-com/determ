@@ -42,6 +42,7 @@ from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.workspace_layout import (
     BEHAVIOUR_TAG_PREFIX,
     PRE_AUGMENT_TAG_PREFIX,
+    augmentation_has_started,
     plan_behaviour_tags,
     plan_pre_augment_tags,
 )
@@ -885,6 +886,10 @@ class RunDeps:
     # phase announcer (`pipeline_core.phases`) so a phase's entry and the state
     # file's "where the run stands" line are written by the same call.
     set_current: Callable[[Path, str], None] = lambda _p, _l: None
+    # Start recording what each phase of this run costs, against the code,
+    # configuration and starting workspace (`adapters.run_stats_recorder`):
+    # `(root, project_dir, crate)`. A no-op unless the composition root binds it.
+    start_run_stats: Callable[[Path, Path, str], None] = lambda _r, _p, _c: None
 
 
 def check_oracle_seal(deps: RunDeps, project_dir: Path,
@@ -1085,6 +1090,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     deps.log(f"  Source hash: {_src_hash}")
     deps.log_state_summary(project_dir, _src_hash)
     phases.bind_current(lambda label: deps.set_current(project_dir, label))
+    deps.start_run_stats(root, project_dir, project_dir.name)
 
     readme_path = project_dir / "README.md"
     if readme_path.exists():
@@ -1289,25 +1295,37 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     # (24 % of the private surface was frozen that way on anyhow).
     # Refused once t0c has run for the module: the original bodies are gone
     # after strip (a doc-fence tier over the shell reads nothing, a probe
-    # cannot compile) and the generated tests would enter the spec. A
-    # workspace restored to its pre-t0c tag has no sentinel and harvests; one
-    # restored to its behaviour restore point keeps the `task0d/<cluster>`
-    # entries, and each cluster skips as already harvested.
+    # cannot compile) and the generated tests would enter the spec. Refused
+    # too once ANY task0c entry exists, finished or not: the module sentinel
+    # is written only when a module's augmentation completes, so a launch
+    # resuming a half-augmented cluster has no sentinel but a tree holding
+    # generated tests, and a book stage resumed there would read them. A
+    # workspace restored to its pre-t0c tag has neither and harvests; one
+    # restored to its behaviour restore point keeps the `task0d/*` entries,
+    # and each cluster and the book stage skip as already done.
     if not _from_spec:
+        _t0c_started = augmentation_has_started(deps.read_state(project_dir)["phases"])
         for _t0d_module in modules:
             if deps.augment_store.is_module_augmented(project_dir, _t0d_module):
                 deps.log(f"  [task0d] '{_t0d_module}' already augmented — the "
                          "behaviour harvest runs only BEFORE task0c; skipping.")
                 phase_skipped("t0d", "already augmented", module=_t0d_module)
                 continue
+            if _t0c_started:
+                deps.log(f"  [task0d] '{_t0d_module}': task0c has started in this workspace — "
+                         "the behaviour harvest and book run only BEFORE task0c; skipping.")
+                phase_skipped("t0d", "task0c started", module=_t0d_module)
+                continue
             run_task0d(deps.task0d_deps, project_dir, _t0d_module, list(_clusters),
                        _module_dirs[_t0d_module] / "src")
     # Behaviour restore point (`task0d-done-<module>`), consumed by
     # --restart-from-pre-augment: a task0c restart lands here and keeps the
     # harvest instead of paying task0d again. task0d commits each cluster's
-    # suite but leaves the doc-example tests and the book in the working tree
-    # (the first task0c commit would sweep them in), so the tree is committed
-    # whole first, and the tag is written only when HEAD holds all of it.
+    # harvest and the module's book stage, then marks each done AFTER its
+    # commit, so the last mark is still uncommitted here: the tree is
+    # committed whole first, and the tag is written only when HEAD holds all
+    # of it. The restore rewrites pipeline_state.md from the tagged commit's
+    # copy, so that last mark is what lets the restored run skip the book.
     if not _from_spec and deps.run_state.git_managed and _clusters:
         _behaviour_plan = plan_behaviour_tags(
             modules, deps.list_git_tags(project_dir, f"{BEHAVIOUR_TAG_PREFIX}*"),
@@ -1348,6 +1366,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # a collaborator.
         behaviour_target_pct=float(
             getattr(deps.SETTINGS, "behaviour_coverage_target", 0.0) or 0.0),
+        file_floor_pct=float(getattr(deps.SETTINGS, "coverage_file_floor", 0.0) or 0.0),
     ))
 
     total_iters = 0
@@ -1398,6 +1417,12 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                     f"\n  WARNING: '{module_name}' coverage is {_final_cov:.1f}% — "
                     f"proceeding to strip anyway. Reconstruction quality may be lower."
                 )
+            # The aggregate hides where the oracle is thin: name every file
+            # each cluster left below the per-file floor, with why.
+            for _fl_cluster, _floor in deps.augment_store.module_file_floors(
+                    project_dir, module_name).items():
+                if _floor.below:
+                    deps.log(f"  WARNING: '{module_name}' [{_fl_cluster}] {_floor.summary()}")
 
         # --- Collect test files BEFORE stripping ---
         # Must happen before strip so we can accurately identify which tests belong

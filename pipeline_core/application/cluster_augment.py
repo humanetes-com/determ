@@ -50,6 +50,9 @@ class AugmentContext:
     # rounds (the pin contract still applies to every block, the extra passes
     # do not run).
     behaviour_target_pct: float = 0.0
+    # The per-file line floor (`COVERAGE_FILE_FLOOR`) over the lines a test can
+    # reach; 0 = off. A module is done only when no file is held under it.
+    file_floor_pct: float = 0.0
 
 
 class ClusterAugmentor:
@@ -133,12 +136,12 @@ class ClusterAugmentor:
                 # skipped it: the only remover of a cluster sentinel is the full
                 # --clean workspace wipe.
                 verdict = store.cluster_augmented_verdict(project_dir, cluster.name, m)
-                if verdict is not None and not verdict.still_binding(code_id):
+                if verdict is not None and not verdict.still_binding(code_id, ctx.file_floor_pct):
                     tel.log(
                         f"  cluster/{cluster.name}: '{m}' sentinel records "
                         f"{verdict.coverage:.1f}% under a "
                         f"'{verdict.reason or 'unattributed'}' verdict "
-                        f"{verdict.unbinding_reason(code_id)} — "
+                        f"{verdict.unbinding_reason(code_id, ctx.file_floor_pct)} — "
                         f"re-augmenting instead of inheriting it."
                     )
                     tel.emit("cluster.sentinel.reopened", cluster=cluster.name,
@@ -147,7 +150,7 @@ class ClusterAugmentor:
                                    "recorded_code_id": verdict.code_id,
                                    "current_code_id": code_id,
                                    "recorded_criterion": verdict.criterion,
-                                   "why": verdict.unbinding_reason(code_id)})
+                                   "why": verdict.unbinding_reason(code_id, ctx.file_floor_pct)})
                 elif verdict is not None:
                     cluster_done.add(m)
                     tel.log(f"  cluster/{cluster.name}: '{m}' already done — skipping.")
@@ -232,10 +235,18 @@ class ClusterAugmentor:
                 fn_record = store.cluster_fn_record(project_dir, cluster.name, mod_name)
                 fns_pending = (len(fn_record.pending)
                                if fn_record is not None and fn_record.measured else 0)
-                state.record_pass(cov, covered, at_ceiling, fns_pending=fns_pending)
+                # The per-file half: a file under the floor on the lines a test
+                # can reach, and not accounted for, holds the module open.
+                file_floor = (store.cluster_file_floor(project_dir, cluster.name, mod_name)
+                              if ctx.file_floor_pct > 0 else None)
+                files_held = len(file_floor.held) if file_floor is not None else 0
+                state.record_pass(cov, covered, at_ceiling, fns_pending=fns_pending,
+                                  files_held=files_held)
                 status = state.status(crate_type)
                 if fn_record is not None:
                     tel.log(f"  TASK 0c [{cluster.name}]: '{mod_name}' {fn_record.summary()}")
+                if file_floor is not None:
+                    tel.log(f"  TASK 0c [{cluster.name}]: '{mod_name}' {file_floor.summary()}")
 
                 # A blocked pass is deterministic: the harness survived the LLM fix
                 # attempts AND a full gen_tests strip (or is broken in protected
@@ -265,7 +276,8 @@ class ClusterAugmentor:
                         )
                     store.mark_cluster_augmented(
                         project_dir, cluster.name, mod_name, cov,
-                        reason=status, code_id=code_id, functions=fn_record)
+                        reason=status, code_id=code_id, functions=fn_record,
+                        file_floor=file_floor)
                     # Also write the main module sentinel when the last cluster finishes,
                     # so the strip/task1-4 loop sees it as done.
                     if cluster == clusters[-1]:
@@ -276,7 +288,11 @@ class ClusterAugmentor:
                             if cov < ctx.target_pct else
                             f"coverage {cov:.1f}% meets {ctx.target_pct:.0f}% but "
                             f"{fns_pending} function(s) no test executes are still "
-                            "inside their attempt budget")
+                            "inside their attempt budget"
+                            if fns_pending else
+                            f"coverage {cov:.1f}% meets {ctx.target_pct:.0f}% but "
+                            f"{files_held} file(s) are below the "
+                            f"{ctx.file_floor_pct:.0f}% floor on reachable lines")
                     tel.log(
                         f"  HARD RULE: '{mod_name}' [{cluster.name}] {_why} "
                         f"(stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "

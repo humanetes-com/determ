@@ -21,6 +21,16 @@ Usage:
                                                # .env still matches it
     .venv/bin/python tools/perf_ledger.py list
     .venv/bin/python tools/perf_ledger.py compare <run_id_a> <run_id_b>
+    .venv/bin/python tools/perf_ledger.py phases [--run <run_id>]
+                                              # per-phase cost vs the previous
+                                              # code identities (the health tab)
+    .venv/bin/python tools/perf_ledger.py phases --history t0c
+                                              # every recorded run of a phase
+
+The code identity and the configuration of a run the pipeline recorded itself
+(`logs/run_stats.db`, written from launch) are read from that record, so an
+`append` made after `.env` was edited still states the run's own knobs; only a
+run with no record falls back to reading `.env` now, and says so.
 
 Metrics are extracted from `logs/events.jsonl` via the proven
 `logs/model_ab/model_report.py` collector; rows seeded from earlier runs
@@ -40,6 +50,8 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 LEDGER = ROOT / "logs" / "perf_ledger.jsonl"
+EVENTS = ROOT / "logs" / "events.jsonl"
+RUN_STATS = ROOT / "logs" / "run_stats.db"
 
 
 def _load_rows() -> list[dict[str, Any]]:
@@ -54,25 +66,26 @@ def _load_rows() -> list[dict[str, Any]]:
 
 
 def _env_block() -> dict[str, Any]:
-    """The knobs that change run behaviour, as the pipeline resolves them.
-    Read at APPEND time — append right after the run, before editing .env."""
+    """The knobs that change run behaviour, as the pipeline resolves them
+    (`domain.phase_cost.RunConfig`, the one resolver). Read NOW — the fallback
+    for a run the pipeline did not record itself."""
     from dotenv import load_dotenv
     load_dotenv(ROOT / ".env")
-    from pipeline_core.domain.model_defaults import resolve_route_order
-    model = os.getenv("MODEL", "")
-    route_env = os.getenv("PHASE_C_ROUTE_ORDER")
-    return {
-        "MODEL": model,
-        "PHASE_C_ROUTE_ORDER": str(resolve_route_order(route_env, model)),
-        "route_order_source": "env" if (route_env or "").strip() else "model-default",
-        "PHASE_C_DRIVER": os.getenv("PHASE_C_DRIVER", "tdd"),
-        "VLLM_REASONING_STRENGTH": os.getenv("VLLM_REASONING_STRENGTH", "high"),
-        "VLLM_MAX_MODEL_LEN": int(os.getenv("VLLM_MAX_MODEL_LEN", "0")) or None,
-        "VLLM_MAX_THINK_CHARS": int(os.getenv("VLLM_MAX_THINK_CHARS", "60000")),
-        "VLLM_REASONING_BUDGET": os.getenv("VLLM_REASONING_BUDGET", "fixed"),
-        "VLLM_THINKING_BUDGET": int(os.getenv("VLLM_THINKING_BUDGET", "0")) or None,
-        "PIPELINE_PARALLELISM": int(os.getenv("PIPELINE_PARALLELISM", "0")) or None,
-    }
+    from pipeline_core.domain.phase_cost import RunConfig
+    return RunConfig.from_env(os.environ).as_dict()
+
+
+def _recorded_run(run_id: str) -> Any:
+    """The pipeline's own record of `run_id` (code + config captured at
+    launch), or None."""
+    from pipeline_core.adapters.run_stats_store import SQLiteRunStatsStore
+    if not RUN_STATS.exists():
+        return None
+    store = SQLiteRunStatsStore(RUN_STATS, read_only=True)
+    try:
+        return store.run(run_id)
+    finally:
+        store.close()
 
 
 def _code_block() -> dict[str, Any]:
@@ -148,12 +161,21 @@ def cmd_append(args: argparse.Namespace) -> int:
               "rotated/older run, add a `source: recorded` row by hand with "
               "the numbers and where they were recorded.")
         return 2
+    recorded = _recorded_run(args.run_id)
+    if recorded is not None and recorded.config:
+        code = {"tree_stamp": recorded.tree_stamp, "commit": recorded.commit,
+                "code_key": recorded.record.code_key}
+        env = recorded.config
+    else:
+        print(f"run {args.run_id}: not in {RUN_STATS.name} — code and config are "
+              "read from the tree and .env as they are NOW")
+        code, env = _code_block(), _env_block()
     row = {
         "run_id": args.run_id,
         "date": (metrics.pop("started") or "")[:10] or None,
         "crate": args.crate,
-        "code": _code_block(),
-        "env": _env_block(),
+        "code": code,
+        "env": env,
         "metrics": metrics,
         "note": args.note,
         "source": "events",
@@ -202,6 +224,49 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_phases(args: argparse.Namespace) -> int:
+    if args.history:
+        return _phase_history(args.history)
+    from pipeline_core.monitor.phase_cost_view import phase_cost_report
+    report = phase_cost_report(EVENTS, running=False, run_id=args.run)
+    for f in report.findings:
+        print(f"{f.severity.symbol} [{f.kind}] {f.subject}")
+        print(f"   {f.evidence}")
+        print(f"   → {f.action}")
+    if report.findings:
+        print()
+    print("\n".join(report.table))
+    return 0
+
+
+def _phase_history(phase: str) -> int:
+    """Every recorded run of `phase` (live and backfilled), oldest first."""
+    from pipeline_core.adapters.run_stats_store import SQLiteRunStatsStore
+    if not RUN_STATS.exists():
+        print(f"{RUN_STATS} does not exist yet.")
+        return 0
+    store = SQLiteRunStatsStore(RUN_STATS, read_only=True)
+    try:
+        runs = {r.record.run_id: r for r in store.runs()}
+        rows = [s for s in store.samples() if s.key.phase == phase]
+    finally:
+        store.close()
+    if not rows:
+        print(f"no recorded sample of phase {phase!r}")
+        return 0
+    rows.sort(key=lambda s: runs[s.run_id].record.started if s.run_id in runs else "")
+    for s in rows:
+        r = runs.get(s.run_id)
+        ident = (r.record.code_key or f"HEAD {r.commit}") if r else "?"
+        where = "/".join(p for p in (s.key.module, s.key.cluster) if p)
+        print(f"{(r.record.started if r else '?')[:16]}  {s.run_id:>18s}  "
+              f"{ident:<17s} {where:<18s} {s.outcome:<8s} "
+              f"wall {s.wall_ms / 1000:7.1f}s  calls {s.work.llm_calls:>4}  "
+              f"tokens {s.work.tokens:>8}  cargo {s.work.cargo:>4}"
+              + (f"  [{r.source}]" if r and r.source != "live" else ""))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -218,6 +283,13 @@ def main() -> int:
     p_cmp.add_argument("a")
     p_cmp.add_argument("b")
     p_cmp.set_defaults(fn=cmd_compare)
+    p_ph = sub.add_parser("phases", help="per-phase cost vs the previous code "
+                                         "identities (what the health tab shows)")
+    p_ph.add_argument("--run", default=None,
+                      help="run id (default: the latest recorded live run)")
+    p_ph.add_argument("--history", metavar="PHASE", default=None,
+                      help="list every recorded run of one phase id instead")
+    p_ph.set_defaults(fn=cmd_phases)
     args = ap.parse_args()
     return int(args.fn(args))
 

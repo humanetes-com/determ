@@ -31,14 +31,16 @@ stream rows — was silently unset inside a pooled route's workers, and the
 records keyed on them came back unlabelled. Each worker gets its OWN copy of
 the spawning context (`contextvars.copy_context()` per thread, never one
 shared `Context` — a Context may not be entered from two threads at once),
-so a binding made inside a worker still scopes that worker alone.
+so a binding made inside a worker still scopes that worker alone. The
+mechanism is `pipeline_core.threads.context_thread`, shared with every other
+pool in the pipeline.
 """
 from __future__ import annotations
 
-import contextvars
 import queue as _queue_mod
-import threading
 from collections.abc import Callable, Iterable
+
+from pipeline_core.threads import context_thread
 
 
 def run_units_concurrently[T](
@@ -92,12 +94,7 @@ def run_units_concurrently[T](
             except Exception as exc:
                 log(f"  [{name_prefix}] worker error on {describe(unit)}: {exc}")
 
-    def _worker_in_context(ctx: contextvars.Context) -> Callable[[], None]:
-        return lambda: ctx.run(_worker)
-
-    threads = [threading.Thread(
-        target=_worker_in_context(contextvars.copy_context()),
-        name=f"{name_prefix}-w{i}") for i in range(n)]
+    threads = [context_thread(_worker, name=f"{name_prefix}-w{i}") for i in range(n)]
     for t in threads:
         t.start()
     for t in threads:

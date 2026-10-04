@@ -133,12 +133,15 @@ def test_plan_is_per_module():
 
 from pipeline_core.domain.workspace_layout import (  # noqa: E402
     BEHAVIOUR_PHASE_PREFIX,
+    behaviour_book_key,
     behaviour_tag,
+    is_behaviour_phase,
     plan_behaviour_tags,
 )
 
 _DONE = {"status": "done"}
-_HARVESTED = {"task0b": _DONE, "task0d/stable": _DONE, "task0d/nightly": _DONE}
+_HARVESTED = {"task0b": _DONE, "task0d/stable": _DONE, "task0d/nightly": _DONE,
+              "task0d/anyhow/book": _DONE}
 _HARVEST_KEYS = ["task0d/stable", "task0d/nightly"]
 
 
@@ -171,6 +174,32 @@ def test_behaviour_plan_refuses_a_partial_harvest():
     assert plan.to_write == () and "task0d/nightly" in (plan.refusal or "")
     plan = plan_behaviour_tags(["anyhow"], [], {"task0d/stable": _DONE}, _HARVEST_KEYS)
     assert plan.to_write == () and "task0d/nightly" in (plan.refusal or "")
+
+
+def test_behaviour_plan_refuses_a_harvest_whose_book_stage_is_not_done():
+    """The restore rewrites pipeline_state from the tagged commit, so a point
+    without the book stage's entry would hand every restored run the book
+    (93-125 min on anyhow) to pay again. Negative control: with the entry
+    done the same phases are tagged."""
+    for book in (None, {"status": "failed"}, {"status": "pending"}):
+        phases = {k: v for k, v in _HARVESTED.items() if k != "task0d/anyhow/book"}
+        if book is not None:
+            phases["task0d/anyhow/book"] = book
+        plan = plan_behaviour_tags(["anyhow"], [], phases, _HARVEST_KEYS)
+        assert plan.to_write == () and "task0d/anyhow/book" in (plan.refusal or "")
+    assert plan_behaviour_tags(["anyhow"], [], _HARVESTED, _HARVEST_KEYS).to_write == (
+        "task0d-done-anyhow",)
+
+
+def test_the_book_key_is_a_behaviour_phase_no_cluster_key_can_equal():
+    from pipeline_core.application.tasks.task0d import phase_key
+    assert behaviour_book_key("anyhow") == "task0d/anyhow/book"
+    assert is_behaviour_phase(behaviour_book_key("anyhow"))
+    # a cluster named like the module still gets a two-segment key
+    assert phase_key("anyhow") == "task0d/anyhow" != behaviour_book_key("anyhow")
+    kept = drop_pre_augment_phases(dict(_LIVE_PHASES, **{"task0d/anyhow/book": "done"}),
+                                   keep_behaviours=True)
+    assert kept["task0d/anyhow/book"] == "done"
 
 
 def test_behaviour_plan_refuses_once_task0c_started_and_with_no_cluster():

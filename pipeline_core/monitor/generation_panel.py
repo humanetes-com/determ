@@ -55,6 +55,7 @@ def _fmt_eta(secs: float) -> str:
 def generation_rows(*, stream_log: str, width: int, now: float,
                     runtime: dict[str, Any], refresh: float,
                     think_cap_chars: int, tail_lines: int = 5,
+                    fill_rows: int | None = None,
                     cut_rate: CutRate | None = None,
                     cut_knobs: CutStopKnobs | None = None) -> list[str]:
     """Rows for the Generation box: header, the LLM_CUT_STOP gauge, the
@@ -63,7 +64,10 @@ def generation_rows(*, stream_log: str, width: int, now: float,
     `cut_rate`/`cut_knobs` are optional (default None → the gauge line is
     skipped) so callers that only want the stream view — tests included —
     are not forced to thread the run-level fold through a box that used to
-    know nothing about it."""
+    know nothing about it.
+
+    `fill_rows` is the box's content height when the caller has the screen to
+    spare: the text tail grows to fill it (never below `tail_lines`)."""
     global _prev_len
     path, thread = freshest_stream_log(stream_log, now)
     try:
@@ -134,7 +138,6 @@ def generation_rows(*, stream_log: str, width: int, now: float,
             display = display.split(marker)[-1].lstrip("\n")
             break
     inner = width - 4
-    dlines = [ln for ln in display.splitlines() if ln.strip()][-tail_lines:]
     retries = runtime.get("retries")
     cpt_s = f"cpt={cpt:.2f}" if runtime.get("cpt") else dim("cpt=?")
     retry_s = f"  {red(f'400-retries={retries}')}" if retries else ""
@@ -146,6 +149,9 @@ def generation_rows(*, stream_log: str, width: int, now: float,
         if cr_row:
             rows.append(cr_row)
     rows += progress_rows
+    if fill_rows is not None:
+        tail_lines = max(tail_lines, fill_rows - len(rows))
+    dlines = [ln for ln in display.splitlines() if ln.strip()][-tail_lines:]
     rows += [dim((ln[:inner - 2] + "…") if len(ln) > inner else ln)
              for ln in dlines] or [dim("(empty)")]
     return rows

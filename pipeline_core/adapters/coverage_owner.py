@@ -41,7 +41,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -56,6 +55,7 @@ from pipeline_core.domain.coverage_slice import (
 from pipeline_core.domain.fn_execution import SiteIndex as SiteIndex
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.test_results import parse_binary_results
+from pipeline_core.threads import ContextPool
 
 _PROF_STEM = re.compile(r"[^A-Za-z0-9_.-]+")
 _BIN_HASH = re.compile(r"-[0-9a-f]{16}$")
@@ -182,7 +182,7 @@ def _map_concurrently[T, R](fn: Callable[[T], R], items: Sequence[T],
     the concurrency test runs against."""
     if workers <= 1 or len(items) <= 1:
         return [fn(it) for it in items]
-    with ThreadPoolExecutor(max_workers=min(workers, len(items))) as pool:
+    with ContextPool(max_workers=min(workers, len(items))) as pool:
         return list(pool.map(fn, items))
 
 

@@ -83,7 +83,7 @@ def test_split_frame_columns_line_up_and_panels_get_the_left_width(monkeypatch) 
     monkeypatch.setattr(m, "pipeline_status",
                         lambda width: widths_seen.append(width) or ["p" * 300])
     monkeypatch.setattr(m, "generation",
-                        lambda width: widths_seen.append(width) or ["g"])
+                        lambda width, fill_rows=None: widths_seen.append(width) or ["g"])
     frame = m._frame(200, 30)
     assert widths_seen == [60, 60]
     body = [plain(r) for r in frame[:-m.BOTTOM_LINES]]
@@ -104,3 +104,11 @@ def test_page_keys_move_by_the_drawn_box(monkeypatch) -> None:
     assert m._scroll["pipeline"] == 22
     m._apply_key("DOWN")
     assert m._scroll["pipeline"] == 22 - m.SCROLL_STEP
+
+
+def test_flow_columns_reflow_with_width():
+    from pipeline_core.monitor.frame import flow_columns
+    cells = ["aaaa", "bbbb", "cccc"]
+    assert [plain(r) for r in flow_columns(cells, 20)] == ["aaaa   bbbb   cccc"]
+    assert [plain(r) for r in flow_columns(cells, 12)] == ["aaaa   bbbb", "cccc"]
+    assert flow_columns(cells, 3) == cells

@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ..domain.file_coverage_floor import FileFloor
 from ..domain.fn_execution import FnCoverageRecord
 from ..domain.models import FN_EXECUTION_CRITERION, AugmentVerdict
 from ..domain.workspace_layout import CLUSTER_AUGMENTED_DIR, MODULE_AUGMENTED_DIR
@@ -63,10 +64,12 @@ class FileAugmentStore:
     def mark_cluster_augmented(self, project_dir: Path, cluster_name: str,
                                module_name: str, cov: float, *,
                                reason: str = "", code_id: str = "",
-                               functions: FnCoverageRecord | None = None) -> None:
+                               functions: FnCoverageRecord | None = None,
+                               file_floor: FileFloor | None = None) -> None:
         """Write the verdict, stamped with the function-execution criterion
         the current stop applies and `functions`' summary (none when nothing
-        could be measured). A verdict on disk WITHOUT the stamp was written by
+        could be measured), and with the per-file floor it applied and the
+        files it left below it. A verdict on disk WITHOUT the stamp was written by
         a line-coverage stop, and a `done` of that kind does not bind again
         (`AugmentVerdict.still_binding`)."""
         p = self.cluster_path(project_dir, cluster_name, module_name)
@@ -80,6 +83,9 @@ class FileAugmentStore:
             unreached=tuple(f"{u.site.file}::{u.site.fn_name}"
                             + (f" [{u.site.container}]" if u.site.container else "")
                             for u in (rec.unreached if rec is not None else ())),
+            file_floor=file_floor.floor if file_floor is not None else 0.0,
+            files_below=tuple(f"{f.rel} {f.pct:.1f}% {f.verdict}"
+                              for f in (file_floor.below if file_floor is not None else ())),
         ).to_text())
 
     def fn_record_path(self, project_dir: Path, cluster_name: str,
@@ -106,6 +112,47 @@ class FileAugmentStore:
         tmp = p.with_name(p.name + ".tmp")
         tmp.write_text(record.to_json(), encoding="utf-8")
         os.replace(tmp, p)
+
+    def file_floor_path(self, project_dir: Path, cluster_name: str,
+                        module_name: str) -> Path:
+        return (project_dir / CLUSTER_AUGMENTED_DIR
+                / f"{cluster_name}__{module_name}.files.json")
+
+    def cluster_file_floor(self, project_dir: Path, cluster_name: str,
+                           module_name: str) -> FileFloor | None:
+        """The per-file floor reading augmentation last wrote for (cluster,
+        module); None when absent or unreadable."""
+        try:
+            return FileFloor.from_json(self.file_floor_path(
+                project_dir, cluster_name, module_name).read_text(encoding="utf-8"))
+        except OSError:
+            return None
+
+    def save_cluster_file_floor(self, project_dir: Path, cluster_name: str,
+                                module_name: str, floor: FileFloor) -> None:
+        """Atomic, like the function record: a resume reads back which files
+        were already given up."""
+        p = self.file_floor_path(project_dir, cluster_name, module_name)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(floor.to_json(), encoding="utf-8")
+        os.replace(tmp, p)
+
+    def module_file_floors(self, project_dir: Path,
+                           module_name: str) -> dict[str, FileFloor]:
+        """Every cluster's per-file floor reading for `module_name`, by
+        cluster: what the strip-time report names."""
+        d = project_dir / CLUSTER_AUGMENTED_DIR
+        out: dict[str, FileFloor] = {}
+        suffix = f"__{module_name}.files.json"
+        for p in sorted(d.glob(f"*{suffix}")) if d.is_dir() else ():
+            try:
+                floor = FileFloor.from_json(p.read_text(encoding="utf-8"))
+            except OSError:
+                continue
+            if floor is not None:
+                out[p.name[:-len(suffix)]] = floor
+        return out
 
     def other_cluster_fn_records(self, project_dir: Path, cluster_name: str,
                                  module_name: str) -> list[FnCoverageRecord]:

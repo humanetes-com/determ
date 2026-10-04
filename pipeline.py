@@ -500,7 +500,7 @@ TEST_TIMEOUT = 600
 BUILD_TIMEOUT = 120
 
 # task0c stops augmenting once coverage reaches this percent (was hardcoded 100).
-COVERAGE_AUGMENTATION_TARGET = float(os.getenv("COVERAGE_AUGMENTATION_TARGET", "98"))
+COVERAGE_AUGMENTATION_TARGET = SETTINGS.coverage_augmentation_target
 
 # Backstop for the inner build-fix loop (TASK 2 + compile check). The
 # real terminator is the per-loop floor-stall on rustc error count
