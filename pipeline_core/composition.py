@@ -1877,7 +1877,11 @@ def build_app(
         read_test_sources=_t0d_test_sources,
         harvest=harvest_behaviour_suite,
         save_suite=save_behaviour_suite, load_suite=load_behaviour_suite,
-        ask=lambda prompt: str(ports.ask(prompt, model=settings.task_models.task0c)),
+        # The probe and rule-probe program calls reason only under
+        # `TASK0D_PROGRAM_THINK`.
+        ask=lambda prompt: str(ports.ask(
+            prompt, model=settings.task_models.task0c,
+            think=settings.task0d_program_think)),
         # The book judge's calls are a measurement: bound at their own
         # temperature, forwarded only when set (unset keeps the server's).
         # Author and judge both reason only under `BEHAVIOUR_BOOK_THINK`.

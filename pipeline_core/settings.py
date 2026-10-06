@@ -156,6 +156,14 @@ class Settings:
     # argument) that no example asserts. `TASK0D_PROBE_EDGES=0` asks none.
     task0d_probe_edges: int = 8
     task0d_exercises: bool = True
+    # Whether t0d's program calls (the probe synthesis and the rule-probe
+    # programs, the calls that write Rust) ask the model to reason. Off by
+    # default, like the book's (`behaviour_book_think`), so every t0d call runs
+    # at the lowest rung; on run `450922-661c5e9f` the probes replied p50 1,810
+    # content chars after p50 38,386 reasoning chars, and the rule probes p50
+    # 423 after 14,003 (`scripts/measure_phase_reasoning.py`).
+    # `TASK0D_PROGRAM_THINK=1` restores reasoning on them.
+    task0d_program_think: bool = False
     # Blocks honoured per synthesis reply. The probe-target cap bounds how many
     # units are ASKED about; without this a single reply's block count bounded
     # the cargo runs, and each run costs a compile at up to the probe timeout.
@@ -199,7 +207,7 @@ class Settings:
     # reason. Off by default: on run `450922-661c5e9f` the book's 105 calls
     # replied p50 787 content chars after p50 26,981 reasoning chars, 492.8
     # call-minutes (`scripts/measure_phase_reasoning.py`). The probe and
-    # rule-probe program calls write Rust and keep the model's default.
+    # rule-probe program calls have their own setting, `task0d_program_think`.
     # `BEHAVIOUR_BOOK_THINK=1` restores reasoning on the book. Printed as
     # `think=` on the behaviour-book line.
     behaviour_book_think: bool = False
@@ -278,6 +286,7 @@ class Settings:
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
             task0d_probe_edges=int(os.getenv("TASK0D_PROBE_EDGES", "8")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
+            task0d_program_think=os.getenv("TASK0D_PROGRAM_THINK", "0").strip() == "1",
             task0d_blocks_per_reply=int(
                 os.getenv("TASK0D_BLOCKS_PER_REPLY", "8")),
             task0d_classes_per_cluster=int(

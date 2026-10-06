@@ -15,7 +15,11 @@ Asserted is the entry's claim:
 - the lines of a function the compiler proved unreachable leave the
   denominator, so a file whose only gap is such a function does not hold;
 - the generation pass no longer aims a prompt at those lines (control: the
-  same lines without the proof are aimed at).
+  same lines without the proof are aimed at);
+- the lines of a function whose targeted-attempt budget is spent stay in the
+  denominator and read the file accounted, and the generation pass is handed
+  that same set and aims no prompt at them, so a pass left with nothing else
+  ends at the ceiling instead of re-prompting until the stall counter.
 """
 from __future__ import annotations
 
@@ -135,16 +139,64 @@ def test_the_lines_of_a_proved_function_leave_the_denominator(
     assert (f.verdict, f.covered, f.coverable, f.raw_coverable) == (FILE_MET, 3, 3, 6)
 
 
-def _phase_c(h: _Harness, lines: dict[str, list[int]], *, proved: tuple[Any, ...]) -> None:
+def test_a_spent_function_stays_in_the_denominator_and_reads_accounted(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `never` (lines 5-7) is unexecuted at every measurement and nothing proves
+    # it unreachable: three targeted passes spend its budget, the fourth
+    # measurement records it unreached and the loop stops on the line target.
+    loop = _FloorLoop(tmp_path, monkeypatch, never_counts=[0], uncovered=[{5, 6, 7}],
+                      floor=90.0)
+    loop.run()
+    assert loop.phase_c_targets == [["never"], ["never"], ["never"]]
+    (f,) = loop.floor_reading.files
+    # Reachable by a test in principle, so still counted: 3/6, not 3/3 met.
+    assert (f.verdict, f.covered, f.coverable) == (FILE_ACCOUNTED, 3, 6)
+    assert f.reason == "attempt budget spent on src/lib.rs::never"
+
+
+class _SpentLoop(_Loop):
+    """Line target out of reach, so the loop keeps generating after the budget
+    of `never` is spent; records what each generation pass is handed."""
+
+    def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        super().__init__(tmp_path, monkeypatch, never_counts=[0])
+        self.phase_c_spent: list[list[str]] = []
+
+    def _phase_c(self, **kw: Any) -> _PhaseCOutcome:
+        spent = [t.site.fn_name for t in kw.get("spent", ())]
+        self.phase_c_spent.append(spent)
+        if spent:
+            return _PhaseCOutcome("break", at_ceiling=True)
+        return super()._phase_c(**kw)
+
+    def deps(self) -> Task0cDeps:
+        d = super().deps()
+        object.__setattr__(d, "COVERAGE_TARGET", 100.0)
+        return d
+
+
+def test_the_generation_pass_is_handed_the_spent_functions_of_the_stop(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    loop = _SpentLoop(tmp_path, monkeypatch)
+    loop.run()
+    # Three targeted passes, then the pass after the measurement that records
+    # `never` unreached is handed it as spent and no longer as a target.
+    assert loop.phase_c_targets == [["never"], ["never"], ["never"]]
+    assert loop.phase_c_spent == [[], [], [], ["never"]]
+    assert [u.site.fn_name for u in loop.record.unreached] == ["never"]
+
+
+def _phase_c(h: _Harness, lines: dict[str, list[int]], *, proved: tuple[Any, ...],
+             spent: tuple[Any, ...] = ()) -> _PhaseCOutcome:
     object.__setattr__(h.deps, "nightly_rules_for_cluster", lambda: nightly_rules_for(_STOCK))
-    _run_phase_c(
+    return _run_phase_c(
         project_dir=h.ws, module_name="microcrate", module_dir=h.ws,
         project_context="", coverage_strategy="", attempt=4, coverage=95.0,
         covered_lines=3, files_data=_files(h, lines), hist=Task0cFileHistory(),
         ctx=_PhaseCCtx(deps=h.deps, current_cluster=_STOCK, cluster_label=_STOCK.name,
                        split_n=1, allow_line="", prelude_block="", prelude_names="",
                        file_stall_limit=5, retro_deep_at_stall=1, stall_context=False),
-        proved=proved)
+        proved=proved, spent=spent)
 
 
 def test_the_generation_pass_is_not_aimed_at_proved_lines(
@@ -161,3 +213,17 @@ def test_the_generation_pass_is_not_aimed_at_proved_lines(
     c = _Harness(control, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
     _phase_c(c, {"src/lib.rs": [28]}, proved=())
     assert c.prompts and "Target file: src/lib.rs" in c.prompts[0]
+
+
+def test_the_generation_pass_is_not_aimed_at_lines_of_a_spent_function(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same line 28 of `add`, now with its targeted-attempt budget spent:
+    # the stop reads it accounted, so no prompt is aimed at it and the pass,
+    # with nothing left to aim at, ends at the ceiling instead of re-prompting
+    # until the stall counter. The control is the unproved, unspent run above.
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
+    outcome = _phase_c(h, {"src/lib.rs": [28]}, proved=(), spent=(_ADD,))
+    assert h.prompts == [] and h.parallel_prompts == []
+    assert any("filtered 1 line(s) in functions whose targeted-attempt budget is spent: [28]"
+               in ln for ln in h.logs)
+    assert (outcome.kind, outcome.at_ceiling) == ("break", True)

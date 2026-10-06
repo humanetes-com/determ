@@ -1573,6 +1573,7 @@ def _run_phase_c(
     ctx: _PhaseCCtx,
     fn_targets: tuple[FnTarget, ...] = (),
     proved: tuple[FnTarget, ...] = (),
+    spent: tuple[FnTarget, ...] = (),
 ) -> _PhaseCOutcome:
     """Generate/augment tests for the attempt's uncovered lines, commit each block
     through its compile-fix loop, and update per-file history. Returns the loop
@@ -1589,6 +1590,9 @@ def _run_phase_c(
 
     `proved` are the functions the compiler proved no test can execute; their
     uncovered lines are filtered like a cfg-compiled-out line, never aimed at.
+    `spent` are the unexecuted functions whose targeted-attempt budget is spent;
+    their lines are filtered too, since the stop already reads them accounted
+    and a prompt aimed at them would buy the function a second budget.
     """
     deps = ctx.deps
     BUILD_TIMEOUT = deps.BUILD_TIMEOUT
@@ -1684,6 +1688,8 @@ def _run_phase_c(
             fn_targets_by_file.setdefault(_ft.site.file, []).append(_ft)
     _proved_lines = {rel: lines_in(t for t in proved if t.site.file == rel)
                      for rel in {t.site.file for t in proved}}
+    _spent_lines = {rel: lines_in(t for t in spent if t.site.file == rel)
+                    for rel in {t.site.file for t in spent}}
     _fn_attempted: set[Any] = set()
     _fn_outcomes: dict[Any, str] = {}
     _fn_verdicts: dict[Any, str] = {}
@@ -1838,7 +1844,8 @@ def _run_phase_c(
                 break
         _split = split_uncovered(existing_text, uncov_lines, _file_cov_hits,
                                  _proved_lines.get(rel_path, frozenset()),
-                                 cluster=_current_cluster, **_line_filters(deps))
+                                 cluster=_current_cluster, **_line_filters(deps),
+                                 spent_lines=_spent_lines.get(rel_path, frozenset()))
         if _split.artifact:
             _log(f"  [{module_name}] {rel_path} — filtered {len(_split.artifact)} LLVM artifact line(s): {sorted(_split.artifact)}")
         if _split.cfg_incompatible:
@@ -1850,6 +1857,9 @@ def _run_phase_c(
         if _split.proved:
             _log(f"  [{module_name}] {rel_path} — filtered {len(_split.proved)} line(s) in functions "
                  f"proved unreachable from tests/: {sorted(_split.proved)}")
+        if _split.spent:
+            _log(f"  [{module_name}] {rel_path} — filtered {len(_split.spent)} line(s) in functions "
+                 f"whose targeted-attempt budget is spent: {sorted(_split.spent)}")
         uncov_lines = set(_split.actionable)
 
         _file_fn_targets = tuple(fn_targets_by_file.get(rel_path, ()))
@@ -2838,7 +2848,8 @@ project-specific import paths, type construction patterns, and hard constraints.
     _pass_outcome = coverage_pass_outcome(
         actionable_lines=_pass_actionable, had_model_call=_pass_had_work)
     if _pass_outcome == "ceiling":
-        _log(f"  [{module_name}] All files filtered (cfg/artifact) — no actionable uncovered lines. Stopping.")
+        _log(f"  [{module_name}] All files filtered (cfg/artifact/proved unreachable/budget spent) "
+             "— no actionable uncovered lines. Stopping.")
         return _PhaseCOutcome("break", at_ceiling=True, blocks_admitted=_blocks_admitted,
                               fn_attempted=frozenset(_fn_attempted),
                               fn_outcomes=tuple(_fn_outcomes.items()),
@@ -3368,6 +3379,7 @@ def task0c_augment_module(
             hist=_hist,
             fn_targets=_fn_record.targets() if _fn_record.measured else (),
             proved=_proved_targets,
+            spent=_spent_targets(_fn_reading, _fn_record),
             ctx=_PhaseCCtx(
                 deps=deps,
                 current_cluster=_current_cluster,
@@ -3434,12 +3446,15 @@ def split_uncovered(existing_text: str, uncovered: Iterable[int], hits: Mapping[
                     proved_lines: frozenset[int], *, cluster: Any,
                     is_structural_line: Callable[[str], Any],
                     cfg_incompatible: Callable[..., Any],
-                    cfg_excluded: Callable[..., Any]) -> UncoveredSplit:
+                    cfg_excluded: Callable[..., Any],
+                    spent_lines: frozenset[int] = frozenset()) -> UncoveredSplit:
     """Which of a file's uncovered lines a generation prompt is aimed at, and
     why each other one is not. The one definition of an actionable line: the
     generation pass targets `actionable`, and the per-file floor leaves
     `not_actionable` out of its denominator, so the stop never waits on a line
-    no prompt will be aimed at.
+    no prompt will be aimed at, and reads `spent` (lines of a function whose
+    targeted-attempt budget is spent) as accounted, so no prompt is aimed at a
+    line the stop has stopped waiting on.
 
     `existing_text` is the file with its gen_tests declarations stripped (the
     view the prompt shows, numbered like the original source); a line past its
@@ -3472,8 +3487,10 @@ def split_uncovered(existing_text: str, uncovered: Iterable[int], hits: Mapping[
         excluded = set(cfg_excluded(existing_text, rest, cluster.excluded_cfg) or ())
         rest -= excluded
     proved = rest & proved_lines
-    return UncoveredSplit(frozenset(rest - proved), frozenset(artifact), frozenset(incompat),
-                          frozenset(excluded), frozenset(proved))
+    spent = (rest - proved) & spent_lines
+    return UncoveredSplit(frozenset(rest - proved - spent), frozenset(artifact),
+                          frozenset(incompat), frozenset(excluded), frozenset(proved),
+                          frozenset(spent))
 
 
 def _line_filters(deps: Task0cDeps) -> dict[str, Any]:
@@ -3490,10 +3507,8 @@ def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, clus
     would queue (module source, not tests, not `build.rs`, not cfg-gated out
     of the cluster), each read over the lines a test can reach."""
     proved = reading.proved_targets if isinstance(reading, FunctionExecution) else ()
-    unexecuted = reading.unexecuted if isinstance(reading, FunctionExecution) else ()
-    unreached = {u.site for u in record.unreached}
-    spent = [t for t in unexecuted if t.site in unreached]
-    gated = cluster.gated_files if cluster is not None and cluster.gated_files else set()
+    spent = _spent_targets(reading, record)
+    gated =cluster.gated_files if cluster is not None and cluster.gated_files else set()
     mod_prefix = str(module_dir) + "/"
     files: list[tuple[str, int, int, frozenset[int]]] = []
     not_actionable: dict[str, frozenset[int]] = {}
@@ -3514,11 +3529,22 @@ def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, clus
             hits = {t["line"]: t["stats"].get("Line", 0) for t in fdata.traces}
             split = split_uncovered(view, unc, hits,
                                     lines_in(t for t in proved if t.site.file == rel),
-                                    cluster=cluster, **_line_filters(deps))
-            # A line past the view's end is never aimed at either.
-            not_actionable[rel] = split.not_actionable | (unc - split.actionable - split.not_actionable)
+                                    cluster=cluster, **_line_filters(deps),
+                                    spent_lines=lines_in(t for t in spent if t.site.file == rel))
+            not_actionable[rel] = split.outside_denominator(unc)
         files.append((rel, fdata.covered, fdata.coverable, unc))
     return judge_files(floor, files, not_actionable=not_actionable, spent=spent, stalled=stalled)
+
+
+def _spent_targets(reading: FunctionExecution | str,
+                   record: FnCoverageRecord) -> tuple[FnTarget, ...]:
+    """The unexecuted functions whose targeted-attempt budget is spent
+    (`record.unreached`), with their spans from this reading: the set the floor
+    reads as accounted and the generation pass holds out of every prompt."""
+    if not isinstance(reading, FunctionExecution):
+        return ()
+    unreached = {u.site for u in record.unreached}
+    return tuple(t for t in reading.unexecuted if t.site in unreached)
 
 
 def _record_fn_reading(deps: Task0cDeps, project_dir: Path, module_name: str,

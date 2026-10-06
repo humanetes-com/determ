@@ -211,8 +211,9 @@ def main() -> int:
                                     lines_in(t for t in proved if t.site.file == rel),
                                     cluster=None, is_structural_line=is_structural_brace_line,
                                     cfg_incompatible=filter_cfg_incompatible_lines,
-                                    cfg_excluded=filter_cfg_excluded_lines)
-            not_actionable[rel] = split.not_actionable | (unc - split.actionable - split.not_actionable)
+                                    cfg_excluded=filter_cfg_excluded_lines,
+                                    spent_lines=lines_in(t for t in spent if t.site.file == rel))
+            not_actionable[rel] = split.outside_denominator(unc)
             files.append((rel, sum(1 for c in hits.values() if c > 0), len(hits), unc))
         floor = judge_files(a.floor, files, not_actionable=not_actionable,
                             spent=spent, stalled=())

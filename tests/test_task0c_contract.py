@@ -488,7 +488,7 @@ def test_a_pass_that_makes_no_model_call_over_reachable_lines_is_not_a_ceiling(
     outcome = h.phase_c(hist=hist)
 
     assert outcome.at_ceiling is False
-    assert not any("All files filtered (cfg/artifact)" in ln for ln in h.logs)
+    assert not any("All files filtered (" in ln for ln in h.logs)
     # The stalled-files report — the branch the false ceiling jumped over.
     assert any("HARD BLOCK: all uncovered files are stalled" in ln for ln in h.logs)
     assert any(f"{h.rel}: 1 uncovered lines" in ln for ln in h.logs)
@@ -516,7 +516,7 @@ def test_empty_extract_over_reachable_lines_is_not_a_ceiling(
 
     assert outcome.at_ceiling is False
     assert outcome.kind == "continue"
-    assert not any("All files filtered (cfg/artifact)" in ln for ln in h.logs)
+    assert not any("All files filtered (" in ln for ln in h.logs)
     assert not any(e == "task0c.pass_no_work" for e, _ in h.events)
     assert h.prompts  # the model was called; extract returned empty
     for ln in h.logs:

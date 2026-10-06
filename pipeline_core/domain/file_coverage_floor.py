@@ -22,7 +22,12 @@ and `src/backtrace.rs` 0/4, every uncovered line in a proved function.
 A file under the floor is `accounted`, not `held`, when every reachable line
 still open lies in a function whose targeted-attempt budget is spent
 (`unreached`), or when the generation pass gave the file up after its stall
-limit. The floor never buys a function a second budget.
+limit. The floor never buys a function a second budget, and neither does the
+generation pass: the split it targets from (`UncoveredSplit.spent`) holds the
+same lines out of every prompt. Before that, the stop read wrapper.rs and
+error.rs `accounted` on anyhow (run `715718-bcd9c1ab`, 2026-10-06) while every
+attempt still sent both files to the model at ~230k chars a prompt, until the
+stall counter ended the pass.
 """
 from __future__ import annotations
 
@@ -46,18 +51,29 @@ class UncoveredSplit:
     """A file's uncovered lines, split by why each one is or is not a target.
 
     `actionable` is what a generation prompt is aimed at; every other set is a
-    reason a line is not, logged by the pass and left out of the floor's
-    denominator."""
+    reason a line is not, logged by the pass. All but `spent` leave the floor's
+    denominator: a line in a function whose targeted-attempt budget is spent
+    could still be reached by a test, so it stays counted and the floor reads
+    the file `accounted` for it instead of `met`."""
 
     actionable: frozenset[int]
     artifact: frozenset[int] = frozenset()
     cfg_incompatible: frozenset[int] = frozenset()
     cfg_excluded: frozenset[int] = frozenset()
     proved: frozenset[int] = frozenset()
+    spent: frozenset[int] = frozenset()
 
     @property
     def not_actionable(self) -> frozenset[int]:
+        """The lines no test can reach: out of the floor's denominator."""
         return self.artifact | self.cfg_incompatible | self.cfg_excluded | self.proved
+
+    def outside_denominator(self, uncovered: Iterable[int]) -> frozenset[int]:
+        """`not_actionable`, plus any uncovered line the split never classified
+        (past the end of the view the prompt numbers), which no prompt is aimed
+        at either."""
+        rest = frozenset(uncovered) - self.actionable - self.not_actionable - self.spent
+        return self.not_actionable | rest
 
 
 def lines_in(targets: Iterable[FnTarget]) -> frozenset[int]:

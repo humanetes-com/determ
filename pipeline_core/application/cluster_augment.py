@@ -269,7 +269,8 @@ class ClusterAugmentor:
                     if status == 'ceiling':
                         tel.log(
                             f"  CEILING [{cluster.name}]: '{mod_name}' at {cov:.1f}% — all remaining "
-                            f"uncovered lines are cfg-filtered or LLVM artifacts. No further passes possible "
+                            f"uncovered lines are cfg-filtered, LLVM artifacts, in functions proved "
+                            f"unreachable, or in functions whose attempt budget is spent. No further passes possible "
                             f"in this cluster. Accepting and moving on."
                         )
                     elif status == 'hard_block':

@@ -90,10 +90,12 @@ class CoverageMeasurement(NamedTuple):
 def coverage_pass_outcome(*, actionable_lines: int, had_model_call: bool) -> str:
     """Why a task0c coverage pass ended, from what it measured.
 
-    - ``"ceiling"`` — no reachable uncovered line survived filtering, so every
-      line that remains is inside an excluded cfg block or is an LLVM artifact
-      and no test could cover it. This is the ONLY outcome that may mark a
-      cluster augmented without reaching the target.
+    - ``"ceiling"`` — no uncovered line survived filtering, so every line that
+      remains is inside an excluded cfg block, an LLVM artifact, inside a
+      function proved unreachable from tests, or inside a function whose
+      targeted-attempt budget is spent, and no prompt will be aimed at it. This
+      is the ONLY outcome that may mark a cluster augmented without reaching
+      the target.
     - ``"no_model_call"`` — reachable lines remain and the pass made no model
       call at all. A generation or routing defect; never a ceiling.
     - ``"progressed"`` — reachable lines remain and the pass worked on them.

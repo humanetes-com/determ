@@ -207,6 +207,15 @@ def test_the_book_reasons_only_when_the_setting_asks(monkeypatch: pytest.MonkeyP
     assert Settings.from_env().behaviour_book_think is True
 
 
+def test_the_t0d_program_calls_reason_only_when_the_setting_asks(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.settings import Settings
+    monkeypatch.delenv("TASK0D_PROGRAM_THINK", raising=False)
+    assert Settings.from_env().task0d_program_think is False
+    monkeypatch.setenv("TASK0D_PROGRAM_THINK", "1")
+    assert Settings.from_env().task0d_program_think is True
+
+
 def test_serial_and_parallel_lanes_build_the_same_book_and_reading() -> None:
     clusters = [_cluster("a", gated=False), _cluster("b", gated=True), _cluster("c", gated=True)]
     suites = _suites(["a", "b", "c"], gated_in=["b", "c"], differ_in="c")
