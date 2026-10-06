@@ -2516,10 +2516,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                     f"\nWrite a `tests/` integration-test file at `{_integ_rel}` covering the uncovered lines shown above{_calls_clause(_file_fn_targets)}.\n"
                     f"{output_format}\n"
                 )
-            # Use think=None — lets MODEL_CAPS decide (think=False for qwen3.6:27b-q8).
-            # think=True on the compat path is unreliable: sometimes generates 40K chars
-            # of thinking, sometimes generates raw_len=0. think=False (via /no_think)
-            # is consistently reliable for this model.
+            # think=None: the transport's per-model default decides (on for
+            # every profiled vLLM model; `adapters/llm_transports.resolve_thinking`).
             response = ask(_query, model=_TASK0C_MODEL, think=None)
             _pass_had_work = True  # LLM ran; empty extract is not "all files filtered"
 

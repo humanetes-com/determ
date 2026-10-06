@@ -76,6 +76,12 @@ class Transport(Protocol):
         estimate; None falls back to the estimate."""
         ...
 
+    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
+        """The template kwargs a request sends for this thinking mode — what
+        "off" actually is on the served model (Muse: the `low` rung, Qwen: a
+        real off). Empty when the transport sends none."""
+        ...
+
     def stream(
         self,
         messages: list[dict[str, Any]],

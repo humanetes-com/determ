@@ -68,6 +68,9 @@ class FakeTransport:
         self.count_calls += 1
         return self._counted
 
+    def reasoning_payload(self, enable_thinking):
+        return {"enable_thinking": enable_thinking}
+
     def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta,
                temperature: float | None = None) -> Iterator[Delta]:
         idx = len(self.calls)

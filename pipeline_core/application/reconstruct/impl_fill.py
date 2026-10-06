@@ -2159,6 +2159,10 @@ def prepare_impl_fill(
                          f"raw_canon={_db.attr_canon!r}")
                 spliced_now = 0
                 _landed: list[LandedBody] = []
+                # Names whose body the splicer refused for its own TEXT, with
+                # what the next turn is told (`reply_refusal_feedback`): a
+                # failed attempt on those names, not a dropped answer.
+                _text_refused: dict[str, str] = {}
                 # Refill targets are already-filled-but-WRONG bodies; the splice
                 # must be told to overwrite a non-stub for exactly those names,
                 # or the model's correction is refused `target_not_stub` and
@@ -2204,11 +2208,12 @@ def prepare_impl_fill(
                              "the schedule deferred it as a re-buy this fill; "
                              "its body is not spliced.")
                         continue
-                    ok, reason, _delta = _splice_fn_with_where(
+                    _fsp = _splice_fn_with_where(
                         file_path, rb.container, _fn,
                         rb.fn_data["body"], wc,
                         allow_nonstub=_fn in _overwrite_names,
                         sig_text=rb.sig_text)
+                    ok, reason, _delta = _fsp
                     if ok:
                         spliced_now += 1
                         _landed.append(LandedBody(
@@ -2258,7 +2263,13 @@ def prepare_impl_fill(
                         # refusal by contract, not a lost answer; a
                         # duplicate of a body that already landed is not an
                         # answer at all.
-                        if reason != "target_not_stub" and not _dup:
+                        _ffb = reply_refusal_feedback(
+                            _fsp, unit=_fn, file_rel=file_rel)
+                        if _ffb is not None and not _dup:
+                            _text_refused[_fn] = _ffb
+                            _cls(FillOutcomeClass.COMPILE_FAIL,
+                                 f"{file_rel}::{_fn}", "file")
+                        elif reason != "target_not_stub" and not _dup:
                             _cls(FillOutcomeClass.ANSWER_DROPPED,
                                  f"{file_rel}::{_fn}", "file")
                 # File-first is the ATOMIC co-dependent fill: it must land a
@@ -2321,10 +2332,11 @@ def prepare_impl_fill(
                                      "matching module-level stub(s).")
                             continue
                         _rec = _cands[0]
-                        _ok, _reason, _d = _splice_fn_with_where(
+                        _rsp = _splice_fn_with_where(
                             file_path, str(_rec.get("container", "")),
                             _p["fn_name"], _p["body"], _p["where_clause"],
                             sig_text=str(_rec.get("sig_text", "")))
+                        _ok, _reason, _d = _rsp
                         if _ok:
                             spliced_now += 1
                             _landed.append(LandedBody(
@@ -2337,6 +2349,49 @@ def prepare_impl_fill(
                         else:
                             _log(f"  [phase-c/file] {file_rel}: free-fn splice "
                                  f"`{_p['fn_name']}` failed: {_reason}")
+                            _rfb = reply_refusal_feedback(
+                                _rsp, unit=_p["fn_name"], file_rel=file_rel)
+                            if _rfb is not None:
+                                _text_refused[_p["fn_name"]] = _rfb
+                                _cls(FillOutcomeClass.COMPILE_FAIL,
+                                     f"{file_rel}::{_p['fn_name']}", "file")
+                if spliced_now == 0 and _text_refused:
+                    # Nothing reached the file, and the splicer named why for
+                    # the reply's own text: a failed attempt on those names,
+                    # whose next turn carries the parser's diagnostic — the
+                    # outcome every splice route takes (`splice_feedback`).
+                    _refused_names = frozenset(_text_refused)
+                    if _retry_names is None:
+                        # The rest of a first attempt's names are lost as
+                        # before; a refused name was answered and charged.
+                        attempts.note_lost(
+                            FnLocator(file_rel, n) for n in wanted
+                            if n not in _refused_names)
+                    prior_error = "\n\n".join(
+                        _text_refused[n] for n in sorted(_refused_names))
+                    _file_kind = LastErrorKind.COMPILE
+                    if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
+                        _log(f"  [phase-c/file] {glabel}: nothing spliced — "
+                             f"{len(_refused_names)} body(ies) refused for "
+                             f"their own text ({', '.join(sorted(_refused_names))}); "
+                             "retrying those names with the parser's diagnostic "
+                             f"(attempt {_attempt + 1}/{_FILE_FIRST_MAX_ATTEMPTS}).")
+                        _revert_cls = None
+                        _retry_names = _refused_names
+                        _retry_note = (
+                            "No body from your last reply reached the file. "
+                            "The bodies for "
+                            + ", ".join(f"`{n}`" for n in sorted(_refused_names))
+                            + " were refused for their own text; the "
+                            "diagnostic below says why. Rewrite only those.")
+                        _pre = capture(file_path, None)
+                        snapshot = _pre.text("replace")
+                        continue
+                    _log(f"  [phase-c/file] {glabel}: nothing spliced — "
+                         f"{len(_refused_names)} body(ies) refused for their "
+                         "own text on the last attempt; falling back to "
+                         "per-block fills.")
+                    return
                 if spliced_now == 0:
                     if (_retry_names is not None
                             and _attempt < _FILE_FIRST_MAX_ATTEMPTS):
@@ -2717,28 +2772,54 @@ def prepare_impl_fill(
                         attempt=_attempt,
                         validity=ValidityVector(binary_completed=True),
                         model_calls=_attempt, route="file")
-                    if _peel_retry:
+                    # Names whose body was refused for its own text are owed
+                    # the same retry as a peeled name: the kept remainder is
+                    # judged, and the next turn carries the parser's
+                    # diagnostic for exactly those names.
+                    _text_retry = frozenset(
+                        n for n in _text_refused
+                        if n not in {b.fn_name for b in _landed})
+                    if _text_retry and _attempt >= _FILE_FIRST_MAX_ATTEMPTS:
+                        _text_retry = frozenset()
+                    if _peel_retry or _text_retry:
                         # The kept remainder is judged and banked; NOW retry
                         # the peeled names with the diagnostic that blamed
                         # them. The re-read snapshot carries the accepted
                         # bodies, so a later whole-file revert restores this
                         # judged state, never the pre-fill one.
-                        _log(f"  [phase-c/file] {glabel}: retrying the "
-                             f"{len(_peel_reverted)} peeled name(s) with "
-                             "the pre-peel diagnostic (kept remainder "
-                             "judged and kept).")
-                        prior_error = _peel_err
+                        _peeled = (frozenset(_peel_reverted) if _peel_retry
+                                   else frozenset())
+                        _log(f"  [phase-c/file] {glabel}: retrying "
+                             + (f"the {len(_peeled)} peeled name(s) with the "
+                                "pre-peel diagnostic" if _peeled else "")
+                             + (" and " if _peeled and _text_retry else "")
+                             + (f"{len(_text_retry)} name(s) refused for "
+                                "their own text with the parser's diagnostic"
+                                if _text_retry else "")
+                             + " (kept remainder judged and kept).")
+                        prior_error = "\n\n".join(
+                            x for x in (
+                                _peel_err if _peeled else "",
+                                *(_text_refused[n] for n in sorted(_text_retry)))
+                            if x)
                         _revert_cls = None
-                        _retry_names = frozenset(_peel_reverted)
+                        _retry_names = _peeled | _text_retry
                         _kept_names = sorted(
                             {b.fn_name for b in _landed} - _retry_names)
                         _retry_note = (
                             "Your bodies for "
                             + ", ".join(f"`{n}`" for n in _kept_names)
-                            + " compiled and were KEPT. The bodies for "
-                            + ", ".join(f"`{n}`" for n in sorted(_retry_names))
-                            + " were peeled back: the diagnostic below blamed "
-                            "them. Rewrite only those."
+                            + " compiled and were KEPT."
+                            + (" The bodies for "
+                               + ", ".join(f"`{n}`" for n in sorted(_peeled))
+                               + " were peeled back: the diagnostic below "
+                               "blamed them." if _peeled else "")
+                            + (" The bodies for "
+                               + ", ".join(f"`{n}`" for n in sorted(_text_retry))
+                               + " were refused for their own text before "
+                               "reaching the file: the diagnostic below says "
+                               "why." if _text_retry else "")
+                            + " Rewrite only those."
                             if _kept_names else "")
                         _pre = capture(file_path, None)
                         snapshot = _pre.text("replace")
@@ -2787,6 +2868,13 @@ def prepare_impl_fill(
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
                     _file_kind = LastErrorKind.COMPILE
+                if _text_refused:
+                    # The reverted reply also had bodies the splicer refused
+                    # for their own text; the whole-group retry is told why.
+                    prior_error = "\n\n".join(
+                        x for x in (prior_error, *(
+                            _text_refused[n] for n in sorted(_text_refused)))
+                        if x)
                 _verdict_row(
                     glabel, Disposition.REVERT, _revert_reason,
                     outcome=GateOutcome.NEGATIVE,
@@ -5095,6 +5183,9 @@ def prepare_impl_fill(
                     tdd_test_cmd, target_src_dir, cluster_env)
                 _pair_hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 _spliced_by_file: dict[str, list[str]] = {}
+                # Bodies refused for their own TEXT (`reply_refusal_feedback`):
+                # a failed attempt the next turn repairs, not a lost answer.
+                _pair_text_refused: list[str] = []
                 for b, _htxt, _hwc in _half_ctx:
                     _routing = route_fn_bodies(
                         _pair_parsed, target=b.container, related=[],
@@ -5111,17 +5202,22 @@ def prepare_impl_fill(
                         if _wc2 and (_rb.via_trait_default
                                      or signature_fixed_by_trait(_rb.container)):
                             _wc2 = None
-                        _ok, _reason, _delta = _splice_fn_with_where(
+                        _psp = _splice_fn_with_where(
                             target_src_dir / b.file, _rb.container,
                             _fd["fn_name"], _fd["body"], _wc2,
                             allow_nonstub=_fd["fn_name"] in _half_refills,
                             sig_text=_rb.sig_text)
+                        _ok, _reason, _delta = _psp
                         if _ok:
                             _spliced_by_file.setdefault(b.file, []).append(
                                 _fd["fn_name"])
                         else:
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_fd['fn_name']}` failed: {_reason}")
+                            _pfb = reply_refusal_feedback(
+                                _psp, unit=_fd["fn_name"], file_rel=b.file)
+                            if _pfb is not None:
+                                _pair_text_refused.append(_pfb)
                 # Same-file table slots: splice by name, not by the model's
                 # block attr. A free fn has no header the pair prompt can
                 # name, and an invented one used to drop the body. The
@@ -5140,17 +5236,22 @@ def prepare_impl_fill(
                             _log(f"  [phase-c/pair] {pair_id}: table slot "
                                  f"`{_em.fn_name}` missing from reply.")
                             continue
-                        _ok, _reason, _delta = _splice_fn_with_where(
+                        _esp = _splice_fn_with_where(
                             target_src_dir / _eb.file, _eb.container,
                             _em.fn_name, _efd["body"],
                             _efd.get("where_clause"),
                             allow_nonstub=True, sig_text=_em.sig_text)
+                        _ok, _reason, _delta = _esp
                         if _ok:
                             _spliced_by_file.setdefault(_eb.file, []).append(
                                 _em.fn_name)
                         else:
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_em.fn_name}` failed: {_reason}")
+                            _efb = reply_refusal_feedback(
+                                _esp, unit=_em.fn_name, file_rel=_eb.file)
+                            if _efb is not None:
+                                _pair_text_refused.append(_efb)
 
                 def _revert_pair(_kept: dict[str, PreImage] = _snaps,
                                  _names: dict[str, list[str]] = _spliced_by_file
@@ -5167,15 +5268,42 @@ def prepare_impl_fill(
                                   if n not in _spliced_names]
                 _need_files = pair_required_files(pd)
                 _missing_files = _need_files - set(_spliced_by_file)
-                if _missing_files or _missing_extra:
-                    # HALF a pair on the tree is exactly the state this route
-                    # exists to never create — revert whatever landed. A
-                    # pair without its table slots is the same split: the
-                    # independently-judged slot fill cannot pay. A quoted
-                    # half is not required: omitting its FN keeps the
-                    # current body.
+                # A same-file slot counts its file as landed as soon as it
+                # splices, so a half member refused for its own text is
+                # neither a missing file nor a missing extra. The pair is
+                # still half-written: revert and re-ask, and do not
+                # cargo-check that partial tree. A quoted half is not
+                # required: omitting its FN keeps the current body.
+                if _pair_text_refused or _missing_files or _missing_extra:
                     if _n_spliced:
                         _revert_pair()
+                    if _pair_text_refused:
+                        # A body the splicer refused for its own text is a
+                        # failed attempt, as on every other splice route
+                        # (`splice_feedback`): the next turn carries the
+                        # parser's diagnostic, and the answer is not dropped.
+                        _cls(FillOutcomeClass.COMPILE_FAIL, pair_id, "pair")
+                        _last_error = "\n\n".join(_pair_text_refused)
+                        _emit("phase_c.pair.fill.reverted", data={
+                            "cluster": cluster_name, "why": "reply_refused",
+                            "errors": len(_pair_text_refused),
+                            "attempt": _attempt})
+                        if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
+                            _log(f"  [phase-c/pair] {pair_id}: "
+                                 f"{len(_pair_text_refused)} body(ies) refused "
+                                 "for their own text — nothing kept; retrying "
+                                 "with the parser's diagnostic (attempt "
+                                 f"{_attempt + 1}/{_FILE_FIRST_MAX_ATTEMPTS}).")
+                            continue
+                        _log(f"  [phase-c/pair] {pair_id}: "
+                             f"{len(_pair_text_refused)} body(ies) refused for "
+                             "their own text on the last attempt — nothing kept.")
+                        with _counters_lock:
+                            _crec = dict(retros_cache.get(_pair_key, {}) or {})
+                            _crec["last_prompt_sha"] = ""
+                            retros_cache[_pair_key] = _crec
+                            _save_retrospectives(project_dir, retros_cache)
+                        return
                     if _missing_extra:
                         _log(f"  [phase-c/pair] {pair_id}: reply omitted "
                              f"table slot(s) {', '.join(_missing_extra)} — "

@@ -669,6 +669,7 @@ class PhaseCFillEngine:
         claim: Callable[..., bool],
         heal_file: Callable[[str], bool] | None = None,
         claim_refusal: Callable[..., str] | None = None,
+        claim_release: Callable[[], None] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -1022,6 +1023,11 @@ class PhaseCFillEngine:
                             errors.append(f"{rec.file}::{rec.fn_name}: "
                                           f"worker exception: {_e}")
                         continue
+                    finally:
+                        # The unit returned: the call it reserved on the
+                        # run's share is spent, and in the clock's elapsed.
+                        if claim_release is not None:
+                            claim_release()
                     with _counters_lock:
                         attempts += res.attempts
                         results_this_pass.append(res)
@@ -1579,6 +1585,9 @@ class _PerFnRoute:
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
         if not clock.may_claim():
             return RouteRunReport(empty=True)
+        # The run is open; its units claim one by one on the workers. This
+        # opening claim is no call of its own, so it reserves nothing.
+        clock.release()
         eng = self._engine
         kw = dict(self._kw)
         if run.parent:
@@ -1605,7 +1614,7 @@ class _PerFnRoute:
             _reverted=kw["reverted"], _answer_lost=kw["answer_lost"],
             landed_before=kw["landed_before"], claim=clock.may_claim,
             heal_file=kw["heal_file"],
-            claim_refusal=clock.refusal)
+            claim_refusal=clock.refusal, claim_release=clock.release)
         res = self.result
         disp = frozenset(kw["dispatched"]) - before_disp
         rev = frozenset(kw["reverted"]) - before_rev

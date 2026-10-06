@@ -515,8 +515,11 @@ def test_a_pair_inside_its_grace_still_defers_the_rest_on_the_681204_fill() -> N
                     budget_minutes=200)
     assert [(s.run.label, s.reason) for s in flat.deferred] == [
         (pair.label, "rebuy_flat")]
+    # A crash revert: the aimed tests did not run, so the retry carries the
+    # revert's diagnosis. A revert whose tests ran red (`wrong`) is a re-buy
+    # on its first row and takes no grace.
     reverted = [*trimmed[:-1],
-                replace(trimmed[-1], outcome=RunOutcome.REVERTED)]
+                replace(trimmed[-1], outcome=RunOutcome.REVERTED, classes={})]
     sched = schedule(runs, reverted, oracle_fp=oracle, hollow=hollow_of(fix),
                      budget_minutes=200)
     assert [s.run.label for s in sched.ordered] == [pair.label]

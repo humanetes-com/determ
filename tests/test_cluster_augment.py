@@ -160,6 +160,7 @@ def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
          behaviour_target_pct: float = 0.0,
          file_floor_pct: float = 0.0,
          target_pct: float = 100.0,
+         pass_stall_limit: int = 10,
          src_hash: str = "crate-hash",
          code_id: str = "abc") -> AugmentContext:
     return AugmentContext(
@@ -177,6 +178,7 @@ def _ctx(fake: FakeAdapter, clusters: list[BuildCluster], modules: list[str], *,
         tarpaulin_bin=_TruthyPath(),  # type: ignore[arg-type]
         behaviour_target_pct=behaviour_target_pct,
         file_floor_pct=file_floor_pct,
+        pass_stall_limit=pass_stall_limit,
     )
 
 
@@ -440,7 +442,7 @@ def test_negative_control_the_line_only_done_rule_stops_on_pass_one(monkeypatch:
             return "done"
         if self.ceiling_passes >= self.CEILING_CONFIRM:
             return "ceiling"
-        return "hard_block" if self.stall_passes >= self.STALL_LIMIT else "retry"
+        return "hard_block" if self.stall_passes >= self.stall_limit else "retry"
 
     monkeypatch.setattr(ModuleAugmentState, "status", _line_only)
     fake = FakeAdapter(augment_script={("nightly", "anyhow"): [
@@ -458,6 +460,28 @@ def test_reaching_the_target_below_a_hundred_records_done() -> None:
     _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["anyhow"], target_pct=90.0))
     v = fake.cluster_sentinels[("nightly", "anyhow")]
     assert v.coverage == 95.2 and v.reason == "done" and v.code_id == "abc"
+
+
+def test_an_unreachable_target_hard_blocks_after_the_configured_stalled_passes() -> None:
+    # A module stuck at 97.0% against a 100 target: pass 1 sets the best,
+    # passes 2 and 3 add no line. At pass_stall_limit=2 the third pass is the
+    # last one, and the module is recorded hard_block rather than re-entered.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [(97.0, 97, False, "")]})
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], pass_stall_limit=2))
+    assert fake.events.count("task.done") == 3
+    assert fake.cluster_sentinels[("stable", "anyhow")].reason == "hard_block"
+    assert any("stall 2/2" in m for m in fake.logs)
+
+
+def test_one_new_covered_line_restarts_the_stalled_pass_count() -> None:
+    # 97 → 97 (stall 1) → 98 (new best, stall 0) → 98 → 98: five passes at
+    # pass_stall_limit=2, not three.
+    fake = FakeAdapter(augment_script={("stable", "anyhow"): [
+        (97.0, 97, False, ""), (97.0, 97, False, ""), (98.0, 98, False, ""),
+        (98.0, 98, False, "")]})
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], pass_stall_limit=2))
+    assert fake.events.count("task.done") == 5
+    assert fake.cluster_sentinels[("stable", "anyhow")].reason == "hard_block"
 
 
 def test_the_terminating_status_is_what_gets_recorded() -> None:

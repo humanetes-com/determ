@@ -20,8 +20,9 @@ Two reasoning-budget shapes (``BudgetSpec.per_call_reasoning``):
 
     request_max = ctx - input - margin      (content keeps ``content_cap`` of it)
 
-  and no character cap: a call is cut only when prompt + reasoning fill the
-  context, which is a runaway, not a long healthy call. Why: on 2026-09-21 the
+  and no fixed character cap: a call is cut when prompt + reasoning fill the
+  context, or at the model profile's runaway cap (``per_call_char_cap``) when
+  its healthy maximum has been measured. Why: on 2026-09-21 the
   file/impl/pair route's healthy reasoning ran p50 73,962 / p90 109,726 / max
   119,973 chars against a fixed 120,000 cap (14% of 383 calls cut), and the
   cut prompts re-asked with no cap finished naturally at 93,740–159,457 chars
@@ -49,7 +50,11 @@ class BudgetSpec:
     cap_by_ctx: bool                  # apply the ctx-budget safe() cap (False ⇒ pass content as-is)
     send_max_tokens: bool             # send max_tokens at all (False ⇒ let the server decide, Ollama-native)
     thinking_char_cap: int | None     # mid-stream reasoning char cap before forced followup (None ⇒ none)
-    per_call_reasoning: bool = False  # reasoning gets the room the prompt leaves, no char cap (see module doc)
+    per_call_reasoning: bool = False  # reasoning gets the room the prompt leaves (see module doc)
+    # The per-call shape's runaway cap in reasoning chars, from the served
+    # model's profile (`domain.model_profile`): None = no cap (Muse, measured
+    # 2026-09-21), a number once a model's healthy maximum is measured.
+    per_call_char_cap: int | None = None
 
 
 @dataclass(slots=True)
@@ -116,7 +121,7 @@ def plan_for_input(spec: BudgetSpec, *, input_tokens: int, content_cap: int,
     if spec.per_call_reasoning and thinking and spec.send_max_tokens:
         room = max(512, spec.ctx_len - input_tokens - spec.margin)
         content = min(content_cap, room)
-        return Plan(room, input_tokens, content, room - content, None)
+        return Plan(room, input_tokens, content, room - content, spec.per_call_char_cap)
     thinking_reserve = spec.thinking_budget if thinking else 0
     if not spec.send_max_tokens:
         return Plan(None, input_tokens, content_cap, thinking_reserve,

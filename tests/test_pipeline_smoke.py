@@ -1563,17 +1563,25 @@ def test_module_augment_state() -> None:
     assert s.stall_passes == 0
     assert s.best_covered_lines == 82
 
-    # 6. Hard block — STALL_LIMIT consecutive no-improvement passes.
+    # 6. Hard block — stall_limit consecutive no-improvement passes.
     s = ModuleAugmentState("m", "stable")
     s.record_pass(80.0, 80, False)
-    for _ in range(ModuleAugmentState.STALL_LIMIT):
+    for _ in range(s.stall_limit):
         s.record_pass(80.0, 80, False)
-    assert s.stall_passes == ModuleAugmentState.STALL_LIMIT
+    assert s.stall_passes == s.stall_limit
+    assert s.status("lib") == "hard_block"
+
+    # 6b. The limit is per instance: two stalled passes block at stall_limit=2.
+    s = ModuleAugmentState("m", "stable", stall_limit=2)
+    s.record_pass(80.0, 80, False)
+    s.record_pass(80.0, 80, False)
+    assert s.status("lib") == "retry"
+    s.record_pass(80.0, 80, False)
     assert s.status("lib") == "hard_block"
 
     # 7. Coverage reaching 100 wins over hard_block (done takes precedence).
     s = ModuleAugmentState("m", "stable")
-    for _ in range(ModuleAugmentState.STALL_LIMIT + 1):
+    for _ in range(s.stall_limit + 1):
         s.record_pass(99.0, 99, False)
     assert s.status("lib") == "hard_block"
     s.record_pass(100.0, 100, False)

@@ -74,3 +74,13 @@ def test_behaviour_pin_env_debug_defaults_on(monkeypatch):
     assert Settings.from_env().behaviour_pin_env_debug is False
     monkeypatch.setenv("BEHAVIOUR_PIN_ENV_DEBUG", "1")
     assert Settings.from_env().behaviour_pin_env_debug is True
+
+
+def test_task0c_pass_stall_limit_reads_env_with_a_floor_of_one(monkeypatch):
+    monkeypatch.delenv("TASK0C_PASS_STALL_LIMIT", raising=False)
+    assert Settings.from_env().task0c_pass_stall_limit == 10
+    monkeypatch.setenv("TASK0C_PASS_STALL_LIMIT", "2")
+    assert Settings.from_env().task0c_pass_stall_limit == 2
+    # 0 would hard-block every module on its first pass below target.
+    monkeypatch.setenv("TASK0C_PASS_STALL_LIMIT", "0")
+    assert Settings.from_env().task0c_pass_stall_limit == 1

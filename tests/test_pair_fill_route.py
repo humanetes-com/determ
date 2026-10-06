@@ -1003,3 +1003,115 @@ def test_pair_last_error_a_compiling_crash_drops_the_prior_rustc_excerpt() -> No
     assert pair_last_error(compile_err, "", "").text == compile_err
     assert pair_last_error("", "", "").text == ""
 
+
+
+def test_a_pair_reply_refused_for_its_text_is_asked_again_with_the_parser(
+        monkeypatch, tmp_path):
+    """A pair body the splicer refuses for its own text (rustc's ambiguous
+    `+` in a cast type) is a failed attempt: both halves are reverted, and
+    the retry turn carries the parser's diagnostic. Before, the route
+    classified `ANSWER_DROPPED` and returned after one call.
+    Control: with `reply_refusal_feedback` deleted no prompt says why."""
+    from pipeline_core.application.reconstruct import impl_fill as impl_fill_mod
+    from pipeline_core.application.reconstruct import splice as splice_mod
+    from pipeline_core.domain.reconstruction import SpliceRefusal
+    diag_text = "error: ambiguous `+` in a type\n --> <stdin>:4:40\n"
+    cast = ('<FN name="fmt" block="impl fmt::Display for Report">'
+            'write!(f, "PAIRED {}", self.msg)</FN>\n'
+            '<FN name="render" block="impl Renderer">'
+            'unsafe { &*(self as *const Self as *const dyn Tag + Send) }.depth</FN>')
+
+    def _drive(root: Path, *, delete_the_call: bool) -> tuple[Path, list[str]]:
+        ws = _setup(monkeypatch, root)
+        real_guard = splice_mod.parse_guarded_write
+
+        def _guard(path, new_bytes, pre_bytes, validate_parse):
+            if b"dyn Tag + Send" in new_bytes:
+                return False
+            return real_guard(path, new_bytes, pre_bytes, validate_parse)
+
+        monkeypatch.setattr(splice_mod, "parse_guarded_write", _guard)
+        monkeypatch.setattr(splice_mod, "parse_refusal",
+                            lambda text, validate: SpliceRefusal("parse_broken", diag_text))
+        monkeypatch.setattr(
+            impl_fill_mod, "reply_refusal_feedback",
+            (lambda *a, **k: None) if delete_the_call
+            else splice_feedback_rule)
+        prompts: list[str] = []
+        _install_model(monkeypatch, [cast, PAIR_REPLY], prompts)
+        install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+        _run(ws)
+        return ws, prompts
+
+    from pipeline_core.domain.splice_feedback import (
+        reply_refusal_feedback as splice_feedback_rule,
+    )
+    ws, prompts = _drive(tmp_path, delete_the_call=False)
+    retries = [p for p in prompts if p.startswith("RESULT of your previous reply")]
+    assert retries and "ambiguous `+` in a type" in retries[0]
+    assert "render.rs" in retries[0]
+    assert "PAIRED" in (ws / "src" / "lib.rs").read_text()
+    assert "self.depth + 7" in (ws / "src" / "render.rs").read_text()
+
+    c_ws, c_prompts = _drive(tmp_path / "control", delete_the_call=True)
+    assert not any("ambiguous `+` in a type" in p for p in c_prompts)
+    assert (c_ws / "src" / "render.rs").read_text() == IMPLEMENTER_LIB
+
+
+def test_a_refused_half_beside_a_landed_same_file_slot_is_asked_again(
+        monkeypatch, tmp_path):
+    """A same-file table slot landing puts the file in the spliced set,
+    so the refused half is neither a missing file nor a missing extra.
+    Both writes revert and the retry carries the parser's diagnostic.
+    Before, the route cargo-checked that partial pair and kept the slot.
+    Control: with `reply_refusal_feedback` deleted the diagnostic is
+    never sent and the refused half stays the stub."""
+    from pipeline_core.application.reconstruct import impl_fill as impl_fill_mod
+    from pipeline_core.application.reconstruct import splice as splice_mod
+    from pipeline_core.domain.reconstruction import SpliceRefusal
+    diag_text = "error: ambiguous `+` in a type\n --> <stdin>:4:40\n"
+    refused = (
+        '<FN name="fmt" block="impl fmt::Display for Report">'
+        'unsafe { &*(self as *const Self as *const dyn Tag + Send) }</FN>\n'
+        '<FN name="render" block="impl Renderer">self.depth + 7</FN>\n'
+        '<FN name="peek" block="free fns">1</FN>')
+
+    def _drive(root: Path, *, delete_the_call: bool) -> tuple[Path, list[str]]:
+        ws = _setup(monkeypatch, root)
+        _install_crash_callees(monkeypatch)
+        real_guard = splice_mod.parse_guarded_write
+
+        def _guard(path, new_bytes, pre_bytes, validate_parse):
+            if b"dyn Tag + Send" in new_bytes:
+                return False
+            return real_guard(path, new_bytes, pre_bytes, validate_parse)
+
+        monkeypatch.setattr(splice_mod, "parse_guarded_write", _guard)
+        monkeypatch.setattr(splice_mod, "parse_refusal",
+                            lambda text, validate: SpliceRefusal("parse_broken", diag_text))
+        monkeypatch.setattr(
+            impl_fill_mod, "reply_refusal_feedback",
+            (lambda *a, **k: None) if delete_the_call
+            else splice_feedback_rule)
+        prompts: list[str] = []
+        _install_model(monkeypatch, [refused, PAIR_REPLY_WITH_SLOT], prompts)
+        install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+        _run(ws)
+        return ws, prompts
+
+    from pipeline_core.domain.splice_feedback import (
+        reply_refusal_feedback as splice_feedback_rule,
+    )
+    ws, prompts = _drive(tmp_path, delete_the_call=False)
+    retries = [p for p in prompts if p.startswith("RESULT of your previous reply")]
+    assert retries and "ambiguous `+` in a type" in retries[0]
+    assert "lib.rs" in retries[0]
+    lib = (ws / "src" / "lib.rs").read_text()
+    assert "PAIRED" in lib
+    assert "pub fn peek() -> u32 { 0 }" not in lib
+    assert "self.depth + 7" in (ws / "src" / "render.rs").read_text()
+
+    c_ws, c_prompts = _drive(tmp_path / "control", delete_the_call=True)
+    assert not any("ambiguous `+` in a type" in p for p in c_prompts)
+    assert "PAIRED" not in (c_ws / "src" / "lib.rs").read_text()
+    assert 'write!(f, "{}", self.msg)' in (c_ws / "src" / "lib.rs").read_text()

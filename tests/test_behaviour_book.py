@@ -875,7 +875,10 @@ def test_small_contracts() -> None:
     miss = judge_rule_set([RuleDraft("s", ("e1",))], pool, predict=_Checker(lambda _r, _i: None))
     assert not miss.kept and miss.dropped[0].startswith("set did not answer")
     assert judge_rule_set([], pool, predict=_Checker(lambda _r, _i: None)).calls == 0
-    assert BookReading().line().endswith("dropped: none; lanes=1; predict-temp=server")
+    assert BookReading().line().endswith(
+        "dropped: none; lanes=1; predict-temp=server; think=on")
+    assert "think=off" in BookReading(think=False).line()
+    assert BookReading(think=False).payload()["think"] is False
     assert "predict-temp=0;" in BookReading(predict_temperature=0.0).line() + ";"
     for reason in ("refuted on 2 of its 3 example(s)", "not necessary for its 1 gained example(s)",
                    "leave-one-out did not answer 1 of its 1 gained example(s)"):

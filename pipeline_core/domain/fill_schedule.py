@@ -80,6 +80,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import statistics
+import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -87,6 +89,7 @@ from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain import unit_clock
+from pipeline_core.domain.fill_class import FillOutcomeClass
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
@@ -105,6 +108,7 @@ __all__ = [
     "ScheduledRun",
     "admit_ranked",
     "bodies_sha_of",
+    "call_price",
     "carve_rebuys",
     "condensed_order",
     "unit_evidence_from",
@@ -1136,8 +1140,8 @@ class UnitService:
         if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
             return _RANK_PAYING, None
         if last.outcome is RunOutcome.REVERTED:
-            cls = (_RANK_SERVED if run.kind is RouteKind.PAIR
-                   and grace_left else _RANK_REBUY_REVERTED)
+            cls = (_RANK_SERVED if _pair_revert_owes_a_retry(run, last, grace_left)
+                   else _RANK_REBUY_REVERTED)
         else:
             cls = _RANK_REBUY_FLAT
         if cls == _RANK_SERVED:
@@ -1191,7 +1195,7 @@ class UnitService:
             return _RANK_SERVED, None
         if (t in _locs(last.reverted) and t not in _locs(last.kept)
                 and t not in _locs(last.collateral)):
-            if run.kind is RouteKind.PAIR and grace_left:
+            if _pair_revert_owes_a_retry(run, last, grace_left):
                 return _RANK_SERVED, None
             return _RANK_REBUY_REVERTED, self._deferrals_since(t, run, last)
         g = ev.grade(last.run_id, last.iteration, t)
@@ -1202,6 +1206,19 @@ class UnitService:
         if (g is None or g[1] is None) and _row_paid(last):
             return _RANK_PAYING, None
         return _RANK_SERVED, None
+
+
+def _pair_revert_owes_a_retry(run: RouteRun, last: RouteLedgerRow,
+                              grace_left: bool) -> bool:
+    """True when a pair's revert is owed its retry inside the grace: the
+    revert stored a crash diagnosis the next prompt carries. A revert whose
+    aimed tests RAN and stayed red (`classes` holds `wrong`) has no such
+    diagnosis; it is a measured re-buy on its first row (run
+    `450922-661c5e9f` fill 11: the formatter pair, `{wrong: 1}`, reopened
+    `never_served` for 20.9 min at net 0). Every rank site asks this one
+    rule, so no path can grant the grace the others refuse."""
+    return (run.kind is RouteKind.PAIR and grace_left
+            and not last.classes.get(FillOutcomeClass.WRONG_BODY.value))
 
 
 def _locs(pairs: Iterable[tuple[str, str]]) -> frozenset[FnLocator]:
@@ -1450,8 +1467,8 @@ def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
         # on its aimed tests (UnitService.cut_by_share): opened, so served,
         # but not a graded try.
         return _RANK_SERVED, _REASON[_RANK_SERVED]
-    if (last.outcome is RunOutcome.REVERTED and run.kind is RouteKind.PAIR
-            and grace_left):
+    if (last.outcome is RunOutcome.REVERTED
+            and _pair_revert_owes_a_retry(run, last, grace_left)):
         # The pair's revert stores a diagnosis the next prompt is
         # supposed to carry. Ranking it as a zero-weight rebuy defers
         # that retry under a positive budget, so the next fill opens
@@ -1764,6 +1781,24 @@ def _later_turn_sample(r: RouteLedgerRow) -> float | None:
     if r.first_turn_minutes is not None:
         return max(0.0, r.minutes - r.first_turn_minutes) / (r.model_calls - 1)
     return r.minutes / r.model_calls
+
+
+CALL_PRICE_WINDOW = 20
+
+
+def call_price(rows: Iterable[RouteLedgerRow], kind: RouteKind, oracle_fp: str,
+               *, window: int = CALL_PRICE_WINDOW) -> float | None:
+    """Minutes one call of `kind` takes on this oracle: the median of
+    minutes per call over the newest `window` rows of that kind that made a
+    call. None when no such row exists — the clock then reserves the rest of
+    the share on a grant (:class:`RunClock`). What a granted claim reserves
+    while its unit is in flight."""
+    graded = [r for r in rows if r.kind is kind and r.oracle_fp == oracle_fp
+              and r.model_calls > 0 and r.minutes > 0]
+    if not graded:
+        return None
+    return float(statistics.median(
+        r.minutes / r.model_calls for r in graded[-window:]))
 
 
 def session_turn_price(rows: Iterable[RouteLedgerRow],
@@ -2408,7 +2443,20 @@ class RunClock:
     fill ran a plan in which `vtable` had no run). ``scope`` is the run's
     target tests; a claim with no scope stands on the whole ground.
     ``units`` is what the run writes: a moved claim still stands when the
-    ground now stops one of its planned tests inside them."""
+    ground now stops one of its planned tests inside them.
+
+    A granted claim RESERVES one call of the run's kind (``call_price``
+    minutes, :func:`call_price`) until its unit returns, and the share check
+    counts what is reserved: ``elapsed + outstanding < share``. Elapsed is
+    wall time and a grant does not move it, so a parallel wave's workers all
+    passed ``elapsed < share`` before any of them had spent a call (run
+    `450922-661c5e9f` fill 11: a 0.3-minute per-fn share granted four claims
+    and ran 31.9 minutes). The check and the grant are one step under a
+    lock. A reservation belongs to the claiming thread: it is released when
+    that thread's unit returns (:meth:`release`) or replaced by the thread's
+    next claim, since its unit is over by then — so a serial route's turns
+    and blocks see exactly the old rule. With no price (no graded row of the
+    kind) a grant reserves the rest of the share: one call, no sibling."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
@@ -2418,8 +2466,14 @@ class RunClock:
                  ] | None = None,
                  scope: frozenset[str] | None = None,
                  units: frozenset[FnLocator] = frozenset(),
-                 unit_multiple: float = 0.0) -> None:
+                 unit_multiple: float = 0.0,
+                 call_price: float | None = None) -> None:
         self.share_minutes = share_minutes
+        #: Minutes one call of this run's kind takes (:func:`call_price`);
+        #: what a granted claim reserves while its unit is in flight.
+        self.call_price = call_price
+        self._lock = threading.Lock()
+        self._reserved: dict[int, float] = {}
         #: Each claimed unit's own bound, as a multiple of the share
         #: (`FILL_UNIT_SHARE_MULTIPLE`; :mod:`unit_clock`). 0 = unbounded.
         self.unit_multiple = unit_multiple
@@ -2447,6 +2501,17 @@ class RunClock:
         """What the run's last landed change set bought (net verdicts)."""
         self.last_delta = int(delta)
 
+    def outstanding(self) -> float:
+        """Minutes reserved by granted claims whose unit has not returned."""
+        with self._lock:
+            return sum(self._reserved.values())
+
+    def release(self) -> None:
+        """The calling thread's claimed unit returned: its reservation ends,
+        and its minutes are in `elapsed()` from here on."""
+        with self._lock:
+            self._reserved.pop(threading.get_ident(), None)
+
     def may_claim(self, tests: Iterable[str] | None = None,
                   units: Iterable[FnLocator] | None = None) -> bool:
         """True when the next claim may be made (:meth:`refusal` is "")."""
@@ -2470,17 +2535,31 @@ class RunClock:
         keep had just moved its tests onto it, or because the share ran out."""
         scope = frozenset(tests) if tests is not None else self.scope
         claimed = frozenset(units) if units is not None else self.units
+        me = threading.get_ident()
+        with self._lock:
+            # This thread asking again means its previous unit is over.
+            self._reserved.pop(me, None)
         if (self._ground_moved is not None
                 and self._ground_moved(scope, claimed)):
-            self.refused += 1
+            with self._lock:
+                self.refused += 1
             return "premise"
-        if self.share_minutes is None or self.elapsed() < self.share_minutes:
-            return self._claimed(scope, claimed)
-        fill_left = self._fill_remaining()
-        if self.last_delta > 0 and (fill_left is None or fill_left > 0):
-            return self._claimed(scope, claimed)
-        self.refused += 1
-        return "share"
+        with self._lock:
+            if self.share_minutes is None:
+                return self._claimed(scope, claimed)
+            elapsed = self.elapsed()
+            if elapsed + sum(self._reserved.values()) < self.share_minutes:
+                self._reserved[me] = (
+                    self.call_price if self.call_price is not None
+                    else max(0.0, self.share_minutes - elapsed))
+                return self._claimed(scope, claimed)
+            fill_left = self._fill_remaining()
+            if self.last_delta > 0 and (fill_left is None or fill_left > 0):
+                # Budget follows payoff past the share, as before.
+                self._reserved[me] = self.call_price or 0.0
+                return self._claimed(scope, claimed)
+            self.refused += 1
+            return "share"
 
     def _claimed(self, scope: frozenset[str] | None,
                  claimed: frozenset[FnLocator]) -> str:

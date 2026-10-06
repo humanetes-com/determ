@@ -97,38 +97,74 @@ class FrontierAdmission:
 
     It also records every unit any insert proposed and every one it
     refused, so the iteration logs ONE report with its denominator instead
-    of one line per filter call (`report`)."""
+    of one line per filter call (`report`).
+
+    `proved` are the stub units the cluster's function record proved no test
+    can execute (`FnCoverageRecord.proved_stub_units`). They are refused at
+    the same inserts: a fill bought for one can only be judged by a test, and
+    none can reach it (run `450922-661c5e9f`: `src/backtrace.rs::
+    _assert_send_sync` dispatched at iterations 6 and 8, opened by no route,
+    left admitted). Reported on their own line (`proved_report`), because
+    the cfg-dead line is parsed back as a cfg-set reading."""
 
     dead: CfgDeadSites
+    proved: frozenset[FnLocator] = frozenset()
     proposed: set[FnLocator] = field(default_factory=set)
     refused: set[FnLocator] = field(default_factory=set)
+    withheld_proved: set[FnLocator] = field(default_factory=set)
+    _proved_keys: frozenset[tuple[str, str]] = field(
+        default=frozenset(), init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._proved_keys = frozenset(
+            (norm_src_rel(u.file), u.fn_name) for u in self.proved)
+
+    def _is_proved(self, loc: FnLocator) -> bool:
+        return (norm_src_rel(loc.file), loc.fn_name) in self._proved_keys
+
+    def _closed(self, key: FnLocator | FnSite) -> bool:
+        loc = _loc(key)
+        return loc in self.dead or self._is_proved(loc)
 
     def observe(self, keys: Iterable[FnLocator | FnSite]) -> None:
-        """Record `keys` as proposed, and the dead ones as refused — for a
+        """Record `keys` as proposed, and the closed ones as refused — for a
         map an injected filter drops dead sites from."""
         for k in keys:
             loc = _loc(k)
             self.proposed.add(loc)
             if loc in self.dead:
                 self.refused.add(loc)
+            elif self._is_proved(loc):
+                self.withheld_proved.add(loc)
 
     def admit[K: (FnLocator, FnSite), V](self, units: Mapping[K, V]) -> dict[K, V]:
         self.observe(units)
-        return self.dead.split(units)[0]
+        return {k: v for k, v in units.items() if not self._closed(k)}
+
+    def without_proved[K: (FnLocator, FnSite), V](self, units: dict[K, V]) -> dict[K, V]:
+        """`units` without the proved stubs — for a map whose dead sites an
+        injected filter already dropped (`observe` has recorded it)."""
+        if not self.proved:
+            return units
+        return {k: v for k, v in units.items() if not self._is_proved(_loc(k))}
 
     def admit_sites(self, sites: Iterable[FnSite]) -> frozenset[FnSite]:
         sites = tuple(sites)
         self.observe(sites)
-        return frozenset(s for s in sites if s not in self.dead)
+        return frozenset(s for s in sites if not self._closed(s))
 
     def admit_pairs(self, pairs: Iterable[FormatterPair]) -> frozenset[FormatterPair]:
         kept: set[FormatterPair] = set()
         for p in pairs:
             members = p.member_locators()
             self.observe(members)
-            if not any(m in self.dead for m in members):
+            if not any(self._closed(m) for m in members):
                 kept.add(p)
         return frozenset(kept)
+
+    def proved_report(self) -> tuple[str, ...]:
+        """The proved stubs some insert proposed this iteration, by name."""
+        return tuple(sorted(f"{u.file}::{u.fn_name}" for u in self.withheld_proved))
 
     def report(self, cluster_name: str) -> ClusterMembershipReport | None:
         """The iteration's one admission line, or None when nothing was

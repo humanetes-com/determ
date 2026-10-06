@@ -33,6 +33,7 @@ from enum import StrEnum
 from typing import Any
 
 from .model_defaults import resolve_route_order
+from .model_profile import GLOBAL_DEFAULTS, resolve_model_knobs
 from .phase_registry import PHASE_ENTER, PHASE_EXIT
 
 # ── work counters ────────────────────────────────────────────────────────────
@@ -332,6 +333,16 @@ _KNOBS: tuple[str, ...] = (
     "VLLM_MAX_MODEL_LEN", "VLLM_MAX_THINK_CHARS", "VLLM_REASONING_BUDGET",
     "VLLM_THINKING_BUDGET", "PIPELINE_PARALLELISM",
 )
+# Model knobs added after the ledger's baselines. Each is hashed only when it
+# resolves to something other than its global default — the no-op value every
+# earlier run ran under — so adding a knob does not split every baseline.
+_LATER_MODEL_KNOBS: tuple[str, ...] = (
+    "VLLM_RUNAWAY_THINK_CHARS", "VLLM_REASONING_STRENGTH_OFF",
+)
+_MODEL_KNOBS: tuple[str, ...] = (
+    "VLLM_REASONING_STRENGTH", "VLLM_MAX_MODEL_LEN", "VLLM_MAX_THINK_CHARS",
+    "VLLM_REASONING_BUDGET", "VLLM_THINKING_BUDGET",
+) + _LATER_MODEL_KNOBS
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -351,30 +362,44 @@ class RunConfig:
 
     values: tuple[tuple[str, Any], ...]
     route_order_source: str = "model-default"
+    # Beside the hash, like `route_order_source`: the served model's profile
+    # family (None = no profile) and where each model knob's value came from
+    # (env | profile | default | uncalibrated). Neither is behaviour.
+    model_family: str | None = None
+    knob_sources: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> RunConfig:
+        """The model knobs are the values `resolve_model_knobs` gives — the
+        same env → profile → default resolution the transport plans with —
+        not the raw env, so a line removed from `.env` records the value the
+        run used instead of an unrelated default of this class's own."""
         model = env.get("MODEL", "")
         route_env = env.get("PHASE_C_ROUTE_ORDER")
+        knobs = resolve_model_knobs(env)
         resolved: dict[str, Any] = {
             "MODEL": model,
             "PHASE_C_ROUTE_ORDER": str(resolve_route_order(route_env, model)),
             "PHASE_C_DRIVER": env.get("PHASE_C_DRIVER", "tdd"),
-            "VLLM_REASONING_STRENGTH": env.get("VLLM_REASONING_STRENGTH", "high"),
-            "VLLM_MAX_MODEL_LEN": _env_int(env, "VLLM_MAX_MODEL_LEN", 0) or None,
-            "VLLM_MAX_THINK_CHARS": _env_int(env, "VLLM_MAX_THINK_CHARS", 60000),
-            "VLLM_REASONING_BUDGET": env.get("VLLM_REASONING_BUDGET", "fixed"),
-            "VLLM_THINKING_BUDGET": _env_int(env, "VLLM_THINKING_BUDGET", 0) or None,
             "PIPELINE_PARALLELISM": _env_int(env, "PIPELINE_PARALLELISM", 0) or None,
         }
-        return cls(values=tuple((k, resolved[k]) for k in _KNOBS),
+        for name in _MODEL_KNOBS:
+            resolved[name] = knobs.value(name)
+        keys = list(_KNOBS) + [k for k in _LATER_MODEL_KNOBS
+                               if resolved[k] != GLOBAL_DEFAULTS[k]]
+        return cls(values=tuple((k, resolved[k]) for k in keys),
                    route_order_source=("env" if (route_env or "").strip()
-                                       else "model-default"))
+                                       else "model-default"),
+                   model_family=knobs.family,
+                   knob_sources=tuple(sorted(knobs.sources().items())))
 
     def as_dict(self) -> dict[str, Any]:
-        """The ledger's historical `env` block, `route_order_source` included."""
+        """The ledger's historical `env` block, `route_order_source`, the
+        model family and the knob sources included."""
         out = dict(self.values)
         out["route_order_source"] = self.route_order_source
+        out["model_family"] = self.model_family
+        out["knob_sources"] = dict(self.knob_sources)
         return out
 
     @property

@@ -12,20 +12,16 @@ Reference: OLLAMA_NUM_CTX=32768 → ~104k chars; the 8192-token fallback → ~26
 from __future__ import annotations
 
 from .enums import Backend, ModelTier
+from .model_profile import family_key, profile_for
 
-# Model name prefixes that follow FILE markers reliably and benefit from explicit
-# reasoning directives. Everything else is treated as weak-tier.
+# Name prefixes of models WITHOUT a profile that follow FILE markers reliably
+# and benefit from explicit reasoning directives. A profiled family (Qwen3,
+# Muse Glimmer) takes its tier from `domain.model_profile`; everything else is
+# treated as weak-tier.
 _MID_TIER_PREFIXES: tuple[str, ...] = (
-    "qwen3", "qwen2.5-72",
+    "qwen2.5-72",
     "llama-3.3-70", "llama-3.1-70", "llama-3.1-405",
     "mistral-large", "mixtral-8x22",
-    # Muse-Glimmer-30B. Without an entry it classifies WEAK by fallback and the
-    # prompts silently lose the FILE markers and explicit reasoning directives —
-    # a quality drop with no error, on a model whose card reports 51.2 on
-    # SWE-Bench Pro and which is built for multi-step tool use. Matched on the
-    # bare name, so it covers both the BF16 repo and the FP8-block one
-    # ("muse-glimmer-30b", "muse-glimmer-30b-fp8-block").
-    "muse-glimmer",
 )
 
 # Headroom (tokens) reserved for the system prompt + generation; the rest is content.
@@ -56,7 +52,10 @@ def safe_input_char_limit(ctx_tokens: int, thinking_tokens: int, min_content_tok
 
 def model_tier(model: str) -> ModelTier:
     """Classify a model as MID (capable instruction-follower) or WEAK (small/distilled)."""
-    name = model.lower().split(":")[0].split("/")[-1]
+    prof = profile_for(model)
+    if prof is not None:
+        return prof.tier
+    name = family_key(model)
     if any(name.startswith(prefix) for prefix in _MID_TIER_PREFIXES):
         return ModelTier.MID
     return ModelTier.WEAK

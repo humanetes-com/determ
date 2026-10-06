@@ -47,8 +47,9 @@ from typing import Any
 
 from pipeline_core.domain.attribution import canon_site, record_site
 from pipeline_core.domain.cfg import CfgSet, crate_cfg_predicates
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FN_EXECUTION_CRITERION as FN_EXECUTION_CRITERION
-from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ModRecord
 from pipeline_core.domain.oracle_immutability import is_oracle_fn
 
 # `(crate-relative file, first line of the body)` -> execution count, max over
@@ -389,6 +390,11 @@ class UnreachedFn:
     proof: str = ""
 
 
+def _canon_rel(site: FnSite) -> FnSite:
+    c = canon_site(site)
+    return FnSite(norm_src_rel(c.file), c.fn_name, c.container)
+
+
 @dataclass(frozen=True, slots=True)
 class ProvenFn:
     """A function no test can execute, and why (`domain.fn_reachability`)."""
@@ -474,6 +480,22 @@ class FnCoverageRecord:
         """True when the record lists this exact site, in any state."""
         want = canon_site(site)
         return bool(self._statuses(lambda s: s == want))
+
+    def proved_stub_units(self, stub_sites: Iterable[FnSite]) -> frozenset[FnLocator]:
+        """The dispatch units whose EVERY stub site this record proved no test
+        can execute (`by_construction`). A fill unit is a locator, which
+        several impl sites share; it leaves the fill only when no stub at it
+        can be reached, so a reachable `clone` stub beside a proved one stays.
+        A proved function that already has a body is not a stub and is not
+        returned. Sites compare canonically (`canon_site`, `src/` spelling)."""
+        proved = {_canon_rel(p.site) for p in self.by_construction}
+        if not proved:
+            return frozenset()
+        by_unit: dict[FnLocator, list[FnSite]] = {}
+        for s in stub_sites:
+            by_unit.setdefault(FnLocator(s.file, s.fn_name), []).append(_canon_rel(s))
+        return frozenset(loc for loc, sites in by_unit.items()
+                         if all(s in proved for s in sites))
 
     def unreached_entry(self, site: FnSite) -> UnreachedFn | None:
         want = canon_site(site)

@@ -129,6 +129,10 @@ def test_run_config_keeps_the_ledger_env_block_shape() -> None:
     assert keys == {"MODEL", "PHASE_C_ROUTE_ORDER", "route_order_source",
                     "PHASE_C_DRIVER", "VLLM_REASONING_STRENGTH", "VLLM_MAX_MODEL_LEN",
                     "VLLM_MAX_THINK_CHARS", "VLLM_REASONING_BUDGET",
-                    "VLLM_THINKING_BUDGET", "PIPELINE_PARALLELISM"}
-    assert RunConfig.from_env({"VLLM_MAX_MODEL_LEN": "garbage"}).as_dict()[
-        "VLLM_MAX_MODEL_LEN"] is None
+                    "VLLM_THINKING_BUDGET", "PIPELINE_PARALLELISM",
+                    # beside the hash, like route_order_source
+                    "model_family", "knob_sources"}
+    # The model knobs resolve through the transport's resolver, which refuses
+    # a value the transport could not run under instead of recording None.
+    with pytest.raises(ValueError, match="VLLM_MAX_MODEL_LEN"):
+        RunConfig.from_env({"VLLM_MAX_MODEL_LEN": "garbage"})

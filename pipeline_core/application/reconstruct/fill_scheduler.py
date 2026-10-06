@@ -47,6 +47,7 @@ from pipeline_core.domain.fill_schedule import (
     RunOutcome,
     ScheduledRun,
     UnitEvidence,
+    call_price,
     release_held,
     schedule,
     withhold_landed,
@@ -688,7 +689,8 @@ def execute_fill(
                 share_minutes=share, fill_remaining=budget.remaining,
                 now=deps.now, ground_moved=gate,
                 scope=w.run.target_tests or None, units=w.run.targets,
-                unit_multiple=deps.unit_share_multiple)
+                unit_multiple=deps.unit_share_multiple,
+                call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp))
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}

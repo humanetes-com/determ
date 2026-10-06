@@ -50,6 +50,16 @@ else
     fi
 fi
 
+# Launch conformance (pipeline_core/adapters/model_conformance.py): the served
+# id, the reasoning dialect the chat template reads, and the parser split, all
+# against the model's profile. A smoke row recorded under a mismatched model is
+# a measurement of the wrong thing, so a failure stops here.
+if ! $PY -m pipeline_core.adapters.model_conformance --env-file .env --deadline 1800 \
+        --report logs/model_conformance.json; then
+    echo "run_smokes: model conformance failed — aborting before any run (logs/model_conformance.json)." >&2
+    exit 1
+fi
+
 # Newest run_id among events appended after line-mark $1 (the smokes run
 # serially and nothing else emits, so the new region belongs to the smoke).
 new_run_id() {

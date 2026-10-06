@@ -1,0 +1,1657 @@
+{
+ "source": "logs/route_ledger/anyhow/index.jsonl, run 450922-661c5e9f, kind per-fn, all iterations",
+ "rows": [
+  {
+   "bodies_sha": "cf64c36081f3cddc",
+   "classes": {},
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 1,
+   "joint_sets": [],
+   "kept": [],
+   "kind": "per-fn",
+   "label": "per-fn 12 stub(s), 0 re-fill(s)",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": null,
+   "newly_red": [],
+   "opened": null,
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "deferred",
+   "reason": "premise_moved",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 0.0,
+   "started": "2026-10-05T00:19:34+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_context_then_into_boxed_0",
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_ensure_vec_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_alt_debug",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "doc_error_example_5",
+    "doc_lib_example_12",
+    "doc_lib_example_13",
+    "doc_lib_example_3",
+    "doc_macros_example_3",
+    "doc_macros_example_4",
+    "error_impl_source_chains_through_multiple_contexts",
+    "error_impl_source_is_none_for_message_error",
+    "error_impl_source_is_some_for_context_error",
+    "no_digits",
+    "one_digit",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_context_none_source_is_none",
+    "option_context_some_preserves_value_type",
+    "option_context_some_returns_ok",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "option_with_context_some_closure_not_evaluated",
+    "option_with_context_some_returns_value",
+    "result_with_context_ok_preserves_value_type_for_string",
+    "result_with_context_ok_returns_value_and_closure_not_evaluated",
+    "test_altdebug",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_as",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_boxed_thiserror",
+    "test_brace_escape",
+    "test_clone",
+    "test_closure",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_drop",
+    "test_ensure",
+    "test_ensure_nonbool",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_format_err_literal_branch",
+    "test_high_precedence_binary_operator",
+    "test_if",
+    "test_inference",
+    "test_io_source",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_literal_source",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_match",
+    "test_messages",
+    "test_no_backtrace_executed_via_chained_context",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_ok_preserves_unit_and_is_send_sync",
+    "test_ok_returns_ok_for_i32",
+    "test_ok_returns_ok_for_string",
+    "test_ok_type_alias_matches_result",
+    "test_pat",
+    "test_path",
+    "test_raw_addr",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_display",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_std_error",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_works",
+    "test_recursion",
+    "test_rev",
+    "test_root_cause",
+    "test_too_long",
+    "test_trailer",
+    "test_unary",
+    "test_unsuccessful_downcast",
+    "test_variable_source",
+    "test_whitespace",
+    "two_digits"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "context"
+    ],
+    [
+     "src/context.rs",
+     "with_context"
+    ],
+    [
+     "src/ensure.rs",
+     "__dispatch_ensure"
+    ],
+    [
+     "src/error.rs",
+     "from_boxed"
+    ],
+    [
+     "src/error.rs",
+     "msg"
+    ],
+    [
+     "src/error.rs",
+     "new"
+    ],
+    [
+     "src/fmt.rs",
+     "write_str"
+    ],
+    [
+     "src/kind.rs",
+     "anyhow_kind"
+    ],
+    [
+     "src/kind.rs",
+     "new"
+    ],
+    [
+     "src/lib.rs",
+     "Ok"
+    ],
+    [
+     "src/lib.rs",
+     "format_err"
+    ],
+    [
+     "src/lib.rs",
+     "not"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "342a0b9ca939ca03",
+   "classes": {},
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 2,
+   "joint_sets": [],
+   "kept": [],
+   "kind": "per-fn",
+   "label": "per-fn 12 stub(s), 0 re-fill(s)",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": null,
+   "newly_red": [],
+   "opened": null,
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "deferred",
+   "reason": "premise_moved",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 0.0,
+   "started": "2026-10-05T01:36:54+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_context_then_into_boxed_0",
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_ensure_vec_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_alt_debug",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "doc_error_example_5",
+    "doc_lib_example_12",
+    "doc_lib_example_13",
+    "doc_lib_example_3",
+    "error_impl_source_chains_through_multiple_contexts",
+    "error_impl_source_is_none_for_message_error",
+    "error_impl_source_is_some_for_context_error",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_context_none_source_is_none",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "test_altdebug",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_as",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_boxed_thiserror",
+    "test_brace_escape",
+    "test_clone",
+    "test_closure",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug",
+    "test_debug_backtrace_coverage",
+    "test_default",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_mut",
+    "test_downcast_ref",
+    "test_drop",
+    "test_ensure",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_format_err_literal_branch",
+    "test_high_precedence_binary_operator",
+    "test_if",
+    "test_io_source",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_literal_source",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_match",
+    "test_messages",
+    "test_no_backtrace_executed_via_chained_context",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_pat",
+    "test_path",
+    "test_raw_addr",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_display",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_std_error",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_works",
+    "test_recursion",
+    "test_rev",
+    "test_root_cause",
+    "test_too_long",
+    "test_trailer",
+    "test_unary",
+    "test_unsuccessful_downcast",
+    "test_variable_source",
+    "test_whitespace"
+   ],
+   "targets": [
+    [
+     "src/chain.rs",
+     "default"
+    ],
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/ensure.rs",
+     "render"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_adhoc"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_boxed"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_display"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_std"
+    ],
+    [
+     "src/error.rs",
+     "context"
+    ],
+    [
+     "src/error.rs",
+     "error"
+    ],
+    [
+     "src/error.rs",
+     "from"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/fmt.rs",
+     "display"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "",
+   "classes": {
+    "unreachable": 14,
+    "wrong": 1
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 3,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/context.rs",
+     "fmt"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ],
+    [
+     "src/fmt.rs",
+     "display"
+    ],
+    [
+     "src/ptr.rs",
+     "boxed"
+    ],
+    [
+     "src/ptr.rs",
+     "new"
+    ],
+    [
+     "src/wrapper.rs",
+     "fmt"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 10 stub(s), 2 re-fill(s) [8 not landed this fill]",
+   "minutes": 70.891,
+   "model_calls": 23,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": [],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/context.rs",
+     "fmt"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ],
+    [
+     "src/fmt.rs",
+     "display"
+    ],
+    [
+     "src/ptr.rs",
+     "boxed"
+    ],
+    [
+     "src/ptr.rs",
+     "new"
+    ],
+    [
+     "src/wrapper.rs",
+     "fmt"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 46.515498142499986,
+   "started": "2026-10-05T01:53:56+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_context_then_into_boxed_0",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_ensure_vec_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "error_impl_source_chains_through_multiple_contexts",
+    "error_impl_source_is_none_for_message_error",
+    "error_impl_source_is_some_for_context_error",
+    "one_digit",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_as",
+    "test_as_ref",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_boxed_thiserror",
+    "test_clone",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_downcast",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_format_err_literal_branch",
+    "test_if",
+    "test_io_source",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_no_backtrace_executed_via_chained_context",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_pat",
+    "test_path",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_display",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_std_error",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_works",
+    "test_rev",
+    "test_root_cause",
+    "test_trailer",
+    "two_digits"
+   ],
+   "targets": [
+    [
+     "src/context.rs",
+     "fmt"
+    ],
+    [
+     "src/context.rs",
+     "source"
+    ],
+    [
+     "src/context.rs",
+     "write_str"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_adhoc"
+    ],
+    [
+     "src/fmt.rs",
+     "display"
+    ],
+    [
+     "src/ptr.rs",
+     "boxed"
+    ],
+    [
+     "src/ptr.rs",
+     "new"
+    ],
+    [
+     "src/wrapper.rs",
+     "fmt"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "",
+   "classes": {
+    "unreachable": 3
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 4,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/error.rs",
+     "as_ref"
+    ],
+    [
+     "src/error.rs",
+     "deref_mut"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 6 stub(s), 9 re-fill(s) [10 not landed this fill]",
+   "minutes": 5.826,
+   "model_calls": 3,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": [],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/error.rs",
+     "as_ref"
+    ],
+    [
+     "src/error.rs",
+     "deref_mut"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 55.82256196848886,
+   "started": "2026-10-05T04:13:37+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_alt_debug",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "option_context_none_display_and_debug",
+    "test_altdebug",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_clone",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_with_new_error",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_macro",
+    "test_path",
+    "test_rev",
+    "test_whitespace"
+   ],
+   "targets": [
+    [
+     "src/chain.rs",
+     "len"
+    ],
+    [
+     "src/chain.rs",
+     "new"
+    ],
+    [
+     "src/chain.rs",
+     "next_back"
+    ],
+    [
+     "src/error.rs",
+     "as_ref"
+    ],
+    [
+     "src/error.rs",
+     "deref_mut"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "from"
+    ],
+    [
+     "src/error.rs",
+     "source"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/wrapper.rs",
+     "source"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "ec15c7b92b7ea7fd",
+   "classes": {
+    "unreachable": 7,
+    "wrong": 1
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 5,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "by_mut"
+    ],
+    [
+     "src/ptr.rs",
+     "by_ref"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 12 stub(s), 0 re-fill(s)",
+   "minutes": 39.327,
+   "model_calls": 12,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": [],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "by_mut"
+    ],
+    [
+     "src/ptr.rs",
+     "by_ref"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 24.724932978355532,
+   "started": "2026-10-05T04:21:36+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_context_then_into_boxed_0",
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_ensure_vec_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_alt_debug",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "doc_error_example_5",
+    "doc_lib_example_12",
+    "doc_lib_example_13",
+    "doc_lib_example_3",
+    "error_impl_source_chains_through_multiple_contexts",
+    "error_impl_source_is_none_for_message_error",
+    "error_impl_source_is_some_for_context_error",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_context_none_source_is_none",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "test_altdebug",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_as",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_boxed_thiserror",
+    "test_brace_escape",
+    "test_clone",
+    "test_closure",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_ref",
+    "test_drop",
+    "test_ensure",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_format_err_literal_branch",
+    "test_high_precedence_binary_operator",
+    "test_if",
+    "test_io_source",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_literal_source",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_match",
+    "test_messages",
+    "test_no_backtrace_executed_via_chained_context",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_pat",
+    "test_path",
+    "test_raw_addr",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_display",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_std_error",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_works",
+    "test_recursion",
+    "test_rev",
+    "test_root_cause",
+    "test_too_long",
+    "test_trailer",
+    "test_unary",
+    "test_unsuccessful_downcast",
+    "test_variable_source",
+    "test_whitespace"
+   ],
+   "targets": [
+    [
+     "src/error.rs",
+     "deref"
+    ],
+    [
+     "src/error.rs",
+     "drop"
+    ],
+    [
+     "src/error.rs",
+     "source"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/fmt.rs",
+     "debug"
+    ],
+    [
+     "src/ptr.rs",
+     "by_mut"
+    ],
+    [
+     "src/ptr.rs",
+     "by_ref"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ],
+    [
+     "src/ptr.rs",
+     "clone"
+    ],
+    [
+     "src/ptr.rs",
+     "deref"
+    ],
+    [
+     "src/ptr.rs",
+     "read"
+    ],
+    [
+     "src/wrapper.rs",
+     "source"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "4db731bfd28bf5d0",
+   "classes": {
+    "cashed": 6,
+    "wrong": 1
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 6,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/error.rs",
+     "error_mut"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_downcast"
+    ],
+    [
+     "src/error.rs",
+     "object_drop"
+    ],
+    [
+     "src/error.rs",
+     "object_reallocate_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/wrapper.rs",
+     "source"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 12 stub(s), 0 re-fill(s)",
+   "minutes": 17.447,
+   "model_calls": 12,
+   "net_pass_delta": 60,
+   "newly_crashed": [],
+   "newly_green": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "doc_error_example_5",
+    "doc_lib_example_3",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_context_none_source_is_none",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "test_anyhow_from_anyhow",
+    "test_as",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_thiserror",
+    "test_brace_escape",
+    "test_closure",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_ensure",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_high_precedence_binary_operator",
+    "test_if",
+    "test_io_source",
+    "test_literal_source",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_match",
+    "test_messages",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_pat",
+    "test_path",
+    "test_raw_addr",
+    "test_recursion",
+    "test_root_cause",
+    "test_unary",
+    "test_unsuccessful_downcast",
+    "test_variable_source"
+   ],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/error.rs",
+     "error_mut"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_downcast"
+    ],
+    [
+     "src/error.rs",
+     "object_drop"
+    ],
+    [
+     "src/error.rs",
+     "object_reallocate_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/wrapper.rs",
+     "source"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "cashed",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 36.36363598380302,
+   "started": "2026-10-05T05:12:36+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_backtrace_1",
+    "behaviour_probe_stable_context_then_into_boxed_0",
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_ensure_i32_mismatch_0",
+    "behaviour_probe_stable_ensure_string_mismatch_0",
+    "behaviour_probe_stable_ensure_vec_mismatch_0",
+    "behaviour_probe_stable_identity_downcast_0",
+    "behaviour_probe_stable_msg_error_no_source_0",
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_trait_object_identity_loss_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "behaviour_probe_stable_with_context_then_context_0",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_via_dyn_std_error_for_display_only_context",
+    "display_error_debug_works_for_display_only_context",
+    "display_error_is_visible_through_bail",
+    "display_error_via_anyhow_literal_empty_and_unicode",
+    "display_error_via_anyhow_literal_is_displayed",
+    "doc_error_example_5",
+    "doc_lib_example_12",
+    "doc_lib_example_13",
+    "doc_lib_example_3",
+    "error_impl_source_chains_through_multiple_contexts",
+    "error_impl_source_is_none_for_message_error",
+    "error_impl_source_is_some_for_context_error",
+    "option_context_none_display_and_debug",
+    "option_context_none_returns_err_with_message",
+    "option_context_none_source_is_none",
+    "option_with_context_none_closure_is_evaluated_and_message_used",
+    "option_with_context_none_display_via_format_args",
+    "option_with_context_none_returns_error_with_context_message",
+    "test_altdebug",
+    "test_altdisplay",
+    "test_anyhow_from_anyhow",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_as",
+    "test_as_ref",
+    "test_atom",
+    "test_boxed_anyhow",
+    "test_boxed_error_debug_alt_is_executed",
+    "test_boxed_error_debug_is_executed",
+    "test_boxed_error_source_none",
+    "test_boxed_error_source_some",
+    "test_boxed_str",
+    "test_boxed_thiserror",
+    "test_brace_escape",
+    "test_clone",
+    "test_closure",
+    "test_convert",
+    "test_convert_send",
+    "test_convert_send_sync",
+    "test_debug",
+    "test_debug_backtrace_coverage",
+    "test_deref_mut_is_invoked",
+    "test_deref_mut_triggers_error_mut",
+    "test_deref_mut_with_new_error",
+    "test_display",
+    "test_downcast",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_downcast_ref",
+    "test_drop",
+    "test_ensure",
+    "test_fmt_source",
+    "test_format_err_interpolation_branch",
+    "test_format_err_literal_branch",
+    "test_high_precedence_binary_operator",
+    "test_if",
+    "test_io_source",
+    "test_iter",
+    "test_large_alignment",
+    "test_len",
+    "test_literal_source",
+    "test_loop",
+    "test_low_precedence_binary_operator",
+    "test_macro",
+    "test_match",
+    "test_messages",
+    "test_no_backtrace_executed_via_chained_context",
+    "test_notbothdebug_dispatch",
+    "test_notbothdebug_dispatch_neq",
+    "test_pat",
+    "test_path",
+    "test_raw_addr",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_display",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_std_error",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_with_context",
+    "test_reallocate_into_boxed_dyn_error_without_backtrace_works",
+    "test_recursion",
+    "test_rev",
+    "test_root_cause",
+    "test_too_long",
+    "test_trailer",
+    "test_unary",
+    "test_unsuccessful_downcast",
+    "test_variable_source",
+    "test_whitespace"
+   ],
+   "targets": [
+    [
+     "src/backtrace.rs",
+     "_assert_send_sync"
+    ],
+    [
+     "src/error.rs",
+     "context_backtrace"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_downcast"
+    ],
+    [
+     "src/error.rs",
+     "error_mut"
+    ],
+    [
+     "src/error.rs",
+     "object_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_downcast"
+    ],
+    [
+     "src/error.rs",
+     "object_drop"
+    ],
+    [
+     "src/error.rs",
+     "object_reallocate_boxed"
+    ],
+    [
+     "src/error.rs",
+     "object_ref"
+    ],
+    [
+     "src/error.rs",
+     "source"
+    ],
+    [
+     "src/error.rs",
+     "vtable"
+    ],
+    [
+     "src/wrapper.rs",
+     "source"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "",
+   "classes": {
+    "cashed": 1
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 7,
+   "joint_sets": [
+    [
+     [
+      "src/chain.rs",
+      "new"
+     ],
+     [
+      "src/chain.rs",
+      "next_back"
+     ]
+    ]
+   ],
+   "kept": [
+    [
+     "src/chain.rs",
+     "new"
+    ],
+    [
+     "src/chain.rs",
+     "next_back"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 2 stub(s), 8 re-fill(s) [1 not landed this fill]",
+   "minutes": 46.086,
+   "model_calls": 5,
+   "net_pass_delta": 8,
+   "newly_crashed": [],
+   "newly_green": [
+    "behaviour_probe_stable_single_context_msg_error_0",
+    "behaviour_probe_stable_triple_nested_with_context_closure_0",
+    "test_altdisplay",
+    "test_anyhow_literal_hits_construct_from_display",
+    "test_clone",
+    "test_iter",
+    "test_len",
+    "test_rev"
+   ],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/chain.rs",
+     "new"
+    ],
+    [
+     "src/chain.rs",
+     "next_back"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "cashed",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 74.77178709786666,
+   "started": "2026-10-05T05:43:55+00:00",
+   "target_tests": [
+    "test_clone",
+    "test_iter",
+    "test_len",
+    "test_rev"
+   ],
+   "targets": [
+    [
+     "src/chain.rs",
+     "next_back"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "5c03556fd21cb313",
+   "classes": {},
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 8,
+   "joint_sets": [],
+   "kept": [],
+   "kind": "per-fn",
+   "label": "per-fn 7 stub(s), 6 re-fill(s)",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": null,
+   "newly_red": [],
+   "opened": null,
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "deferred",
+   "reason": "premise_moved",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 0.0,
+   "started": "2026-10-05T08:23:15+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_too_long"
+   ],
+   "targets": [
+    [
+     "src/backtrace.rs",
+     "_assert_send_sync"
+    ],
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/ensure.rs",
+     "render"
+    ],
+    [
+     "src/error.rs",
+     "construct_from_context"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_downcast"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_drop_rest"
+    ],
+    [
+     "src/error.rs",
+     "context_downcast"
+    ],
+    [
+     "src/error.rs",
+     "context_drop_rest"
+    ],
+    [
+     "src/error.rs",
+     "erase"
+    ],
+    [
+     "src/error.rs",
+     "object_downcast"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "",
+   "classes": {
+    "wrong": 3
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 9,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/lib.rs",
+     "must_use"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 1 stub(s), 13 re-fill(s) [5 not landed this fill]",
+   "minutes": 18.055,
+   "model_calls": 3,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": [],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/lib.rs",
+     "must_use"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "flat",
+   "reason": "never_served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 23.699691609916687,
+   "started": "2026-10-05T10:49:12+00:00",
+   "target_tests": [
+    "behaviour_probe_stable_context_then_into_boxed_2",
+    "behaviour_probe_stable_with_context_then_context_2",
+    "display_error_debug_alt_contains_display_only_context",
+    "display_error_debug_delegates_to_display_for_another_display_only_context",
+    "display_error_debug_is_reached_for_two_levels",
+    "display_error_debug_via_context_alt_debug",
+    "display_error_debug_via_context_debug",
+    "display_error_debug_works_for_display_only_context",
+    "test_boxed_str",
+    "test_debug",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid",
+    "test_trailer"
+   ],
+   "targets": [
+    [
+     "src/backtrace.rs",
+     "_assert_send_sync"
+    ],
+    [
+     "src/chain.rs",
+     "len"
+    ],
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/lib.rs",
+     "must_use"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "c26e2958489d469a",
+   "classes": {},
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 10,
+   "joint_sets": [],
+   "kept": [],
+   "kind": "per-fn",
+   "label": "per-fn 1 stub(s), 14 re-fill(s)",
+   "minutes": 0.0,
+   "model_calls": 0,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": null,
+   "newly_red": [],
+   "opened": null,
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "deferred",
+   "reason": "budget_spent",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 0.0,
+   "started": "2026-10-05T14:36:02+00:00",
+   "target_tests": [
+    "display_error_debug_is_reached_for_two_levels",
+    "test_downcast_high",
+    "test_downcast_low",
+    "test_downcast_mid"
+   ],
+   "targets": [
+    [
+     "src/backtrace.rs",
+     "_assert_send_sync"
+    ],
+    [
+     "src/chain.rs",
+     "len"
+    ],
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_downcast"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_drop_rest"
+    ],
+    [
+     "src/error.rs",
+     "context_downcast"
+    ],
+    [
+     "src/error.rs",
+     "object_drop"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "boxed"
+    ],
+    [
+     "src/ptr.rs",
+     "by_ref"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  },
+  {
+   "bodies_sha": "",
+   "classes": {
+    "dropped": 1,
+    "wrong": 3
+   },
+   "cluster": "stable",
+   "collateral": [],
+   "iteration": 11,
+   "joint_sets": [],
+   "kept": [
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ]
+   ],
+   "kind": "per-fn",
+   "label": "per-fn 1 stub(s), 18 re-fill(s) [11 not landed this fill]",
+   "minutes": 31.859,
+   "model_calls": 4,
+   "net_pass_delta": 0,
+   "newly_crashed": [],
+   "newly_green": [],
+   "newly_red": [],
+   "opened": [
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ]
+   ],
+   "oracle_fp": "21fc1d6d63df",
+   "outcome": "flat",
+   "reason": "served",
+   "reverted": [],
+   "run_id": "450922-661c5e9f",
+   "share_minutes": 0.27998930646668896,
+   "started": "2026-10-05T17:56:08+00:00",
+   "target_tests": [
+    "test_downcast_high",
+    "test_downcast_mid"
+   ],
+   "targets": [
+    [
+     "src/backtrace.rs",
+     "_assert_send_sync"
+    ],
+    [
+     "src/context.rs",
+     "ext_context"
+    ],
+    [
+     "src/error.rs",
+     "construct"
+    ],
+    [
+     "src/error.rs",
+     "context_chain_drop_rest"
+    ],
+    [
+     "src/error.rs",
+     "from"
+    ],
+    [
+     "src/error.rs",
+     "object_drop"
+    ],
+    [
+     "src/ptr.rs",
+     "as_ptr"
+    ],
+    [
+     "src/ptr.rs",
+     "boxed"
+    ],
+    [
+     "src/ptr.rs",
+     "by_ref"
+    ],
+    [
+     "src/ptr.rs",
+     "cast"
+    ],
+    [
+     "src/ptr.rs",
+     "from_raw"
+    ]
+   ]
+  }
+ ]
+}

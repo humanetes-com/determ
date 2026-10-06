@@ -223,43 +223,24 @@ OLLAMA_CHUNK_TIMEOUT=60
 export LLM_DEBUG_LOG LLM_STREAM_LOG OLLAMA_CHUNK_TIMEOUT OLLAMA_MAX_THINK_CHARS
 
 # ---------------------------------------------------------------------------
-# For vLLM: wait until the inference endpoint accepts requests (health passes
-# before CUDA graph compilation finishes; inference fails until that's done)
+# For vLLM: launch conformance (pipeline_core/adapters/model_conformance.py).
+# Waits for the API (GET /v1/models doubles as the readiness probe), then
+# refuses the launch — before any pipeline call — unless the server serves the
+# id .env names, its chat template reads the profile's reasoning variable, and
+# its parser splits reasoning out of the answer. This replaces the 240-try
+# 1-token chat loop, which on a wrong served id 404'd for 20 minutes and then
+# printed "starting pipeline anyway". The report it writes
+# (logs/model_conformance.json) becomes the run's model.conformance event.
 # ---------------------------------------------------------------------------
 if [[ "$BACKEND" == "vllm" ]]; then
-    _vllm_url=$(grep -E "^[[:space:]]*VLLM_BASE_URL=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]')
-    _vllm_port="${_vllm_url##*:}"; _vllm_port="${_vllm_port%%/*}"; _vllm_port="${_vllm_port:-8000}"
-    # VLLM_MODEL_NAME is legitimately unset (.env documents it as defaulting
-    # to MODEL on both the Python and the launcher side) — and under
-    # `set -euo pipefail` an unmatched grep in the substitution exits the
-    # WHOLE script here, after the server check and before the launch block:
-    # continue.sh printed "vLLM already healthy" and died rc=1 with no
-    # pipeline started (2026-08-10). Tolerate the miss and apply the
-    # documented default, so the readiness POST also probes a model name the
-    # server actually serves instead of 404ing for the full 20-min budget.
-    _model=$(grep -E "^[[:space:]]*VLLM_MODEL_NAME=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)
-    if [[ -z "$_model" ]]; then
-        _model=$(grep -E "^[[:space:]]*MODEL=" "$SCRIPT_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '[:space:]' || true)
+    echo "Checking the served model against its profile ..."
+    if ! "$SCRIPT_DIR/.venv/bin/python" -m pipeline_core.adapters.model_conformance \
+            --env-file "$SCRIPT_DIR/.env" --deadline 1200 \
+            --report "$SCRIPT_DIR/logs/model_conformance.json"; then
+        echo "[error] model conformance failed — not starting the pipeline." >&2
+        echo "        The report is logs/model_conformance.json." >&2
+        exit 1
     fi
-    echo "Waiting for vLLM inference endpoint to be ready ..."
-    for _i in $(seq 1 240); do
-        _status=$(curl -s -o /dev/null -w "%{http_code}" \
-            -X POST "http://localhost:${_vllm_port}/v1/chat/completions" \
-            -H "Content-Type: application/json" \
-            -d "{\"model\":\"${_model}\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}" \
-            2>/dev/null)
-        if [[ "$_status" == "200" ]]; then
-            echo "vLLM inference ready ($(( _i * 5 / 60 ))m $(( _i * 5 % 60 ))s)."
-            break
-        fi
-        sleep 5
-        if (( _i % 12 == 0 )); then
-            echo "  ... inference not ready yet ($(( _i * 5 / 60 ))m elapsed, last status: ${_status})"
-        fi
-        if [[ "$_i" -eq 240 ]]; then
-            echo "[warn] vLLM inference not ready after 20 min — starting pipeline anyway"
-        fi
-    done
 fi
 
 # ---------------------------------------------------------------------------

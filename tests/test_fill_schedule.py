@@ -11,7 +11,9 @@ the same sentences on the live 2026-09-06 fills.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
@@ -24,6 +26,7 @@ from pipeline_core.domain.fill_schedule import (
     RunOutcome,
     ScheduledRun,
     bodies_sha_of,
+    call_price,
     consecutive_unpaid,
     hollow_by_test,
     rebuy_identity,
@@ -415,6 +418,58 @@ def test_a_reverted_pair_retries_instead_of_deferring_under_a_budget() -> None:
     assert [s.run.label for s in sched.deferred] == ["file src/x.rs"]
     control = schedule([pair], [], oracle_fp="o", hollow={}, budget_minutes=60)
     assert control.ordered[0].reason == "never_served"
+
+
+_PAIR_ROWS = Path(__file__).parent / "fixtures" / "fills" / "450922-661c5e9f_pair_rows.json"
+
+
+def _recorded_pair_rows() -> list[RouteLedgerRow]:
+    raw = json.loads(_PAIR_ROWS.read_text(encoding="utf-8"))["rows"]
+    rows = [RouteLedgerRow.from_dict(r) for r in raw]
+    return [r for r in rows if r is not None]
+
+
+def test_a_pair_revert_whose_tests_ran_red_is_a_rebuy_inside_the_grace() -> None:
+    """Fill 11 of run `450922-661c5e9f` reopened the debug pair at
+    `never_served`: its fill-10 row on the same bodies reverted with
+    `classes {wrong: 1}` — the aimed tests ran and stayed red, so there was
+    no crash diagnosis for the grace to carry. Replayed on the ledger as
+    fill 11 read it, the identical pair is the reverted re-buy. Control: the
+    same row with no `wrong` count (a crash revert) keeps the grace."""
+    rows = _recorded_pair_rows()
+    last = rows[-1]
+    assert (last.label, last.iteration, dict(last.classes)) == (
+        "pair src/error.rs::fmt + src/fmt.rs::debug", 10, {"wrong": 1})
+    run = RouteRun(kind=RouteKind.PAIR, label=last.label,
+                   targets=frozenset(FnLocator(f, fn) for f, fn in last.targets),
+                   target_tests=frozenset(last.target_tests),
+                   files=("src/error.rs", "src/fmt.rs"), bodies_sha=last.bodies_sha)
+    other = _per_fn({_STUB})  # fill 11 had other runs open; a lone re-buy is shared in
+    sched = schedule([run, other], rows, oracle_fp=last.oracle_fp, hollow={},
+                     budget_minutes=200)
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [(last.label, "rebuy_reverted")]
+    assert [s.run.label for s in sched.ordered] == ["per-fn"]
+
+    crash = [*rows[:-1], replace(last, classes={})]
+    control = schedule([run, other], crash, oracle_fp=last.oracle_fp, hollow={},
+                       budget_minutes=200)
+    assert (last.label, "never_served") in [(s.run.label, s.reason) for s in control.ordered]
+
+
+def test_a_pair_revert_classed_wrong_is_a_rebuy_on_the_unit_path_too() -> None:
+    """The unit path grants the same grace (`_target_class`): a pair under a
+    new bodies sha whose units the previous pair try reverted. One rule
+    answers both paths. Control: no `wrong` count keeps the unit `served`."""
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    moved = replace(pair, bodies_sha="moved")
+    wrong = [replace(_row(pair, RunOutcome.REVERTED, 0), classes={"wrong": 1},
+                     reverted=tuple(sorted((u.file, u.fn_name) for u in pair.targets)))]
+    other = _per_fn({_STUB})
+    sched = schedule([moved, other], wrong, oracle_fp="o", hollow={}, budget_minutes=60)
+    assert [s.reason for s in sched.deferred] == ["rebuy_reverted"]
+    crash = [replace(wrong[0], classes={"compile": 1})]
+    control = schedule([moved, other], crash, oracle_fp="o", hollow={}, budget_minutes=60)
+    assert (moved.label, "served") in [(s.run.label, s.reason) for s in control.ordered]
 
 
 def test_a_flat_rebuy_sinks_below_a_never_served_run_and_is_deferred_under_a_budget() -> None:
@@ -1343,3 +1398,130 @@ def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_f
     assert [(s.run.label, s.blocker_writer) for s in control.ordered
             if s.blocker_writer] == [
         ("file src/error.rs", ("src/error.rs::downcast_mut",))]
+
+
+# --- a claim reserves one call before a sibling claim is granted -------------
+
+_PER_FN_ROWS = Path(__file__).parent / "fixtures" / "fills" / "450922-661c5e9f_per_fn_rows.json"
+
+
+class _Wall:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def minutes(self, m: float) -> None:
+        self.t += m * 60.0
+
+
+def _wave(clock: RunClock, n: int, *, release_at: _Wall | None = None,
+          after: float = 0.0) -> list[str]:
+    """`n` workers claim before any time passes, each on its own live
+    thread (as the per-fn pass's workers are). With `release_at`, the wave's
+    calls then take `after` minutes and every unit releases."""
+    import threading
+    answers: list[str] = [""] * n
+    claimed = threading.Barrier(n + 1)
+    finish = threading.Event()
+
+    def _worker(i: int) -> None:
+        answers[i] = clock.refusal()
+        claimed.wait()
+        finish.wait()
+        if release_at is not None:
+            clock.release()
+
+    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    claimed.wait()
+    if release_at is not None:
+        release_at.minutes(after)
+    finish.set()
+    for t in threads:
+        t.join()
+    return answers
+
+
+def test_fill_11s_per_fn_share_grants_one_claim_not_four() -> None:
+    """Fill 11 of run `450922-661c5e9f`: per-fn share 0.28 min, four
+    workers, 4 calls in 31.9 min. The kind's recorded price before that
+    fill is above the share, so one claim is granted and the three siblings
+    are refused `share` before any call is sent."""
+    raw = json.loads(_PER_FN_ROWS.read_text(encoding="utf-8"))["rows"]
+    rows = [r for r in (RouteLedgerRow.from_dict(x) for x in raw) if r is not None]
+    fill_11 = next(r for r in rows if r.iteration == 11 and r.model_calls)
+    assert (fill_11.model_calls, round(fill_11.minutes, 1)) == (4, 31.9)
+    price = call_price([r for r in rows if r.iteration <= 10],
+                       RouteKind.PER_FN, fill_11.oracle_fp)
+    assert price is not None and price > (fill_11.share_minutes or 0.0)
+    wall = _Wall()
+    clock = RunClock(share_minutes=fill_11.share_minutes, fill_remaining=lambda: 100.0,
+                     now=wall, call_price=price)
+    answers = _wave(clock, 4)
+    assert sorted(answers) == ["", "share", "share", "share"]
+
+    # NEGATIVE CONTROL: every sibling's unit already returned (nothing
+    # outstanding) — the old `elapsed < share` reading — grants each one.
+    control = RunClock(share_minutes=fill_11.share_minutes,
+                       fill_remaining=lambda: 100.0, now=wall, call_price=price)
+    for _ in range(4):
+        assert control.refusal() == ""
+        control.release()
+
+
+def test_a_share_that_pays_four_calls_grants_four() -> None:
+    clock = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
+                     now=_Wall(), call_price=8.0)
+    assert _wave(clock, 4) == ["", "", "", ""]
+    assert clock.outstanding() == 32.0
+
+
+def test_a_returned_flat_call_is_not_counted_twice() -> None:
+    """The correction of 2026-10-06: four flat 8-minute calls return at wall
+    8 on a share of 40. Their minutes are in `elapsed`; their reservations
+    end with them, so the next claim is granted (8 + 0 < 40). Control: had
+    the units not released, 8 + 32 = 40 refuses it with 32 minutes unspent."""
+    wall = _Wall()
+    clock = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
+                     now=wall, call_price=8.0)
+    assert _wave(clock, 4, release_at=wall, after=8.0) == ["", "", "", ""]
+    assert clock.outstanding() == 0.0
+    assert clock.refusal() == ""
+
+    held = _Wall()
+    control = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
+                       now=held, call_price=8.0)
+    assert _wave(control, 4) == ["", "", "", ""]
+    held.minutes(8.0)
+    assert control.refusal() == "share"
+
+
+def test_a_session_floor_grants_three_turns_and_refuses_the_fourth() -> None:
+    """A session's turns are serial claims on one thread: each turn's claim
+    ends the last turn's reservation, so the reading is the old one. Share
+    16 + 2 x 2: turns at 0, 16 and 18 minutes; the fourth at 20 is refused."""
+    wall = _Wall()
+    clock = RunClock(share_minutes=20.0, fill_remaining=lambda: 100.0,
+                     now=wall, call_price=2.0)
+    assert clock.refusal() == ""
+    wall.minutes(16.0)
+    assert clock.refusal() == ""
+    wall.minutes(2.0)
+    assert clock.refusal() == ""
+    wall.minutes(2.0)
+    assert clock.refusal() == "share"
+
+
+def test_a_kind_with_no_price_reserves_the_rest_and_payoff_still_extends() -> None:
+    clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 100.0,
+                     now=_Wall(), call_price=None)
+    assert sorted(_wave(clock, 3)) == ["", "share", "share"]
+    paying = RunClock(share_minutes=10.0, fill_remaining=lambda: 100.0,
+                      now=_Wall(), call_price=None)
+    assert paying.refusal() == ""
+    paying.note_delta(2)
+    assert paying.refusal() == "", "a claim that cashed extends past the share"
+    assert call_price([], RouteKind.PER_FN, "o") is None

@@ -55,61 +55,37 @@ _model_cached() {
 }
 
 # MODEL is the one switch. VLLM_MODEL_NAME falls back to it exactly as the
-# Python side does (`os.getenv("VLLM_MODEL_NAME", MODEL)` in
-# pipeline_core/adapters/llm_transports.py), and TaskModels.from_env defaults
-# every TASK*_MODEL to it too, so with the per-key overrides left unset in .env
-# a single MODEL= line moves the server, the served name, the per-task models
-# and — through MODEL_CAPS and model_tier, both keyed on that same string — the
-# reasoning dialect and the prompt tier.
+# Python side does (pipeline_core/adapters/llm_transports.py), and
+# TaskModels.from_env defaults every TASK*_MODEL to it too, so with the per-key
+# overrides left unset in .env a single MODEL= line moves the server, the
+# served name, the per-task models and — through the model profile — the
+# reasoning dialect, the prompt tier and the route order.
 VLLM_MODEL=$(_env VLLM_MODEL_NAME); VLLM_MODEL="${VLLM_MODEL:-$(_env MODEL)}"
 VLLM_URL=$(_env VLLM_BASE_URL); VLLM_URL="${VLLM_URL:-http://localhost:8000/v1}"
 VLLM_PORT="${VLLM_URL##*:}"; VLLM_PORT="${VLLM_PORT%%/*}"; VLLM_PORT="${VLLM_PORT:-8000}"
 VLLM_TP=$(_env VLLM_TENSOR_PARALLEL); VLLM_TP="${VLLM_TP:-1}"
 
-# Server-side defaults that are a property of the MODEL, not of this box. An
-# explicit .env key still wins; these only fill a gap, so switching models does
-# not mean remembering four more lines. Keyed on the model string, like
-# MODEL_CAPS on the Python side — the two tables carry different facts (server
-# flags here, request dialect there) and are keyed the same on purpose.
+# Server-side defaults that are a property of the MODEL: the image, the two
+# parsers and the context ceiling, from the same table the pipeline reads
+# (pipeline_core/domain/model_profile.py, printed by scripts/model_profile_shell.py).
+# An explicit .env key still wins. An id no profile matches is refused: a wrong
+# --reasoning-parser does not fail, it stops splitting reasoning out of the
+# answer, and the pipeline would send that model a guessed dialect.
 #
-#   image      Muse Glimmer needs vLLM 0.27.0+ for its architecture and the
-#              muse_glimmer parsers, shipped as vllm/vllm-openai:muse-glimmer;
-#              Qwen3.6-27B-FP8 runs on :latest.
-#   parsers    muse_glimmer emits reasoning and tool calls in its own framing.
-#   max len    a CEILING, not just a default. Qwen3.6-FP8 (~30 GB) leaves room
-#              for 131072 across the two 24 GB cards; the Muse FP8-block weights
-#              are 32.8 GB and the model keeps a BF16 vision tower and a
-#              202k-entry BF16 output head, so the KV pool that remains will not
-#              hold it. This one stays an explicit .env key rather than a pure
-#              derivation because the PYTHON side reads VLLM_MAX_MODEL_LEN
-#              directly for its budget math (VLLMTransport._ctx, whose own
-#              default is 65536) — deleting the key to let the launcher derive it
-#              would quietly halve the client's context while the server kept
-#              serving 131072. So: keep the key, and refuse a value the model
-#              cannot honour instead of letting vLLM fail at KV allocation with
-#              an error that names no cause.
-case "$VLLM_MODEL" in
-    *Muse-Glimmer*)
-        _def_image="vllm/vllm-openai:muse-glimmer"
-        # 32768 was a conservative guess, never a measurement. Measured
-        # 2026-08-11 from the engine's own startup line at TP=2 on 2x RTX 3090:
-        #   GPU KV cache size: 189,405 tokens
-        #     (Qwen3.6-27B-FP8 on the same box reports 136,533)
-        # A single 131,072-token sequence therefore fits with room to spare, and
-        # the old ceiling was forcing every comparison against Qwen to run at a
-        # quarter of Qwen's native window for no reason the hardware supports.
-        _def_reasoning="muse_glimmer"; _def_tool="muse_glimmer"; _max_len_ceiling=131072 ;;
-    *Qwen3.6*|*qwen3*)
-        _def_image="vllm/vllm-openai:latest"
-        _def_reasoning="qwen3"; _def_tool=""; _max_len_ceiling=131072 ;;
-    *)
-        # Unknown model: no parser rather than a guessed one. A wrong
-        # --reasoning-parser does not fail, it just stops splitting reasoning
-        # out of the answer, so guessing costs more than declining.
-        _def_image="vllm/vllm-openai:latest"
-        _def_reasoning=""; _def_tool=""; _max_len_ceiling=131072 ;;
-esac
-VLLM_MAX_LEN=$(_env VLLM_MAX_MODEL_LEN); VLLM_MAX_LEN="${VLLM_MAX_LEN:-$_max_len_ceiling}"
+#   image      Muse Glimmer needs vLLM 0.27.0+ (vllm/vllm-openai:muse-glimmer);
+#              Qwen3.6 runs on :latest.
+#   max len    a CEILING measured from the engine's KV pool at TP=2 on 2x RTX
+#              3090 (Muse 189,405 tokens, Qwen3.6-FP8 136,533; 2026-08-11).
+#              VLLM_MAX_LEN resolves env → profile → default exactly as the
+#              transport's context does, so leaving VLLM_MAX_MODEL_LEN unset no
+#              longer gives the server one window and the client another.
+if ! _profile_sh=$("$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/scripts/model_profile_shell.py" \
+        --env-file "$SCRIPT_DIR/.env" --model "$VLLM_MODEL"); then
+    echo "[error] no model profile for '$VLLM_MODEL' — refusing to launch." >&2
+    exit 1
+fi
+eval "$_profile_sh"
+echo "[profile] $VLLM_MODEL → family=$VLLM_FAMILY image=$_def_image reasoning-parser=${_def_reasoning:-none} tool-parser=${_def_tool:-none} max-len=$VLLM_MAX_LEN ($VLLM_MAX_LEN_SOURCE)"
 if (( VLLM_MAX_LEN > _max_len_ceiling )); then
     echo "[error] VLLM_MAX_MODEL_LEN=$VLLM_MAX_LEN exceeds the $_max_len_ceiling this box has" >&2
     echo "        measured room for with '$VLLM_MODEL' at TP=$VLLM_TP." >&2

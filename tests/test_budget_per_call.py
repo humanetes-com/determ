@@ -141,3 +141,45 @@ def test_reasoning_budget_knob_parses(value, expected):
 def test_reasoning_budget_knob_refuses_a_typo():
     with pytest.raises(ValueError, match="VLLM_REASONING_BUDGET"):
         reasoning_budget_is_per_call("percall")
+
+
+# ── the model profile's runaway cap under per_call ──────────────────────────
+# The per_call branch returns the profile cap: None for Muse (its uncapped tail
+# finished naturally, MEASURED above), a measured number for a calibrated
+# model, and none while a profile is uncalibrated (Qwen until its reading).
+
+RUNAWAY = 90_000
+
+
+@pytest.mark.parametrize(("cap", "expected"), [
+    (None, None),          # Muse: calibrated, no cap
+    (RUNAWAY, RUNAWAY),    # a measured cap reaches the plan
+])
+def test_per_call_plan_carries_the_profile_cap(cap, expected):
+    plan = _plan(_spec(per_call=True, per_call_char_cap=cap), 22_366)
+    assert plan.thinking_char_cap == expected
+    # The fixed cap never leaks into a per-call plan.
+    assert plan.thinking_char_cap != FIXED_CAP
+
+
+def test_uncalibrated_profile_resolves_to_no_cap_in_the_transport_spec(monkeypatch):
+    from pipeline_core.adapters.llm_transports import VLLMTransport
+    for v in ("VLLM_RUNAWAY_THINK_CHARS", "VLLM_REASONING_BUDGET", "MODEL_FAMILY"):
+        monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("VLLM_MODEL_NAME", "Qwen/Qwen3.6-27B-FP8")
+    spec = VLLMTransport().spec()
+    assert spec.per_call_reasoning is True and spec.per_call_char_cap is None
+    monkeypatch.setenv("VLLM_RUNAWAY_THINK_CHARS", str(RUNAWAY))
+    assert VLLMTransport().spec().per_call_char_cap == RUNAWAY
+
+
+def test_controller_breaks_a_per_call_stream_at_the_plan_cap():
+    # The consume path breaks at the cap the PLAN carried and follows up.
+    reasoning = "x" * (RUNAWAY + 5_000)
+    spec = _spec(per_call=True, per_call_char_cap=RUNAWAY)
+    t = FakeTransport([[Delta(reasoning=reasoning), Delta(content="body")],
+                       [Delta(content="followup body")]], spec=spec)
+    out = LLMController(Hooks(), default_sentinel=SENTINEL).run(
+        t, system=None, prompt="p", model="m", max_tokens=SENTINEL)
+    assert out == "followup body"
+    assert len(t.calls) == 2

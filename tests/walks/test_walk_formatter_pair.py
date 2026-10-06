@@ -52,6 +52,7 @@ def _replay(monkeypatch, tmp_path: Path, *, with_pairs: bool):
     events: list[tuple[str, dict]] = []
     seen_bindings: list[CoverageSlice | None] = []
     engine_pairs: list[frozenset[FormatterPair]] = []
+    bound_at_fill: list[CoverageSlice | None] = []
     measured: list[int] = []
 
     def _coverage(_pd: Path, _cl: str, failing_tests=frozenset(), **_k):
@@ -76,6 +77,9 @@ def _replay(monkeypatch, tmp_path: Path, *, with_pairs: bool):
     def _fill(**kw: Any) -> ClusterFillResult:
         ft = kw.get("tdd_frontier_tests")
         engine_pairs.append(frozenset(getattr(ft, "pairs", frozenset())))
+        # The fill runs after the sweep's own `bind_coverage_slice`: this is
+        # the reading THIS iteration bound.
+        bound_at_fill.append(cov.current())
         keys = tuple(kw.get("tdd_frontier_keys") or ())
         return ClusterFillResult(attempts=1, dispatched_fns=keys)
 
@@ -85,7 +89,7 @@ def _replay(monkeypatch, tmp_path: Path, *, with_pairs: bool):
                       coverage=_coverage, attribute=_attribute)
     finally:
         cov.bind(None)
-    return logs, seen_bindings, engine_pairs
+    return logs, seen_bindings, engine_pairs, bound_at_fill
 
 
 def _tag(reading: CoverageSlice | None) -> str | None:
@@ -97,19 +101,23 @@ def _tag(reading: CoverageSlice | None) -> str | None:
 
 def test_the_hop_reads_the_previous_sweeps_binding(
         monkeypatch, tmp_path: Path) -> None:
-    _logs, seen, _pairs = _replay(monkeypatch, tmp_path, with_pairs=True)
-    assert len(seen) >= 3
+    _logs, seen, _pairs, bound = _replay(monkeypatch, tmp_path, with_pairs=True)
+    assert len(seen) >= 3 and len(bound) >= len(seen) - 1
     # Iter 1: nothing measured yet — the conservative rule's None arm.
     assert seen[0] is None
-    # Iter N's attribution observes the reading measured at iter N-1.
+    assert _tag(bound[0]) == "iter1"
+    # Iter N's attribution observes the reading iter N-1 bound. A sweep over
+    # the same tree and red set reuses the last reading instead of measuring
+    # again (the replay's tree never moves), so the tag names the sweep that
+    # MEASURED it; the binding order is the identity below.
     for n, reading in enumerate(seen[1:], start=2):
-        assert _tag(reading) == f"iter{n - 1}", (n, _tag(reading))
+        assert reading is bound[n - 2], (n, _tag(reading), _tag(bound[n - 2]))
 
 
 def test_a_cross_file_pair_reaches_the_fill_engine(
         monkeypatch, tmp_path: Path) -> None:
-    _logs, _seen, engine_pairs = _replay(monkeypatch, tmp_path,
-                                         with_pairs=True)
+    _logs, _seen, engine_pairs, _bound = _replay(monkeypatch, tmp_path,
+                                                 with_pairs=True)
     assert engine_pairs, "the replay must reach a fill"
     assert all(_PAIR in ps for ps in engine_pairs), (
         "every dispatched batch carries the hop's pair to the pair route")
@@ -119,7 +127,7 @@ def test_negative_control_no_pairs_recorded_no_pair_dispatchable(
         monkeypatch, tmp_path: Path) -> None:
     """The recorded run's shape: attribution resolved the delegation but
     carried no pair, so the engine had nothing to dispatch jointly."""
-    _logs, _seen, engine_pairs = _replay(monkeypatch, tmp_path,
-                                         with_pairs=False)
+    _logs, _seen, engine_pairs, _bound = _replay(monkeypatch, tmp_path,
+                                                 with_pairs=False)
     assert engine_pairs
     assert all(not ps for ps in engine_pairs)

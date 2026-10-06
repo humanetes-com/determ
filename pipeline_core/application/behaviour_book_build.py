@@ -87,7 +87,9 @@ class BookBudget:
     with the rules drafted from its own examples (the build before
     2026-10-01, and the negative control of the sibling judgment).
     `given_phrases=False` asks for no sentence about a root, and the view
-    prints each `Given` as its pointer alone."""
+    prints each `Given` as its pointer alone. `think` is whether the
+    composition binds the draft, judge and phrase calls with reasoning on,
+    carried here only so the reading prints it."""
 
     rules: bool = True
     max_features: int = 24
@@ -96,6 +98,7 @@ class BookBudget:
     lanes: int = 1
     predict_temperature: float | None = None
     sibling_chunks: bool = True
+    think: bool = True
     given_phrases: bool = True
 
 
@@ -247,7 +250,8 @@ def build_behaviour_book(
         skipped_features=max(0, len(asked_order) - budget.max_features) if budget.rules else 0,
         checkable_examples=checkable, covered_examples=len(covered),
         proposed=proposed, kept=kept, dropped=dict(dropped), lanes=lanes,
-        predict_temperature=budget.predict_temperature, sibling_examples=len(sibling),
+        predict_temperature=budget.predict_temperature, think=budget.think,
+        sibling_examples=len(sibling),
         unaided_examples=unaided,
         given_roots=len(roots), given_phrases=len(phrases),
         given_refused=dict(Counter(drop_reason_class(why) for why in without.values())))

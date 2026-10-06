@@ -22,6 +22,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book
 from pipeline_core.application.strip_bake import BakeArtifactsDeps, bake_skeleton_artifacts
 from pipeline_core.application.tasks.task0d import Task0dDeps, build_world_book, run_task0d
@@ -178,6 +180,31 @@ def test_a_union_build_asks_each_feature_once_whatever_the_number_of_worlds() ->
                              private=private_names(_RECORDS, [], g), ask=control.ask,
                              budget=BookBudget(examples_per_prompt=2))
     assert control.drafts() == 2 * union_model.drafts()
+
+
+def test_the_book_asks_through_its_own_binding_and_leaves_ask_to_the_programs() -> None:
+    """The book's drafts go to `book_ask` (bound with `BEHAVIOUR_BOOK_THINK`);
+    `ask`, which the probe and rule-probe program calls use, gets none of them.
+    Control: with no `book_ask` the same drafts go to `ask`, as before."""
+    clusters = [_cluster("a", gated=False)]
+    suites = _suites(["a"])
+    program_model, book_model = _Model(_values(suites)), _Model(_values(suites))
+    deps = replace(_deps(program_model), book_ask=book_model.ask)
+    build_world_book(deps, Path("."), "crate_x", clusters, suites,  # type: ignore[arg-type]
+                     list(_RECORDS), [], [], list(_SOURCES))
+    assert book_model.drafts() == 3 and program_model.drafts() == 0
+
+    control = _Model(_values(suites))
+    _world_book(suites, clusters, control)
+    assert control.drafts() == 3
+
+
+def test_the_book_reasons_only_when_the_setting_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.settings import Settings
+    monkeypatch.delenv("BEHAVIOUR_BOOK_THINK", raising=False)
+    assert Settings.from_env().behaviour_book_think is False
+    monkeypatch.setenv("BEHAVIOUR_BOOK_THINK", "1")
+    assert Settings.from_env().behaviour_book_think is True
 
 
 def test_serial_and_parallel_lanes_build_the_same_book_and_reading() -> None:

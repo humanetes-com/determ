@@ -173,6 +173,11 @@ class Task0dDeps:
     # bound at `BEHAVIOUR_BOOK_PREDICT_TEMPERATURE`. None sends them through
     # `ask`, the author's sampled collaborator.
     book_predict: Callable[[str], str] | None = None
+    # prompt → reply for the book AUTHOR's calls (rule drafts, Given phrases),
+    # bound with `BEHAVIOUR_BOOK_THINK`. None sends them through `ask`, which
+    # the probe and rule-probe PROGRAM calls keep: those write Rust that must
+    # compile, the book writes sentences and verdicts.
+    book_ask: Callable[[str], str] | None = None
     # (project_dir, cluster, {file name: text}) — the generated, read-only
     # Gherkin view under `.skeleton/_features_<cluster>/`.
     write_features: Callable[[Path, str, dict[str, str]], object] = lambda _p, _c, _f: None
@@ -678,7 +683,7 @@ def build_world_book(
     private = private_names(records, types, glossary, union.suite.specs)
     book, reading = build_behaviour_book(
         union.suite, crate=module_name, glossary=glossary, private=private,
-        ask=deps.ask, budget=deps.BOOK_BUDGET, log=deps.log, worlds=marks,
+        ask=deps.book_ask or deps.ask, budget=deps.BOOK_BUDGET, log=deps.log, worlds=marks,
         predict=deps.book_predict)
     reading = replace(reading, worlds=union.clusters, residue_examples=len(marks),
                       residue_names=sum(1 for g in glossary if g.worlds))

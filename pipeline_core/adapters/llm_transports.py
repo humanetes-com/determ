@@ -21,6 +21,14 @@ from typing import Any
 
 import httpx
 
+from pipeline_core.domain.model_profile import (
+    ModelKnobs,
+    ReasoningDialect,
+    profile_for,
+    require_profile,
+    resolve_model_knobs,
+)
+from pipeline_core.domain.model_profile import reasoning_payload as model_reasoning_payload
 from pipeline_core.llm import (
     BudgetSpec,
     BudgetState,
@@ -47,57 +55,36 @@ def _default_max_tokens() -> int:
     if num_ctx and num_ctx.strip().isdigit():
         return max(int(num_ctx) - 8192, 8192)
     vllm_ctx = os.getenv("VLLM_MAX_MODEL_LEN")
-    if vllm_ctx and vllm_ctx.strip().isdigit():
-        return max(int(vllm_ctx) - 8192, 8192)
+    if os.getenv("BACKEND", "").strip().lower() == "vllm" or (vllm_ctx and vllm_ctx.strip()):
+        # The same env → profile → default context the transport and the
+        # launcher use; an unset key no longer means a different window here.
+        return max(resolve_model_knobs(os.environ).max_model_len - 8192, 8192)
     return 32768  # safe fallback for unknown backends
 
 MAX_TOKENS = _default_max_tokens()
 
-# Per-model capability map.
+# What a model is — its reasoning dialect, prompt tier, route order, server
+# parsers and reasoning calibration — lives in ONE table,
+# `pipeline_core.domain.model_profile`, matched by one rule. The dialect is the
+# fact this module needs, and the one whose failure is silent: an unknown chat
+# template variable is dropped, not refused. Sending `enable_thinking: false` to
+# Muse Glimmer leaves its `reasoning_strength` undefined, the template falls back
+# to `high`, and a request that asked for NO reasoning gets the most; the
+# followup path, which re-feeds reasoning and asks for code only, would
+# re-reason instead. `docker_vllm.sh` and the launch conformance check
+# (`adapters/model_conformance.py`) read the same table.
 #
-# think        — whether the model should use extended reasoning (think:true/false).
-#                Qwen3.6 is a hybrid-thinking model: think=True is recommended for
-#                complex coding tasks (better quality, "preserve thinking" across turns).
-#                Use think=False only for simple/fast tasks.
-#
-# native_ollama — whether to use the ollama Python library (/api/chat) instead of the
-#                OpenAI-compat endpoint (/v1/chat/completions).
-#                Qwen3.6+ requires native endpoint: the compat layer routes thinking
-#                tokens into reasoning_content (not content), so our streaming loop
-#                receives an empty string when think=True via compat.
-#                qwen3:32b works fine via compat (older Qwen3 family, no this issue).
-#
-# reasoning     — WHICH chat-template variable turns extended reasoning on and off
-#                for this model. Two dialects exist among the models served here and
-#                they are not interchangeable:
-#
-#                "enable_thinking"  — Qwen3.6's template branches on a boolean
-#                    `enable_thinking`, so False actually suppresses the think block.
-#
-#                "reasoning_strength" — Muse-Glimmer-30B's template has NO thinking
-#                    boolean. It reads a level and renders it into the system prompt:
-#                        {%- set rs = reasoning_strength if reasoning_strength is
-#                           defined and reasoning_strength else 'high' -%}
-#                        {{- 'Reasoning strength: ' + rs + '.' -}}
-#                    (chat_template.jinja, meta-models/Muse-Glimmer-30B, read
-#                    2026-08-10). Levels are low / medium / high / xhigh; the card
-#                    recommends high or xhigh for coding and agentic work, and the
-#                    template's own default when the variable is absent is 'high'.
-#
-#                The failure this key exists to prevent: an unknown template
-#                variable is not an error, it is silently dropped. Sending
-#                `enable_thinking: false` to Muse Glimmer leaves `rs` undefined,
-#                the template falls back to 'high', and the request that asked for
-#                NO reasoning gets the most. The followup path depends on that
-#                suppression working — it re-feeds the reasoning and asks for code
-#                only — so on the wrong dialect it would re-reason instead.
-#
+# MODEL_CAPS below covers only the Ollama / SGLang names, which have no profile:
+#   think         — whether the model reasons by default (think:true/false).
+#   native_ollama — use the ollama library (/api/chat) instead of the
+#                   OpenAI-compat endpoint; qwen3.6:27b on Ollama's compat layer
+#                   routed reasoning into a field the old loop did not read.
 # History:
 #   qwen3:32b        — confirmed good results via OpenAI-compat + think:true (sessions 3-9)
 #   qwen3.6:27b      — needs native ollama endpoint; think:true recommended for coding tasks
 #   qwen3.6-27b-q8   — SGLang served name for the same model; uses OpenAI-compat + thinking_budget
-REASONING_ENABLE_THINKING = "enable_thinking"
-REASONING_STRENGTH = "reasoning_strength"
+REASONING_ENABLE_THINKING = ReasoningDialect.ENABLE_THINKING.value
+REASONING_STRENGTH = ReasoningDialect.STRENGTH.value
 
 MODEL_CAPS: dict[str, dict[str, Any]] = {
     "qwen3:32b":                  {"think": True,  "native_ollama": False},
@@ -111,23 +98,8 @@ MODEL_CAPS: dict[str, dict[str, Any]] = {
     # so the pin has nothing left to work around.
     "qwen3.6:27b-q8":             {"think": True,  "native_ollama": False},
     "qwen3.6-27b-q8":             {"think": True,  "native_ollama": False},   # SGLang served name (dash, not colon)
-    "Qwen/Qwen3.6-27B-FP8":                      {"think": True,  "native_ollama": False},
-    "mattbucci/Qwen3.6-27B-AWQ":                  {"think": True,  "native_ollama": False},
     "/home/user/Qwen3.6-27B-Q8_0.gguf":          {"think": True,  "native_ollama": False},
-    "meta-models/Muse-Glimmer-30B":               {"think": True,  "native_ollama": False,
-                                                  "reasoning": REASONING_STRENGTH},
-    "RedHatAI/Muse-Glimmer-30B-FP8-block":        {"think": True,  "native_ollama": False,
-                                                  "reasoning": REASONING_STRENGTH},
 }
-
-# The two rungs the boolean `enable_thinking` maps onto in the strength dialect.
-# There is no "off": the levels are low / medium / high / xhigh, so a request
-# that wants no reasoning asks for the least. Both are overridable because the
-# right ON rung is a quality/latency trade the card leaves open (it recommends
-# "high or xhigh" for coding and agentic tasks) and only a measured run here can
-# settle it.
-_REASONING_STRENGTH_ON = os.getenv("VLLM_REASONING_STRENGTH", "high")
-_REASONING_STRENGTH_OFF = os.getenv("VLLM_REASONING_STRENGTH_OFF", "low")
 
 
 def _model_uses_think(model: str) -> bool:
@@ -139,20 +111,24 @@ def _model_use_native_ollama(model: str) -> bool:
 
 
 def _model_reasoning_dialect(model: str) -> str:
-    """Which chat-template variable expresses reasoning on/off for this model.
-
-    Defaults to the boolean dialect: it is what every model served here before
-    Muse Glimmer used, and a model whose template has neither variable drops it
-    either way."""
-    return str(MODEL_CAPS.get(model, {}).get("reasoning", REASONING_ENABLE_THINKING))
+    """Which chat-template variable expresses reasoning on/off for this model:
+    its profile's. A model without a profile gets the boolean dialect; on vLLM
+    such a model is refused before a transport is built (`_backend_factory`)."""
+    prof = profile_for(model, os.getenv("MODEL_FAMILY"))
+    return (prof.dialect if prof is not None else ReasoningDialect.ENABLE_THINKING).value
 
 
 def reasoning_template_kwargs(model: str, enable_thinking: bool) -> dict[str, Any]:
-    """The `chat_template_kwargs` payload that asks `model` for (no) reasoning."""
-    if _model_reasoning_dialect(model) == REASONING_STRENGTH:
-        return {REASONING_STRENGTH: _REASONING_STRENGTH_ON if enable_thinking
-                else _REASONING_STRENGTH_OFF}
-    return {REASONING_ENABLE_THINKING: enable_thinking}
+    """The `chat_template_kwargs` payload that asks `model` for (no) reasoning.
+
+    In the strength dialect there is no "off": the levels are low / medium /
+    high / xhigh, so a request that wants no reasoning asks for the least.
+    Both rungs resolve env → profile → default (`VLLM_REASONING_STRENGTH`,
+    `VLLM_REASONING_STRENGTH_OFF`)."""
+    knobs = resolve_model_knobs(os.environ, model)
+    return dict(model_reasoning_payload(
+        ReasoningDialect(_model_reasoning_dialect(model)), enable_thinking,
+        strength_on=knobs.strength_on, strength_off=knobs.strength_off))
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +160,9 @@ class _BaseTransport:
     def count_input_tokens(self, messages: list[dict[str, Any]], *,
                            enable_thinking: bool) -> int | None:
         return None
+
+    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
+        return {}
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:
@@ -289,7 +268,9 @@ _MAX_THINK_CHARS  = int(os.getenv("OLLAMA_MAX_THINK_CHARS", "40000"))
 # band to sit in. `VLLM_REASONING_BUDGET=per_call` (`llm/budget.py`) removes the
 # character cap and gives each call the context its prompt leaves; this value
 # is only the `fixed` shape's cap.
-_VLLM_MAX_THINK_CHARS = int(os.getenv("VLLM_MAX_THINK_CHARS", "120000"))
+# VLLM_MAX_THINK_CHARS (the fixed-shape cap) now resolves with the other
+# model-calibrated knobs in `domain.model_profile.resolve_model_knobs`; its
+# global default stays 120000.
 
 # The recorded evidence both claims rest on, kept next to the value so the next
 # change is checked against it rather than against a remembered number.
@@ -824,14 +805,17 @@ class VLLMTransport(_BaseTransport):
     def __init__(self) -> None:
         super().__init__()
         self._base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
-        self._model_name = os.getenv("VLLM_MODEL_NAME", MODEL)
+        self._model_name = os.getenv("VLLM_MODEL_NAME") or MODEL
         self.served_model = self._model_name
-        self._ctx = int(os.getenv("VLLM_MAX_MODEL_LEN", "65536"))
-        self._thinking_budget = int(os.getenv("VLLM_THINKING_BUDGET", "16384"))
+        # Context, reasoning shape, thinking reserve and both character caps:
+        # env → the served model's profile → global default, the resolution
+        # RunConfig, the settings budget math and docker_vllm.sh also use.
+        self._knobs: ModelKnobs = resolve_model_knobs(os.environ, self._model_name)
+        self._ctx = self._knobs.max_model_len
+        self._thinking_budget = self._knobs.thinking_budget
         self._content_budget = int(os.getenv("VLLM_CONTENT_BUDGET", "16384"))
         self._rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
-        self._per_call_reasoning = reasoning_budget_is_per_call(
-            os.getenv("VLLM_REASONING_BUDGET", "fixed"))
+        self._per_call_reasoning = reasoning_budget_is_per_call(self._knobs.reasoning_budget)
 
     def count_input_tokens(self, messages: list[dict[str, Any]], *,
                            enable_thinking: bool) -> int | None:
@@ -871,13 +855,17 @@ class VLLMTransport(_BaseTransport):
             ctx_len=self._ctx, content_budget=self._content_budget,
             thinking_budget=self._thinking_budget, margin=512, cpt_floor=3.0,
             adaptive_cpt=True, add_thinking_to_request=True, cap_by_ctx=True,
-            send_max_tokens=True, thinking_char_cap=_VLLM_MAX_THINK_CHARS,
+            send_max_tokens=True, thinking_char_cap=self._knobs.max_think_chars,
             per_call_reasoning=self._per_call_reasoning,
+            per_call_char_cap=self._knobs.runaway_think_chars,
         )
 
     def resolve_thinking(self, model: str, want_think: bool | None) -> bool:
         base = _model_uses_think(self._model_name) if want_think is None else want_think
         return base and self._thinking_budget > 0
+
+    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
+        return reasoning_template_kwargs(self._model_name, enable_thinking)
 
     def _reasoning_delta(self, reasoning: str, enable_thinking: bool) -> Delta:
         """Which channel this server's reasoning-field text belongs on.
@@ -1087,5 +1075,8 @@ def _backend_factory() -> Transport:
     if backend_env == "sglang":
         return SGLangTransport()
     if backend_env == "vllm":
+        # An id no profile matches is refused here, at the one place a live
+        # transport is built, rather than served under a guessed dialect.
+        require_profile(os.getenv("VLLM_MODEL_NAME") or MODEL, os.getenv("MODEL_FAMILY"))
         return VLLMTransport()
     return OllamaTransport()

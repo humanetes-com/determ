@@ -184,6 +184,9 @@ from pipeline_core.adapters.layout_registry_store import (
     load_registry as load_layout_registry,
 )
 from pipeline_core.adapters.layout_tree_splice import apply_layout_to_tree
+from pipeline_core.adapters.model_conformance import (
+    report_at_run_start as _report_model_at_run_start,
+)
 from pipeline_core.adapters.model_notes_store import (
     FileModelNotesStore,
 )
@@ -714,6 +717,7 @@ from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _cov_partition_uncovered_lines,
 )
 from pipeline_core.domain.enums import (
+    Backend,
     LanguageDriverKind,
     PhaseCDriver,
     PhaseCMode,
@@ -1876,10 +1880,15 @@ def build_app(
         ask=lambda prompt: str(ports.ask(prompt, model=settings.task_models.task0c)),
         # The book judge's calls are a measurement: bound at their own
         # temperature, forwarded only when set (unset keeps the server's).
+        # Author and judge both reason only under `BEHAVIOUR_BOOK_THINK`.
         book_predict=lambda prompt: str(ports.ask(
             prompt, model=settings.task_models.task0c,
+            think=settings.behaviour_book_think,
             **({} if settings.behaviour_book_predict_temperature is None
                else {"temperature": settings.behaviour_book_predict_temperature}))),
+        book_ask=lambda prompt: str(ports.ask(
+            prompt, model=settings.task_models.task0c,
+            think=settings.behaviour_book_think)),
         public_surface=_t0d_public_surface,
         # The same (empty) inventory t1.5 receives (`composition_layout`).
         symbol_inventory=lambda _pd, _c: "",
@@ -1913,6 +1922,7 @@ def build_app(
             drafts_per_reply=settings.behaviour_book_drafts_per_reply,
             lanes=settings.behaviour_book_lanes,
             predict_temperature=settings.behaviour_book_predict_temperature,
+            think=settings.behaviour_book_think,
             sibling_chunks=settings.behaviour_book_sibling_chunks,
             given_phrases=settings.behaviour_book_given_phrases),
         write_features=write_feature_files,
@@ -2613,6 +2623,13 @@ def build_app(
             root=root, project_dir=project_dir, crate=crate,
             run_id=_ctx.get("run_id", ""), commit=_ctx.get("pipeline_sha"),
             env=_os.environ, argv=sys.argv)
+        if settings.backend is Backend.VLLM:
+            # The model profile line (family, each calibrated knob and its
+            # source) and the launch's conformance verdict as this run's
+            # `model.conformance` event.
+            _report_model_at_run_start(
+                _os.environ, log=ports.log, emit=ports.emit,
+                report_path=Path(events_log()).parent / "model_conformance.json")
 
     run_deps = RunDeps(
         WORKSPACE_DIR=_WORKSPACE_DIR,

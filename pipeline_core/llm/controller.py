@@ -400,6 +400,10 @@ class LLMController:
             "request_max": plan.request_max,
             "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
+            # What that boolean was sent as: `{"reasoning_strength": "low"}`
+            # on Muse is a reasoning call; `{"enable_thinking": false}` on
+            # Qwen is not.
+            "reasoning_payload": transport.reasoning_payload(enable_thinking),
             # So a reader replaying events.jsonl (the monitor's live cut-rate
             # gauge) can exclude bookkeeping calls the same way
             # `record_stream_meta` excludes them from the in-process

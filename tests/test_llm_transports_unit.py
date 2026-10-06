@@ -50,9 +50,15 @@ def test_default_max_tokens_from_ollama_ctx(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_default_max_tokens_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    for v in ("MAX_TOKENS", "OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN"):
+    for v in ("MAX_TOKENS", "OLLAMA_NUM_CTX", "VLLM_MAX_MODEL_LEN", "BACKEND",
+              "VLLM_MODEL_NAME", "MODEL_FAMILY"):
         monkeypatch.delenv(v, raising=False)
     assert t._default_max_tokens() == 32768
+    # On vLLM an unset VLLM_MAX_MODEL_LEN is the served model's profile context
+    # (the one the server is launched with), not this fallback.
+    monkeypatch.setenv("BACKEND", "vllm")
+    monkeypatch.setenv("MODEL", "RedHatAI/Muse-Glimmer-30B-FP8-block")
+    assert t._default_max_tokens() == 131072 - 8192
 
 
 def test_parse_input_token_overflow_extracts_and_rejects() -> None:
@@ -131,7 +137,8 @@ def test_qwen_keeps_the_boolean_thinking_dialect() -> None:
     assert t.reasoning_template_kwargs("unknown-model", True) == {"enable_thinking": True}
 
 
-def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down() -> None:
+def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     """The negative control for the dialect split.
 
     On the old code both models got `{"enable_thinking": ...}`. For Muse Glimmer
@@ -141,11 +148,18 @@ def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down() ->
     and asks for code only, so a re-reasoned followup is the failure the
     thinking-off request exists to prevent. Assert the OFF request differs from
     the ON one, which is exactly what sending the boolean could not achieve."""
+    for v in ("VLLM_REASONING_STRENGTH", "VLLM_REASONING_STRENGTH_OFF", "MODEL_FAMILY"):
+        monkeypatch.delenv(v, raising=False)
     on = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True)
     off = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", False)
     assert "enable_thinking" not in on and "enable_thinking" not in off
-    assert on == {"reasoning_strength": t._REASONING_STRENGTH_ON}
-    assert off == {"reasoning_strength": t._REASONING_STRENGTH_OFF}
+    # The rungs are the profile's when the env is silent, the env's when set.
+    assert on == {"reasoning_strength": "high"}
+    assert off == {"reasoning_strength": "low"}
+    monkeypatch.setenv("VLLM_REASONING_STRENGTH", "xhigh")
+    assert t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True) == {
+        "reasoning_strength": "xhigh"}
+    monkeypatch.delenv("VLLM_REASONING_STRENGTH")
     assert on != off, "thinking-off is indistinguishable from thinking-on"
     # Both rungs must be levels the template accepts; there is no 'off'.
     assert {on["reasoning_strength"], off["reasoning_strength"]} <= {"low", "medium", "high", "xhigh"}

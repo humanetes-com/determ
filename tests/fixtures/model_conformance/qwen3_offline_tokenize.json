@@ -1,0 +1,112 @@
+{
+ "recorded": "2026-10-06, rendered OFFLINE with transformers AutoTokenizer.apply_chat_template over the cached Qwen/Qwen3.6-27B-FP8 chat template (the call vLLM's /tokenize makes); no Qwen server was up. Replace with a live recording at the first Qwen launch.",
+ "models": {
+  "object": "list",
+  "data": [
+   {
+    "id": "Qwen/Qwen3.6-27B-FP8",
+    "object": "model"
+   }
+  ]
+ },
+ "tokenize": {
+  "enable_thinking_true": {
+   "payload": {
+    "enable_thinking": true
+   },
+   "tokens": [
+    248045,
+    846,
+    198,
+    20206,
+    440,
+    6681,
+    799,
+    3299,
+    25,
+    5354,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    198
+   ]
+  },
+  "enable_thinking_false": {
+   "payload": {
+    "enable_thinking": false
+   },
+   "tokens": [
+    248045,
+    846,
+    198,
+    20206,
+    440,
+    6681,
+    799,
+    3299,
+    25,
+    5354,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    271,
+    248069,
+    271
+   ]
+  },
+  "strength_high": {
+   "payload": {
+    "reasoning_strength": "high"
+   },
+   "tokens": [
+    248045,
+    846,
+    198,
+    20206,
+    440,
+    6681,
+    799,
+    3299,
+    25,
+    5354,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    198
+   ]
+  },
+  "strength_low": {
+   "payload": {
+    "reasoning_strength": "low"
+   },
+   "tokens": [
+    248045,
+    846,
+    198,
+    20206,
+    440,
+    6681,
+    799,
+    3299,
+    25,
+    5354,
+    248046,
+    198,
+    248045,
+    74455,
+    198,
+    248068,
+    198
+   ]
+  }
+ }
+}

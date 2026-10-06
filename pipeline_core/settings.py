@@ -24,6 +24,7 @@ from .domain.enums import (
     PhaseCMode,
 )
 from .domain.model_caps import model_context_chars, safe_input_char_limit
+from .domain.model_profile import resolve_model_knobs
 
 # Output reservation (tokens) for the two budget classes.
 _MIN_CONTENT_TOKENS_GENERAL = 16_384  # task1/2/3/4 — large outputs (full files, docs)
@@ -87,9 +88,15 @@ class FixLoopCaps:
 
 
 def _resolve_ctx_thinking(backend: Backend) -> tuple[int, int]:
-    """Backend context length + thinking-budget tokens, with the legacy defaults."""
+    """Backend context length + thinking-budget tokens, with the legacy defaults.
+
+    vLLM resolves both through `resolve_model_knobs` (env → the served
+    model's profile → default), the values the transport plans with. The
+    thinking default here used to be 0 against the transport's 16384, so an
+    unset key sized prompts with no reasoning reserve the transport then took."""
     if backend is Backend.VLLM:
-        return int(os.getenv("VLLM_MAX_MODEL_LEN", "65536")), int(os.getenv("VLLM_THINKING_BUDGET", "0"))
+        knobs = resolve_model_knobs(os.environ)
+        return knobs.max_model_len, knobs.thinking_budget
     if backend is Backend.SGLANG:
         return int(os.getenv("SGLANG_MAX_MODEL_LEN", "65536")), int(os.getenv("SGLANG_THINKING_BUDGET", "0"))
     if backend is Backend.OLLAMA:
@@ -139,6 +146,10 @@ class Settings:
     # 0 = off). See `domain.file_coverage_floor`.
     coverage_augmentation_target: float = 98.0
     coverage_file_floor: float = 0.0
+    # Consecutive task0c passes over a module with no new best covered-line
+    # count (and no function newly accounted for) before it is accepted as
+    # hard_block. The backstop for a target the module cannot reach.
+    task0c_pass_stall_limit: int = 10
     task0d_probe_max: int = 12
     # Compositions of two public items t0d asks about per cluster: edges of
     # the public API (one item's result type is another's receiver or
@@ -184,6 +195,14 @@ class Settings:
     # Left unset until `scripts/book_judge_replay.py`'s agreement line
     # chooses a value. Printed as `predict-temp=` on the behaviour-book line.
     behaviour_book_predict_temperature: float | None = None
+    # Whether the book's draft, judge and Given-phrase calls ask the model to
+    # reason. Off by default: on run `450922-661c5e9f` the book's 105 calls
+    # replied p50 787 content chars after p50 26,981 reasoning chars, 492.8
+    # call-minutes (`scripts/measure_phase_reasoning.py`). The probe and
+    # rule-probe program calls write Rust and keep the model's default.
+    # `BEHAVIOUR_BOOK_THINK=1` restores reasoning on the book. Printed as
+    # `think=` on the behaviour-book line.
+    behaviour_book_think: bool = False
     # A feature's kept sentences are judged again on each of its chunks'
     # uncovered examples (one set call, plus leave-one-out calls when it
     # gains). `BEHAVIOUR_BOOK_SIBLING_CHUNKS=0` leaves each chunk with the
@@ -223,6 +242,8 @@ class Settings:
         var = backend.max_len_env_var
         raw = os.getenv(var) if var else None
         max_len = int(raw) if raw and raw.strip().isdigit() else None
+        if backend is Backend.VLLM:
+            max_len = resolve_model_knobs(os.environ).max_model_len
 
         mcc = model_context_chars(model, backend, max_len)
         ctx, thinking = _resolve_ctx_thinking(backend)
@@ -253,6 +274,7 @@ class Settings:
             behaviour_coverage_target=float(os.getenv("BEHAVIOUR_COVERAGE_TARGET", "0")),
             coverage_augmentation_target=_coverage_target,
             coverage_file_floor=_file_floor_pct(_coverage_target),
+            task0c_pass_stall_limit=max(1, int(os.getenv("TASK0C_PASS_STALL_LIMIT", "10"))),
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
             task0d_probe_edges=int(os.getenv("TASK0D_PROBE_EDGES", "8")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
@@ -271,6 +293,7 @@ class Settings:
                 os.getenv("BEHAVIOUR_BOOK_LANES") or os.getenv("PIPELINE_PARALLELISM") or "1")),
             behaviour_book_predict_temperature=_optional_float(
                 os.getenv("BEHAVIOUR_BOOK_PREDICT_TEMPERATURE")),
+            behaviour_book_think=os.getenv("BEHAVIOUR_BOOK_THINK", "0").strip() == "1",
             behaviour_rule_probes=int(os.getenv("BEHAVIOUR_RULE_PROBES", "8")),
             behaviour_rule_probe_programs=int(os.getenv("BEHAVIOUR_RULE_PROBE_PROGRAMS", "3")),
             behaviour_held_out_share=max(0, min(100, int(

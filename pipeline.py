@@ -1031,12 +1031,12 @@ def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
 # closures, _task3_inline_retry) move onto it directly.
 
 
-# Retro/diagnosis calls MUST run with think=True. The served
-# Qwen3.6 model (vLLM + --reasoning-parser qwen3) returns EMPTY content under
-# think=False — its hybrid-thinking path never populates `content`. Fill calls
-# already use think=True and work. think=True was once dropped pipeline-wide for
-# context-budget reasons, but that was the large fill prompts; retro INPUT is
-# tiny, so we cap OUTPUT tokens instead of disabling thinking. The cap must be
+# Retro/diagnosis calls run with think=True. When this was written, Qwen3.6 on
+# vLLM returned its think-off answer on the reasoning channel with `content`
+# empty; the transport now reroutes that (`VLLMTransport._reasoning_delta`), and
+# on Muse think-off is only the lowest reasoning rung — so think=True here is
+# for answer quality, not a workaround. Retro INPUT is tiny, so we cap OUTPUT
+# tokens instead of disabling thinking. The cap must be
 # generous enough for reasoning + the 2-line answer to both emit (if reasoning
 # alone exhausts the budget, `content` is truncated to empty again).
 _RETRO_MAX_TOKENS = 6144

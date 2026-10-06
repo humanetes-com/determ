@@ -908,7 +908,9 @@ class BookReading:
     is the server default, printed `server`. `sibling_examples` are the
     covered examples credited to a rule drafted in another chunk of their
     feature (`sibling_visits`). `unaided_examples` are the checkable examples
-    the checker predicted with no rule at all (`Feature.unaided_ids`)."""
+    the checker predicted with no rule at all (`Feature.unaided_ids`).
+    `think` is whether the book's draft, judge and phrase calls asked the
+    model to reason (`BEHAVIOUR_BOOK_THINK`), printed `think=on|off`."""
 
     features: int = 0
     features_asked: int = 0
@@ -923,6 +925,7 @@ class BookReading:
     residue_examples: int = 0
     residue_names: int = 0
     predict_temperature: float | None = None
+    think: bool = True
     sibling_examples: int = 0
     unaided_examples: int = 0
     # The roots the examples are given, the phrases kept for them, and why
@@ -941,7 +944,8 @@ class BookReading:
                 f"checkable examples covered ({self.sibling_examples} by a sibling chunk's rule; "
                 f"{self.unaided_examples} predicted with no rule); "
                 f"dropped: {drop}; lanes={self.lanes}; "
-                f"predict-temp={self._temp()}{where}{self._givens()}")
+                f"predict-temp={self._temp()}; think={'on' if self.think else 'off'}"
+                f"{where}{self._givens()}")
 
     def _givens(self) -> str:
         if not self.given_roots:
@@ -964,6 +968,7 @@ class BookReading:
             "worlds": list(self.worlds),
             "residue_examples": self.residue_examples, "residue_names": self.residue_names,
             "predict_temperature": self.predict_temperature,
+            "think": self.think,
             "sibling_examples": self.sibling_examples,
             "unaided_examples": self.unaided_examples,
             "given_roots": self.given_roots, "given_phrases": self.given_phrases,

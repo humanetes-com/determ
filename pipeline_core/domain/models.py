@@ -962,7 +962,7 @@ class ModuleAugmentState:
                        held under the per-file floor, or crate is proc-macro
                        (cannot augment)
         'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
-        'hard_block' — stall_passes >= STALL_LIMIT (genuinely stuck)
+        'hard_block' — stall_passes >= stall_limit (genuinely stuck)
         'retry'      — keep going
     """
     module_name: str
@@ -975,6 +975,10 @@ class ModuleAugmentState:
     last_covered: int = 0
     last_at_ceiling: bool = False
     target_pct: float = 100.0  # coverage % at/above which the module is 'done'
+    # Consecutive passes with no new best covered-line count and no function
+    # newly accounted for before the module is accepted as 'hard_block'
+    # (`TASK0C_PASS_STALL_LIMIT`). Any single new covered line resets it.
+    stall_limit: int = 10
     # Functions the cluster compiles that no test executes and that are still
     # inside their targeted-attempt budget, as of the last pass (0 when the
     # criterion could not be measured — the pass logged why).
@@ -985,7 +989,6 @@ class ModuleAugmentState:
     # is off.
     last_files_held: int = 0
 
-    STALL_LIMIT: int = 10
     CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
 
     def record_pass(self, pct: float, covered: int, at_ceiling: bool,
@@ -1019,7 +1022,7 @@ class ModuleAugmentState:
             return 'done'
         if self.ceiling_passes >= self.CEILING_CONFIRM:
             return 'ceiling'
-        if self.stall_passes >= self.STALL_LIMIT:
+        if self.stall_passes >= self.stall_limit:
             return 'hard_block'
         return 'retry'
 

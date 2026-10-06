@@ -2139,3 +2139,85 @@ def test_a_compile_retry_is_not_bought_once_the_claims_ground_moved(
     retries = [t for t in sent
                if t[-1]["content"].startswith("RESULT of your previous reply")]
     assert retries == [], "no file-first retry turn on moved ground"
+
+
+# --- A reply-text refusal on the file route is a failed attempt ---------------
+# Run `473471-33301154`'s shape: a cast to a `dyn` type with an unparenthesized
+# `+`. rustc's parser rejects it; the splicer refuses it `parse_broken` with
+# that diagnostic. Before, the file route dropped the answer (nothing spliced)
+# or silently lost the refused name (partial), and the model was never told.
+
+_CAST = "unsafe { &*(self as *const Self as *const dyn Tag + Send) }.tag"
+_DIAG = "error: ambiguous `+` in a type\n --> <stdin>:5:51\n"
+
+
+def _refuse_the_cast(monkeypatch) -> None:
+    from pipeline_core.application.reconstruct import splice as splice_mod
+    from pipeline_core.domain.reconstruction import SpliceRefusal
+    real_guard = splice_mod.parse_guarded_write
+
+    def _guard(path, new_bytes, pre_bytes, validate_parse):
+        if b"dyn Tag + Send" in new_bytes:
+            return False
+        return real_guard(path, new_bytes, pre_bytes, validate_parse)
+
+    monkeypatch.setattr(splice_mod, "parse_guarded_write", _guard)
+    monkeypatch.setattr(splice_mod, "parse_refusal",
+                        lambda text, validate: SpliceRefusal("parse_broken", _DIAG))
+
+
+def _file_first_run(monkeypatch, tmp_path, replies: list[str], *,
+                    delete_the_call: bool = False) -> tuple[Path, list[str]]:
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    _refuse_the_cast(monkeypatch)
+    if delete_the_call:
+        from pipeline_core.application.reconstruct import impl_fill as impl_fill_mod
+        monkeypatch.setattr(impl_fill_mod, "reply_refusal_feedback",
+                            lambda *a, **k: None)
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies[min(len(prompts) - 1, len(replies) - 1)]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    return ws, prompts
+
+
+def test_a_file_first_reply_refused_for_its_text_is_asked_again_with_the_parser(
+        monkeypatch, tmp_path):
+    both_cast = (f'<FN name="kind" block="impl Foo">{_CAST}</FN>\n'
+                 f'<FN name="name" block="impl Bar">{_CAST}</FN>')
+    ws, prompts = _file_first_run(monkeypatch, tmp_path, [both_cast, RESPONSE_TWO])
+    text = (ws / "src" / "lib.rs").read_text()
+    assert len(prompts) >= 2
+    assert "ambiguous `+` in a type" in prompts[1]
+    assert "self.tag + 1" in text and "unimplemented!()" not in text
+
+    # NEGATIVE CONTROL: without the call the answer is dropped after one
+    # attempt and no later prompt is told why.
+    c_ws, c_prompts = _file_first_run(monkeypatch, tmp_path / "control",
+                                      [both_cast, RESPONSE_TWO], delete_the_call=True)
+    assert not any("ambiguous `+` in a type" in p for p in c_prompts)
+
+
+def test_a_partial_file_first_keeps_the_rest_and_retries_the_refused_name(
+        monkeypatch, tmp_path):
+    one_cast = (f'<FN name="kind" block="impl Foo">{_CAST}</FN>\n'
+                '<FN name="name" block="impl Bar">self.tag + 1</FN>')
+    retry = '<FN name="kind" block="impl Foo">self.tag</FN>'
+    ws, prompts = _file_first_run(monkeypatch, tmp_path, [one_cast, retry])
+    text = (ws / "src" / "lib.rs").read_text()
+    assert len(prompts) == 2
+    assert "ambiguous `+` in a type" in prompts[1] and "kind" in prompts[1]
+    assert "self.tag + 1" in text, "the landed body is judged and kept"
+    assert "unimplemented!()" not in text, "the refused name is retried and lands"
+
+    c_ws, c_prompts = _file_first_run(monkeypatch, tmp_path / "control",
+                                      [one_cast, retry], delete_the_call=True)
+    assert not any("ambiguous `+` in a type" in p for p in c_prompts)

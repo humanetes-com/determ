@@ -2002,6 +2002,22 @@ def run_phase_c_tdd(
             futility=prev_test_units,
             products=escalation_products, producers=escalation_producers))
 
+    # The cluster's function record, read once: what it proved unreachable
+    # (from rustc's MIR and the public index, at task0c) is a static fact of
+    # the crate, not of this loop. Each iteration's admission withholds the
+    # stubs it proved (`FnCoverageRecord.proved_stub_units`).
+    _fn_record_read = (deps.augmentation_fn_record(project_dir, cluster.name, module)
+                       if deps.augmentation_fn_record is not None else None)
+    _fn_record = (_fn_record_read if isinstance(_fn_record_read, FnCoverageRecord)
+                  else None)
+    # The last coverage reading and the question it answered: tree, bare
+    # failing names, hung labels, which binaries failed each name, and
+    # which binaries never finished. A sweep that asks the same question
+    # reuses it.
+    _cov_memo: tuple[tuple[
+        str, frozenset[str], frozenset[tuple[str, str]],
+        frozenset[tuple[str, str]], frozenset[str]], Any] | None = None
+
     while True:
         iter_n += 1
         # The coverage binding is NOT cleared here: it stands from its
@@ -3422,12 +3438,15 @@ def run_phase_c_tdd(
         # through it, and it reports what it refused once, before dispatch.
         _admission = FrontierAdmission(
             deps.cfg_dead_sites(target_src_dir, cluster)
-            if deps.cfg_dead_sites is not None else CfgDeadSites())
+            if deps.cfg_dead_sites is not None else CfgDeadSites(),
+            proved=(_fn_record.proved_stub_units(s.site for s in _stubs_now.sites)
+                    if _fn_record is not None else frozenset()))
 
         def _admit_map[M: (Frontier, SiteFrontier)](
                 fr: M, adm: FrontierAdmission = _admission) -> M:
             adm.observe(fr)
-            return deps.filter_test_targets(fr, src_dir, cluster=cluster)
+            return adm.without_proved(
+                deps.filter_test_targets(fr, src_dir, cluster=cluster))
 
         _attr = deps.attribute_failures(
             output, src_dir, recently_filled,
@@ -4666,115 +4685,6 @@ def run_phase_c_tdd(
                 refill_attempts.pop(loc, None)
             return frozenset(reopened), list(released)
 
-        if not eligible:
-            _no_frontier_streak += 1
-            # Nothing dispatchable. This is not "flat" and `max_stalls` never
-            # governed it: the plateau exit above charges a COMPLETED
-            # traversal, and an empty frontier completes nothing. First the
-            # only move left — re-admit what the loop itself holds exhausted
-            # (the exhaustion re-entry filter's set and the store's flags), bounded by the
-            # same reset cap the store applies per record; then, with that
-            # budget spent and still nothing to dispatch, stop under a name
-            # instead of re-running a cached `cargo test` to the backstop.
-            # Only where the plateau exit is DISABLED: with a stall budget the
-            # empty frontier is charged like any flat sweep and the stall exit
-            # ends it within `max_stalls` cached iterations — the documented
-            # terminator, and the one the refill cap's attempt bound is pinned
-            # against. With `max_stalls=0` nothing ends it.
-            _held = set(frontier) & permanently_exhausted
-            _spin_regime = plateau_exit_disabled(max_stalls)
-            if _spin_regime:
-                _reopen, _disk = _spend_no_move_readmission(
-                    f"TDD iter {iter_n}: no actionable frontier — no other "
-                    f"move (re-admission {_no_move_readmissions + 1}/"
-                    f"{_reset_cap})")
-                if _reopen:
-                    deps.log(
-                        f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
-                        f"frontier and no other move — re-admitting "
-                        f"{len(_held)} unit(s) the loop held as exhausted and "
-                        f"{len(_disk)} stored verdict(s) for one more attempt "
-                        f"({_no_move_readmissions}/{_reset_cap}; "
-                        f"pass={pass_count}, fail={fail_count}): "
-                        + ", ".join(sorted(
-                            f"{k.file}::{k.fn_name}" for k in _reopen)[:8]))
-                    deps.emit("phase_c.tdd.no_move_readmission", data={
-                        "cluster": cluster.name, "iter": iter_n,
-                        "held": sorted(f"{k.file}::{k.fn_name}"
-                                       for k in _held),
-                        "disk_released": sorted(_disk),
-                        "attempt": _no_move_readmissions,
-                        "cap": _reset_cap,
-                    })
-                    deps.emit("phase_c.tdd.iter", data={
-                        **_prov,
-                        "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                        "frontier_size": 0, "kind": "no_frontier_readmit",
-                        "pass_count": pass_count, "fail_count": fail_count,
-                        "improved": improved, "stall": stall,
-                    })
-                    _score_grace(iter_n, pass_count)
-                    continue
-            if (_spin_regime and _no_frontier_stop_after > 0
-                    and _no_frontier_streak >= _no_frontier_stop_after):
-                deps.log(
-                    f"  {tag} [phase-c/tdd] iter {iter_n}: NO_FRONTIER_STOP — "
-                    f"{_no_frontier_streak} consecutive iteration(s) found "
-                    f"nothing dispatchable (frontier={len(frontier)} unit(s), "
-                    f"{len(_held)} held as exhausted, {fail_count} test(s) "
-                    "still failing) and the no-other-move re-admission budget "
-                    f"is spent ({_no_move_readmissions}/{_reset_cap}). "
-                    f"Reading pass={pass_count} fail={fail_count}. Stopping "
-                    f"the RUN instead of spinning to the {_tdd_backstop}-"
-                    "iteration backstop. Nothing is convicted and every fill "
-                    "is on disk — `bash continue.sh` resumes here; "
-                    "TDD_NO_FRONTIER_STOP=0 disables this stop.")
-                _log_attribution_gap(deps, tag, iter_n, fail_count,
-                                     cur_failed, len(frontier), kind)
-                deps.emit("phase_c.tdd.no_frontier_stop", data={
-                    "cluster": cluster.name, "iter": iter_n,
-                    "pass_count": pass_count, "fail_count": fail_count,
-                    "frontier_size": len(frontier),
-                    "held_exhausted": len(_held),
-                    "streak": _no_frontier_streak,
-                    "readmissions": _no_move_readmissions,
-                    "cap": _reset_cap,
-                })
-                deps.emit("phase_c.tdd.iter", data={
-                    **_prov,
-                    "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                    "frontier_size": 0, "kind": "no_frontier_stop",
-                    "pass_count": pass_count, "fail_count": fail_count,
-                    "improved": improved, "stall": stall,
-                })
-                request_graceful_stop()
-                break
-            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
-                 f"frontier this iter but stall={stall}/{max_stalls} — "
-                 f"continuing (pass={pass_count}, fail={fail_count}, "
-                 f"improved={improved}).")
-            _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
-                                 len(frontier), kind)
-            deps.emit("phase_c.tdd.iter", data={
-                **_prov,
-                "cluster": cluster.name, "iter": iter_n, "rc": rc,
-                "frontier_size": 0, "kind": "no_frontier_continue",
-                "pass_count": pass_count, "fail_count": fail_count,
-                "improved": improved, "stall": stall,
-            })
-            # Nothing to do this iter — loop back to re-run cargo test.
-            # (Mostly a no-op, but keeps the loop honest: if a flaky
-            # failure or test ordering surfaced a fn next iter, we'll
-            # pick it up.)
-            _score_grace(iter_n, pass_count)
-            continue
-        # The streak is NOT cleared here. A non-empty frontier used to clear
-        # it, which made the terminator above a statement about the frontier
-        # rather than about whether anything was dispatched — and the loop's
-        # own refusals (the flat exclusion, the pass cursor, a route cap) can
-        # empty the BATCH while the frontier still holds units. It is cleared
-        # where a unit is actually dispatched, below `take_batch`.
-
         # The batch is decided BEFORE the guard, and committed after it. Two
         # reasons, both about honesty at the stop: the stop line has to name
         # what it declined to spend (`len(eligible)` is the frontier, and under
@@ -5011,14 +4921,32 @@ def run_phase_c_tdd(
             # per failing test on a staged copy.
             # A name the sweep failed in several binaries is several failing
             # tests: pass C measures it on each binary that failed it.
-            _cov = deps.measure_coverage_slice(
-                project_dir, cluster.name,
-                failing_tests=frozenset(cur_failed),
-                cluster_env=cluster_env,
-                timeout=test_timeout,
-                hung={b.label: (b.dangling or "?") for b in _hung},
-                failing_binaries=failing_binaries_by_name(
-                    _measure.failed_pairs))
+            # The reading is that question: the tree, the bare red names,
+            # the binaries that failed each name, the binaries that never
+            # finished, and the hung labels. A later sweep that asks the
+            # same question reuses the last reading. A bare name that gains
+            # or loses a binary does not — the stored map is the first
+            # claimant's.
+            _hung_now = {b.label: (b.dangling or "?") for b in _hung}
+            _cov_key = (_tree_sha, frozenset(cur_failed),
+                        frozenset(_hung_now.items()),
+                        frozenset(_measure.failed_pairs),
+                        frozenset(_measure.incomplete))
+            if _cov_memo is not None and _cov_memo[0] == _cov_key:
+                _cov = _cov_memo[1]
+                deps.log(f"  {tag} [phase-c/coverage] iter {iter_n}: tree and "
+                         "coverage question unchanged since the last "
+                         "reading — owner map reused.")
+            else:
+                _cov = deps.measure_coverage_slice(
+                    project_dir, cluster.name,
+                    failing_tests=frozenset(cur_failed),
+                    cluster_env=cluster_env,
+                    timeout=test_timeout,
+                    hung=_hung_now,
+                    failing_binaries=failing_binaries_by_name(
+                        _measure.failed_pairs))
+                _cov_memo = (_cov_key, _cov)
             if _cov is not None and _cov.hung_tests:
                 deps.emit("phase_c.coverage.hung", data={
                     "cluster": cluster.name, "iter": iter_n,
@@ -5301,6 +5229,122 @@ def run_phase_c_tdd(
                     for t, ks in sorted(
                         (t, set(d)) for t, d in _by_test.items())},
             })
+        # The empty-frontier decision is taken HERE, after the measured-owner
+        # admission, not before it: a leftover whose whole attributed cohort
+        # is exhausted, on an otherwise empty frontier, has owners the
+        # coverage reading names, and returning to the sweep first spent a
+        # re-admission slot and, after the reset cap, stopped with those
+        # owners never dispatched. Every step between the attribution and
+        # this point runs on an empty frontier too (ordering, standing
+        # claims, the coverage reading); none dispatches.
+        if not eligible:
+            _no_frontier_streak += 1
+            # Nothing dispatchable. This is not "flat" and `max_stalls` never
+            # governed it: the plateau exit above charges a COMPLETED
+            # traversal, and an empty frontier completes nothing. First the
+            # only move left — re-admit what the loop itself holds exhausted
+            # (the exhaustion re-entry filter's set and the store's flags), bounded by the
+            # same reset cap the store applies per record; then, with that
+            # budget spent and still nothing to dispatch, stop under a name
+            # instead of re-running a cached `cargo test` to the backstop.
+            # Only where the plateau exit is DISABLED: with a stall budget the
+            # empty frontier is charged like any flat sweep and the stall exit
+            # ends it within `max_stalls` cached iterations — the documented
+            # terminator, and the one the refill cap's attempt bound is pinned
+            # against. With `max_stalls=0` nothing ends it.
+            _held = set(frontier) & permanently_exhausted
+            _spin_regime = plateau_exit_disabled(max_stalls)
+            if _spin_regime:
+                _reopen, _disk = _spend_no_move_readmission(
+                    f"TDD iter {iter_n}: no actionable frontier — no other "
+                    f"move (re-admission {_no_move_readmissions + 1}/"
+                    f"{_reset_cap})")
+                if _reopen:
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
+                        f"frontier and no other move — re-admitting "
+                        f"{len(_held)} unit(s) the loop held as exhausted and "
+                        f"{len(_disk)} stored verdict(s) for one more attempt "
+                        f"({_no_move_readmissions}/{_reset_cap}; "
+                        f"pass={pass_count}, fail={fail_count}): "
+                        + ", ".join(sorted(
+                            f"{k.file}::{k.fn_name}" for k in _reopen)[:8]))
+                    deps.emit("phase_c.tdd.no_move_readmission", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "held": sorted(f"{k.file}::{k.fn_name}"
+                                       for k in _held),
+                        "disk_released": sorted(_disk),
+                        "attempt": _no_move_readmissions,
+                        "cap": _reset_cap,
+                    })
+                    deps.emit("phase_c.tdd.iter", data={
+                        **_prov,
+                        "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                        "frontier_size": 0, "kind": "no_frontier_readmit",
+                        "pass_count": pass_count, "fail_count": fail_count,
+                        "improved": improved, "stall": stall,
+                    })
+                    _score_grace(iter_n, pass_count)
+                    continue
+            if (_spin_regime and _no_frontier_stop_after > 0
+                    and _no_frontier_streak >= _no_frontier_stop_after):
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: NO_FRONTIER_STOP — "
+                    f"{_no_frontier_streak} consecutive iteration(s) found "
+                    f"nothing dispatchable (frontier={len(frontier)} unit(s), "
+                    f"{len(_held)} held as exhausted, {fail_count} test(s) "
+                    "still failing) and the no-other-move re-admission budget "
+                    f"is spent ({_no_move_readmissions}/{_reset_cap}). "
+                    f"Reading pass={pass_count} fail={fail_count}. Stopping "
+                    f"the RUN instead of spinning to the {_tdd_backstop}-"
+                    "iteration backstop. Nothing is convicted and every fill "
+                    "is on disk — `bash continue.sh` resumes here; "
+                    "TDD_NO_FRONTIER_STOP=0 disables this stop.")
+                _log_attribution_gap(deps, tag, iter_n, fail_count,
+                                     cur_failed, len(frontier), kind)
+                deps.emit("phase_c.tdd.no_frontier_stop", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "frontier_size": len(frontier),
+                    "held_exhausted": len(_held),
+                    "streak": _no_frontier_streak,
+                    "readmissions": _no_move_readmissions,
+                    "cap": _reset_cap,
+                })
+                deps.emit("phase_c.tdd.iter", data={
+                    **_prov,
+                    "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                    "frontier_size": 0, "kind": "no_frontier_stop",
+                    "pass_count": pass_count, "fail_count": fail_count,
+                    "improved": improved, "stall": stall,
+                })
+                request_graceful_stop()
+                break
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: no actionable "
+                 f"frontier this iter but stall={stall}/{max_stalls} — "
+                 f"continuing (pass={pass_count}, fail={fail_count}, "
+                 f"improved={improved}).")
+            _log_attribution_gap(deps, tag, iter_n, fail_count, cur_failed,
+                                 len(frontier), kind)
+            deps.emit("phase_c.tdd.iter", data={
+                **_prov,
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": 0, "kind": "no_frontier_continue",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            # Nothing to do this iter — loop back to re-run cargo test.
+            # (Mostly a no-op, but keeps the loop honest: if a flaky
+            # failure or test ordering surfaced a fn next iter, we'll
+            # pick it up.)
+            _score_grace(iter_n, pass_count)
+            continue
+        # The streak is NOT cleared here. A non-empty frontier used to clear
+        # it, which made the terminator above a statement about the frontier
+        # rather than about whether anything was dispatched — and the loop's
+        # own refusals (the flat exclusion, the pass cursor, a route cap) can
+        # empty the BATCH while the frontier still holds units. It is cleared
+        # where a unit is actually dispatched, below `take_batch`.
         # RED-SLICE SESSIONS. The failing set is the unit of evidence, not
         # the coverage-key subset: iterating owners.items() planned no
         # session for cfg-gated tests an instrumented run omitted (run
@@ -6241,6 +6285,15 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "proposed": _adm_report.total,
                 "refused": list(_adm_report.skipped)})
+        _proved_withheld = _admission.proved_report()
+        if _proved_withheld:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: withheld "
+                     f"{len(_proved_withheld)} stub(s) the function record "
+                     "proved no test can execute (not fill units): "
+                     + ", ".join(_proved_withheld))
+            deps.emit("phase_c.tdd.proved_unreachable_admission", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "withheld": list(_proved_withheld)})
         _fill_meta: list[dict[str, Any]] = []
         # The ground this fill's plan stands on: the sweep's own capture,
         # read into per-test outcomes with crate sites resolved to the

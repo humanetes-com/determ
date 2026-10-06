@@ -53,6 +53,9 @@ class AugmentContext:
     # The per-file line floor (`COVERAGE_FILE_FLOOR`) over the lines a test can
     # reach; 0 = off. A module is done only when no file is held under it.
     file_floor_pct: float = 0.0
+    # Passes in a row without a new best before a module is accepted as
+    # hard_block (`TASK0C_PASS_STALL_LIMIT`).
+    pass_stall_limit: int = 10
 
 
 class ClusterAugmentor:
@@ -227,7 +230,8 @@ class ClusterAugmentor:
 
                 state = module_states.setdefault(
                     mod_name, ModuleAugmentState(mod_name, cluster.name,
-                                                 target_pct=ctx.target_pct)
+                                                 target_pct=ctx.target_pct,
+                                                 stall_limit=ctx.pass_stall_limit)
                 )
                 # The function-execution half of the stop, as task0c persisted
                 # it this pass. A line target met with functions still
@@ -252,7 +256,7 @@ class ClusterAugmentor:
                 # attempts AND a full gen_tests strip (or is broken in protected
                 # files), so re-entering augmentation from the identical tree state
                 # cannot end differently. Accept and move on instead of burning
-                # STALL_LIMIT identical retries (observed live: nightly ×10 no-ops).
+                # stall_limit identical retries (observed live: nightly ×10 no-ops).
                 if blocked_reason and status not in ('done', 'ceiling'):
                     tel.log(
                         f"  HARD BLOCK: '{mod_name}' [{cluster.name}] augmentation "
@@ -271,7 +275,7 @@ class ClusterAugmentor:
                     elif status == 'hard_block':
                         tel.log(
                             f"  HARD BLOCK: '{mod_name}' [{cluster.name}] coverage stuck "
-                            f"at {cov:.1f}% (stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
+                            f"at {cov:.1f}% (stall {state.stall_passes}/{state.stall_limit}, "
                             f"total {state.total_passes}). Accepting and moving on."
                         )
                     store.mark_cluster_augmented(
@@ -295,7 +299,7 @@ class ClusterAugmentor:
                             f"{ctx.file_floor_pct:.0f}% floor on reachable lines")
                     tel.log(
                         f"  HARD RULE: '{mod_name}' [{cluster.name}] {_why} "
-                        f"(stall {state.stall_passes}/{ModuleAugmentState.STALL_LIMIT}, "
+                        f"(stall {state.stall_passes}/{state.stall_limit}, "
                         f"total {state.total_passes}, best covered {state.best_covered_lines} lines). "
                         f"Retrying."
                     )

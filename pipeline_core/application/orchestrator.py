@@ -1367,6 +1367,7 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         behaviour_target_pct=float(
             getattr(deps.SETTINGS, "behaviour_coverage_target", 0.0) or 0.0),
         file_floor_pct=float(getattr(deps.SETTINGS, "coverage_file_floor", 0.0) or 0.0),
+        pass_stall_limit=int(getattr(deps.SETTINGS, "task0c_pass_stall_limit", 10)),
     ))
 
     total_iters = 0

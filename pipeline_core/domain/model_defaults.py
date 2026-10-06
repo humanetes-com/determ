@@ -1,14 +1,14 @@
 """Per-model operating defaults, applied only where the env is silent.
 
-`MODEL_CAPS` keys the request dialect on the model string and `model_tier`
-keys the prompt tier; this module is the third member of that family — the
-knob VALUES a model has been measured to work best under. Precedence is
+The value itself is the model profile's (`domain.model_profile`, which also
+carries the request dialect and the prompt tier); this module is the env-wins
+resolution over it. Precedence is
 strict and pinned by test: an explicit env setting always wins, the model
 default fills in when the env is unset, and an unknown model string falls
 back to the global default, byte-identical to the behavior before this
 module existed.
 
-Only measured values belong here. The evidence for the current table, all
+Only measured values belong in the profile. The evidence for the route orders, all
 2026-08-12, complexity-7 hardcrate + microcrate, ctx 131072, parallelism 4:
 
 - Muse-Glimmer -> FILE_PRIMARY. Flag-on halved its hardcrate calls (30 vs
@@ -30,23 +30,15 @@ and this table only carries values a run has validated.
 from __future__ import annotations
 
 from pipeline_core.domain.enums import RouteOrder
-
-# Matched case-insensitively as substrings of the served model id, so a repo
-# prefix or quantization suffix ("RedHatAI/Muse-Glimmer-30B-FP8-block")
-# resolves the same as the family name.
-_ROUTE_ORDER_DEFAULTS: tuple[tuple[str, RouteOrder], ...] = (
-    ("muse-glimmer", RouteOrder.FILE_PRIMARY),
-    ("qwen", RouteOrder.DEFAULT),
-)
+from pipeline_core.domain.model_profile import profile_for
 
 
 def default_route_order(model: str) -> RouteOrder:
-    """The validated route order for `model`; DEFAULT when nothing matches."""
-    low = model.lower()
-    for needle, order in _ROUTE_ORDER_DEFAULTS:
-        if needle in low:
-            return order
-    return RouteOrder.DEFAULT
+    """The validated route order for `model` (its profile's), DEFAULT when no
+    profile matches. Matched by `model_profile.family_key`, the rule every
+    model reader shares."""
+    prof = profile_for(model)
+    return prof.route_order if prof is not None else RouteOrder.DEFAULT
 
 
 def resolve_route_order(env_value: str | None, model: str) -> RouteOrder:
