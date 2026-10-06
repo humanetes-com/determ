@@ -374,7 +374,8 @@ def _row_for(
         target_tests=tuple(sorted(s.run.target_tests)),
         classes=dict(rep.classes), share_minutes=share, reason=s.reason,
         joint_sets=tuple(_pairs(frozenset(js)) for js in rep.joint_sets),
-        opened=(_pairs(rep.opened_units) if report is not None else None))
+        opened=(_pairs(rep.opened_units) if report is not None else None),
+        first_turn_minutes=rep.first_turn_minutes)
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,

@@ -99,6 +99,9 @@ class RouteRunReport:
     #: reports only the units it wrote. None reads as the attempt delta
     #: (`opened_units`).
     opened: frozenset[FnLocator] | None = None
+    #: A session's minutes from its opening to the end of its first turn
+    #: (`RouteLedgerRow.first_turn_minutes`); None for every other route.
+    first_turn_minutes: float | None = None
 
     @property
     def opened_units(self) -> frozenset[FnLocator]:

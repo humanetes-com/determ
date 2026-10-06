@@ -27,8 +27,9 @@ from pipeline_core.domain.fill_schedule import (
     RouteLedgerRow,
     RouteRun,
     RunOutcome,
+    SessionTurnPrice,
     schedule,
-    session_turn_minutes,
+    session_turn_price,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -116,7 +117,9 @@ def test_the_session_floor_is_min_turns_at_its_turn_price() -> None:
                    targets=frozenset(units), target_tests=frozenset(tests))
     others = [_per_fn([FnLocator("src/y.rs", f"n{i}")], label=f"per-fn {i}")
               for i in range(10)]
-    assert session_turn_minutes(history, run) == 12.0
+    # A three-call row from before the first turn was recorded gives only
+    # its per-call reading: the uniform price.
+    assert session_turn_price(history, run) == SessionTurnPrice(12.0, 12.0)
     sched = schedule([run, *others], history, oracle_fp="o", hollow={},
                      budget_minutes=200, session_min_turns=3)
     sess = next(s for s in sched.ordered if s.run.kind is RouteKind.SESSION)
@@ -181,12 +184,12 @@ def test_recorded_450977_fill_2_opens_the_session_with_three_turns_of_share() ->
           "max_per_kind": {RouteKind.SESSION: 4}}
     sched = schedule(runs, rows, session_min_turns=3, **kw)
     sess = next(s for s in sched.ordered if s.run.kind is RouteKind.SESSION)
-    turn = session_turn_minutes(rows, sess.run)
-    assert turn is not None and sess.share_minutes is not None
-    assert sess.share_minutes >= 3 * turn - 1e-6
+    price = session_turn_price(rows, sess.run)
+    assert price is not None and sess.share_minutes is not None
+    assert sess.share_minutes >= price.floor(3) - 1e-6
     off = schedule(runs, rows, session_min_turns=0, **kw)
     assert [s.reason for s in off.deferred if s.run.kind is RouteKind.SESSION] \
         == ["rebuy_reverted"]
     # The live schedule gave it 11 minutes.
     live = next(r for r in fix["schedule_runs"] if r["kind"] == "session")
-    assert live["share_minutes"] is None or live["share_minutes"] < 3 * turn
+    assert live["share_minutes"] is None or live["share_minutes"] < price.floor(3)

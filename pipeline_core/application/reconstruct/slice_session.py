@@ -186,6 +186,10 @@ class SessionOutcome:
     #: forced completion's guess).
     judged_turns: int = 0
     judged_capped_turns: int = 0
+    #: Minutes from the session's opening (before its baseline suite) to the
+    #: end of its first turn; None when no turn made a call. The fill
+    #: schedule prices the first turn apart from the turns after it.
+    first_turn_minutes: float | None = None
 
     @property
     def unmeasured(self) -> bool:
@@ -347,6 +351,9 @@ def run_slice_session(
     # The write set starts as the planned slice and may grow when a FILE
     # request holds a called-qualifier complement the plan did not admit.
     records = dict(records)
+    # The first turn is priced from here, the baseline suite included: it is
+    # the time the share must hold before a second turn can open.
+    opened_at = ports.now()
     # Byte pre-images of the slice's files, restored through the
     # transaction primitive: the session's undo is a byte restore, never a
     # re-write of a text it read.
@@ -386,6 +393,7 @@ def run_slice_session(
     started = ports.now()
     turns = 0
     model_calls = 0
+    first_turn_minutes: float | None = None
     compile_failures = 0
     notes = ""
     dispatched: set[FnSite] = set()
@@ -512,6 +520,8 @@ def run_slice_session(
 
     try:
         while turns < max_turns:
+            if model_calls and first_turn_minutes is None:
+                first_turn_minutes = (ports.now() - opened_at) / 60.0
             ports.check_graceful_stop(f"slice session turn {turns + 1}")
             if (ports.now() - started) / 60.0 > max_minutes:
                 ports.log(f"  [phase-c/session] {label}: wall-clock budget "
@@ -760,6 +770,8 @@ def run_slice_session(
             else:
                 _restore(baseline_texts)
         raise
+    if model_calls and first_turn_minutes is None:
+        first_turn_minutes = (ports.now() - opened_at) / 60.0
 
     # The tree holds the best judged state, but the gate below decides
     # whether it may stay by `TurnReading.regressed` — while the order that
@@ -831,7 +843,8 @@ def run_slice_session(
         best_turn=ended.turn if ended is not None else None,
         preferred_turn=best.turn if best is not None else None,
         restored_turns=restored_turns, capped_turns=capped_turns,
-        judged_turns=judged_turns, judged_capped_turns=judged_capped)
+        judged_turns=judged_turns, judged_capped_turns=judged_capped,
+        first_turn_minutes=first_turn_minutes)
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,
@@ -841,7 +854,9 @@ def run_slice_session(
         "best_turn": result.best_turn, "preferred_turn": result.preferred_turn,
         "restored_turns": restored_turns,
         "capped_turns": capped_turns, "judged_turns": judged_turns,
-        "judged_capped_turns": judged_capped, "unmeasured": result.unmeasured})
+        "judged_capped_turns": judged_capped, "unmeasured": result.unmeasured,
+        "first_turn_minutes": (round(first_turn_minutes, 3)
+                               if first_turn_minutes is not None else None)})
     ports.log(f"  [phase-c/session] {label}: {outcome.upper()} after {turns} turn(s) "
               f"({model_calls} call(s), {compile_failures} compile failure(s)); "
               f"kept {len(kept)}, reverted {len(reverted)} unit(s)"

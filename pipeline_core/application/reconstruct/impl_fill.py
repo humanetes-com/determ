@@ -6029,6 +6029,7 @@ def prepare_impl_fill(
                 dispatched=frozenset(locator_of(u) for u in _out.dispatched),
                 stopped=_out.outcome == "stopped",
                 unmeasured=_out.unmeasured, cap_owned=True,
+                first_turn_minutes=_out.first_turn_minutes,
                 # Every slice unit with a record was editable and in view;
                 # a unit with none (`_missing`) was left out inside the run.
                 opened=frozenset(locator_of(u) for u in _records))

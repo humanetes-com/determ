@@ -400,6 +400,13 @@ class RouteLedgerRow:
     #: None on every row written before 2026-09-27: not recorded, which is
     #: not the same claim as "opened nothing".
     opened: tuple[tuple[str, str], ...] | None = None
+    #: Minutes from the session's opening to the end of its first turn (the
+    #: baseline suite, turn 0's prompt and deliberation, its check and
+    #: judgement). The first turn is where a session's cost is, so the floor
+    #: prices it apart from the turns after it (:class:`SessionTurnPrice`).
+    #: None on every non-session row, on a session that made no call, and on
+    #: every row written before 2026-10-05.
+    first_turn_minutes: float | None = None
 
     @property
     def identity(self) -> str:
@@ -431,6 +438,9 @@ class RouteLedgerRow:
             "joint_sets": [[list(t) for t in js] for js in self.joint_sets],
             "opened": ([list(t) for t in self.opened]
                        if self.opened is not None else None),
+            "first_turn_minutes": (round(self.first_turn_minutes, 3)
+                                   if self.first_turn_minutes is not None
+                                   else None),
         }
 
     @classmethod
@@ -446,6 +456,7 @@ class RouteLedgerRow:
 
         share = raw.get("share_minutes")
         green = raw.get("newly_green")
+        first = raw.get("first_turn_minutes")
         return cls(
             kind=kind, label=str(raw.get("label", "")),
             targets=_pairs("targets"), bodies_sha=str(raw.get("bodies_sha", "")),
@@ -472,6 +483,7 @@ class RouteLedgerRow:
                 for js in raw.get("joint_sets") or () if js),
             opened=(_pairs("opened") if isinstance(raw.get("opened"), list)
                     else None),
+            first_turn_minutes=float(first) if first is not None else None,
         )
 
     def to_json(self) -> str:
@@ -905,6 +917,12 @@ class UnitService:
                  evidence: UnitEvidence | None = None) -> None:
         self._opened: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
+        # Every opened row under the oracle in ledger order, and the session
+        # rows among the opened and deferred ones: a session's try is keyed
+        # by the tests it aims at, not by the units it touched.
+        self._opened_rows: list[RouteLedgerRow] = []
+        self._sessions: list[RouteLedgerRow] = []
+        self._sessions_deferred: list[RouteLedgerRow] = []
         self._min_turns = session_min_turns
         self._evidence = evidence
         rows = list(rows)
@@ -919,6 +937,11 @@ class UnitService:
                       else None)
             if bucket is None:
                 continue
+            if bucket is self._opened:
+                self._opened_rows.append(r)
+            if r.kind is RouteKind.SESSION:
+                (self._sessions if bucket is self._opened
+                 else self._sessions_deferred).append(r)
             for f, fn in r.targets:
                 bucket.setdefault(FnLocator(f, fn), []).append(r)
 
@@ -948,6 +971,81 @@ class UnitService:
                 and row.model_calls < self._min_turns
                 and row.share_minutes is not None
                 and row.minutes >= row.share_minutes)
+
+    def _prior_cut(self, row: RouteLedgerRow, test: str) -> bool:
+        """The session try on `test` before `row` was cut by its share too."""
+        prior = None
+        for r in self._sessions:
+            if r is row:
+                break
+            if test in r.target_tests:
+                prior = r
+        return prior is not None and self.starved(prior)
+
+    def cut_by_share(self, row: RouteLedgerRow) -> bool:
+        """`row` is :meth:`starved`, and at least one test it aimed at had not
+        been cut by the share on its try before: the share owes a test one
+        more look, not an unbounded number.
+
+        A starved row ranks ``served`` because the share, not the route, ended
+        it. That holds for a test's first cut. When the session try on the
+        test before it was cut too, the share was too small twice, and
+        nothing bounded the next one: on `450922-661c5e9f` `test_altdebug`
+        was cut after one call at fill 10 (with `test_downcast_low`, 26.8
+        min) and fill 11 (with `test_downcast_mid`, 33.2 min), and a third
+        slice on it opened at fill 12. Keyed per test, because every fill
+        re-packs the leftovers: no two of those three slices aimed at the
+        same set. A test cut twice in a row is graded on the outcome its
+        latest row recorded."""
+        if not self.starved(row):
+            return False
+        if not row.target_tests:
+            return True
+        return any(not self._prior_cut(row, t) for t in row.target_tests)
+
+    def session_rebuy(self, run: RouteRun) -> tuple[int, int] | None:
+        """(rank, deferrals) when every test `run` aims at was last tried by a
+        session that was graded and did not pay it; None otherwise.
+
+        A session's slice is re-packed around its leftovers every fill, so
+        a new unit set or a moved body makes a new identity and a new work
+        key for the same question. The question is the test. Its latest
+        session row decides: graded (not starved, or starved on a test whose
+        try before was starved too — :meth:`cut_by_share`), FLAT / REVERTED /
+        DECLINED, not paying the test, and no later opened row on any route
+        paying it. One test without such a row (never tried by a session,
+        owed its look after a first cut, or paid since) leaves the run at
+        the rank it already holds. An unopened unit does not: `_rank_of`
+        asks this for `never_served` as well as `served`, so a unit no
+        route has opened, riding on tests that already have the row, is
+        the re-buy. Deferrals are the session deferrals aimed at the test
+        since that row, the least over the tests, for the bounded
+        re-admission."""
+        if run.kind is not RouteKind.SESSION or not run.target_tests:
+            return None
+        worst = _RANK_PAYING
+        deferrals: list[int] = []
+        for t in run.target_tests:
+            mine = [r for r in self._sessions if t in r.target_tests]
+            if not mine:
+                return None
+            last = mine[-1]
+            owed = self.starved(last) and not self._prior_cut(last, t)
+            if (owed or row_paid_test(last, t)
+                    or last.outcome not in (RunOutcome.FLAT,
+                                            RunOutcome.REVERTED,
+                                            RunOutcome.DECLINED)):
+                return None
+            at = next(i for i, r in enumerate(self._opened_rows) if r is last)
+            if any(row_paid_test(r, t) for r in self._opened_rows[at + 1:]):
+                return None
+            worst = max(worst, _RANK_REBUY_REVERTED
+                        if last.outcome is RunOutcome.REVERTED
+                        else _RANK_REBUY_FLAT)
+            deferrals.append(sum(
+                1 for d in self._sessions_deferred
+                if t in d.target_tests and d.started >= last.started))
+        return worst, min(deferrals)
 
     def rank(self, run: RouteRun, *, grace_left: bool,
              readmit_after: int) -> tuple[int, str]:
@@ -1025,7 +1123,7 @@ class UnitService:
         opened = self._opened[t]
         here_at = [i for i, r in enumerate(opened)
                    if self._same_route(r, run)]
-        if (not here_at or self.starved(opened[here_at[-1]])
+        if (not here_at or self.cut_by_share(opened[here_at[-1]])
                 or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
             # Never tried on this route, starved by its share, or a later
             # try on another route PAID (the verdicts this route last saw
@@ -1088,7 +1186,7 @@ class UnitService:
         if not here_at:
             return _RANK_SERVED, None
         last = opened[here_at[-1]]
-        if self.starved(last) or any(
+        if self.cut_by_share(last) or any(
                 _row_paid(r) for r in opened[here_at[-1] + 1:]):
             return _RANK_SERVED, None
         if (t in _locs(last.reverted) and t not in _locs(last.kept)
@@ -1306,7 +1404,7 @@ def _rank_of(run: RouteRun, oracle_fp: str,
                                   readmit_after=readmit_after)
     else:
         rank, reason = _ledger_rank(run, last, grace_left=grace_left,
-                                    starved=units.starved(last))
+                                    starved=units.cut_by_share(last))
     if (run.kind is RouteKind.PAIR and not grace_left
             and rank in (_RANK_NEVER_SERVED, _RANK_SERVED)):
         # Past the grace a pair is never "never served": its work key has
@@ -1319,6 +1417,20 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         # oracle, none paying, the last two on one bodies sha, and the
         # pair still opened ahead of four never-served sessions.
         return _RANK_SERVED, "grace_spent", deferrals
+    if (run.kind is RouteKind.SESSION
+            and rank in (_RANK_SERVED, _RANK_NEVER_SERVED)):
+        # A re-packed slice is a new identity and a new work key for the
+        # same tests; the tests' own latest session tries decide. An
+        # unopened unit is `never_served` from `UnitService.rank` whatever
+        # rides with it, which is how a twice-cut test reopened: the slice
+        # added one unit no route had opened. The tests still decide.
+        # `paying` is left alone, and so is a `never_served` whose tests
+        # have no graded unpaid row (`session_rebuy` returns None): a
+        # first cut, an untried test, an interrupted try.
+        rebuy = units.session_rebuy(run)
+        if rebuy is not None:
+            rank, deferrals = rebuy
+            reason = _REASON[rank]
     if rank in (_RANK_REBUY_FLAT, _RANK_REBUY_REVERTED) \
             and deferrals >= readmit_after:
         return rank, "rebuy_readmitted", deferrals
@@ -1334,8 +1446,9 @@ def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
         # Interrupted, or every reply reasoning-capped: not evidence.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     if starved:
-        # Ended by its share before its minimum turns (UnitService.starved):
-        # opened, so served, but not a graded try.
+        # Ended by its share before its minimum turns, the first such cut
+        # on its aimed tests (UnitService.cut_by_share): opened, so served,
+        # but not a graded try.
         return _RANK_SERVED, _REASON[_RANK_SERVED]
     if (last.outcome is RunOutcome.REVERTED and run.kind is RouteKind.PAIR
             and grace_left):
@@ -1593,28 +1706,112 @@ def unpaid_attributed_writes(rows: Iterable[RouteLedgerRow], test: str,
 _TURN_COST_WINDOW = 20
 
 
-def session_turn_minutes(rows: Iterable[RouteLedgerRow],
-                         run: RouteRun) -> float | None:
-    """The median minutes per model call over this session's rows (its work
-    key), falling back to every session row in the ledger; None when there
-    is none. A session's unit of progress is a turn (compile → diagnostics
-    → next turn), and one turn is one call, so minutes / calls is its turn
-    price. Measured across `logs/pipeline_anyhow.log*` to 2026-09-21: 41
-    sessions stopped by the share, 31 after at most 2 of 8 turns; session
-    turn calls since 2026-09-14 ran p50 5.0 / p90 14.3 min, and run
-    `450977-5f48b68a`'s two turns were 11.3 and 14.3 min against shares of 9
-    and 11 min. Any oracle: a turn's price does not depend on which tests
-    fail."""
+@dataclass(frozen=True, slots=True)
+class SessionTurnPrice:
+    """What a session's turns cost, in minutes: its first turn, and each turn
+    after it.
+
+    The two are different quantities. The first turn carries the session's
+    whole opening: the baseline suite, turn 0's prompt (the largest the
+    session sends) and the deliberation over it (the longest). A later turn
+    answers a diagnostic on a transcript the model has already read. On run
+    `450922-661c5e9f` (2026-10-05, cluster stable) first turns ran 1.4–33.2
+    min, median 16.1, and later turns mostly 0.0–4.5. A per-call median
+    spreads the first turn over turns the session never reaches: fill 9
+    reserved a fresh slice 3 × 3.98 = 11.9 min and fill 10 3 × 4.19 = 12.6,
+    and six of their seven sessions ran one turn and were cut by the share.
+
+    ``first == later`` is the uniform per-call reading, which is all a ledger
+    with no first-turn sample can say."""
+
+    first: float
+    later: float
+
+    def floor(self, turns: int) -> float:
+        """Minutes for `turns` turns: the first, then `turns - 1` later ones."""
+        if turns <= 0:
+            return 0.0
+        return self.first + (turns - 1) * self.later
+
+    def note(self, turns: int) -> str:
+        if turns <= 1 or self.first == self.later:
+            return f"floor {turns}x{self.later:.1f}m"
+        return f"floor {self.first:.1f}m+{turns - 1}x{self.later:.1f}m"
+
+
+def _median(xs: Sequence[float]) -> float:
+    s = sorted(xs)
+    mid = len(s) // 2
+    return s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2
+
+
+def _first_turn_sample(r: RouteLedgerRow) -> float | None:
+    """The first turn's minutes on one session row. A row that made one call
+    is its first turn whole, recorded field or not."""
+    if r.first_turn_minutes is not None:
+        return r.first_turn_minutes
+    if r.model_calls == 1:
+        return r.minutes
+    return None
+
+
+def _later_turn_sample(r: RouteLedgerRow) -> float | None:
+    """Minutes per turn after the first on one session row. A row written
+    before the first turn was recorded can only give minutes / calls, an
+    upper bound (it still holds the first turn)."""
+    if r.model_calls < 2:
+        return None
+    if r.first_turn_minutes is not None:
+        return max(0.0, r.minutes - r.first_turn_minutes) / (r.model_calls - 1)
+    return r.minutes / r.model_calls
+
+
+def session_turn_price(rows: Iterable[RouteLedgerRow],
+                       run: RouteRun) -> SessionTurnPrice | None:
+    """The session's turn price: each half the median of its samples over
+    this session's own rows, falling back to the newest `_TURN_COST_WINDOW`
+    session rows that give that half a sample; None when no session row
+    gives either.
+
+    A session's own rows are the session rows aimed at any of its tests, the
+    key the ranking reads a session try by (`UnitService._same_route`). The
+    unit set is not part of it: every fill re-packs the leftovers, so a
+    work key with units in it is new almost every fill, and the price fell
+    to the window, which on `450922-661c5e9f` fill 9 was a first-turn median
+    of 11.0 min from older runs while this run's tail first turns ran 13-33.
+    The turn-0 prompt is the slice the test executes, so the test's own
+    first turns are the price of its next one. A run that aims at no test
+    is matched on its work key.
+
+    A share-cut row is priced like any other: its minutes are the turns it
+    ran, and a one-call cut row is exactly the first-turn sample this price
+    exists to keep. With no first-turn sample anywhere the price is the
+    uniform per-call median the floor was priced at before
+    (``first == later``). Any oracle: a turn's price does not depend on which
+    tests fail."""
     sessions = [r for r in rows if r.kind is RouteKind.SESSION
                 and r.model_calls > 0 and r.minutes > 0]
-    key = _served_key(run)
-    own = [r for r in sessions if _served_key_of(r) == key]
-    pool = (own or sessions)[-_TURN_COST_WINDOW:]
-    if not pool:
+    if run.target_tests:
+        own = [r for r in sessions if run.target_tests & set(r.target_tests)]
+    else:
+        key = _served_key(run)
+        own = [r for r in sessions if _served_key_of(r) == key]
+
+    def _half(sample: Callable[[RouteLedgerRow], float | None]) -> float | None:
+        mine = [x for x in map(sample, own) if x is not None]
+        if mine:
+            return _median(mine[-_TURN_COST_WINDOW:])
+        pool = [x for x in map(sample, sessions) if x is not None]
+        return _median(pool[-_TURN_COST_WINDOW:]) if pool else None
+
+    first = _half(_first_turn_sample)
+    later = _half(_later_turn_sample)
+    if first is None and later is None:
         return None
-    per = sorted(r.minutes / r.model_calls for r in pool)
-    mid = len(per) // 2
-    return per[mid] if len(per) % 2 else (per[mid - 1] + per[mid]) / 2
+    if first is None:
+        assert later is not None
+        return SessionTurnPrice(first=later, later=later)
+    return SessionTurnPrice(first=first, later=first if later is None else later)
 
 
 def _allot(scheduled: list[ScheduledRun], budget_minutes: float
@@ -1761,16 +1958,21 @@ def schedule(
 
     ``session_min_turns`` prices a session's share in its own unit: an
     opened session's share is at least that many turns at its measured
-    turn cost (:func:`session_turn_minutes`), taken from the budget before
+    price, the first turn and the turns after it priced apart
+    (:func:`session_turn_price`), taken from the budget before
     the weighted split; floors that together exceed the budget are clipped
     to budget / sessions (:func:`_floor_clip`) and the schedule line says
     so. The clock that opens the run recomputes that same allotment against
     the time still left (:meth:`FillBudget.opening_shares`), so a floor
     that has not opened yet is not spent by an earlier run, and time an
     earlier run did not use flows forward. A session row that ran out of
-    its share before that many turns is not a graded try
-    (:meth:`UnitService.starved`). ``0`` restores the plain weighted split
-    and the pre-floor grading.
+    its share before that many turns is not a graded try, once per aimed
+    test set (:meth:`UnitService.cut_by_share`). ``0`` restores the plain
+    weighted split and the pre-floor grading.
+
+    A session aimed only at tests whose latest session try was graded,
+    unpaid and not cut by its share ranks as the re-buy of that try under
+    any packing (:meth:`UnitService.session_rebuy`).
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -2065,24 +2267,24 @@ def admit_ranked(
         return FillSchedule(tuple(scheduled), tuple(waiting), 0.0)
 
     if session_min_turns > 0:
-        priced: dict[str, float] = {}
+        priced: dict[str, SessionTurnPrice] = {}
         for sr in scheduled:
             if sr.run.kind is RouteKind.SESSION and sr.weight > 0:
-                turn = session_turn_minutes(rows_list, sr.run)
-                if turn is not None:
-                    priced[sr.run.key] = turn
-        total_floor = sum(session_min_turns * t for t in priced.values())
-        clip = _floor_clip(
-            [session_min_turns * t for t in priced.values()], budget_minutes)
+                price = session_turn_price(rows_list, sr.run)
+                if price is not None:
+                    priced[sr.run.key] = price
+        floors = {k: p.floor(session_min_turns) for k, p in priced.items()}
+        total_floor = sum(floors.values())
+        clip = _floor_clip(list(floors.values()), budget_minutes)
         scheduled = [
             replace(sr, floor_minutes=(
-                min(session_min_turns * priced[sr.run.key], clip)
-                if clip is not None else session_min_turns * priced[sr.run.key]),
+                min(floors[sr.run.key], clip)
+                if clip is not None else floors[sr.run.key]),
                 floor_note=(
-                    f"floor {session_min_turns}x{priced[sr.run.key]:.1f}m"
+                    priced[sr.run.key].note(session_min_turns)
                     + (f" clipped to {clip:.0f}m (floors {total_floor:.0f}m > "
                        f"budget {budget_minutes:.0f}m)" if clip is not None
-                       and session_min_turns * priced[sr.run.key] > clip
+                       and floors[sr.run.key] > clip
                        else "")))
             if sr.run.key in priced else sr
             for sr in scheduled]

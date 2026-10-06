@@ -24,8 +24,9 @@ index, N being the event's `ledger_rows`. Of those, the fixture keeps the rows
 the admission stage can read: rows aimed at any candidate's tests (the
 per-test grace clocks) and PAIR rows (a pair's own grace), under the fill's
 oracle (every clock skips the others), with the fields those clocks read.
-`minutes` and `model_calls` stay too: a session floor is priced from them
-(`session_turn_minutes`), and dropping them replays every floor as absent.
+`minutes`, `model_calls` and `first_turn_minutes` stay too: a session floor
+is priced from them (`session_turn_price`), and dropping them replays every
+floor as absent.
 `oracle_fp` is the oracle of the newest such row of the same run, else of
 the newest such row.
 
@@ -40,12 +41,13 @@ import argparse
 import json
 from pathlib import Path
 
-# Fields the admission clocks read. `minutes` and `model_calls` price a
-# session's floor; the grace clocks read the rest.
+# Fields the admission clocks read. `minutes`, `model_calls` and
+# `first_turn_minutes` price a session's floor; the grace clocks read the rest.
 _CLOCK_FIELDS = (
     "kind", "label", "targets", "bodies_sha", "oracle_fp",
     "outcome", "run_id", "iteration", "cluster", "net_pass_delta",
     "target_tests", "newly_green", "reason", "minutes", "model_calls",
+    "first_turn_minutes",
 )
 
 
