@@ -157,13 +157,17 @@ class Settings:
     task0d_probe_edges: int = 8
     task0d_exercises: bool = True
     # Whether t0d's program calls (the probe synthesis and the rule-probe
-    # programs, the calls that write Rust) ask the model to reason. Off by
-    # default, like the book's (`behaviour_book_think`), so every t0d call runs
-    # at the lowest rung; on run `450922-661c5e9f` the probes replied p50 1,810
-    # content chars after p50 38,386 reasoning chars, and the rule probes p50
-    # 423 after 14,003 (`scripts/measure_phase_reasoning.py`).
-    # `TASK0D_PROGRAM_THINK=1` restores reasoning on them.
-    task0d_program_think: bool = False
+    # programs, the calls that write Rust) ask the model to reason. On by
+    # default. Run `1397698-aaac983d` took them to the lowest rung against the
+    # high run `450922-661c5e9f`, with no other t0d change between the two:
+    # rule probes went from 4 and 7 rules confirmed (stable, nightly) to 0 and
+    # 0, with 12 captures per cluster withdrawn at emission against none, and
+    # the suites lost every probe-derived spec (13 and 8). The probes' compile
+    # failures were basic ones (a missing `#[derive(Debug)]`, a missing `dyn`).
+    # The rung saved 37 of the rule probes' 50 minutes and about 7 of the
+    # probes' 9.5 per cluster, in a phase a bake pays once.
+    # `TASK0D_PROGRAM_THINK=0` runs them at the lowest rung.
+    task0d_program_think: bool = True
     # Blocks honoured per synthesis reply. The probe-target cap bounds how many
     # units are ASKED about; without this a single reply's block count bounded
     # the cargo runs, and each run costs a compile at up to the probe timeout.
@@ -204,13 +208,18 @@ class Settings:
     # chooses a value. Printed as `predict-temp=` on the behaviour-book line.
     behaviour_book_predict_temperature: float | None = None
     # Whether the book's draft, judge and Given-phrase calls ask the model to
-    # reason. Off by default: on run `450922-661c5e9f` the book's 105 calls
-    # replied p50 787 content chars after p50 26,981 reasoning chars, 492.8
-    # call-minutes (`scripts/measure_phase_reasoning.py`). The probe and
-    # rule-probe program calls have their own setting, `task0d_program_think`.
-    # `BEHAVIOUR_BOOK_THINK=1` restores reasoning on the book. Printed as
-    # `think=` on the behaviour-book line.
-    behaviour_book_think: bool = False
+    # reason. On by default. At the lowest rung (run `1397698-aaac983d`) the
+    # book took 9 minutes instead of 137 and covered 15 of 197 checkable
+    # examples, against 99-101 (of 197 or 204) in the three earlier readings
+    # at high, with 0 covered by a sibling chunk's rule against about 50.
+    # The judge ran at
+    # the same rung, so that reading does not separate a worse book from a
+    # different judge (`scripts/book_judge_replay.py` re-judges recorded
+    # drafts); keeping both at high also keeps the reading comparable with
+    # every earlier one. The probe and rule-probe program calls have their
+    # own setting, `task0d_program_think`. `BEHAVIOUR_BOOK_THINK=0` runs the
+    # book at the lowest rung. Printed as `think=` on the behaviour-book line.
+    behaviour_book_think: bool = True
     # A feature's kept sentences are judged again on each of its chunks'
     # uncovered examples (one set call, plus leave-one-out calls when it
     # gains). `BEHAVIOUR_BOOK_SIBLING_CHUNKS=0` leaves each chunk with the
@@ -286,7 +295,7 @@ class Settings:
             task0d_probe_max=int(os.getenv("TASK0D_PROBE_MAX", "12")),
             task0d_probe_edges=int(os.getenv("TASK0D_PROBE_EDGES", "8")),
             task0d_exercises=os.getenv("TASK0D_EXERCISES", "1").strip() == "1",
-            task0d_program_think=os.getenv("TASK0D_PROGRAM_THINK", "0").strip() == "1",
+            task0d_program_think=os.getenv("TASK0D_PROGRAM_THINK", "1").strip() == "1",
             task0d_blocks_per_reply=int(
                 os.getenv("TASK0D_BLOCKS_PER_REPLY", "8")),
             task0d_classes_per_cluster=int(
@@ -302,7 +311,7 @@ class Settings:
                 os.getenv("BEHAVIOUR_BOOK_LANES") or os.getenv("PIPELINE_PARALLELISM") or "1")),
             behaviour_book_predict_temperature=_optional_float(
                 os.getenv("BEHAVIOUR_BOOK_PREDICT_TEMPERATURE")),
-            behaviour_book_think=os.getenv("BEHAVIOUR_BOOK_THINK", "0").strip() == "1",
+            behaviour_book_think=os.getenv("BEHAVIOUR_BOOK_THINK", "1").strip() == "1",
             behaviour_rule_probes=int(os.getenv("BEHAVIOUR_RULE_PROBES", "8")),
             behaviour_rule_probe_programs=int(os.getenv("BEHAVIOUR_RULE_PROBE_PROGRAMS", "3")),
             behaviour_held_out_share=max(0, min(100, int(

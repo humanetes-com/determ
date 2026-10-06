@@ -436,6 +436,7 @@ def test_a_non_first_occurrence_can_be_targeted(tmp_path):
         lock_for_fn=lambda p: Lock(),
     )
     shown: dict[str, str] = {}
+    logs: list[str] = []
     ctx = RetryContext(
         project_dir=tmp_path, src_root=src, cluster_label="stable",
         containers={("kind.rs", "new"): "impl Adhoc"},
@@ -451,8 +452,12 @@ def test_a_non_first_occurrence_can_be_targeted(tmp_path):
             sig=kw["sig_text"], prev=kw["prev_body"]) or "prompt",
         ask_per_fn_body=lambda *a, **kw: ("{ Error::from_boxed(error) }", ""),
         splice_body_scoped=mut.splice_body_scoped,
+        log=logs.append,
     )
-    assert fix_one_ref("src/kind.rs", "new", "", ctx, d, occurrence=1) is True
+    # Every False exit of `fix_one_ref` is either a logged refusal or a step
+    # before the prompt; the message names which one a failure took.
+    assert fix_one_ref("src/kind.rs", "new", "", ctx, d, occurrence=1) is True, (
+        f"logs={logs} prompted={shown} file_exists={f.exists()}")
     out = f.read_text()
     assert "from_boxed" in out, "the second definition was never written"
     assert "first()" in out, "the first definition was overwritten"

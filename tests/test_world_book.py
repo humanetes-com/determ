@@ -199,21 +199,21 @@ def test_the_book_asks_through_its_own_binding_and_leaves_ask_to_the_programs() 
     assert control.drafts() == 3
 
 
-def test_the_book_reasons_only_when_the_setting_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_book_reasons_unless_the_setting_turns_it_off(monkeypatch: pytest.MonkeyPatch) -> None:
     from pipeline_core.settings import Settings
     monkeypatch.delenv("BEHAVIOUR_BOOK_THINK", raising=False)
-    assert Settings.from_env().behaviour_book_think is False
-    monkeypatch.setenv("BEHAVIOUR_BOOK_THINK", "1")
     assert Settings.from_env().behaviour_book_think is True
+    monkeypatch.setenv("BEHAVIOUR_BOOK_THINK", "0")
+    assert Settings.from_env().behaviour_book_think is False
 
 
-def test_the_t0d_program_calls_reason_only_when_the_setting_asks(
+def test_the_t0d_program_calls_reason_unless_the_setting_turns_it_off(
         monkeypatch: pytest.MonkeyPatch) -> None:
     from pipeline_core.settings import Settings
     monkeypatch.delenv("TASK0D_PROGRAM_THINK", raising=False)
-    assert Settings.from_env().task0d_program_think is False
-    monkeypatch.setenv("TASK0D_PROGRAM_THINK", "1")
     assert Settings.from_env().task0d_program_think is True
+    monkeypatch.setenv("TASK0D_PROGRAM_THINK", "0")
+    assert Settings.from_env().task0d_program_think is False
 
 
 def test_serial_and_parallel_lanes_build_the_same_book_and_reading() -> None:
