@@ -48,7 +48,10 @@ class ExitKind(StrEnum):
     opened it: the route's own planners dropped it after the schedule fixed
     the targets (the refill collector, the stale probe, a withholding). The
     ledger's ``targets`` alone read this as held, which is why 37% of the
-    census's unattempted units looked routed; ``detail`` names the runs."""
+    census's unattempted units looked routed; ``detail`` names the runs,
+    and with each the predicate that dropped the unit when the run recorded
+    one (``RouteLedgerRow.filtered``: per-fn's claim gate says `premise` or
+    `share`)."""
 
     DEFERRED = "deferred"
     """Every run holding the unit was deferred; `detail` lists the reasons
@@ -98,8 +101,11 @@ def unit_exits(
             key = (u.file, u.fn_name)
             if executed and all(r.opened is not None and key not in r.opened
                                 for r in executed):
-                out[u] = UnitExit(ExitKind.FILTERED,
-                                  ", ".join(sorted({r.label for r in executed})))
+                # The predicate that dropped it, where the run named one.
+                why = sorted({f"{r.label}: {w}" for r in executed
+                              for f, n, w in r.filtered if (f, n) == key})
+                out[u] = UnitExit(ExitKind.FILTERED, ", ".join(
+                    why or sorted({r.label for r in executed})))
             elif executed:
                 out[u] = UnitExit(ExitKind.RUN_TARGET,
                                   ", ".join(sorted({r.label for r in executed})))

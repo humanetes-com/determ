@@ -98,7 +98,7 @@ def test_negative_control_identity_alone_fires_before_any_dispatch(
     from pipeline_core.domain.escalation_lifetime import FireDecision
     monkeypatch.setattr(
         phase_c_tdd, "escalation_fire_due",
-        lambda units, prev, served_at, since: FireDecision(
+        lambda units, prev, served_at, since, **_kw: FireDecision(
             due=(prev is not None and prev == units), unserved=()))
     logs, batches, events = _process(monkeypatch, tmp_path)
     assert _PARKED not in batches[0]

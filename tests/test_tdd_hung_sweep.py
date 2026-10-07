@@ -152,3 +152,57 @@ def test_a_timeout_that_cut_the_build_still_ends_the_cluster(monkeypatch, tmp_pa
     assert any("the build did not finish. Stopping." in ln for ln in logs)
     assert not any("HUNG in" in ln for ln in logs)
     assert os.getenv("TDD_MAX_STALLS") == "1"
+
+
+_REDDENED = (_LIB
+             + "    Running tests/ptr_gen_1.rs (t/ptr_gen_1-1)\n"
+               "running 3 tests\ntest test_error_context_display ... FAILED\n"
+               "test test_error_debug_chain ... FAILED\ntest test_z ... ok\n"
+               "test result: FAILED. 1 passed; 2 failed; 0 ignored\n"
+               "    Running tests/later.rs (t/later-1)\n"
+               "running 1 test\ntest later ... FAILED\n"
+               "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
+
+
+def test_an_entry_sweep_below_the_mark_under_the_same_layout_is_restored(
+        monkeypatch, tmp_path):
+    """Runs `13787-88fc12a8` → `137975-9ed0bd7b`: a process killed mid-turn
+    left a reddened tree (139 against a 144 mark); the next process planned
+    its first fill on it. A first sweep that the mark beats, on the same
+    oracle and the same layout, restores the pair before planning. A mark
+    that predates the hash restores on the oracle alone
+   . Control: a mark whose layout hash differs (a
+    deliberate re-stub moved the layout) declines and plans on the tree."""
+    from pipeline_core.domain.measurement import tree_content_sha
+
+    _tree(tmp_path)
+    layout = tree_content_sha(tmp_path / ".skeleton" / "stable" / "src")
+    mark = BestTreeMark(pass_count=5, iteration=3, tree_sha="deadbeef",
+                        oracle_size=6, layout_sha=layout)
+    events, logs, restores = _run(
+        monkeypatch, tmp_path, [(101, _REDDENED), (101, _HEALTHY)],
+        mark=mark, restore=True)
+    assert len(restores) == 1
+    restored = [d for ev, d in events if ev == "phase_c.tdd.entry_restored"]
+    assert restored and restored[0]["pass_count"] == 3
+    assert _iters(events)[0]["pass_count"] == 5
+
+    no_hash = BestTreeMark(pass_count=5, iteration=3, tree_sha="deadbeef",
+                           oracle_size=6)
+    events, logs, restores = _run(
+        monkeypatch, tmp_path, [(101, _REDDENED), (101, _HEALTHY)],
+        mark=no_hash, restore=True)
+    assert len(restores) == 1
+    assert any("predates its layout hash" in ln and "RESTORED" in ln
+               for ln in logs)
+    assert _iters(events)[0]["pass_count"] == 5
+
+    moved = BestTreeMark(pass_count=5, iteration=3, tree_sha="deadbeef",
+                         oracle_size=6, layout_sha="0" * 16)
+    events, logs, restores = _run(
+        monkeypatch, tmp_path, [(101, _REDDENED), (101, _HEALTHY)],
+        mark=moved, restore=True)
+    assert restores == []
+    assert any("entry restore declined" in ln and "layout moved" in ln
+               for ln in logs)
+    assert _iters(events)[0]["pass_count"] == 3

@@ -2479,6 +2479,38 @@ def test_slice5b_task0b_discovery() -> None:
     print("  OK  task0b discovery extracted")
 
 
+def test_task0b_hands_the_model_the_computed_part_as_given() -> None:
+    """The discovery prompt carries the strategy file's computed part as
+    established, so the model is not asked to restate what rustc says
+    (negative control: without a computed part the section is absent)."""
+    import tempfile
+    from pathlib import Path
+
+    from pipeline_core.application.tasks.task0b_discovery import Task0bDeps, task0b_discovery
+
+    prompts: list[str] = []
+
+    def deps(part: str) -> Task0bDeps:
+        return Task0bDeps(
+            ask=lambda prompt, model=None: prompts.append(prompt) or '<FILE path="coverage_strategy.md">A</FILE>',
+            write=lambda p, c: None,
+            is_test_file=lambda f, d: False, is_gen_tests_file=lambda n: False,
+            strip_gen_tests_decls=lambda t: t, condense_rust_to_signatures=lambda raw, filename="": raw,
+            manifest_name=".generated_files.txt", sibling_cap=3000,
+            single_call_char_limit=120_000, task0_model="m",
+            computed_part=lambda _p: part)
+
+    with tempfile.TemporaryDirectory() as td:
+        proj = Path(td)
+        (proj / "src").mkdir()
+        (proj / "src" / "lib.rs").write_text("pub fn x() {}")
+        task0b_discovery(proj / "coverage_strategy.md", proj, [], "", "", deps("  NEVER: DisplayError  # x"))
+        task0b_discovery(proj / "coverage_strategy.md", proj, [], "", "", deps(""))
+    assert "Already established from rustc's MIR and public index" in prompts[0]
+    assert "NEVER: DisplayError  # x" in prompts[0]
+    assert "Already established" not in prompts[1]
+
+
 def test_slice5b_task1() -> None:
     """Extracted TASK 1 dispatches to the synthesizer, and the proc-macro path
     builds requirements via fakes (Rust-source regex stays injected from pipeline)."""

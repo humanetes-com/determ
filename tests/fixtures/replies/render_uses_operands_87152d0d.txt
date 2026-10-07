@@ -1,0 +1,4 @@
+<FN name="render" block="">
+let s = format!("{} (left: {:?}, right: {:?})", msg, lhs, rhs);
+Error::msg(s)
+</FN>

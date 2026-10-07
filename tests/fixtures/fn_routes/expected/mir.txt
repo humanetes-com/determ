@@ -1,0 +1,518 @@
+// WARNING: This output format is intended for human consumers only
+// and is subject to change without notice. Knock yourself out.
+// HINT: See also -Z dump-mir for MIR at specific points during compilation.
+fn wrapper::<impl at src/lib.rs:18:5: 18:57>::fmt(_1: &DisplayError<M>, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let _3: &M;
+
+    bb0: {
+        _3 = &((*_1).0: M);
+        _0 = <M as std::fmt::Display>::fmt(copy _3, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn wrapper::<impl at src/lib.rs:24:5: 24:59>::fmt(_1: &DisplayError<M>, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let _3: &M;
+
+    bb0: {
+        _3 = &((*_1).0: M);
+        _0 = <M as std::fmt::Display>::fmt(copy _3, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn wrapper::<impl at src/lib.rs:36:5: 36:32>::fmt(_1: &Unbuilt, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let mut _3: std::fmt::Arguments<'_>;
+    let _4: (&u8,);
+    let mut _5: &u8;
+    let mut _7: core::fmt::rt::Argument<'_>;
+    let mut _8: &[u8; 13];
+    let _9: &[core::fmt::rt::Argument<'_>; 1];
+    let mut _10: &u8;
+    scope 1 {
+        debug args => _4;
+        let _6: [core::fmt::rt::Argument<'_>; 1];
+        scope 2 {
+            debug args => _6;
+        }
+    }
+
+    bb0: {
+        _5 = &((*_1).0: u8);
+        _4 = (move _5,);
+        _10 = copy (_4.0: &u8);
+        _7 = core::fmt::rt::Argument::<'_>::new_display::<u8>(copy _10) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _6 = [move _7];
+        _8 = const b"\x08Unbuilt(\xc0\x01)\x00";
+        _9 = &_6;
+        _3 = Arguments::<'_>::new::<13, 1>(move _8, copy _9) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _0 = Formatter::<'_>::write_fmt(copy _2, move _3) -> [return: bb3, unwind continue];
+    }
+
+    bb3: {
+        return;
+    }
+}
+
+alloc1 (size: 13, align: 1) {
+    08 55 6e 62 75 69 6c 74 28 c0 01 29 00          │ .Unbuilt(..).
+}
+
+fn <impl at src/lib.rs:59:1: 59:48>::fmt(_1: &ErrorImpl<E>, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let _3: &E;
+
+    bb0: {
+        _3 = &((*_1).1: E);
+        _0 = <E as Debug>::fmt(copy _3, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:65:1: 65:52>::fmt(_1: &ErrorImpl<E>, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let _3: &E;
+
+    bb0: {
+        _3 = &((*_1).1: E);
+        _0 = <E as std::fmt::Display>::fmt(copy _3, copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn object_ref(_1: *const ()) -> *const dyn std::error::Error + Send + Sync {
+    debug p => _1;
+    let mut _0: *const dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _2: *const ErrorImpl<E>;
+    scope 1 {
+        debug unerased => _2;
+        let _3: *const E;
+        scope 2 {
+            debug inner => _3;
+        }
+    }
+
+    bb0: {
+        _2 = copy _1 as *const ErrorImpl<E> (PtrToPtr);
+        _3 = &raw const ((*_2).1: E);
+        _0 = copy _3 as *const dyn std::error::Error + std::marker::Send + std::marker::Sync (PointerCoercion(Unsize, Implicit));
+        return;
+    }
+}
+
+fn object_boxed(_1: *mut ()) -> Box<dyn std::error::Error + Send + Sync> {
+    debug p => _1;
+    let mut _0: std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>;
+    let _2: std::boxed::Box<ErrorImpl<E>>;
+    let mut _3: *mut ErrorImpl<E>;
+    scope 1 {
+        debug unerased => _2;
+    }
+
+    bb0: {
+        _3 = copy _1 as *mut ErrorImpl<E> (PtrToPtr);
+        _2 = Box::<ErrorImpl<E>>::from_raw(copy _3) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _0 = copy _2 as std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> (PointerCoercion(Unsize, Implicit));
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:89:1: 89:11>::construct(_1: E) -> Error {
+    debug object => _1;
+    let mut _0: Error;
+    let _2: &VTable;
+    let mut _4: ErrorImpl<E>;
+    let mut _5: *mut ();
+    let mut _6: *mut ErrorImpl<E>;
+    scope 1 {
+        debug vtable => _2;
+        let _3: std::boxed::Box<ErrorImpl<E>>;
+        scope 2 {
+            debug inner => _3;
+        }
+    }
+
+    bb0: {
+        _2 = const Error::construct::<E>::promoted[0];
+        _4 = ErrorImpl::<E> { vtable: copy _2, object: copy _1 };
+        _3 = Box::<ErrorImpl<E>>::new(move _4) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _6 = Box::<ErrorImpl<E>>::into_raw(copy _3) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        _5 = move _6 as *mut () (PtrToPtr);
+        _0 = Error { ptr: move _5, vtable: copy _2 };
+        return;
+    }
+}
+
+const <impl at src/lib.rs:89:1: 89:11>::construct::promoted[0]: &VTable = {
+    let mut _0: &VTable;
+    let mut _1: VTable;
+    let mut _2: unsafe fn(*const ()) -> *const dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _3: unsafe fn(*mut ()) -> std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>;
+
+    bb0: {
+        _2 = object_ref::<E> as unsafe fn(*const ()) -> *const dyn std::error::Error + std::marker::Send + std::marker::Sync (PointerCoercion(ReifyFnPointer(Unsafe), Implicit));
+        _3 = object_boxed::<E> as unsafe fn(*mut ()) -> std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync> (PointerCoercion(ReifyFnPointer(Unsafe), Implicit));
+        _1 = VTable { object_ref: move _2, object_boxed: move _3 };
+        _0 = &_1;
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:89:1: 89:11>::from_display(_1: M) -> Error {
+    debug message => _1;
+    let mut _0: Error;
+    let _2: wrapper::DisplayError<M>;
+    scope 1 {
+        debug error => _2;
+    }
+
+    bb0: {
+        _2 = DisplayError::<M>(copy _1);
+        _0 = Error::construct::<DisplayError<M>>(copy _2) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:89:1: 89:11>::object(_1: &Error) -> &dyn std::error::Error + Send + Sync {
+    debug self => _1;
+    let mut _0: &dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let _2: *const dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _3: unsafe fn(*const ()) -> *const dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _4: *const ();
+    let mut _5: *mut ();
+    let mut _6: &VTable;
+
+    bb0: {
+        _6 = copy ((*_1).1: &VTable);
+        _3 = copy ((*_6).0: unsafe fn(*const ()) -> *const dyn std::error::Error + std::marker::Send + std::marker::Sync);
+        _5 = copy ((*_1).0: *mut ());
+        _4 = move _5 as *const () (PtrToPtr);
+        _2 = move _3(copy _4) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _0 = &(*_2);
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:89:1: 89:11>::into_boxed(_1: Error) -> Box<dyn std::error::Error + Send + Sync> {
+    debug self => _1;
+    let mut _0: std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>;
+    let mut _2: unsafe fn(*mut ()) -> std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>;
+    let mut _3: *mut ();
+    let mut _4: &VTable;
+
+    bb0: {
+        _4 = copy (_1.1: &VTable);
+        _2 = copy ((*_4).1: unsafe fn(*mut ()) -> std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>);
+        _3 = copy (_1.0: *mut ());
+        _0 = move _2(move _3) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:89:1: 89:11>::never_called(_1: &Error) -> u8 {
+    debug self => _1;
+    let mut _0: u8;
+
+    bb0: {
+        _0 = const 0_u8;
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:119:1: 119:26>::fmt(_1: &Error, _2: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+    debug self => _1;
+    debug f => _2;
+    let mut _0: std::result::Result<(), std::fmt::Error>;
+    let _3: &dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _4: bool;
+    let mut _5: &std::fmt::Formatter<'_>;
+    let mut _6: std::fmt::Arguments<'_>;
+    let mut _8: &&dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    let mut _10: core::fmt::rt::Argument<'_>;
+    let mut _11: &[u8; 2];
+    let _12: &[core::fmt::rt::Argument<'_>; 1];
+    let mut _13: &&dyn std::error::Error + std::marker::Send + std::marker::Sync;
+    scope 1 {
+        debug object => _3;
+        let _7: (&&dyn std::error::Error + std::marker::Send + std::marker::Sync,);
+        scope 2 {
+            debug args => _7;
+            let _9: [core::fmt::rt::Argument<'_>; 1];
+            scope 3 {
+                debug args => _9;
+            }
+        }
+    }
+
+    bb0: {
+        _3 = Error::object(copy _1) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _5 = &(*_2);
+        _4 = Formatter::<'_>::alternate(move _5) -> [return: bb2, unwind continue];
+    }
+
+    bb2: {
+        switchInt(move _4) -> [0: bb4, otherwise: bb3];
+    }
+
+    bb3: {
+        _0 = <dyn std::error::Error + Send + Sync as Debug>::fmt(copy _3, copy _2) -> [return: bb7, unwind continue];
+    }
+
+    bb4: {
+        _8 = &_3;
+        _7 = (move _8,);
+        _13 = copy (_7.0: &&dyn std::error::Error + std::marker::Send + std::marker::Sync);
+        _10 = core::fmt::rt::Argument::<'_>::new_display::<&dyn std::error::Error + Send + Sync>(copy _13) -> [return: bb5, unwind continue];
+    }
+
+    bb5: {
+        _9 = [move _10];
+        _11 = const b"\xc0\x00";
+        _12 = &_9;
+        _6 = Arguments::<'_>::new::<2, 1>(move _11, copy _12) -> [return: bb6, unwind continue];
+    }
+
+    bb6: {
+        _0 = Formatter::<'_>::write_fmt(copy _2, move _6) -> [return: bb7, unwind continue];
+    }
+
+    bb7: {
+        return;
+    }
+}
+
+alloc2 (size: 2, align: 1) {
+    c0 00                                           │ ..
+}
+
+fn <impl at src/lib.rs:129:1: 129:53>::from(_1: Error) -> Box<dyn std::error::Error + Send + Sync> {
+    debug error => _1;
+    let mut _0: std::boxed::Box<dyn std::error::Error + std::marker::Send + std::marker::Sync>;
+
+    bb0: {
+        _0 = Error::into_boxed(copy _1) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn <impl at src/lib.rs:139:1: 139:33>::context(_1: Option<T>, _2: C) -> Result<T, Error> {
+    debug self => _1;
+    debug context => _2;
+    let mut _0: std::result::Result<T, Error>;
+    let mut _3: isize;
+    let _4: T;
+    let mut _5: Error;
+    let mut _6: C;
+    let mut _7: bool;
+    scope 1 {
+        debug ok => _4;
+    }
+
+    bb0: {
+        _7 = const false;
+        _7 = const true;
+        _3 = discriminant(_1);
+        switchInt(move _3) -> [0: bb2, 1: bb3, otherwise: bb1];
+    }
+
+    bb1: {
+        unreachable;
+    }
+
+    bb2: {
+        _7 = const false;
+        _6 = move _2;
+        _5 = Error::from_display::<C>(move _6) -> [return: bb4, unwind continue];
+    }
+
+    bb3: {
+        _4 = move ((_1 as Some).0: T);
+        _0 = Result::<T, Error>::Ok(copy _4);
+        goto -> bb7;
+    }
+
+    bb4: {
+        _0 = Result::<T, Error>::Err(move _5);
+        goto -> bb7;
+    }
+
+    bb5: {
+        return;
+    }
+
+    bb6: {
+        drop(_2) -> [return: bb5, unwind continue];
+    }
+
+    bb7: {
+        switchInt(copy _7) -> [0: bb5, otherwise: bb6];
+    }
+}
+
+fn leaf() -> u32 {
+    let mut _0: u32;
+
+    bb0: {
+        _0 = const 3_u32;
+        return;
+    }
+}
+
+fn middle() -> u32 {
+    let mut _0: u32;
+    let mut _1: u32;
+    let mut _2: (u32, bool);
+
+    bb0: {
+        _1 = leaf() -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        _2 = AddWithOverflow(copy _1, const 1_u32);
+        assert(!move (_2.1: bool), "attempt to compute `{} + {}`, which would overflow", move _1, const 1_u32) -> [success: bb2, unwind continue];
+    }
+
+    bb2: {
+        _0 = move (_2.0: u32);
+        return;
+    }
+}
+
+fn entry() -> u32 {
+    let mut _0: u32;
+
+    bb0: {
+        _0 = middle() -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn in_closure() -> u32 {
+    let mut _0: u32;
+
+    bb0: {
+        _0 = const 5_u32;
+        return;
+    }
+}
+
+fn lazy(_1: Option<u32>) -> u32 {
+    debug value => _1;
+    let mut _0: u32;
+
+    bb0: {
+        _0 = Option::<u32>::unwrap_or_else::<{closure@src/lib.rs:168:26: 168:28}>(copy _1, const ZeroSized: {closure@src/lib.rs:168:26: 168:28}) -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn lazy::{closure#0}(_1: {closure@src/lib.rs:168:26: 168:28}) -> u32 {
+    let mut _0: u32;
+
+    bb0: {
+        _0 = in_closure() -> [return: bb1, unwind continue];
+    }
+
+    bb1: {
+        return;
+    }
+}
+
+fn DisplayError(_1: M) -> DisplayError<M> {
+    let mut _0: wrapper::DisplayError<M>;
+
+    bb0: {
+        _0 = DisplayError::<M>(move _1);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn DisplayError(_1: M) -> DisplayError<M> {
+    let mut _0: wrapper::DisplayError<M>;
+
+    bb0: {
+        _0 = DisplayError::<M>(move _1);
+        return;
+    }
+}
+
+fn Unbuilt(_1: u8) -> Unbuilt {
+    let mut _0: wrapper::Unbuilt;
+
+    bb0: {
+        _0 = Unbuilt(move _1);
+        return;
+    }
+}
+
+// MIR FOR CTFE
+fn Unbuilt(_1: u8) -> Unbuilt {
+    let mut _0: wrapper::Unbuilt;
+
+    bb0: {
+        _0 = Unbuilt(move _1);
+        return;
+    }
+}

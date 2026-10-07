@@ -23,6 +23,7 @@ three defect-observable flags use the same patterns the census script does.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -67,9 +68,18 @@ from pipeline_core.domain.behaviour_probe import (
 )
 from pipeline_core.domain.behaviour_select import behaviour_class_name
 from pipeline_core.domain.cfg import CfgSet, cluster_cfg_set
+from pipeline_core.domain.fn_routes import WorldFacts
 from pipeline_core.domain.held_out import capture_key, split_held_out
 from pipeline_core.domain.models import BuildCluster, FnRecord, ModRecord, TypeRecord
 from pipeline_core.domain.module_reachability import externally_reachable_files
+from pipeline_core.domain.reach_probe import (
+    PROBE_FAILED,
+    PROBE_MISSED,
+    REACHED,
+    ReachOutcome,
+    ReachTarget,
+    reach_targets,
+)
 from pipeline_core.domain.rule_probe import (
     DROP_REASON,
     RuleTrial,
@@ -87,7 +97,7 @@ from pipeline_core.domain.workspace_layout import (
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
 from pipeline_core.prompts.behaviour_rules import build_rule_probe_prompt, build_then_prediction_prompt
-from pipeline_core.prompts.behaviour_synthesis import build_behaviour_synthesis_prompt
+from pipeline_core.prompts.behaviour_synthesis import build_behaviour_synthesis_prompt, build_reach_prompt, reach_name
 
 PHASE_PREFIX = BEHAVIOUR_PHASE_PREFIX
 
@@ -195,6 +205,13 @@ class Task0dDeps:
     RULE_PROBES_MAX: int = 0
     RULE_PROBE_PROGRAMS: int = 3
     HELD_OUT_SHARE: int = 0
+    # (project_dir, cluster name) -> the ORIGINAL crate's construction facts
+    # for that world (`domain.fn_routes`), None without them: the reach
+    # round's public routes. None runs no reach round.
+    load_construction_facts: Callable[[Path, str], WorldFacts | None] = lambda _p, _c: None
+    # Writes the reach round's outcomes (`.skeleton/_reach_<cluster>.json`),
+    # which t0c reads to quote a measured miss beside the route.
+    save_reach: Callable[[Path, str, list[ReachOutcome]], object] = lambda _p, _c, _o: None
     save_held_out: Callable[[Path, BehaviourSuite], object] = lambda _p, _s: None
     load_held_out: Callable[[Path, str], BehaviourSuite] = (
         lambda _p, c: BehaviourSuite(cfg_cluster=c))
@@ -207,6 +224,19 @@ def _style_example(specs: tuple[BehaviourSpec, ...]) -> str:
         if is_test_assertion_spec(s) and s.setup.strip():
             return example_code(s)
     return ""
+
+
+def _public_index(deps: Task0dDeps, project_dir: Path,
+                  cluster: str) -> Mapping[str, frozenset[str]] | None:
+    """The world's measured public index (rustdoc's nameable items by
+    defining file), from the construction facts t0b stored; None when none
+    were measured — the mod-chain walk then stands in."""
+    try:
+        facts = deps.load_construction_facts(project_dir, cluster)
+    except Exception:  # noqa: BLE001 — a missing reading is "not measured"
+        return None
+    names = getattr(facts, "item_names", None)
+    return names if names else None
 
 
 def _run_probes(
@@ -230,6 +260,7 @@ def _run_probes(
     reachable = externally_reachable_files(mods, files)
     type_files = {t.name: t.file for t in types if t.is_pub and t.is_exactly_pub}
     cfg_set = CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
+    index = _public_index(deps, project_dir, cluster.name)
     targets = probe_targets(
         records,
         suite.specs,
@@ -237,6 +268,7 @@ def _run_probes(
         reachable_files=reachable,
         type_files=type_files,
         cfg_set=cfg_set,
+        public_index=index,
     )
     # Compositions. The vocabulary is built HERE, from the same records and
     # sources the book reads later: the suite carries no glossary yet (the
@@ -247,7 +279,7 @@ def _run_probes(
     by_name: dict[str, GlossaryEntry] = {}
     if deps.PROBE_EDGES_PER_CLUSTER > 0:
         glossary = glossary_entries(records, types, sources, reachable_files=reachable,
-                                    cfg_set=cfg_set)
+                                    cfg_set=cfg_set, public_index=index)
         by_name = {g.name: g for g in glossary}
         edges, asserted, total = edges_to_ask(glossary, suite.specs,
                                               max_edges=deps.PROBE_EDGES_PER_CLUSTER)
@@ -514,14 +546,18 @@ def _fill_exercises(
     cluster: BuildCluster,
     specs: tuple[BehaviourSpec, ...],
     records: list[FnRecord],
+    sites: dict[str, frozenset[str]] | None = None,
 ) -> tuple[tuple[BehaviourSpec, ...], int, int]:
     """Specs with `exercises` filled from coverage; (specs, filled count,
     cargo invocations). A collaborator that still returns a bare dict
-    (the pre-count signature) is treated as zero invocations."""
+    (the pre-count signature) is treated as zero invocations. `sites`, when
+    given, receives the same hits as site labels per spec (which `fmt` of a
+    file ran), for the reach round."""
     runnable = [s for s in specs if is_test_assertion_spec(s) or is_probe_spec(s)]
     if not runnable:
         return specs, 0, 0
-    raw = deps.exercises_by_coverage(project_dir, cluster, runnable, records)
+    raw = deps.exercises_by_coverage(project_dir, cluster, runnable, records,
+                                     **({"sites_out": sites} if sites is not None else {}))
     cargo_n = 0
     by_id: dict[str, frozenset[str]]
     if isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[0], dict):
@@ -532,6 +568,88 @@ def _fill_exercises(
         return specs, 0, cargo_n
     out = tuple(replace(s, exercises=by_id[s.behaviour_id]) if s.behaviour_id in by_id else s for s in specs)
     return out, sum(1 for s in out if s.exercises), cargo_n
+
+
+def _reach_unit(label: str) -> str:
+    """A spec unit for a reach probe that names no internal: the label's hash."""
+    return "reach_" + hashlib.sha1(label.encode()).hexdigest()[:8]
+
+
+def _run_reach(
+    deps: Task0dDeps,
+    project_dir: Path,
+    module_name: str,
+    cluster: BuildCluster,
+    suite: BehaviourSuite,
+    records: list[FnRecord],
+    executed: frozenset[str],
+    *,
+    default_cluster: str,
+) -> tuple[list[BehaviourSpec], list[ReachOutcome], int]:
+    """The reach round (`domain/reach_probe.py`): one probe along the MIR's
+    public route to each function no example enters, captured twice on the
+    original, then judged by its OWN site-level coverage. Returns
+    (captured specs with `exercises` filled, outcome per target, cargo runs)."""
+    targets = reach_targets(deps.load_construction_facts(project_dir, cluster.name), executed)
+    if not targets:
+        return [], [], 0
+    # The per-cluster probe cap bounds this round too: one probe per target,
+    # each captured twice. Targets past it are said, not dropped silently.
+    cap = max(0, deps.PROBE_MAX_PER_CLUSTER)
+    if len(targets) > cap:
+        deps.log(f"  [task0d] cluster {cluster.name}: reach probes capped at {cap} of "
+                 f"{len(targets)} routed function(s) (TASK0D_PROBE_MAX); the rest "
+                 "are not asked this round.")
+        targets = targets[:cap]
+    surface = deps.public_surface(project_dir, cluster.name)
+    example = _style_example(suite.specs)
+    taken: list[tuple[ReachTarget, BehaviourSpec]] = []
+    outcomes: dict[str, ReachOutcome] = {}
+    cargo_runs = 0
+    size = max(1, deps.PROBE_BLOCKS_PER_REPLY)
+    for start in range(0, len(targets), size):
+        batch = targets[start:start + size]
+        reply = deps.ask(build_reach_prompt(module_name, cluster.name, batch, surface, example))
+        by_name = {p.name: p for p in parse_behaviour_specs(reply)}
+        for i, tgt in enumerate(batch, 1):
+            probe = by_name.get(reach_name(i))
+            if probe is None:
+                outcomes[tgt.label] = ReachOutcome(tgt.label, PROBE_FAILED,
+                                                   reason="the reply carried no block for this line")
+                continue
+            # The observe kind is the route's, not the reply's: the line gave it.
+            probe = replace(probe, name=_reach_unit(tgt.label), observe=tgt.observe)
+            if (bad := value_bearing_reason(probe.when)) is not None:
+                outcomes[tgt.label] = ReachOutcome(tgt.label, PROBE_FAILED, given=probe.given,
+                                                   when=probe.when, observe=probe.observe,
+                                                   reason=f"not value-bearing: {bad}")
+                continue
+            misses: list[dict[str, str]] = []
+            spec, runs = _capture_twice(
+                deps, project_dir, module_name, cluster, probe, unit=probe.name, n=0,
+                tag=f"{cluster.name}_reach_{start + i}", default_cluster=default_cluster,
+                misses=misses)
+            cargo_runs += runs
+            if spec is None:
+                outcomes[tgt.label] = ReachOutcome(
+                    tgt.label, PROBE_FAILED, given=probe.given, when=probe.when,
+                    observe=probe.observe, reason=(misses[-1]["reason"] if misses else "no capture"))
+                continue
+            taken.append((tgt, spec))
+    if not taken:
+        return [], [outcomes[t.label] for t in targets if t.label in outcomes], cargo_runs
+    sites: dict[str, frozenset[str]] = {}
+    specs, _filled, ex_cargo = _fill_exercises(deps, project_dir, cluster,
+                                               tuple(s for _t, s in taken), records, sites)
+    cargo_runs += ex_cargo
+    by_id = {s.behaviour_id: s for s in specs}
+    for tgt, spec in taken:
+        hit = tgt.label in sites.get(spec.behaviour_id, frozenset())
+        outcomes[tgt.label] = ReachOutcome(
+            tgt.label, REACHED if hit else PROBE_MISSED, behaviour_id=spec.behaviour_id,
+            given=spec.setup, when=spec.when, observe=tgt.observe)
+    return ([by_id[s.behaviour_id] for _t, s in taken],
+            [outcomes[t.label] for t in targets if t.label in outcomes], cargo_runs)
 
 
 def run_rule_probes(
@@ -676,7 +794,8 @@ def build_world_book(
     reachable = externally_reachable_files(mods, files) if mods else None
     glossary = union_glossary({
         c.name: glossary_entries(records, types, sources, reachable_files=reachable,
-                                 cfg_set=cluster_cfg_set(c))
+                                 cfg_set=cluster_cfg_set(c),
+                                 public_index=_public_index(deps, project_dir, c.name))
         for c in present})
     union = union_worlds({c.name: suites[c.name] for c in present})
     marks = union.marks()
@@ -852,13 +971,52 @@ def run_task0d(
                      f"(non-fatal, every capture stays in the suite): {e}")
         filled = 0
         _ph.step("t0d.exercises")
+        sites: dict[str, frozenset[str]] | None = None
         if deps.EXERCISES_ENABLED:
             try:
-                specs, filled, ex_cargo = _fill_exercises(deps, project_dir, cluster, suite.specs, records)
+                sites = {}
+                specs, filled, ex_cargo = _fill_exercises(deps, project_dir, cluster, suite.specs,
+                                                          records, sites)
                 cargo_n += ex_cargo
                 suite = suite.with_specs(specs)
             except Exception as e:
+                sites = None
                 deps.log(f"  [task0d] cluster {cluster.name}: exercises failed (non-fatal, harvested suite kept): {e}")
+        # The reach round needs the site-level executed set the exercises just
+        # measured: without it every function would look unexecuted.
+        _ph.step("t0d.reach")
+        if sites is None or deps.PROBE_MAX_PER_CLUSTER <= 0:
+            # Said, not silent: t0c's prompt quotes the reach outcomes, and a
+            # skipped round leaves every routed function without one.
+            deps.log(f"  [task0d] cluster {cluster.name}: reach probes skipped — "
+                     + ("the exercises reading is off or failed, and the round "
+                        "judges a probe by the site-level coverage it measures"
+                        if sites is None else
+                        "TASK0D_PROBE_MAX is 0"))
+        else:
+            try:
+                executed = frozenset(x for v in sites.values() for x in v)
+                reach_specs, reach_out, reach_cargo = _run_reach(
+                    deps, project_dir, module_name, cluster, suite, records, executed,
+                    default_cluster=default_cluster)
+                cargo_n += reach_cargo
+                if reach_specs:
+                    suite = merge_suites(suite, BehaviourSuite(cfg_cluster=cluster.name,
+                                                               specs=tuple(reach_specs)))
+                    admitted_ids |= {s.behaviour_id for s in reach_specs}
+                    filled += sum(1 for s in reach_specs if s.exercises)
+                deps.save_reach(project_dir, cluster.name, reach_out)
+                if reach_out:
+                    counts = {k: sum(1 for o in reach_out if o.outcome == k)
+                              for k in (REACHED, PROBE_MISSED, PROBE_FAILED)}
+                    deps.log(f"  [task0d] cluster {cluster.name}: reach probes: {len(reach_out)} "
+                             f"function(s) no example entered, asked along their public route — "
+                             f"{counts[REACHED]} reached, {counts[PROBE_MISSED]} ran without entering "
+                             f"it, {counts[PROBE_FAILED]} did not capture; {reach_cargo} cargo invocation(s)")
+                    deps.emit("task0d.reach", cluster=cluster.name, **counts,
+                              cargo_invocations=reach_cargo)
+            except Exception as e:
+                deps.log(f"  [task0d] cluster {cluster.name}: reach probes failed (non-fatal, suite kept): {e}")
         # Captures become REAL tests here, or they stay notes about the crate.
         # Emitted from the observed value, never re-asked of the model, and
         # deliberately NOT put through t0c's admission contract: that contract

@@ -46,6 +46,25 @@ def test_err_sig_from_text_matches_old_regex() -> None:
         assert err_sig_from_text(c) == _old_err_sig_text(c), c
 
 
+def test_err_sig_reads_rustcs_errors_through_colour_and_past_the_count_lines() -> None:
+    """The check's rendered text is rustc's `rendered-ansi`: the scan used to
+    match none of its errors, and two attempts failing on `E0277` and then
+    `E0599` both signed as cargo's `could not compile … due to 1 previous
+    error` — "the same error set". Control: a failure with no rustc error
+    line (a linker failure) still signs as cargo's line."""
+    wrap = ("error: could not compile `meters` (lib) due to 1 previous error\n"
+            "error: could not compile `meters` (lib test) due to 1 previous error\n")
+    a = wrap + ("\x1b[1m\x1b[91merror[E0277]\x1b[0m\x1b[1m: cannot add `&str` "
+                "to `u8`\x1b[0m\n")
+    b = wrap + ("\x1b[1m\x1b[91merror[E0599]\x1b[0m\x1b[1m: no method named "
+                "`no_such_method` found for type `u8`\x1b[0m\n")
+    assert err_sig(a) == frozenset({"error[E0277]: cannot add `&str` to `u8`"})
+    assert err_sig(a) != err_sig(b)
+    assert err_sig(wrap + "error: linking with `cc` failed\n") == frozenset(
+        {"error: linking with `cc` failed"})
+    assert err_sig(wrap) == frozenset(wrap.splitlines())
+
+
 def test_err_sig_prefers_json_then_text_fallback() -> None:
     # No JSON present → text scan.
     assert err_sig("error[E0308]: x") == err_sig_from_text("error[E0308]: x")

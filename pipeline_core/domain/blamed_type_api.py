@@ -222,8 +222,12 @@ def _subject_of(block: str) -> tuple[str, frozenset[str]] | None:
         leaf = trait.strip().rsplit("::", 1)[-1].split("<", 1)[0]
         wanted: set[str] = {leaf} if leaf and leaf not in _AUTO_TRAITS else set()
         shape = _dyn_shape(subject.strip())
-        if shape:
-            wanted |= set(_alt_traits(block, shape[0]))
+        # Every spelling this block uses for the obligation: rustc prints
+        # `core::error::Error`, the callee's bound note prints the crate's
+        # alias (`E: StdError`), and a crate impl is recorded under the
+        # alias. Run `486447-5207101c`: `impl<C> StdError for
+        # ContextError<C, Error>` was the answer to `Error: core::error::Error`.
+        wanted |= set(_alt_traits(block, shape[0] if shape else leaf))
         return subject.strip(), frozenset(
             t for t in wanted if t not in _AUTO_TRAITS)
     return None
@@ -259,6 +263,77 @@ def _implements(rec: TypeRecord, traits: frozenset[str]) -> bool:
     return False
 
 
+def _generic_params(generics: str) -> list[str]:
+    """`<C, E: Bound>` -> `["C", "E"]` (lifetimes and consts dropped)."""
+    text = generics.strip()
+    if not (text.startswith("<") and text.endswith(">")):
+        return []
+    out: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in text[1:-1] + ",":
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            name = cur.split(":", 1)[0].strip()
+            if name and not name.startswith("'") and not name.startswith("const "):
+                out.append(name)
+            cur = ""
+            continue
+        cur += ch
+    return out
+
+
+def _split_args(text: str) -> list[str]:
+    out: list[str] = []
+    depth = 0
+    cur = ""
+    for ch in text + ",":
+        if ch in "<([":
+            depth += 1
+        elif ch in ">)]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur.strip())
+            cur = ""
+            continue
+        cur += ch
+    return [a for a in out if a]
+
+
+def instantiating_impl(rec: TypeRecord, subject: str,
+                       traits: frozenset[str]) -> str:
+    """The header of one of ``rec``'s trait impls that implements a wanted
+    trait for ``rec`` with a generic parameter bound to ``subject`` — where
+    that parameter is the type of one of ``rec``'s fields — or "".
+
+    A holder whose field is generic (`error: E`) holds the subject only in
+    the impl that instantiates `E` with it. Run `486447-5207101c`
+    (2026-10-07): a session turn wrote `Self::construct_from_context(context,
+    self, None)` for `Error::context` three times, each E0277 `Error:
+    core::error::Error` not satisfied; the crate's `impl<C> StdError for
+    ContextError<C, Error>` is the holder that implements the trait for
+    exactly that value, and the field-type match could not see it."""
+    if rec.trait_impls is None:
+        return ""
+    params = _generic_params(rec.generics)
+    field_params = {(_tighten(f.ty)) for f in rec.fields if f.ty}
+    sub = _tighten(subject)
+    for impl in rec.trait_impls:
+        leaf = impl.trait_path.rsplit("::", 1)[-1].split("<", 1)[0]
+        if traits and leaf not in traits:
+            continue
+        args = [_tighten(a) for a in _split_args(
+            _tighten(impl.self_ty)[len(rec.name) + 1:-1])] if _tighten(
+                impl.self_ty).startswith(rec.name + "<") else []
+        for param, arg in zip(params, args, strict=False):
+            if arg == sub and param in field_params:
+                return impl.header or f"impl {impl.trait_path} for {impl.self_ty}"
+    return ""
+
+
 def adapter_types_for_diagnostic(
     excerpt: str, type_records: Sequence[TypeRecord] | Iterable[TypeRecord],
 ) -> tuple[TypeRecord, ...]:
@@ -288,9 +363,10 @@ def adapter_types_for_diagnostic(
         for rec in records:
             if rec.name in seen:
                 continue
-            if not any(_field_holds(f.ty, subject, alts) for f in rec.fields if f.ty):
-                continue
-            if not _implements(rec, traits):
+            direct = (any(_field_holds(f.ty, subject, alts)
+                          for f in rec.fields if f.ty)
+                      and _implements(rec, traits))
+            if not direct and not instantiating_impl(rec, subject, traits):
                 continue
             seen.add(rec.name)
             found.append(rec)
@@ -305,16 +381,23 @@ def adapter_type_section(
     recs = adapter_types_for_diagnostic(excerpt, type_records)
     if not recs:
         return ""
+    subjects = [p for p in (_subject_of(b) for b in _e0277_blocks(excerpt))
+                if p is not None]
     lines = []
     for rec in recs:
         fields = ", ".join(f"{f.name}: {f.ty}" for f in rec.fields if f.ty)
+        via = next((h for sub, tr in subjects
+                    if (h := instantiating_impl(rec, sub, tr))), "")
         lines.append(
-            f"  `{rec.name}` in `{rec.file}` — {fields}")
+            f"  `{rec.name}` in `{rec.file}` — {fields}"
+            + (f" (`{via}`)" if via else ""))
     return (
         "\n\nThe error above rejects a value the compiler could not pass "
-        "where a trait and a size were required. These crate types hold "
-        "that value, or a Box of it, in a field, and implement the trait "
-        "the error names. The list is the records, not a guess:\n"
+        "where a trait (and, for an unsized value, a size) was required. "
+        "These crate types hold that value, or a Box of it, in a field — "
+        "directly, or through the generic parameter the quoted impl binds to "
+        "it — and implement the trait the error names. The list is the "
+        "records, not a guess:\n"
         + "\n".join(lines))
 
 

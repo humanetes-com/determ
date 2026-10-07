@@ -29,7 +29,7 @@ planned from the sweep's own owner map.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -58,6 +58,11 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
 from pipeline_core.domain.crash_keep import SameCrashJudge
+from pipeline_core.domain.ignored_inputs import (
+    declined_by_ignored_inputs,
+    ignored_inputs_feedback,
+    vouched_bodies,
+)
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.reasoning_cap import CallCapReading
@@ -70,6 +75,7 @@ from pipeline_core.domain.slice_session import (
     TargetStatus,
     TurnReading,
     coverage_note_for,
+    executing_tests,
     extract_notes,
     judge_against_best,
     render_budget_turn,
@@ -313,6 +319,7 @@ def run_slice_session(
     keep_best: bool = True,
     end_on_keepable: bool = True,
     all_records: Sequence[FnRecord] = (),
+    executed: Mapping[str, Collection[FnSite]] | None = None,
 ) -> SessionOutcome:
     """Run one session and leave the tree in its accepted, kept, or
     restored state. Never raises on a model or splice failure; a graceful
@@ -345,7 +352,12 @@ def run_slice_session(
     reply already in the transcript: the user turn that answers a request
     refers to the turn that made it, and a conversation with a hole in it
     is not a cheaper conversation. 0 disables the bound — the behaviour
-    before it, and the negative control."""
+    before it, and the negative control.
+
+    `executed` (test -> the units it executes, the map the slice was planned
+    from) is the session's attribution: a body that ignores a declared input
+    is kept only when a test executing THAT unit turned green on the turn.
+    None attributes nothing, so such a body is never vouched."""
     label = slice_.label()
     files = list(slice_.files)
     # The write set starts as the planned slice and may grow when a FILE
@@ -679,6 +691,35 @@ def run_slice_session(
                     f"wrote ({_held}) are still on the crashing stack after "
                     "it, so the change was not kept.\n"
                     + render_budget_turn(max_turns - turns))
+                continue
+            # A body that ignores a declared input stands only when the turn
+            # turned green a test that executes THAT unit
+            # (`domain/ignored_inputs`). A sibling's test, or a target that
+            # was green before the session, vouches for nobody. Otherwise the
+            # change set is not kept and the transcript says which inputs
+            # were dropped.
+            _ignoring = declined_by_ignored_inputs(
+                ((r.unit.fn_name, r.sig_text, r.body) for r in cs.routed),
+                vouched=vouched_bodies(
+                    {r.unit.fn_name: executing_tests(executed or {}, r.unit)
+                     for r in cs.routed},
+                    reading.newly_green))
+            if _ignoring:
+                _restore(pre)
+                ports.log(
+                    f"  [phase-c/declined] session {label}: turn {turns} — "
+                    + ", ".join(f"{n} ignores {', '.join(i)}"
+                                for n, i in sorted(_ignoring.items()))
+                    + " and no test turned green; not kept.")
+                ports.emit("phase_c.session.turn", data={
+                    "cluster": cluster_name, "turn": turns, "kind": "declined",
+                    "units": [site_payload(u) for u in sorted(cs.units)],
+                    "ignored": {n: list(i) for n, i in sorted(_ignoring.items())}})
+                pending = (
+                    "RESULT: this change compiled and was not kept.\n"
+                    + "\n".join(ignored_inputs_feedback(n, i)
+                                for n, i in sorted(_ignoring.items()))
+                    + "\n" + render_budget_turn(max_turns - turns))
                 continue
             # The best-state decision, before anything reads the reading:
             # a turn at least as good as the best becomes it; a worse one

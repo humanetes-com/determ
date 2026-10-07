@@ -55,6 +55,10 @@ class Task0bDeps:
     sibling_cap: int
     single_call_char_limit: int
     task0_model: str
+    # (project_dir) -> the strategy file's computed part as stored
+    # (`adapters.strategy_facts.StrategyFacts.computed_part`), "" without one.
+    # Handed to the model as given; the caller renders it into the file.
+    computed_part: Callable[[Path], str] = lambda _p: ""
 
 
 def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
@@ -139,7 +143,15 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
             _cluster_lines.append(f"  {c.name}: env={env_desc}  active_cfg=[{active}]  excluded_cfg=[{excluded}]")
         clusters_section = "\n".join(_cluster_lines) + "\n"
 
-    _fixed_overhead = _BOILERPLATE_ESTIMATE + _cargo_cap + _readme_cap + len(clusters_section)
+    computed = deps.computed_part(project_dir).strip()
+    computed_section = (
+        "\nAlready established from rustc's MIR and public index (given, not yours to write: "
+        "do not restate these types, do not contradict them, do not list an import for them):\n"
+        f"{computed}\n"
+    ) if computed else ""
+
+    _fixed_overhead = (_BOILERPLATE_ESTIMATE + _cargo_cap + _readme_cap + len(clusters_section)
+                       + len(computed_section))
     _content_budget = max(2_000, deps.single_call_char_limit - _fixed_overhead)
     src_budget  = int(_content_budget * 0.55)
     test_budget_alloc = int(_content_budget * 0.45)
@@ -205,7 +217,7 @@ def task0b_discovery(strategy_path: Path, project_dir: Path, test_files: Any,
     prompt = f"""You are analyzing a software project to produce a compact coverage strategy reference.
 This will be injected verbatim into every unit-test-generation prompt — token budget is scarce.
 Output must be machine-readable compact notation, NOT prose paragraphs.
-{cargo_section}{readme_section}{clusters_section}{dropped_note}{src_section}{test_section}
+{cargo_section}{readme_section}{clusters_section}{computed_section}{dropped_note}{src_section}{test_section}
 Produce coverage_strategy.md in this exact compact format (copy headings literally):
 
 IMPORTS:

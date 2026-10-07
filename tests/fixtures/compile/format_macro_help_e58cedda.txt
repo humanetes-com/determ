@@ -1,0 +1,15 @@
+# Errors in target file:
+error: cannot find macro `format` in this scope
+  --> src/ensure.rs:54:13
+   |
+54 |     let s = format!("{} (left: {:?}, right: {:?})", msg, lhs, rhs);
+   |             ^^^^^^
+   |
+help: consider importing one of these macros
+   |
+ 2 + use crate::__private::format;
+   |
+ 2 + use std::format;
+   |
+ 2 + use alloc::format;
+   |

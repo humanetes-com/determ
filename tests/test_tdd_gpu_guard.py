@@ -153,10 +153,14 @@ def _run(tmp_path: Path, monkeypatch, sweeps: list[str],
 
 
 def _mark(pass_count: int, oracle_size: int) -> Any:
-    """A durable best-tree mark, as `load_best_tree_mark` returns one."""
+    """A durable best-tree mark, as `load_best_tree_mark` returns one. Its
+    layout hash is not the live tree's, so the entry restore declines it (a
+    re-stub moved the layout) and the restore these tests read is the one
+    before a stop."""
     from pipeline_core.domain.best_tree_mark import BestTreeMark
     return BestTreeMark(pass_count=pass_count, iteration=1,
-                        tree_sha="a" * 16, oracle_size=oracle_size)
+                        tree_sha="a" * 16, oracle_size=oracle_size,
+                        layout_sha="f" * 16)
 
 
 def _iters(events: list[tuple[str, dict]]) -> list[dict]:

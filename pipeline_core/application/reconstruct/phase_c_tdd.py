@@ -33,6 +33,7 @@ from pipeline_core.application.reconstruct.body_reseed import (
 from pipeline_core.application.reconstruct.cargo_runner import oracle_test_source
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
+from pipeline_core.application.reconstruct.macro_invariants import defined_macro_names
 from pipeline_core.application.reconstruct.site_revert import (
     SiteRevertPorts,
     SiteSweep,
@@ -71,6 +72,7 @@ from pipeline_core.domain.body_ledger import (
     classify,
     flat_standing_unchanged,
     judgment_attributed,
+    kept_green_of,
     latest_by_unit,
     raw_bodies_of,
     rebuy_by_grade,
@@ -88,12 +90,18 @@ from pipeline_core.domain.coverage_slice import (
     unowned_among,
     withhold_unmeasured,
 )
+from pipeline_core.domain.crash_scope import (
+    crash_culprits_by_test,
+    scope_to_crash_culprits,
+)
 from pipeline_core.domain.crash_site import (
+    CrashSites,
     blamed_locators,
     callee_subjects,
     chain_derived_site,
     crash_evidence_by_locator,
     crash_signal_hint,
+    crash_sites_of,
     destruction_path_subjects,
     faulting_stack_records,
     faulting_stack_sites,
@@ -130,10 +138,13 @@ from pipeline_core.domain.dispatch_batch import (
 )
 from pipeline_core.domain.escalation_lifetime import (
     FiredProduct,
+    attach_to_eligible_owners,
     attributed_cohorts,
     escalate_to_measured_owners,
     escalation_fire_due,
+    measured_owners_on_frontier,
     product_addition_keys,
+    red_dead_after_sweep,
     sustain_escalation_products,
     withholding_paired_tests,
 )
@@ -143,8 +154,7 @@ from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     RouteLedgerRow,
     unit_evidence_from,
-    unopened_pair_fills,
-    unpaid_pair_buys,
+    unpaid_pair_fills,
 )
 from pipeline_core.domain.flat_score import (
     FlatScoreDecision,
@@ -222,6 +232,7 @@ from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
+from pipeline_core.domain.retro_gate import bind_crate_names
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
     attributed_units_for_session,
@@ -268,6 +279,7 @@ from pipeline_core.domain.test_results import (
     unmeasured_failures,
 )
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
+from pipeline_core.domain.workspace_layout import SKELETON_DIR
 from pipeline_core.domain.write_set import bind_observed as bind_observed_cycles
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
@@ -931,6 +943,9 @@ def run_phase_c_tdd(
     _filled_at_prev_sweep = 0
     # One durable-tree restore per process (see the guard's trip site).
     _restore_spent = False
+    # The first sweep of THIS process has been read against the durable mark
+    # (the entry restore below runs once per process, before any fill).
+    _entry_mark_read = False
     # Armed by the restore block: the pre-restore sweep's binary-qualified
     # verdict pairs and the restored body count, consumed by the NEXT sweep. A
     # restore that replaced >0 files and is followed by identical pairs was
@@ -1015,6 +1030,15 @@ def run_phase_c_tdd(
     # `served_verified` and re-earned as routes open units.
     _served_verified: set[FnLocator] = set()
     _set_since: dict[str, int] = {}
+    # The units the previous sweep's coverage reading proved no failing test
+    # executes (`red_dead_units`). The futility gate reads it: such a unit
+    # can never be "served" by a dispatch (it ranks last), and a rewrite of
+    # it cannot move the test, so it must not hold the fire.
+    _red_dead_prev: frozenset[FnLocator] = frozenset()
+    # Every unit the owner map admitted or attached a test to, this sweep or
+    # an earlier one. The schedule checks the ones still in `ordered`
+    # (`measured_owners_on_frontier`) for a candidate that writes them.
+    _owner_map_units: set[FnLocator] = set()
     # Escalated test -> (the futile unit-set that EARNED its fire, the
     # additions the fire computed). The escalation's product lives exactly as
     # long as this evidence: while a test's attribution still equals the
@@ -2270,6 +2294,84 @@ def run_phase_c_tdd(
                             "the hung-tree restore is byte-identical to the "
                             "hung reading — the binaries did not rebuild; this "
                             "reading measured the discarded tree.")
+        # THE ENTRY RESTORE. A process killed mid-turn leaves the tree the
+        # turn reddened; the next process swept it and planned its first fill
+        # on it, because the durable pair was restored only at the flat-score
+        # stop. Runs `13787-88fc12a8` → `137975-9ed0bd7b` (2026-10-06): the
+        # mark held 144/158, a session turn had reddened five tests when
+        # SIGTERM arrived, and the next process planned on 139. Once per
+        # process, on its first sweep: when the mark beats this reading on the
+        # same oracle AND the live layout is the one the mark was taken
+        # under, the pair is put back before anything is planned. The layout
+        # clause is what keeps a deliberate destruction (a retrigger's
+        # re-stub moves the layout) from being undone. A mark with no layout
+        # hash was written before the field and says nothing
+        # about a re-stub: it restores on the oracle clause alone. A hash
+        # that differs still declines.
+        if (not _entry_mark_read and not _hung and _bratchet_snap is None
+                and not _restore_spent
+                and deps.restore_best_tree_pair is not None
+                and deps.load_best_tree_mark is not None):
+            _entry_mark_read = True
+            _mark_e = deps.load_best_tree_mark(project_dir, cluster.name)
+            _layout_now = tree_content_sha(
+                project_dir / SKELETON_DIR / cluster.name / "src")
+            if (_mark_e is not None and _mark_e.pass_count > pass_count
+                    and _mark_e.oracle_size == pass_count + fail_count
+                    and (not _mark_e.layout_sha
+                         or _mark_e.layout_sha == _layout_now)):
+                _restored_e = deps.restore_best_tree_pair(
+                    project_dir, cluster.name, target_src_dir)
+                if _restored_e is not None:
+                    _restore_spent = True
+                    _bodies_e, _layout_e, _left_e = _restored_e
+                    deps.log(
+                        f"  {tag} [phase-c/tdd] iter {iter_n}: entry restore — "
+                        f"this process's first sweep read {pass_count}/"
+                        f"{pass_count + fail_count} and the durable mark is "
+                        f"{_mark_e.pass_count}/{_mark_e.oracle_size} under the "
+                        + ("same layout" if _mark_e.layout_sha
+                           else "same oracle (the mark predates its layout "
+                           "hash)")
+                        + "; RESTORED that pair ("
+                        f"{_bodies_e} body file(s) + {_layout_e} layout "
+                        "file(s)) before the fill is planned. THE COST, "
+                        "stated: whatever the previous process landed after "
+                        "the mark and did not bank is discarded"
+                        + (f"; {len(_left_e)} file(s) not in the snapshot are "
+                           f"left in place ({_left_e[:3]})" if _left_e else "")
+                        + "; re-testing.")
+                    deps.emit("phase_c.tdd.entry_restored", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "pass_count": pass_count,
+                        "mark_pass": _mark_e.pass_count,
+                        "mark_oracle": _mark_e.oracle_size,
+                        "bodies": _bodies_e, "layout_files": _layout_e,
+                        "leftovers": _left_e[:20]})
+                    bind_coverage_slice(None)
+                    _reseed_site("after entry restore", iter_n)
+                    rc, output = deps.run_cargo(test_cmd, target_src_dir,
+                                                cluster_env, timeout=test_timeout)
+                    _hung = _hung_of(rc, output)
+                    _log_hung(_hung)
+                    pass_count, fail_count, _ignored = parse_test_counts(output)
+                    cur_failed = parse_failed_tests(output)
+                    _sweep = _reconcile(rc, output, pass_count, fail_count,
+                                        cur_failed)
+                    fail_count, cur_failed, _oracle = (
+                        _sweep.fail_count, _sweep.failed, _sweep.oracle)
+            elif _mark_e is not None and _mark_e.pass_count > pass_count:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: entry restore "
+                    f"declined — the durable mark {_mark_e.pass_count}/"
+                    f"{_mark_e.oracle_size} beats this sweep's {pass_count}, "
+                    "but "
+                    + ("the oracle differs" if _mark_e.oracle_size
+                       != pass_count + fail_count
+                       else "the layout moved since the mark (a deliberate "
+                       "re-stub is not undone)")
+                    + "; planning on this tree.")
+        _entry_mark_read = True
         # Refresh the best-known snapshot on the first iter and each strict
         # improvement (never on a plateau — the existing best-state snapshot is
         # equivalent and re-reading the tree would be wasted I/O). No oracle
@@ -2512,7 +2614,10 @@ def run_phase_c_tdd(
                 BestTreeMark(pass_count=pass_count, iteration=iter_n,
                              tree_sha=_tree_sha,
                              oracle_size=pass_count + fail_count,
-                             missing_count=_oracle.missing_count))
+                             missing_count=_oracle.missing_count,
+                             layout_sha=tree_content_sha(
+                                 project_dir / SKELETON_DIR / cluster.name
+                                 / "src")))
             _checkpoint_best = pass_count
             _checkpoint_sha = _tree_sha
         elif deps.checkpoint_fill_tree is not None and _snap_due:
@@ -3486,6 +3591,10 @@ def run_phase_c_tdd(
         # The part of that blame an invalid-memory crash made, for the
         # ownership instruction (`crash_site.memory_blamed_locators`).
         crash_memory_blamed: frozenset[FnLocator] = frozenset()
+        # The same blame and evidence at the bodies the frames ran
+        # (`crash_sites_of`): a homonym's container, which the locator keys
+        # above drop. Dispatch stays on the locators.
+        crash_sites = CrashSites()
         _sites: tuple[Any, ...] = ()
         # Sites where an origin-capable detector looked and placed no frame
         # in-crate — the precondition for chain-derived blame synthesis at
@@ -3523,6 +3632,12 @@ def run_phase_c_tdd(
                 crash_texts = crash_evidence_by_locator(_sites)
                 crash_blamed = blamed_locators(_sites)
                 crash_memory_blamed = memory_blamed_locators(_sites)
+                if deps.enumerate_fns is not None:
+                    crash_sites = crash_sites_of(
+                        _sites,
+                        [FnRecord.from_dict(r)
+                         for r in deps.enumerate_fns(target_src_dir) or []],
+                        lambda rel: _read_cluster_file(target_src_dir, rel))
                 _unattributed_sites = [
                     s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
@@ -3829,7 +3944,8 @@ def run_phase_c_tdd(
                     continue
                 _fire = escalation_fire_due(
                     frozenset(units), prev, _served_at,
-                    _set_since.get(tname, iter_n))
+                    _set_since.get(tname, iter_n),
+                    unexecuted=_red_dead_prev)
                 if _fire.unserved:
                     # The old rule fires here: the set is unchanged. Under the
                     # dispatch cap that is not evidence — these units were
@@ -5073,13 +5189,17 @@ def run_phase_c_tdd(
         # carries the computation). Crash promotion runs after this and
         # re-lifts anything a fault names.
         _red_dead: frozenset[FnLocator] = frozenset()
+        _red_dead_measured: frozenset[FnLocator] | None = None
         if _cov is not None and _owners_read:
             # The withheld map: a failing test whose run stopped short is
             # absent from it, so the demotion declines (`red_dead_units`'s
             # own "every red test measured" rule).
-            _red_dead = red_dead_units(
+            _red_dead = _red_dead_measured = red_dead_units(
                 (k for k, _ in ordered), cur_failed, _cov.owners,
                 exempt=_esc_keys | _product_keys | _crash_grades.keys())
+        # A sweep with no coverage reading keeps the last measured set for
+        # the next fire; only a measurement replaces it.
+        _red_dead_prev = red_dead_after_sweep(_red_dead_prev, _red_dead_measured)
         # OWNER-MAP ADMISSION. Ranking can promote a never-served owner but
         # cannot put `error.rs::fmt` on the frontier: run `451330-7e8a7ca9`
         # listed it on all three remaining tests and never dispatched it.
@@ -5124,14 +5244,10 @@ def run_phase_c_tdd(
         # because a pair's ledger row carries the same-file table slots the
         # crash evidence joined to its write set and its hop does not.
         _pair_unpaid = {
-            t: unpaid_pair_buys(_route_rows, t, _oracle_fp(iter_n))
-            for t in _has_pair}
-        _pair_unopened = {
-            t: unopened_pair_fills(_route_rows, t, _oracle_fp(iter_n))
+            t: unpaid_pair_fills(_route_rows, t, _oracle_fp(iter_n))
             for t in _has_pair}
         _paired_tests = withholding_paired_tests(
-            _has_pair, unpaid_buys=_pair_unpaid,
-            unopened_fills=_pair_unopened)
+            _has_pair, unpaid_fills=_pair_unpaid)
         _pair_lapsed = _has_pair - _paired_tests
         # Snapshot before owner-map admission: spine locators the map
         # would add are coverage, not the attributed write.
@@ -5147,28 +5263,26 @@ def run_phase_c_tdd(
                 "the fill: "
                 + ", ".join(
                     f"{t} (pair unpaid {_pair_unpaid.get(t, 0)}/"
-                    f"{DEFAULT_UNPAID_GRACE})"
+                    f"{DEFAULT_UNPAID_GRACE} fill(s))"
                     for t in sorted(_paired_tests)[:8]))
         if _pair_lapsed:
             deps.log(
                 f"  {tag} [phase-c/dispatch] measured-owners: "
-                f"{len(_pair_lapsed)} leftover test(s) have a hop pair that "
-                "has been bought and returned nothing, or has not opened, "
-                f"in {DEFAULT_UNPAID_GRACE} fill(s) under this oracle (the "
-                "bound the schedule already lapses a route's exemptions "
-                "on) — the withholding lapses and the coverage owners they "
-                "execute through are admissible: "
+                f"{len(_pair_lapsed)} leftover test(s) have had a hop pair "
+                f"as their candidate for {DEFAULT_UNPAID_GRACE} fill(s) "
+                "under this oracle, opened or not, without it turning them "
+                "green (the bound the schedule already lapses a route's "
+                "exemptions on) — the withholding lapses until a pair row "
+                "pays the test, and the coverage owners they execute "
+                "through are admissible: "
                 + ", ".join(
-                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)}, "
-                    f"unopened {_pair_unopened.get(t, 0)})"
+                    f"{t} (pair unpaid {_pair_unpaid.get(t, 0)} fill(s))"
                     for t in sorted(_pair_lapsed)[:8]))
             deps.emit("phase_c.dispatch.pair_withhold_lapsed", data={
                 "cluster": cluster.name, "iter": iter_n,
                 "tests": sorted(_pair_lapsed),
-                "unpaid_buys": {t: _pair_unpaid.get(t, 0)
-                                for t in sorted(_pair_lapsed)},
-                "unopened_fills": {t: _pair_unopened.get(t, 0)
-                                   for t in sorted(_pair_lapsed)},
+                "unpaid_fills": {t: _pair_unpaid.get(t, 0)
+                                 for t in sorted(_pair_lapsed)},
                 "grace": DEFAULT_UNPAID_GRACE,
                 "still_withholding": sorted(_paired_tests),
             })
@@ -5229,6 +5343,44 @@ def run_phase_c_tdd(
                     for t, ks in sorted(
                         (t, set(d)) for t, d in _by_test.items())},
             })
+        # A measured owner already on the frontier is not re-admitted, but
+        # a test that passes the same gate must still be AIMED by it: the
+        # skip used to drop the test with the unit, so a test whose pair
+        # withholding lapsed after its owner was admitted for its siblings
+        # reached no run that writes the body its coverage names.
+        _owner_attach: dict[FnLocator, set[str]] = {}
+        if _cov is not None and _owners_read:
+            _owner_attach = attach_to_eligible_owners(
+                owners={bare_test_name(t): frozenset(
+                    FnLocator(s.file, s.fn_name) for s in ks)
+                    for t, ks in _owners_read.items()},
+                units_by_test=_units_for_owners,
+                eligible=eligible,
+                graded=_flat_keys | permanently_exhausted,
+                unable=_dead_keys | _red_dead,
+                permanently_exhausted=permanently_exhausted,
+                served=frozenset(_served_at),
+                paired_tests=_paired_tests,
+            )
+            if _owner_attach:
+                for _loc, _ts in _owner_attach.items():
+                    eligible[_loc].update(_ts)
+                ordered = [(k, eligible[k]) if k in _owner_attach else (k, ts)
+                           for k, ts in ordered]
+                deps.log(
+                    f"  {tag} [phase-c/dispatch] measured-owners: "
+                    f"{len(_owner_attach)} eligible unit(s) now also aim at "
+                    "test(s) whose coverage names them: "
+                    + ", ".join(sorted(
+                        f"{k.file}::{k.fn_name} +{len(ts)}"
+                        for k, ts in _owner_attach.items())[:12]))
+                deps.emit("phase_c.attribution.measured_owners_attached", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "attached": {
+                        f"{k.file}::{k.fn_name}": sorted(ts)
+                        for k, ts in sorted(_owner_attach.items())},
+                })
+        _owner_map_units |= set(_owner_admits) | set(_owner_attach)
         # The empty-frontier decision is taken HERE, after the measured-owner
         # admission, not before it: a leftover whose whole attributed cohort
         # is exhausted, on an otherwise empty frontier, has owners the
@@ -5533,6 +5685,37 @@ def run_phase_c_tdd(
                 "evidence_fp": _excl_fp,
                 "remaining": len(ordered),
             })
+        # While a failing test dies of a native crash whose culprits the
+        # localizer named, only those culprits can move it
+        # (`domain/crash_scope`): the test leaves every other unit it would
+        # be dispatched on, and a unit carrying only such tests leaves the
+        # batch for this sweep.
+        _scope = scope_to_crash_culprits(
+            ordered, crash_culprits_by_test(_sites, cur_failed))
+        if _scope.blocked:
+            ordered = list(_scope.ordered)
+            for _loc, _ts in ordered:
+                if _loc in eligible:
+                    eligible[_loc] = _ts
+            for _loc in _scope.dropped:
+                eligible.pop(_loc, None)
+            deps.log(
+                f"  {tag} [phase-c/dispatch] iter {iter_n}: "
+                f"{len(_scope.blocked)} crashed test(s) scoped to their "
+                "crash's culprits — not dispatched on "
+                f"{sum(len(v) for v in _scope.blocked.values())} other "
+                f"owner(s) ({len(_scope.dropped)} left the batch): "
+                + "; ".join(
+                    f"{t} blocked on " + ", ".join(
+                        f"{u.file}::{u.fn_name}" for u in us[:4])
+                    + (f" (+{len(us) - 4})" if len(us) > 4 else "")
+                    for t, us in list(_scope.blocked.items())[:4]))
+            deps.emit("phase_c.dispatch.crash_scoped", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "blocked": {t: sorted(f"{u.file}::{u.fn_name}" for u in us)
+                            for t, us in _scope.blocked.items()},
+                "dropped": sorted(f"{u.file}::{u.fn_name}"
+                                  for u in _scope.dropped)})
         if _pass_cohort is None:
             _pass_cohort = tuple(key for key, _ in ordered)
         # The promotion above is worthless unless the cursor is told to let
@@ -6118,6 +6301,13 @@ def run_phase_c_tdd(
         # skipped, never guessed.
         _recs_before = (deps.enumerate_fns(target_src_dir) or []
                         if deps.enumerate_fns is not None else None)
+        # The names this tree defines, for the retro screen's
+        # `denies_defined_name` rule: a lesson that calls one of them
+        # nonexistent is not injected.
+        if _recs_before is not None:
+            bind_crate_names(
+                {str(r.get("fn_name") or "") for r in _recs_before}
+                | defined_macro_names(target_src_dir))
         _bodies_before = (unit_bodies(_recs_before, frontier_keys)
                           if _recs_before is not None else None)
         # Every unit's body, for the landed-row writer: a wave's route may
@@ -6194,6 +6384,14 @@ def run_phase_c_tdd(
                     prior_of=raw_bodies_of(
                         _recs_prior or [],
                         [(k.file, k.fn_name) for k in landed_now]))
+                # Each row carries the tests its own keep can be shown to
+                # have paid (a test only one kept unit of that report is
+                # attributed to), so the sweep credits a landing only with
+                # what it paid.
+                _attr_w = {u: _elig.get(u, ()) for u in kept_hint}
+                rows_w = [replace(r, kept_green=kept_green_of(
+                    kept_hint, FnLocator(r.key.file, r.key.fn_name), _attr_w))
+                    for r in rows_w]
                 fresh = [r for r in rows_w
                          if _written.get(FnLocator(r.key.file, r.key.fn_name))
                          != r.body_sha]
@@ -6382,6 +6580,7 @@ def run_phase_c_tdd(
                     crash_evidence=crash_texts or None,
                     crash_blamed=crash_blamed or None,
                     crash_memory_blamed=crash_memory_blamed or None,
+                    crash_sites=crash_sites,
                     crash_blocked=crash_blocked_units,
                     culprits_of=_culprits_after,
                     # Failing tests whose own verdict was never read
@@ -6390,6 +6589,8 @@ def run_phase_c_tdd(
                     # targets miss crash_blamed, as a flat re-buy.
                     unmeasurable_tests=_unmeasured,
                     attributed=_attributed_locs,
+                    measured_owners=measured_owners_on_frontier(
+                        _owner_map_units, (k for k, _ in ordered)),
                     unit_evidence=_unit_evidence,
                     body_rows=_body_rows,
                     # The pool starts units in the order this driver chose;

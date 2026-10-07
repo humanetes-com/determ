@@ -1,0 +1,37 @@
+{
+  "_about": "What domain.fn_routes must say about tests/fixtures/fn_routes/src/lib.rs. `routes` map a site label to substrings its route lines must contain, in order of appearance; `none` are sites that must get no route (never built, never called); `unnameable` are the types tests/ cannot name, each with a substring of its built-by line.",
+  "routes": {
+    "src/lib.rs::fmt [impl fmt::Debug for DisplayError<M>]": [
+      "`<Option<T> as Context<T>>::context`",
+      "`Error::from_display`",
+      "builds `DisplayError`; returned as its `Err`",
+      "only when `f.alternate()` is true"
+    ],
+    "src/lib.rs::fmt [impl fmt::Debug for ErrorImpl<E>]": [
+      "`<Box<dyn StdError + Send + Sync> as From<Error>>::from`",
+      "`Error::into_boxed`",
+      "`object_boxed`",
+      "coerces `ErrorImpl` to a `dyn`",
+      "only when `f.alternate()` is true"
+    ],
+    "src/lib.rs::leaf": [
+      "`entry` → `middle`"
+    ],
+    "src/lib.rs::in_closure": [
+      "`lazy`"
+    ]
+  },
+  "no_gate": [
+    "src/lib.rs::fmt [impl fmt::Display for DisplayError<M>]"
+  ],
+  "none": [
+    "src/lib.rs::fmt [impl fmt::Debug for Unbuilt]",
+    "src/lib.rs::never_called [impl Error]",
+    "src/lib.rs::entry",
+    "src/lib.rs::context [impl Context<T> for Option<T>]"
+  ],
+  "unnameable": {
+    "DisplayError": "`<Option<T> as Context<T>>::context`",
+    "Unbuilt": "no public call that builds it"
+  }
+}

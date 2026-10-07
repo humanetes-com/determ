@@ -224,6 +224,7 @@ from pipeline_core.adapters.pipeline_db import type_signals_write as _db_type_si
 from pipeline_core.adapters.private_surface_store import load_private_surface, save_private_surface
 from pipeline_core.adapters.progress import ChunkProgress
 from pipeline_core.adapters.ratchet import BestTreeRatchet
+from pipeline_core.adapters.reach_store import load_reach, save_reach
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
     CoverageDocsAdapter,
@@ -294,6 +295,7 @@ from pipeline_core.adapters.state import mark_phase as _state_mark_phase
 from pipeline_core.adapters.state import read_state as _state_read_state
 from pipeline_core.adapters.state import state_path as _state_path
 from pipeline_core.adapters.state import write_state as _state_write_state
+from pipeline_core.adapters.strategy_facts import StrategyFacts
 from pipeline_core.adapters.strip import strip_module_source as _strip_module_source
 from pipeline_core.adapters.structure import CliStructureReader  # noqa: F401 (re-export for composition callers)
 from pipeline_core.adapters.structure import (
@@ -593,6 +595,7 @@ from pipeline_core.application.tasks.discover_test_command import (
 from pipeline_core.application.tasks.discover_test_command import (
     infer_build_check_command as _infer_build_check_command,
 )
+from pipeline_core.application.tasks.fn_criterion import FnCriterionInputs, read_world_facts
 from pipeline_core.application.tasks.genesis_audit import GenesisAuditDeps
 from pipeline_core.application.tasks.genesis_audit import (
     extract_and_store_rules as _ga_extract_and_store_rules,
@@ -1869,6 +1872,17 @@ def build_app(
         rc, out, err = _probe_subprocess_runner(cmd, Path(pd), env, cfg.test_timeout)
         return rc == 0, (out or "") + "\n" + (err or "")
 
+    # The ORIGINAL crate's construction facts (`domain.fn_routes`), from the
+    # same reading t0c takes per cluster; the strategy file's computed part
+    # and t0d's reach probes read them.
+    construction_facts = StrategyFacts(
+        read_world=functools.partial(read_world_facts, inputs=FnCriterionInputs(
+            enumerate_fns=enumerate_fns, enumerate_mods=enumerate_mods,
+            measure_reachability=functools.partial(
+                measure_world_reachability, cluster_env=cluster_cargo_env,
+                timeout=cfg.test_timeout),
+            enumerate_types=enumerate_types)),
+        log=ports.log)
     task0d_deps = Task0dDeps(
         log=ports.log, emit=ports.emit,
         mark_phase=mark_phase, phase_valid=phase_valid,
@@ -1900,8 +1914,13 @@ def build_app(
         enumerate_mods=enumerate_mods,
         enumerate_types=enumerate_types,
         run_probe=run_probe,
-        exercises_by_coverage=lambda pd, cl, specs, recs: exercises_by_coverage(
-            pd, cl, specs, recs, log=ports.log),
+        exercises_by_coverage=lambda pd, cl, specs, recs, **kw: exercises_by_coverage(
+            pd, cl, specs, recs, log=ports.log, **kw),
+        # The reach round: routes from the facts t0b stored for each world,
+        # outcomes beside the suite for t0c.
+        load_construction_facts=lambda pd, c: next(
+            (w for w in (construction_facts.load(pd) or ("", ()))[1] if w.cluster == c), None),
+        save_reach=save_reach,
         record_misses=save_behaviour_misses,
         emit_tests=functools.partial(
             emit_behaviour_tests, balanced=_rust_delimiters_balanced),
@@ -2360,6 +2379,7 @@ def build_app(
         sibling_cap=PromptBudgets.derive(cfg.single_call_char_limit).sibling,
         single_call_char_limit=cfg.single_call_char_limit,
         task0_model=settings.task_models.task0,
+        computed_part=construction_facts.computed_part,
     )
 
     # Role adapters + spine objects are referenced by the phase use-cases below,
@@ -2427,6 +2447,9 @@ def build_app(
         artifacts=workspace_artifacts, coverage_docs=coverage_docs,
         audit=flow_audit, docs=docs_metrics, telemetry=telemetry,
         genesis_audit_interval=cfg.genesis_audit_interval,
+        render_strategy=lambda ctx, text: construction_facts.rendered(
+            ctx.project_dir, text,
+            construction_facts.facts(ctx.project_dir, ctx.clusters, may_measure=False)),
     )
     def _stall_refill(project_dir: Path, module: str) -> None:
         # Same keys restart_from.sh task2a clears — the manual escape hatch,
@@ -2685,6 +2708,7 @@ def build_app(
         oracle_drift=_workspace_oracle_drift,
         set_current=set_current,
         start_run_stats=_start_run_stats,
+        construction_facts=construction_facts,
         source_hash=source_hash,
         log_state_summary=_state_log_state_summary,
         read=_io_read,
@@ -2930,7 +2954,6 @@ def build_app(
             BEHAVIOUR_COVERAGE_TARGET=settings.behaviour_coverage_target,
             BEHAVIOUR_CAPTURE_SPLIT=settings.behaviour_capture_split,
             load_behaviour_suite=load_behaviour_suite,
-            coverage_ignore_pragma=cfg.ignore_pragma,
             TASK0C_PROMPT_CHAR_CAP=helpers.task0c_prompt_char_cap,
             FIX_ERR_CAP=cfg.fix_err_cap,
             SIBLING_CAP=PromptBudgets.derive(cfg.single_call_char_limit).sibling,
@@ -3008,6 +3031,8 @@ def build_app(
             # augmentation sentinel.
             enumerate_fns=enumerate_fns,
             enumerate_mods=enumerate_mods,
+            enumerate_types=enumerate_types,
+            load_reach=load_reach,
             load_fn_record=augment_store.cluster_fn_record,
             save_fn_record=augment_store.save_cluster_fn_record,
             other_fn_records=augment_store.other_cluster_fn_records,

@@ -72,7 +72,7 @@ def test_every_recorded_leftover_lapses_its_withholding() -> None:
     unpaid = {t: unpaid_pair_buys(rows, t, _ORACLE) for t in _LEFTOVERS}
     assert unpaid == dict.fromkeys(_LEFTOVERS, 68)
     assert withholding_paired_tests(
-        _LEFTOVERS, unpaid_buys=unpaid) == frozenset()
+        _LEFTOVERS, unpaid_fills=unpaid) == frozenset()
 
 
 def test_the_lapse_is_earned_not_granted() -> None:
@@ -85,11 +85,11 @@ def test_the_lapse_is_earned_not_granted() -> None:
         unpaid = {t: unpaid_pair_buys(prefix, t, _ORACLE) for t in _LEFTOVERS}
         assert set(unpaid.values()) == {n}
         assert withholding_paired_tests(
-            _LEFTOVERS, unpaid_buys=unpaid) == frozenset(_LEFTOVERS)
+            _LEFTOVERS, unpaid_fills=unpaid) == frozenset(_LEFTOVERS)
     at_bound = rows[:DEFAULT_UNPAID_GRACE]
     unpaid = {t: unpaid_pair_buys(at_bound, t, _ORACLE) for t in _LEFTOVERS}
     assert withholding_paired_tests(
-        _LEFTOVERS, unpaid_buys=unpaid) == frozenset()
+        _LEFTOVERS, unpaid_fills=unpaid) == frozenset()
 
 
 def test_rows_under_another_oracle_are_not_evidence() -> None:
@@ -101,7 +101,7 @@ def test_rows_under_another_oracle_are_not_evidence() -> None:
               for t in _LEFTOVERS}
     assert unpaid == dict.fromkeys(_LEFTOVERS, 0)
     assert withholding_paired_tests(
-        _LEFTOVERS, unpaid_buys=unpaid) == frozenset(_LEFTOVERS)
+        _LEFTOVERS, unpaid_fills=unpaid) == frozenset(_LEFTOVERS)
 
 
 def test_a_cashing_row_restarts_the_streak() -> None:
@@ -122,4 +122,4 @@ def test_a_cashing_row_restarts_the_streak() -> None:
     unpaid = {t: unpaid_pair_buys(patched, t, _ORACLE) for t in _LEFTOVERS}
     assert set(unpaid.values()) == {DEFAULT_UNPAID_GRACE - 1}
     assert withholding_paired_tests(
-        _LEFTOVERS, unpaid_buys=unpaid) == frozenset(_LEFTOVERS)
+        _LEFTOVERS, unpaid_fills=unpaid) == frozenset(_LEFTOVERS)

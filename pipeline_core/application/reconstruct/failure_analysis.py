@@ -8,6 +8,7 @@ step owns. Depends only on the analysis/journal/ratchet/docs roles (ISP).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pipeline_core.application.reconstruct.reconstruction_step import StepOutcome
@@ -39,6 +40,7 @@ class FailureAnalysisStep:
         self, *, analyst: Analyst, journal: FailureJournal, ratchet: Ratchet,
         artifacts: Artifacts, coverage_docs: CoverageDocs, audit: FlowAudit,
         docs: DocsMetrics, telemetry: Telemetry, genesis_audit_interval: int,
+        render_strategy: Callable[[RunContext, str], str],
     ) -> None:
         self._analyst = analyst
         self._journal = journal
@@ -49,6 +51,10 @@ class FailureAnalysisStep:
         self._docs = docs
         self._tel = telemetry
         self._genesis_audit_interval = genesis_audit_interval
+        # The discovery reply is model text. The next iteration's fill reads
+        # what this returns, so the computed part is rendered here, before
+        # that iteration, from the facts stored for the original crate.
+        self._render_strategy = render_strategy
 
     def run(
         self, ctx: RunContext, state: IterationState, outcome: StepOutcome, *,
@@ -87,9 +93,9 @@ class FailureAnalysisStep:
             # Genesis grew — regenerate coverage_strategy.md so TASK 0c/1 prompts
             # reflect lessons learned this iteration (force=True bypasses the cache).
             self._tel.log("  Regenerating coverage_strategy.md after genesis update...")
-            coverage_strategy = self._coverage_docs.regenerate(
+            coverage_strategy = self._render_strategy(ctx, self._coverage_docs.regenerate(
                 ctx.project_dir, ctx.test_files, ctx.readme_text, ctx.project_profile,
-                ctx.clusters)
+                ctx.clusters))
 
         self._journal.append_failure_log(
             ctx.failure_log_path, label, failure_type_logged, current_pass,

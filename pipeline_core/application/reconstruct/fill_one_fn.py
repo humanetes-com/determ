@@ -76,6 +76,10 @@ from pipeline_core.domain.fill_class import (
     keep_reading,
     tests_could_not_run,
 )
+from pipeline_core.domain.ignored_inputs import (
+    declined_by_ignored_inputs,
+    ignored_inputs_feedback,
+)
 from pipeline_core.domain.joint_write import (
     JointAdmission,
     JointUnit,
@@ -395,6 +399,9 @@ class FillOneFn:
         # without `nonlocal`, like the holders above.
         _last_failure: list[AttemptFailure] = [AttemptFailure.COMPILE]
         _last_crash_sites: list[frozenset[tuple[str, int]] | None] = [None]
+        # The inputs the last attempt's body ignored with no attributed test
+        # observed passing (`domain/ignored_inputs`); empty when it did not.
+        _last_declined: list[tuple[str, ...]] = [()]
         _last_own_panics: list[tuple[str, ...]] = [()]
         # A crash-implicated fn is never exhaustion-skipped: the localized
         # faulting stack is evidence no prior attempt ever saw.
@@ -1444,6 +1451,31 @@ class FillOneFn:
                         _crash_blocked_mark[:] = [crash_block_mark(
                             ctx.target_src_dir,
                             [b.file for b in (ctx.crash_blamed or frozenset())])]
+            # A body that ignores a declared input is kept only when an
+            # attributed test was observed passing. Without one it is a
+            # decline: the attempt fails with the dropped inputs as its error,
+            # the body is reverted, and it is never offered to the salvage.
+            _last_declined[0] = ()
+            if rc == 0 and _u2_fail_sig is None:
+                _ign = declined_by_ignored_inputs(
+                    [(fn_name, sig_text, body)],
+                    vouched=frozenset({fn_name}) if _u2_passed else frozenset())
+                if _ign:
+                    _last_declined[0] = _ign[fn_name]
+                    cargo_out = ignored_inputs_feedback(fn_name, _ign[fn_name])
+                    _u2_fail_sig = frozenset(
+                        f"ignored_input:{n}" for n in _ign[fn_name])
+                    self.tel.log(
+                        f"  [phase-c/declined] per-fn {rel_file}::{fn_name}: "
+                        f"body ignores input(s) {', '.join(_ign[fn_name])} "
+                        "with no attributed test observed passing — not kept "
+                        f"(attempt {fix_attempt}).")
+                    self.tel.emit("phase_c.fill.declined", data={
+                        "cluster": ctx.cluster_name,
+                        "unit": f"{rel_file}::{fn_name}", "route": "per-fn",
+                        "reason": "ignored_inputs", "names": [fn_name],
+                        "ignored": {fn_name: list(_ign[fn_name])},
+                        "attempt": fix_attempt})
             if rc == 0 and _u2_fail_sig is None:
                 _joint_labels = [u.label for u, _pre in joint.live]
                 joint.settle()
@@ -1613,9 +1645,10 @@ class FillOneFn:
             })
             last_body = body
             last_metric = cur_metric
-            salvage.offer(body, cur_metric,
-                          extras=tuple(u for u, _pre in joint.live),
-                          excerpt=_focused, attempt=fix_attempt)
+            if not _last_declined[0]:
+                salvage.offer(body, cur_metric,
+                              extras=tuple(u for u, _pre in joint.live),
+                              excerpt=_focused, attempt=fix_attempt)
             error_excerpt = _excerpt()
             _excerpt_quotes_run[0] = True
             # Revert to snapshot before returning; the model will see
@@ -1689,9 +1722,20 @@ class FillOneFn:
                          f"{gauge.best} for {gauge.stalls} iter(s) — "
                          f"stopping fix loop (attempt {attempt_n}).")
 
+        # A repeated error set is the unit's outcome for this fill: the
+        # retrospective may still be stored, but the loop is not re-entered
+        # and no body is kept after it (no salvage, no annotated stub) — the
+        # pre-fill body stays. Run `486447-5207101c`: `construct` stopped on
+        # `E0433` twice, the retrospective was rejected, and the same fill
+        # still kept a body the sweep classed `wrong`. A later fill may buy
+        # the unit again.
+        _repeated_stop: list[int] = []
+
         def _on_fn_repeated(attempt_n: int, gauge: FloorStall) -> None:
+            _repeated_stop.append(attempt_n)
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: same error set after "
-                         f"attempt {attempt_n} — stopping fix loop.")
+                         f"attempt {attempt_n} — stopping fix loop; the unit "
+                         "keeps its pre-fill body for this fill.")
 
         # === Retro-informed retry loop: a failed fix loop gets a
         # retrospective diagnosis and, while each round STRICTLY improves
@@ -2041,6 +2085,14 @@ class FillOneFn:
                         "retro_round": _retro_round,
                         "retired_by": _nverdict.retired_by,
                     })
+            if _repeated_stop:
+                if _retry_informed:
+                    self.tel.log(
+                        f"  [phase-c/per-fn] {fn_name}: retro round "
+                        f"{_retro_round} stored; not re-entering — the fix "
+                        "loop stopped on a repeated error set, which ends "
+                        "the unit for this fill.")
+                break
             if not (_retry_informed and _retro_round < _retro_rounds_max):
                 break
             self.tel.log(f"  [phase-c/per-fn] {fn_name}: retro round "
@@ -2129,10 +2181,12 @@ class FillOneFn:
             # phase against concurrent workers.
             with ctx.splice_check_lock:
                 _revert_own_body()
-                _salvaged = self._salvage_compiling_body(
+                # A repeated-error-set stop keeps nothing: the pre-fill body
+                # is the unit's state for this fill.
+                _salvaged = (not _repeated_stop) and self._salvage_compiling_body(
                     ctx, salvage, file_path, rel_file, fn_name, container,
                     sig_text, rec, _revert_own_body, joint=joint)
-                if not _salvaged:
+                if not _salvaged and not _repeated_stop:
                     annotated_body = make_failed_attempt_body(
                         attempted_body=last_body or first_failed_body or "",
                         error_excerpt=error_excerpt or first_error_excerpt or "",
@@ -2236,8 +2290,13 @@ class FillOneFn:
                 self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} "
                              f"{rel_file}::{fn_name}: "
                              f"reverted after {fix_attempt} attempt(s) "
-                             f"({_retro_round} retro round(s)).")
-            if last_metric is None or (
+                             f"({_retro_round} retro round(s))"
+                             + ("; repeated error set — pre-fill body kept, "
+                                "no salvage" if _repeated_stop else "")
+                             + ".")
+            if _last_declined[0] and not _salvaged:
+                _ex_cls = FillOutcomeClass.DECLINED
+            elif last_metric is None or (
                     last_metric.compiles is False and not _salvaged):
                 _ex_cls = (FillOutcomeClass.ANSWER_DROPPED
                            if last_metric is None

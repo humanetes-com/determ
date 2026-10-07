@@ -60,6 +60,7 @@ class _World:
         self.probe_ok = probe_ok
         self.reply = reply
         self.exercises = exercises or {}
+        self.sites: dict[str, frozenset[str]] = {}
         self.probes_raise = probes_raise
 
     def deps(self, **over: object) -> Task0dDeps:
@@ -83,6 +84,14 @@ class _World:
         def ask(prompt: str) -> str:
             self.prompts.append(prompt)
             return self.reply
+
+        def exercises(pd: Path, cl: object, specs: object, recs: object,
+                      sites_out: dict[str, frozenset[str]] | None = None) -> object:
+            # The same hits by site: a spec the test maps in `self.sites`.
+            if sites_out is not None:
+                ids = {getattr(x, "behaviour_id", "") for x in specs}  # type: ignore[attr-defined]
+                sites_out.update({k: v for k, v in self.sites.items() if k in ids})
+            return self.exercises
 
         kw: dict[str, object] = {
             "log": self.logs.append,
@@ -109,7 +118,7 @@ class _World:
             "enumerate_mods": lambda sd: [],
             "enumerate_types": lambda sd: [],
             "run_probe": run_probe,
-            "exercises_by_coverage": lambda pd, cl, specs, recs: self.exercises,
+            "exercises_by_coverage": exercises,
             "record_misses": lambda pd, c, m: self.misses.append((c, list(m))),
             # The book's rule calls are their own stage with their own knob;
             # these pins are about the probe stage, so the book is built

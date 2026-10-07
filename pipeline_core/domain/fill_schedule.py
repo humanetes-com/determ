@@ -117,7 +117,7 @@ __all__ = [
     "rebuy_identity",
     "run_blocks",
     "schedule",
-    "unopened_pair_fills",
+    "unpaid_pair_fills",
     "unpaid_pair_buys",
     "withhold_landed",
 ]
@@ -411,6 +411,12 @@ class RouteLedgerRow:
     #: None on every non-session row, on a session that made no call, and on
     #: every row written before 2026-10-05.
     first_turn_minutes: float | None = None
+    #: Targets the run's own planners dropped after the schedule fixed them,
+    #: each with the predicate that dropped it: ``(file, fn, reason)``. A
+    #: unit in ``targets`` and not in ``opened`` with no entry here was
+    #: dropped by a planner that does not say why. Empty on every row written
+    #: before 2026-10-07.
+    filtered: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def identity(self) -> str:
@@ -445,6 +451,8 @@ class RouteLedgerRow:
             "first_turn_minutes": (round(self.first_turn_minutes, 3)
                                    if self.first_turn_minutes is not None
                                    else None),
+            **({"filtered": [list(t) for t in self.filtered]}
+               if self.filtered else {}),
         }
 
     @classmethod
@@ -488,6 +496,10 @@ class RouteLedgerRow:
             opened=(_pairs("opened") if isinstance(raw.get("opened"), list)
                     else None),
             first_turn_minutes=float(first) if first is not None else None,
+            filtered=tuple(
+                (str(t[0]), str(t[1]), str(t[2]))
+                for t in raw.get("filtered") or ()
+                if isinstance(t, (list, tuple)) and len(t) == 3),
         )
 
     def to_json(self) -> str:
@@ -762,38 +774,70 @@ def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
         rows, test, oracle_fp, match=lambda r: r.kind is RouteKind.PAIR)
 
 
-def unopened_pair_fills(rows: Iterable[RouteLedgerRow], test: str,
-                        oracle_fp: str) -> int:
+def unpaid_pair_fills(rows: Iterable[RouteLedgerRow], test: str,
+                      oracle_fp: str) -> int:
     """How many fills in a row, newest first, had a PAIR aimed at `test`
-    and opened none of them (every such row DEFERRED or EMPTY).
+    and did not turn `test` green — whether the pair opened in that fill
+    or not.
 
-    The other half of :func:`unpaid_pair_buys`. That clock releases a
-    refusal to spend once the pair has been graded `grace` times; a pair
-    that never opens is never graded, so a refusal earned by the pair's
-    unspent buy would hold for as long as the pair keeps not opening —
-    the wait-for-a-run-that-never-runs lock the schedule's pair_wait had
-    until 2026-09-18 (run `3127-6763a5c6`, cluster `stable`: fills 2-6
-    opened no run, both pairs deferred, and the measured-owners
-    withholding for their 117 leftovers read `pair unpaid 0/3` on every
-    iteration). A fill is one (run id, iteration); a STOPPED row is the
-    operator's and neither counts nor interrupts. Other oracles are not
-    evidence about this one. An empty `oracle_fp` is 0, as in
+    ONE clock for the measured-owners withholding. It used to be two —
+    graded buys that returned nothing (:func:`unpaid_pair_buys`) and fills
+    in which the pair did not open — each compared with the grace on its
+    own, and an OPEN reset the second while the first had not reached the
+    bound. Run `486447-5207101c` (2026-10-07, cluster `stable`): the
+    withholding for `test_if` lapsed at fills 4 and 5 on the unopened
+    clock, fill 5 then opened the pair (it cashed on four other tests),
+    and fill 6 read `unopened 0`, `unpaid 2/3` and withheld again: six
+    fills of the pair as `test_if`'s candidate without paying it, and the
+    owner the coverage reading named stayed out. A fill the pair spent
+    and a fill it was the candidate and did not open are the same fact
+    for the test: a fill went by and the pair did not pay it.
+
+    A fill is one (run id, iteration). It pays `test` when any of its pair
+    rows does (:func:`row_paid_test`, with the same-process inference
+    :func:`unpaid_tries_for_test` uses for an unrecorded row). A STOPPED
+    row is the operator's and neither counts nor interrupts. Other oracles
+    are not evidence about this one. An empty `oracle_fp` is 0, as in
     :func:`unpaid_pair_buys`.
+
+    Newest first is read from the rows, not from where they sit in the
+    ledger: a process orders by its earliest `started` (its first row
+    where none is stamped), a fill within a process by its iteration. A
+    walk in insertion order stopped at an older paid fill when the rows
+    arrived newest first, and under-counted the unpaid fills after it.
     """
     if not oracle_fp:
         return 0
+    rows_list = list(rows)
+    aimed: dict[str, int] = {}
+    for r in rows_list:
+        if r.run_id and test in r.target_tests:
+            aimed[r.run_id] = max(aimed.get(r.run_id, r.iteration), r.iteration)
+    run_order: dict[str, tuple[str, int]] = {}
+    for n, r in enumerate(rows_list):
+        first = run_order.get(r.run_id)
+        started = r.started or ""
+        if first is None:
+            run_order[r.run_id] = (started, n)
+        elif started and (not first[0] or started < first[0]):
+            run_order[r.run_id] = (started, first[1])
     fills: dict[tuple[str, int], bool] = {}
-    for r in rows:
+    for r in rows_list:
         if (r.kind is not RouteKind.PAIR or r.oracle_fp != oracle_fp
                 or test not in r.target_tests
                 or r.outcome is RunOutcome.STOPPED):
             continue
         key = (r.run_id, r.iteration)
-        opened = r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY)
-        fills[key] = fills.get(key, False) or opened
+        paid = (r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY)
+                and row_paid_test(
+                    r, test, aimed_later=bool(r.run_id)
+                    and aimed.get(r.run_id, r.iteration) > r.iteration))
+        fills[key] = fills.get(key, False) or paid
+    newest_first = sorted(
+        fills, key=lambda k: (run_order[k[0]], k[1]), reverse=True)
     seen = 0
-    for opened in reversed(list(fills.values())):
-        if opened:
+    for paid in (fills[k] for k in newest_first):
+        if paid:
             break
         seen += 1
     return seen

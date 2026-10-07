@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `Error: core::error::Error` is not satisfied
+   --> src/error.rs:327:47
+    |
+327 |         Self::construct_from_context(context, self, None)
+    |         ----------------------------          ^^^^ unsatisfied trait bound
+    |         |
+    |         required by a bound introduced by this call
+    |
+help: the trait `core::error::Error` is not implemented for `Error`
+   --> src/lib.rs:375:1
+    |
+375 | pub struct Error {
+    | ^^^^^^^^^^^^^^^^
+note: required by a bound in `error::<impl Error>::construct_from_context`
+   --> src/error.rs:203:12
+    |
+196 |     pub(crate) fn construct_from_context<C, E>(
+    |                   ---------------------- required by a bound in this associated function
+...
+203 |         E: StdError + Send + Sync + 'static,
+    |            ^^^^^^^^ required by this bound in `error::<impl Error>::construct_from_context`

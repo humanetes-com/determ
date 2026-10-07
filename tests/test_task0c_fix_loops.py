@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 
 from pipeline_core.application.tasks.task0c import Task0cDeps, task0c_augment_module
-from pipeline_core.domain.coverage import PerFileCoverage
 
 
 class _Stop(Exception):
@@ -211,68 +210,16 @@ def test_engine_get_history_imported_not_injected() -> None:
     assert "get_task0c_history" not in Task0cDeps.__dataclass_fields__
 
 
-def test_engine_pragma_pass_writes_and_compiles(tmp_path: Path) -> None:
-    """Relocated `_engine_pragma_pass` annotates uncovered lines, asks the
-    LLM for a pragma'd file, and persists it only if the recompile succeeds."""
-    from pipeline_core.application.tasks.task0c import _engine_pragma_pass
-
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    f = src_dir / "x.rs"
-    f.write_text("pub fn a() {}\npub fn b() {}\n")
-    rel = "src/x.rs"
-
-    captured: dict = {}
-
-    def fake_ask(prompt, **_kw):
-        captured["prompt"] = prompt
-        return f'<FILE path="{rel}">\npub fn a() {{}}  // IGN\npub fn b() {{}}\n</FILE>'
-
-    deps = SimpleNamespace(
-        BUILD_TIMEOUT=30,
-        coverage_ignore_pragma="// IGN",
-        annotate_uncovered=lambda s, lines: s,
-        cargo_env=lambda: {},
-        ask=fake_ask,
-        extract_files=lambda r: {rel: "pub fn a() {}  // IGN\npub fn b() {}\n"},
-        is_test_file=lambda p, d: False,
-        subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0)),
-    )
-    files_data = [PerFileCoverage.from_dict(
-        {"abs_path": str(f), "traces": [{"line": 1, "stats": {"Line": 0}}]})]
-
-    _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
-
-    assert "uncovered" in captured["prompt"].lower()
-    assert "// IGN" in f.read_text()       # pragma persisted (compile passed)
-
-
-def test_engine_pragma_pass_reverts_on_compile_fail(tmp_path: Path) -> None:
-    """If the pragma'd file no longer compiles, the original is restored."""
-    from pipeline_core.application.tasks.task0c import _engine_pragma_pass
-
-    src_dir = tmp_path / "src"
-    src_dir.mkdir()
-    f = src_dir / "x.rs"
-    original = "pub fn a() {}\n"
-    f.write_text(original)
-    rel = "src/x.rs"
-
-    deps = SimpleNamespace(
-        BUILD_TIMEOUT=30,
-        coverage_ignore_pragma="// IGN",
-        annotate_uncovered=lambda s, lines: s,
-        cargo_env=lambda: {},
-        ask=lambda prompt, **k: "x",
-        extract_files=lambda r: {rel: "this is not valid rust // IGN\n"},
-        is_test_file=lambda p, d: False,
-        subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=1)),
-    )
-    files_data = [PerFileCoverage.from_dict(
-        {"abs_path": str(f), "traces": [{"line": 1, "stats": {"Line": 0}}]})]
-
-    _engine_pragma_pass(deps, tmp_path, "x", src_dir, files_data, "m")
-    assert f.read_text() == original       # reverted
+def test_no_model_verdict_can_write_a_pragma() -> None:
+    """Both writers that let a model's "unreachable" exclude lines from the
+    line reading are gone: the stall pass that pragma'd whatever the model
+    listed, and the retrospective's targeted pass that pragma'd anyhow's
+    `format_err` `else` arm, which `anyhow!("x {var}")` executes. A line leaves
+    the reading only by the compiler's proof or the artifact/cfg filters."""
+    from pipeline_core.application.tasks import task0c
+    assert not hasattr(task0c, "_engine_pragma_pass")
+    assert not hasattr(task0c, "_engine_targeted_pragma")
+    assert "coverage_ignore_pragma" not in Task0cDeps.__dataclass_fields__
 
 
 def test_looks_like_fn_decl_matches_old_regex() -> None:
@@ -290,58 +237,6 @@ def test_looks_like_fn_decl_matches_old_regex() -> None:
     ]
     for c in cases:
         assert _looks_like_fn_decl(c) == bool(old.match(c)), c
-
-
-def _tpragma_deps(**over: Any) -> SimpleNamespace:
-    base = {
-        "BUILD_TIMEOUT": 30,
-        "coverage_ignore_pragma": "// IGN",
-        "annotate_uncovered": lambda s, lines: s,
-        "cargo_env": lambda: {},
-        "ask": lambda prompt, **k: "x",
-        "extract_files": lambda r: {},
-        "strip_gen_tests_decls": lambda s: s,
-        "subprocess": SimpleNamespace(run=lambda *a, **k: SimpleNamespace(returncode=0)),
-    }
-    base.update(over)
-    return SimpleNamespace(**base)
-
-
-def test_engine_targeted_pragma_writes_on_compile(tmp_path: Path) -> None:
-    """Relocated `_engine_targeted_pragma` writes the LLM's pragma'd file
-    when it recompiles, and reports success."""
-    from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
-
-    f = tmp_path / "src" ; f.mkdir()
-    src = f / "x.rs"
-    src.write_text("pub fn a() {}\npub fn b() {}\n")
-    rel = "src/x.rs"
-    deps = _tpragma_deps(
-        ask=lambda p, **k: f'<FILE path="{rel}">\npub fn a() {{}}  // IGN\npub fn b() {{}}\n</FILE>',
-        extract_files=lambda r: {rel: "pub fn a() {}  // IGN\npub fn b() {}\n"},
-    )
-    ok = _engine_targeted_pragma(deps, tmp_path, "x", rel, {1}, ["a"], "m")
-    assert ok is True
-    assert "// IGN" in src.read_text()
-
-
-def test_engine_targeted_pragma_codeblock_fallback(tmp_path: Path) -> None:
-    """When no <FILE> tag is returned, it falls back to the largest fenced
-    code block (the relocated extract_code_blocks helper)."""
-    from pipeline_core.application.tasks.task0c import _engine_targeted_pragma
-
-    f = tmp_path / "src" ; f.mkdir()
-    src = f / "x.rs"
-    src.write_text("pub fn a() {}\n")
-    rel = "src/x.rs"
-    big = "pub fn a() {}  // IGN\n" + "// padding line\n" * 10
-    deps = _tpragma_deps(
-        ask=lambda p, **k: f"here you go:\n```rust\n{big}```\n",
-        extract_files=lambda r: {},
-    )
-    ok = _engine_targeted_pragma(deps, tmp_path, "x", rel, {1}, ["a"], "m")
-    assert ok is True
-    assert "// IGN" in src.read_text()
 
 
 def test_engine_mutation_pass_persists_hardening(tmp_path: Path, monkeypatch) -> None:

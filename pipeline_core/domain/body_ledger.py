@@ -40,13 +40,14 @@ digests; the raw occurrence text is what goes back on the tree.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain.assertion_position import TestKey, outcomes_of
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.oracle_ledger import bare_test_name
 
 GATE_VERSION = "bl1"
 """Bumped when the layout gate's meaning changes.
@@ -262,6 +263,14 @@ class LedgerEntry:
     # when this row was graded. "" on every row graded before the typed
     # position existed.
     comparator: str = ""
+    # The BARE names of the tests the keep that landed this body turned
+    # green in its own comparison (the route row's `newly_green`). None =
+    # unrecorded (a row written before the field, or a keep with no reading).
+    # The sweep's grade credits a convicting test that turned green only when
+    # it is in this set: a sweep on 2026-10-02 judged `4 landed body(ies) —
+    # 4 proven` for one keep that moved the test, because every landed unit
+    # attributed to a test that turned green between two sweeps was credited.
+    kept_green: tuple[str, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -281,6 +290,8 @@ class LedgerEntry:
             **({"prior_bodies": list(self.prior_bodies)}
                if self.prior_bodies else {}),
             **({"comparator": self.comparator} if self.comparator else {}),
+            **({"kept_green": list(self.kept_green)}
+               if self.kept_green is not None else {}),
         }
 
     @staticmethod
@@ -333,6 +344,8 @@ class LedgerEntry:
                 prior_bodies=tuple(
                     str(b) for b in (raw.get("prior_bodies") or ())),
                 comparator=str(raw.get("comparator") or ""),
+                kept_green=(None if raw.get("kept_green") is None else tuple(
+                    str(t) for t in raw.get("kept_green") or ())),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -875,6 +888,12 @@ def classify(
                 return BodyState.ADVANCED, delta + tuple(
                     (t, "advanced") for t in outcomes.later_tests)
             return BodyState.FLAT, delta
+        if (entry.kept_green is not None
+                and not (convicting & after.passed & frozenset(entry.kept_green))):
+            # The convicting tests that turned green were not turned by THIS
+            # landing's keep (its own comparison recorded none of them): a
+            # sibling keep paid them. A graded try that bought nothing.
+            return BodyState.FLAT, delta
         return BodyState.PROVEN, delta
     if not (names & after.passed):
         return BodyState.UNMEASURED, delta
@@ -888,6 +907,78 @@ def classify(
     # only while nothing convicts the unit, so a test that later fails in it
     # reopens it.
     return BodyState.FLAT, delta
+
+
+@dataclass(frozen=True, slots=True)
+class ReportKeep:
+    """One route report of a wave: the units it kept and the tests its row's
+    own comparison turned green (bare names; None when that row recorded no
+    comparison)."""
+
+    kept: frozenset[FnLocator]
+    newly_green: frozenset[str] | None
+
+
+class WaveKept(frozenset[FnLocator]):
+    """The units a fill wave's routes kept — a frozenset of them, so every
+    reader of the plain set is unchanged — carrying each report's keep
+    (`ReportKeep`). Which kept unit a green test is credited to is decided
+    by :func:`credited_green` with the attribution the driver holds; the
+    unit ledger stamps the result on the landed row
+    (`LedgerEntry.kept_green`)."""
+
+    reports: tuple[ReportKeep, ...]
+
+    def __new__(cls, units: Iterable[FnLocator],
+                reports: Iterable[ReportKeep] = ()) -> WaveKept:
+        obj = super().__new__(cls, units)
+        obj.reports = tuple(reports)
+        return obj
+
+
+def credited_green(
+    reports: Iterable[ReportKeep],
+    attributed: Mapping[FnLocator, Collection[str]],
+) -> dict[FnLocator, frozenset[str] | None]:
+    """Per kept unit, the tests its own keep can be shown to have paid.
+
+    A file or pair row runs one cargo invocation for the whole reply, so it
+    cannot see which of two bodies attributed to the same test turned it
+    green. A test in a row's `newly_green` is therefore credited to a kept
+    unit only when that unit is the ONLY unit the same report kept that is
+    attributed to the test; a test two kept units share is credited to
+    neither. A report whose row recorded no comparison does not erase a set
+    another report recorded for the same unit: a unit's green is None only
+    when every report that kept it is unrecorded."""
+    attr = {u: frozenset(bare_test_name(t) for t in ts)
+            for u, ts in attributed.items()}
+    out: dict[FnLocator, frozenset[str] | None] = {}
+    for rep in reports:
+        if rep.newly_green is None:
+            for u in rep.kept:
+                out.setdefault(u, None)
+            continue
+        paid: dict[FnLocator, set[str]] = {u: set() for u in rep.kept}
+        for t in {bare_test_name(n) for n in rep.newly_green}:
+            owners = [u for u in rep.kept if t in attr.get(u, frozenset())]
+            if len(owners) == 1:
+                paid[owners[0]].add(t)
+        for u, got in paid.items():
+            out[u] = (out.get(u) or frozenset()) | got
+    return out
+
+
+def kept_green_of(kept: frozenset[FnLocator], unit: FnLocator,
+                  attributed: Mapping[FnLocator, Collection[str]],
+                  ) -> tuple[str, ...] | None:
+    """The tests the wave's keep can credit to `unit`
+    (:func:`credited_green`), or None when the caller handed a plain set or
+    no report that kept `unit` recorded a comparison."""
+    reports = getattr(kept, "reports", None)
+    if not reports:
+        return None
+    got = credited_green(reports, attributed).get(unit)
+    return None if got is None else tuple(sorted(got))
 
 
 # --- selection ---------------------------------------------------------------

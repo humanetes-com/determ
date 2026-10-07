@@ -1,0 +1,4 @@
+<FN name="render" block="free fns">
+let _ = (lhs, rhs);
+Error::msg(msg)
+</FN>

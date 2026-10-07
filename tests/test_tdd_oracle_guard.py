@@ -25,6 +25,11 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.oracle_ledger import reconcile_sweep
 from pipeline_core.domain.stub_inventory import StubInventory
 
+# A layout hash the live tree is not: the entry restore declines such a mark
+# (a re-stub moved the layout), so the restore these tests read is the one
+# taken before a stop.
+_MOVED_LAYOUT = "f" * 16
+
 
 def test_reconcile_sweep_vanished_deficit_and_normalization() -> None:
     o = reconcile_sweep(4, frozenset({"t1", "m::t2", "t3", "t4"}),
@@ -1189,7 +1194,7 @@ def test_a_best_tree_restore_inside_a_refill_window_closes_the_window(
                                             bytes_filled=10),
         guard="2",
         best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
-                               oracle_size=2),
+                               oracle_size=2, layout_sha=_MOVED_LAYOUT),
         restore=lambda pd, cl, f: (50, 12, []),
     )
     rows = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]
@@ -1240,7 +1245,7 @@ def test_a_restore_the_next_sweep_cannot_see_is_called_unmeasured(
                                             bytes_filled=10),
         guard="2",
         best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
-                               oracle_size=2),
+                               oracle_size=2, layout_sha=_MOVED_LAYOUT),
         restore=lambda pd, cl, f: (57, 12, []),
     )
     restored = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]
@@ -1286,7 +1291,7 @@ def test_a_restore_the_next_sweep_DOES_see_is_not_called_unmeasured(
                                             bytes_filled=10),
         guard="2",
         best_mark=BestTreeMark(pass_count=2, iteration=1, tree_sha="a" * 16,
-                               oracle_size=2),
+                               oracle_size=2, layout_sha=_MOVED_LAYOUT),
         restore=_restore,
     )
     restored = [d for ev, d in events if ev == "phase_c.tdd.best_tree_restored"]

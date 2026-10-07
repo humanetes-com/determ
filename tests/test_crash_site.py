@@ -1276,3 +1276,150 @@ def test_the_must_is_worded_for_the_copy_not_the_box() -> None:
     assert "sentinel" in OWNERSHIP_TRANSFER_MUST
     assert ownership_transfer_must(("downcast",)) == OWNERSHIP_TRANSFER_MUST
     assert ownership_transfer_must(("drop",)) == ""
+
+
+# --- homonyms keep their container ------------------------------------------
+
+_TWO_FMTS = """struct Error;
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.debug(f)
+    }
+}
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("e")
+    }
+}
+impl A {
+    fn new() -> A { A }
+}
+impl B {
+    fn new() -> B { B }
+}
+impl C {
+    fn new() -> C { C }
+}
+fn caller(e: &Error) -> String {
+    format!("{:?}", e)
+}
+"""
+_CONTAINERS = {3: "impl fmt::Debug for Error", 8: "impl fmt::Display for Error",
+               13: "impl A", 16: "impl B", 19: "impl C", 21: ""}
+
+
+def _span_records(text: str, file: str) -> list:
+    """Byte-span records of the invented file, as the extractor emits them
+    (signature start through the closing brace)."""
+    from pipeline_core.domain.models import FnRecord
+    raw = text.encode()
+    lines = text.splitlines(keepends=True)
+    starts = [0]
+    for ln in lines:
+        starts.append(starts[-1] + len(ln.encode()))
+    out = []
+    for line_no, cont in _CONTAINERS.items():
+        sig = starts[line_no - 1] + lines[line_no - 1].index("fn ")
+        brace = raw.index(b"{", sig)
+        depth, i = 0, brace
+        while True:
+            if raw[i:i + 1] == b"{":
+                depth += 1
+            elif raw[i:i + 1] == b"}":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        name = lines[line_no - 1].split("fn ")[1].split("(")[0]
+        out.append(FnRecord(file=file, fn_name=name, sig_byte_start=sig,
+                            body_byte_start=brace + 1, body_byte_end=i,
+                            container=cont))
+    return out
+
+
+def _uaf(origin_line: int, origin_fn: str):
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    access = CrashFrame(file_rel="src/error.rs", line=22, fn_name="caller",
+                        symbol="anyhow::caller")
+    origin = CrashFrame(file_rel="src/error.rs", line=origin_line,
+                        fn_name=origin_fn, symbol=f"anyhow::{origin_fn}")
+    return CrashSite(binary_label="tests/test_fmt.rs", test_name="t",
+                     signal="AddressSanitizer: heap-use-after-free",
+                     frames=(access,), origin_frames=(origin,), raw_report="")
+
+
+def test_the_two_fmt_homonyms_do_not_share_evidence_or_a_refill_admission() -> None:
+    """A fault in `fmt` under `impl Debug for Error`. The
+    locator maps key `src/error.rs::fmt`, so the Display `fmt` shared its
+    evidence string and its crash refill admission. The frames resolve to
+    the Debug body; the Display body carries neither. Negative control: the
+    locator map still gives both one key, and dispatch keeps reading it."""
+    from pipeline_core.application.reconstruct.cluster_membership import (
+        collect_impl_refill_targets,
+    )
+    from pipeline_core.domain.attribution import FailureFrontier
+    from pipeline_core.domain.crash_site import (
+        blamed_locators,
+        crash_evidence_by_locator,
+        crash_sites_of,
+    )
+    from pipeline_core.domain.models import FnRecord, FnSite, ImplBlock
+    from pipeline_core.domain.refill_evidence import Attribution, collect_refill_evidence
+
+    recs = _span_records(_TWO_FMTS, "src/error.rs")
+    site = _uaf(4, "fmt")
+    fmt = FnLocator("src/error.rs", "fmt")
+    debug, display = "impl fmt::Debug for Error", "impl fmt::Display for Error"
+    assert list(crash_evidence_by_locator((site,))).count(fmt) == 1
+    blamed = blamed_locators((site,))
+    assert blamed == {fmt}
+
+    sites = crash_sites_of((site,), recs,
+                           lambda rel: _TWO_FMTS if rel == "src/error.rs" else None)
+    assert sites.blamed == {FnSite("src/error.rs", "fmt", debug)}
+    assert sites.blames(blamed, "src/error.rs", "fmt", debug)
+    assert not sites.blames(blamed, "src/error.rs", "fmt", display)
+    evidence = crash_evidence_by_locator((site,))
+    assert sites.evidence_for(evidence, "src/error.rs", "fmt", debug)
+    assert sites.evidence_for(evidence, "src/error.rs", "fmt", display) == ""
+    assert sites.evidences(evidence.keys(), "src/error.rs", "caller", "")
+
+    def block(cont: str) -> ImplBlock:
+        return ImplBlock(file="src/error.rs", container=cont, members=(
+            FnRecord(file="src/error.rs", fn_name="fmt", container=cont),))
+
+    frontier = FailureFrontier.of_direct({fmt: set()})
+    stamped = collect_impl_refill_targets(
+        [block(debug), block(display)], {fmt}, frontier,
+        crash_blamed=blamed, crash_sites=sites, file_primary=True)
+    assert [len(b.refill_members) for b in stamped] == [1, 0]
+    # The locator-only reading (no sites) admits both: the old collapse.
+    stamped_old = collect_impl_refill_targets(
+        [block(debug), block(display)], {fmt}, frontier,
+        crash_blamed=blamed, file_primary=True)
+    assert [len(b.refill_members) for b in stamped_old] == [1, 1]
+    grades = [collect_refill_evidence(b, stamped_old, frontier, crashed=blamed,
+                                      crash_sites=sites)[0].attribution
+              for b in stamped_old]
+    assert grades[0] is Attribution.CRASHED
+    assert grades[1] is not Attribution.CRASHED
+
+
+def test_three_new_containers_do_not_collapse_to_one_blame() -> None:
+    from pipeline_core.domain.crash_site import blamed_locators, crash_sites_of
+
+    recs = _span_records(_TWO_FMTS, "src/error.rs")
+    site = _uaf(16, "new")
+    blamed = blamed_locators((site,))
+    sites = crash_sites_of((site,), recs,
+                           lambda rel: _TWO_FMTS if rel == "src/error.rs" else None)
+    got = [sites.blames(blamed, "src/error.rs", "new", c)
+           for c in ("impl A", "impl B", "impl C")]
+    assert got == [False, True, False]
+    # A frame no record's span holds is left out, and the locator blame then
+    # stands for every container, as before.
+    stray = crash_sites_of((_uaf(99, "new"),), recs,
+                           lambda rel: _TWO_FMTS if rel == "src/error.rs" else None)
+    assert stray.blamed == frozenset()
+    assert all(stray.blames(blamed, "src/error.rs", "new", c)
+               for c in ("impl A", "impl B", "impl C"))

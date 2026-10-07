@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from pipeline_core.domain.abort_cause import AbortCause, AbortReading
+from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.generation import (
     is_gen_tests_sibling_name,
     parse_gen_tests_integration_filename,
@@ -2056,6 +2057,112 @@ def frame_site(
     return FnSite(frame.file_rel, best.fn_name, best.container)
 
 
+@dataclass(frozen=True, slots=True)
+class CrashSites:
+    """A sweep's crash blame and evidence at the declared bodies the frames
+    ran (:func:`frame_site`), beside the locator-keyed sets dispatch reads.
+
+    `crash_evidence_by_locator` and the blame both key `(file, fn_name)`,
+    so `fmt` under `impl Debug for Error` and `fmt` under `impl Display for
+    Error` shared one evidence string and one refill admission, and three
+    `new` containers collapsed to one blame. ``blamed`` is every culprit
+    frame resolved to its body; ``evidence`` is every frame's rendered
+    evidence at its body. A frame `frame_site` cannot resolve is left out.
+
+    The readers that hold a container narrow a locator fact with it: when
+    any frame of that locator resolved, only the resolved containers carry
+    it; when none did (a family member, a chain-derived blame, a table slot
+    a route joined), the locator fact stands for every container, as
+    before."""
+
+    blamed: frozenset[FnSite] = frozenset()
+    evidence: Mapping[FnSite, str] = field(default_factory=dict)
+
+    def blames(self, blamed: Collection[FnLocator], file: str, fn_name: str,
+               container: str) -> bool:
+        """`(file, fn_name)` is in the locator blame, and the body in
+        `container` is the one a culprit frame resolved to (or none did)."""
+        return _narrowed(blamed, self.blamed, file, fn_name, container)
+
+    def evidences(self, keys: Collection[FnLocator], file: str, fn_name: str,
+                  container: str) -> bool:
+        """`(file, fn_name)` carries crash evidence, narrowed to the body a
+        frame resolved to as :meth:`blames` narrows the blame."""
+        return _narrowed(keys, self.evidence.keys(), file, fn_name, container)
+
+    def evidence_for(self, evidence: Mapping[FnLocator, str], file: str,
+                     fn_name: str, container: str) -> str:
+        """The evidence text of the body in `container`: its own resolved
+        entries when any frame of the locator resolved, else the locator's."""
+        own = _resolved(self.evidence.keys(), file, fn_name)
+        if not own:
+            return evidence.get(FnLocator(file, fn_name), "")
+        want = container_key(container)
+        return "\n\n".join(dict.fromkeys(
+            t for site, t in self.evidence.items()
+            if site in own and container_key(site.container) == want))
+
+
+def _resolved(sites: Iterable[FnSite], file: str, fn_name: str
+              ) -> frozenset[FnSite]:
+    f = norm_src_rel(file)
+    return frozenset(s for s in sites
+                     if s.fn_name == fn_name and norm_src_rel(s.file) == f)
+
+
+def _narrowed(locs: Collection[FnLocator], sites: Iterable[FnSite],
+              file: str, fn_name: str, container: str) -> bool:
+    if FnLocator(file, fn_name) not in locs:
+        return False
+    own = _resolved(sites, file, fn_name)
+    want = container_key(container)
+    return not own or any(container_key(s.container) == want for s in own)
+
+
+def crash_sites_of(
+    sites: tuple[CrashSite, ...],
+    records: Sequence[FnRecord],
+    file_text: Callable[[str], str | None],
+) -> CrashSites:
+    """The sweep's :class:`CrashSites`: every culprit frame (the origin
+    blame, an exhaustion's cycle members) and every evidence frame resolved
+    by :func:`frame_site`. Evidence follows `crash_evidence_by_locator`'s
+    keys: a site's frames carry its rendered evidence, an exhaustion's
+    cycle members carry the cycle's one block; a chain-derived site has no
+    frame and contributes nothing here."""
+    def resolve(frames: Iterable[CrashFrame]) -> list[FnSite]:
+        return [r for r in (frame_site(f, records, file_text) for f in frames)
+                if r is not None]
+
+    blamed: set[FnSite] = set()
+    evidence: dict[FnSite, str] = {}
+
+    def _put(keys: Iterable[FnSite], text: str) -> None:
+        for key in keys:
+            if key in evidence and text in evidence[key]:
+                continue
+            evidence[key] = (evidence[key] + "\n\n" + text
+                             if key in evidence else text)
+
+    exhausted: dict[object, list[CrashSite]] = {}
+    for site in sites:
+        blamed.update(resolve(site.culprit_frames))
+        if site.provenance != PROVENANCE_FRAME:
+            continue
+        if site.fault is FaultClass.EXHAUSTION:
+            ident = (site.cycle.key if site.cycle is not None
+                     else tuple((f.file_rel, f.fn_name) for f in site.frames))
+            exhausted.setdefault(ident, []).append(site)
+            continue
+        _put(resolve(site.all_frames), site.render_evidence())
+    for group in exhausted.values():
+        keys = [k for s in group for k in resolve(s.culprit_frames)]
+        if not keys:
+            keys = [k for s in group for k in resolve(s.all_frames)]
+        _put(sorted(set(keys)), render_exhaustion_evidence(group))
+    return CrashSites(frozenset(blamed), evidence)
+
+
 def faulting_stack_sites(
     sites: tuple[CrashSite, ...],
     unowned: Collection[str],
@@ -2356,6 +2463,49 @@ class AsanReport:
     origin: list[dict[str, object]]
     text: str
     origin_stack_lines: int = 0
+    #: The `previously allocated by` stack of a report whose origin is the
+    #: `freed by` stack (a use-after-free). Kept apart: it is not the
+    #: origin, but when the free stack's only workspace frames are the
+    #: test's own it is the only stack that names the crate's constructor
+    #: (run `486447-5207101c`: `Error::construct_from_context` and
+    #: `Error::construct_from_std` sat there while the localizer blamed
+    #: NOBODY).
+    alloc: tuple[dict[str, object], ...] = ()
+
+
+def origin_or_allocation(
+    origin: list[dict[str, object]],
+    alloc: Sequence[dict[str, object]],
+    is_test_path: Callable[[str], bool],
+) -> tuple[list[dict[str, object]], bool]:
+    """The stack a use-after-free is blamed on: the free stack, unless its
+    only workspace frames are the test's own, in which case the allocation
+    stack's crate frames name the body that built the memory. Frames are
+    workspace-relative (`relativize_frame_files`); an absolute path is
+    outside the workspace. Returns ``(frames, from_allocation)``.
+
+    A test's own free is usually the legitimate one (it dropped its value),
+    so the free stack says nothing about the crate; the constructor on the
+    allocation stack is the crate's last word on that memory. Run
+    `486447-5207101c` (2026-10-07): `tests/test_context.rs::test_downcast_high`
+    freed in the test at `:124`, allocated through
+    `Error::construct_from_context` → `Error::context` → `ext_context`;
+    `tests/test_downcast.rs::test_drop` freed at `:83`, allocated through
+    `Error::construct_from_std` → `Error::new`. Both were blamed on nobody."""
+    def _ws(frames: Sequence[dict[str, object]]) -> list[str]:
+        return [str(f.get("file") or "") for f in frames
+                if str(f.get("file") or "")
+                and not str(f.get("file") or "").startswith("/")]
+
+    free_ws = _ws(origin)
+    if not free_ws or not all(is_test_path(f) for f in free_ws):
+        return origin, False
+    crate = [f for f in alloc
+             if (fl := str(f.get("file") or ""))
+             and not fl.startswith("/") and not is_test_path(fl)]
+    if not crate:
+        return origin, False
+    return [dict(f) for f in alloc], True
 
 
 def parse_asan_reports(output: str) -> list[AsanReport]:
@@ -2426,6 +2576,7 @@ def _parse_asan_chunk(chunk: list[str]) -> AsanReport:
                                    or "error")
     access: list[dict[str, object]] = []
     origin: list[dict[str, object]] = []
+    alloc: list[dict[str, object]] = []
     origin_lines = 0
     # Which bucket the stack currently being read belongs to. None = discard
     # (a stack under an introducer this parser does not recognise).
@@ -2450,11 +2601,17 @@ def _parse_asan_chunk(chunk: list[str]) -> AsanReport:
                 or "is located in stack of" in low):
             # The origin is whichever of these appears first: for a
             # use-after-free that is `freed by`, for a use-after-return
-            # `is located in stack of`, for a leak `allocated by`.
-            target = origin if not origin_lines else None
+            # `is located in stack of`, for a leak `allocated by`. An
+            # allocation stack after the origin is kept apart (`alloc`).
+            if not origin_lines and not origin:
+                target = origin
+            elif "allocated by" in low and not alloc:
+                target = alloc
+            else:
+                target = None
     return AsanReport(label=label, kind=kind, access=access, origin=origin,
                       text="\n".join([header, *rest]),
-                      origin_stack_lines=origin_lines)
+                      origin_stack_lines=origin_lines, alloc=tuple(alloc))
 
 
 def parse_asan_report(

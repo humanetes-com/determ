@@ -30,20 +30,23 @@ from ...domain.behaviour_pinning import (
 from ...domain.behaviour_select import drop_capture_owned
 from ...domain.cluster_plan import target_scope_rule
 from ...domain.coverage import PerFileCoverage, coverage_pass_outcome
-from ...domain.file_coverage_floor import FileFloor, UncoveredSplit, judge_files, lines_in
+from ...domain.file_coverage_floor import FileFloor, UncoveredSplit, bucket_counts, judge_files, lines_in
 from ...domain.fn_execution import (
+    COMMITTED,
     FnCoverageRecord,
     FnTarget,
     FunctionExecution,
     aimed_fn_outcomes,
+    block_failure,
     flipped_cfg_set,
     inherited_attempts,
     note_attempt,
     note_verdicts,
     site_label,
     unambiguous_verdicts,
-    withhold_pending,
 )
+from ...domain.fn_reachability import proofs as reachability_proofs
+from ...domain.fn_routes import WorldFacts, nameable_api
 from ...domain.generation import (
     as_integration_test,
     gen_tests_integration_rel,
@@ -51,7 +54,6 @@ from ...domain.generation import (
     merge_gen_tests_blocks,
     parse_gen_tests_integration_filename,
 )
-from ...domain.llm_output import extract_code_blocks, strip_uncovered_markers
 from ...domain.oracle_admission import (
     AdmissionPolicy,
     BlockAdmission,
@@ -60,8 +62,10 @@ from ...domain.oracle_admission import (
     weakening_reason,
 )
 from ...domain.oracle_visibility import declared_items, fn_line_spans, public_item_names
+from ...domain.reach_probe import ReachOutcome
 from ...domain.refine import Attempt, FixProgress, LoopState
 from ...domain.rust_idents import camelcase_type_names, defined_type_names
+from ...domain.test_evidence import still_unexecuted, without_model_comments
 from ...domain.text import strip_think_blocks
 from ...domain.workspace_layout import STREAM_LOG_DIR
 from ...log import emit, log
@@ -71,8 +75,8 @@ from ..reconstruct.cargo_errors import error_type_signals
 from .fn_criterion import (
     FnCriterionInputs,
     fold_reading,
-    read_by_construction,
     read_function_execution,
+    read_world_facts,
 )
 
 TASK0C_ATTEMPTS_LOG = ".task0c_attempts.jsonl"
@@ -82,7 +86,6 @@ TASK0C_ATTEMPTS_LOG = ".task0c_attempts.jsonl"
 class Task0cDeps:
     BUILD_TIMEOUT: Any
     COVERAGE_TARGET: Any
-    coverage_ignore_pragma: Any
     TASK0C_PROMPT_CHAR_CAP: Any
     FIX_ERR_CAP: Any
     SIBLING_CAP: Any
@@ -176,6 +179,13 @@ class Task0cDeps:
     # stop says so; nothing reads an absent reading as "all executed".
     enumerate_fns: Any = None
     enumerate_mods: Any = None
+    # The extractor's type records over the crate root: which `pub` types the
+    # public index leaves unnameable (`domain.fn_routes`). Absent: none named.
+    enumerate_types: Any = None
+    # (project_dir, cluster) -> t0d's reach-round outcomes by site label
+    # (`domain.reach_probe`): a probe along a target's route that ran on the
+    # original and did not enter it is quoted beside the route. Absent: none.
+    load_reach: Any = None
     load_fn_record: Any = None
     save_fn_record: Any = None
     other_fn_records: Any = None
@@ -243,7 +253,7 @@ def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_
         result_label = "compiled and is COMMITTED TO DISK" if outcome == "success" else f"FAILED ({outcome})"
         entry_lines = [f"Attempt {e.get('attempt', '?')}: → {result_label}"]
         if preview:
-            entry_lines.append(f"Test signatures:\n{preview}")
+            entry_lines.append(f"Test signatures:\n{without_model_comments(preview)}")
         if err:
             err_capped = err[-_FIX_ERR_CAP:] if len(err) > _FIX_ERR_CAP else err
             entry_lines.append(f"Compiler said:\n{err_capped}")
@@ -265,120 +275,6 @@ def _engine_get_history(deps: Task0cDeps, project_dir: Path, rel_path: str, max_
     else:
         parts.append("Write a new attempt that avoids every failure pattern above.")
     return "\n\n".join(parts)
-
-
-def _engine_pragma_pass(
-    deps: Task0cDeps,
-    project_dir: Path,
-    module_name: str,
-    module_dir: Path,
-    files_data: list[PerFileCoverage],
-    model: str,
-) -> None:
-    """
-    Called when coverage stalls: ask the LLM to add `// # tarpaulin coverage ignore`
-    to lines that are genuinely unreachable from inline #[cfg(test)] blocks
-    (cfg-gated nightly code, unsafe vtable dispatch, unreachable!() arms, etc.).
-
-    This is legitimate — production codebases routinely exclude intrinsically
-    unreachable paths from coverage measurement. Tarpaulin honours the pragma and
-    stops counting those lines, allowing coverage to reach 100% on the coverable
-    portion.
-    """
-    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
-    COVERAGE_IGNORE_PRAGMA = deps.coverage_ignore_pragma
-    _annotate_uncovered = deps.annotate_uncovered
-    _cargo_env = deps.cargo_env
-    _log = log
-    ask = deps.ask
-    extract_files = deps.extract_files
-    is_test_file = deps.is_test_file
-    subprocess = deps.subprocess
-    mod_prefix = str(module_dir) + "/"
-
-    # Build map: abs_path → set of uncovered line numbers
-    uncovered_by_file: dict[Path, set[int]] = {}
-    for fdata in files_data:
-        abs_path = Path(fdata.abs_path)
-        if not str(abs_path).startswith(mod_prefix):
-            continue
-        if is_test_file(abs_path, project_dir):
-            continue
-        if abs_path.name == "build.rs":
-            continue
-        lines_uncov = {
-            t["line"] for t in fdata.traces
-            if t["stats"].get("Line", 1) == 0
-        }
-        if lines_uncov:
-            uncovered_by_file[abs_path] = lines_uncov
-
-    if not uncovered_by_file:
-        return
-
-    for abs_path, uncov_lines in uncovered_by_file.items():
-        rel = str(abs_path.relative_to(project_dir))
-        try:
-            source = abs_path.read_text(encoding="utf-8")
-        except Exception:
-            continue
-
-        annotated = _annotate_uncovered(source, uncov_lines)
-        prompt = f"""The following Rust source file has lines that remain uncovered after multiple
-test-generation attempts. These lines may be genuinely unreachable from the crate's public API (the generated tests live in `tests/`
-and can only call `pub` items) — for example:
-- Code behind `#[cfg(error_generic_member_access)]` or other non-default cfg flags
-- `unsafe` functions only called via vtable dispatch (never called directly in tests)
-- `unreachable!()` arms in exhaustive matches
-- Lines only reachable via OS-level error conditions
-
-Your task: add `{COVERAGE_IGNORE_PRAGMA}` to each line that is intrinsically
-unreachable from a `tests/` integration test of the public API.
-
-Rules:
-- ONLY add the pragma to lines marked `// !! UNCOVERED` that you can confirm are
-  unreachable from the public API. Do NOT add it to lines that could be covered
-  by a test.
-- Do NOT modify any existing test code or logic.
-- If a line is coverable (just needs a better test), do NOT add the pragma — leave
-  it for the next generation attempt.
-- Output the complete corrected file.
-
-File: {rel}
-```rust
-{annotated}
-```
-
-<FILE path="{rel}">
-corrected content here
-</FILE>
-"""
-        response = ask(prompt, model=model)
-        files_out = extract_files(response)
-        if rel in files_out:
-            new_content = files_out[rel]
-            # Sanity: must still compile before writing.
-            tmp = abs_path.with_suffix(".pragma_tmp.rs")
-            try:
-                tmp.write_text(new_content, encoding="utf-8")
-                tmp.rename(abs_path)
-                check = subprocess.run(
-                    ["cargo", "test", "--no-run", "-p", module_name],
-                    cwd=project_dir, capture_output=True, text=True,
-                    timeout=BUILD_TIMEOUT, env=_cargo_env(),
-                )
-                if check.returncode != 0:
-                    _log(f"  [pragma-pass] {rel}: compile failed after pragma addition — reverting.")
-                    abs_path.write_text(source, encoding="utf-8")
-                else:
-                    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - source.count(COVERAGE_IGNORE_PRAGMA)
-                    _log(f"  [pragma-pass] {rel}: added {added} coverage ignore pragma(s).")
-            except Exception as e:
-                _log(f"  [pragma-pass] {rel}: error — {e}. Reverting.")
-                with suppress(Exception):
-                    abs_path.write_text(source, encoding="utf-8")
-        else:
-            _log(f"  [pragma-pass] {rel}: LLM returned no output — skipping.")
 
 
 def _looks_like_fn_decl(ln: str) -> bool:
@@ -405,6 +301,7 @@ def _engine_retrospective(
     uncov_lines: set[int] | None = None,
     unproductive_blocks: list[str] | None = None,
     consecutive_giveups: int = 0,
+    unexecuted_note: str = "",
 ) -> str:
     """Ask LLM to classify why remaining uncovered functions can't be reached.
 
@@ -428,7 +325,8 @@ def _engine_retrospective(
     # Count the distinct function names so we can require all to be classified.
     _fn_count = sum(1 for ln in fn_bodies.splitlines() if _looks_like_fn_decl(ln))
     _src_snippet = existing_text[:_SRC_SNIP_CAP]
-    _block_snippet = old_block[:_SRC_SNIP_CAP // 2] if old_block else "(no previous block)"
+    _block_snippet = (without_model_comments(old_block[:_SRC_SNIP_CAP // 2]) if old_block
+                      else "(no previous block)")
     _history_section = (
         f"Compile error history for this file (what went wrong in previous attempts):\n{attempt_history}\n\n"
     ) if attempt_history.strip() else ""
@@ -485,6 +383,7 @@ def _engine_retrospective(
         f"{_unproductive_section}"
         f"{_giveup_section}"
         f"Previous test block (already committed):\n```rust\n{_block_snippet}\n```\n\n"
+        f"{unexecuted_note + chr(10) if unexecuted_note else ''}"
         f"Still-uncovered functions:\n```rust\n{fn_bodies}\n```\n\n"
         f"Source context:\n```rust\n{_src_snippet}\n```\n\n"
         f"For each uncovered function, output exactly one line:\n"
@@ -503,129 +402,6 @@ def _engine_retrospective(
     result = ask(prompt, model=_TASK0C_MODEL, think=None)
     lines = [ln.strip() for ln in result.splitlines() if ln.strip().startswith("FUNCTION")]
     return "\n".join(lines) if lines else result[:600].strip()
-
-
-def _engine_targeted_pragma(
-    deps: Task0cDeps,
-    project_dir: Path,
-    module_name: str,
-    rel_path: str,
-    uncov_lines: set[int],
-    pragma_functions: list[str],
-    model: str,
-) -> bool:
-    """Add tarpaulin ignore pragmas to specific classified-unreachable functions.
-
-    Reads the current file state (including any committed gen_tests block), asks the
-    LLM to add pragmas only to the listed functions, then compile-checks before
-    writing.  Returns True on success.
-    """
-    BUILD_TIMEOUT = deps.BUILD_TIMEOUT
-    COVERAGE_IGNORE_PRAGMA = deps.coverage_ignore_pragma
-    _annotate_uncovered = deps.annotate_uncovered
-    _cargo_env = deps.cargo_env
-    _log = log
-    _strip_gen_tests_decls = deps.strip_gen_tests_decls
-    ask = deps.ask
-    extract_files = deps.extract_files
-    subprocess = deps.subprocess
-    abs_path = project_dir / rel_path
-    try:
-        current_source = abs_path.read_text(encoding="utf-8")
-    except Exception:
-        return False
-
-    # Strip gen_* blocks before sending to LLM — files can become very large after many
-    # augmentation rounds, causing the LLM to fail to return the complete file.
-    # We reattach the stripped suffix after the LLM edits only the core source.
-    # gen_tests bodies now live in sibling files (foo.gen_tests_N.rs); the source
-    # file only contains short `mod gen_tests_N;` path-mod declarations. Strip those
-    # before sending to the LLM and reattach the exact same bytes afterwards.
-    _core_source = _strip_gen_tests_decls(current_source).rstrip() + "\n"
-    _gen_suffix   = current_source[len(_core_source.rstrip("\n")):]
-
-    annotated = _annotate_uncovered(_core_source, uncov_lines)
-    fn_list = "\n".join(f"- {fn}" for fn in pragma_functions)
-
-    prompt = (
-        f"The following functions in `{rel_path}` have been classified as intrinsically "
-        f"unreachable from inline `#[cfg(test)]` unit tests "
-        f"(compile-time dispatch markers, cfg-gated nightly code, dead branches):\n"
-        f"{fn_list}\n\n"
-        f"Add `{COVERAGE_IGNORE_PRAGMA}` to ONLY the lines marked `// !! UNCOVERED` "
-        f"that belong to these specific functions. "
-        f"Do NOT add the pragma to any other line. Do NOT change any other code.\n\n"
-        f"Source file (gen_* test blocks omitted for brevity):\n```rust\n{annotated}\n```\n\n"
-        f"Output the COMPLETE corrected source (without the gen_* blocks) wrapped exactly "
-        f"like this — no other text:\n"
-        f'<FILE path="{rel_path}">\n'
-        f"(complete file content here)\n"
-        f"</FILE>"
-    )
-
-    response = ask(prompt, model=model, think=None)
-    files_out = extract_files(response)
-    if rel_path not in files_out:
-        # Fallback: extract from the largest ```rust ... ``` code block.
-        code_blocks = extract_code_blocks(response)
-        if code_blocks:
-            candidate = max(code_blocks, key=len).strip()
-            if len(candidate) > 100:
-                files_out = {rel_path: candidate}
-                _log(f"  [targeted-pragma] {rel_path}: fell back to code-block extraction.")
-    if rel_path not in files_out:
-        # Last-resort: programmatically insert pragma on the exact uncovered lines.
-        _lines = _core_source.splitlines(keepends=True)
-        _added = 0
-        for _lno in sorted(uncov_lines):
-            if 1 <= _lno <= len(_lines) and COVERAGE_IGNORE_PRAGMA not in _lines[_lno - 1]:
-                _lines[_lno - 1] = _lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
-                _added += 1
-        if _added:
-            files_out = {rel_path: "".join(_lines)}
-            _log(f"  [targeted-pragma] {rel_path}: LLM failed — applied {_added} pragma(s) directly.")
-        else:
-            _log(f"  [targeted-pragma] {rel_path}: LLM returned no output.")
-            return False
-
-    # Strip any // !! UNCOVERED annotations the LLM may have copied from the annotated
-    # prompt back into the output — these are prompt-only markers and must not persist
-    # in the source file.
-    _raw_llm_out = files_out[rel_path]
-    _cleaned_out = strip_uncovered_markers(_raw_llm_out)
-    if _cleaned_out != _raw_llm_out:
-        files_out[rel_path] = _cleaned_out
-        _log(f"  [targeted-pragma] {rel_path}: stripped leaked // !! UNCOVERED annotations from LLM output.")
-
-    # Ensure all uncov_lines actually have the pragma — the LLM sometimes returns the
-    # file unchanged.  Apply any missing pragmas programmatically to the LLM's output.
-    _out_lines = files_out[rel_path].splitlines(keepends=True)
-    _missed = 0
-    for _lno in sorted(uncov_lines):
-        if 1 <= _lno <= len(_out_lines) and COVERAGE_IGNORE_PRAGMA not in _out_lines[_lno - 1]:
-            _out_lines[_lno - 1] = _out_lines[_lno - 1].rstrip("\n") + f"  {COVERAGE_IGNORE_PRAGMA}\n"
-            _missed += 1
-    if _missed:
-        files_out[rel_path] = "".join(_out_lines)
-        _log(f"  [targeted-pragma] {rel_path}: LLM missed {_missed} pragma(s) — added programmatically.")
-
-    # Reattach gen_* suffix so no accumulated tests are lost.
-    _core_out = files_out[rel_path].rstrip("\n") + "\n"
-    new_content = _core_out + _gen_suffix
-    abs_path.write_text(new_content, encoding="utf-8")
-    check = subprocess.run(
-        ["cargo", "test", "--no-run", "-p", module_name],
-        cwd=project_dir, capture_output=True, text=True,
-        timeout=BUILD_TIMEOUT, env=_cargo_env(),
-    )
-    if check.returncode != 0:
-        _log(f"  [targeted-pragma] {rel_path}: compile failed after pragma addition — reverting.")
-        abs_path.write_text(current_source, encoding="utf-8")
-        return False
-
-    added = new_content.count(COVERAGE_IGNORE_PRAGMA) - current_source.count(COVERAGE_IGNORE_PRAGMA)
-    _log(f"  [targeted-pragma] {rel_path}: added {added} pragma(s) for {len(pragma_functions)} classified function(s).")
-    return True
 
 
 _COMPILE_FIX_HEAD = """The Rust test block you generated for `{rel_path}` does not compile.
@@ -840,10 +616,17 @@ def _engine_log_attempt(
             type_signals_write(project_dir, rel_path, type_name, difficulty=1, pattern=pattern)
 
 
-def _render_unexecuted_fns(source_text: str, targets: tuple[FnTarget, ...]) -> str:
+def _render_unexecuted_fns(source_text: str, targets: tuple[FnTarget, ...],
+                           facts: WorldFacts | None = None,
+                           reach: Mapping[str, ReachOutcome] | None = None) -> str:
     """The bodies of functions no test executes, numbered as the coverage run
     numbers them, each headed with its site and its cfg world. Read from the
-    workspace's source, which augmentation runs on before strip."""
+    workspace's source, which augmentation runs on before strip.
+
+    A target the world's MIR routes from the public API carries that route
+    (`domain.fn_routes`): the public call, the crate fns on the way, and what
+    happens at the bottom. Without one the generic trait-dispatch text is the
+    fallback."""
     if not targets:
         return ""
     lines = source_text.splitlines()
@@ -854,11 +637,22 @@ def _render_unexecuted_fns(source_text: str, targets: tuple[FnTarget, ...]) -> s
         body = "\n".join(
             f"{n:4d} | {lines[n - 1]}"
             for n in range(max(1, tgt.first_line), min(tgt.last_line, len(lines)) + 1))
-        route = trait_dispatch_route(tgt.site.container)
-        via = (f"// Reached through the trait, not by a direct call: {route}\n"
-               if route else "")
+        routed = facts.routes_for(tgt.site).lines() if facts is not None else []
+        measured = (reach or {}).get(tgt.label)
+        if measured is not None and measured.prompt_line():
+            routed = [*routed, measured.prompt_line()]
+        if routed:
+            via = "\n".join(routed) + "\n"
+        else:
+            route = trait_dispatch_route(tgt.site.container)
+            via = (f"// Reached through the trait, not by a direct call: {route}\n"
+                   if route else "")
         blocks.append(f"// NEVER EXECUTED by any test: {tgt.label}{world}\n{via}{body}")
     return "\n\n".join(blocks)
+
+
+def _with_note(text: str, note: str) -> str:
+    return f"{text}\n\n{note}" if note else text
 
 
 def _calls_clause(targets: tuple[FnTarget, ...]) -> str:
@@ -1518,6 +1312,10 @@ class Task0cFileHistory:
     file_failed_blocks: dict[str, list[str]] = field(default_factory=dict)
     file_giveup_counts: dict[str, int] = field(default_factory=dict)
     file_loops: dict[str, LoopState] = field(default_factory=dict)
+    # Site label -> the `tests/` files of committed blocks aimed at that
+    # function. Read against the next measurement: a label still among the
+    # unexecuted targets is "those files ran and it has 0 executions".
+    committed_for: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1538,6 +1336,12 @@ class _PhaseCCtx:
     # lines are the fns the listed behaviours exercise, so the coverage
     # retrospective/pragma machinery (which classifies real gaps) stays off.
     behaviour_pass: bool = False
+    # The cluster world's routes and public index (`domain.fn_routes`),
+    # read once at cluster entry with the reachability proofs; None when no
+    # reading was taken (the prompts then carry what they always did).
+    facts: WorldFacts | None = None
+    # t0d's reach outcomes for this world, by site label.
+    reach: Mapping[str, ReachOutcome] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1644,7 +1448,6 @@ def _run_phase_c(
     _strip_trailing_file_tag = deps.strip_trailing_file_tag
     _check_stop = deps.check_stop
     _task0c_retrospective = functools.partial(_engine_retrospective, deps)
-    _task0c_targeted_pragma = functools.partial(_engine_targeted_pragma, deps)
     ask = deps.ask
     extract_test_mod = deps.extract_test_mod
     generate_in_parallel = deps.generate_in_parallel
@@ -1880,8 +1683,15 @@ def _run_phase_c(
         _line_targets = uncov_lines - _fn_span_lines
         fn_bodies = (_extract_uncovered_functions(existing_text, _line_targets)
                      if _line_targets else "")
-        _unexecuted_fns = _render_unexecuted_fns(_raw_text, _file_fn_targets)
-        pub_symbols = _extract_public_symbols(existing_text)
+        _unexecuted_fns = _render_unexecuted_fns(_raw_text, _file_fn_targets, ctx.facts, ctx.reach)
+        # Committed blocks aimed at a function this measurement still counts
+        # at 0: the files ran and it has 0 executions (no cause is claimed).
+        _unexec_note = still_unexecuted(hist.committed_for, [t.label for t in _file_fn_targets])
+        _unexecuted_fns = _with_note(_unexecuted_fns, _unexec_note)
+        _what_worked = file_what_worked.get(rel_path, "")
+        if _what_worked:
+            _what_worked = _with_note(_what_worked, _unexec_note)
+        pub_symbols = nameable_api(_extract_public_symbols(existing_text), rel_path, ctx.facts)
         # The cluster rules, with the target-scope half rendered from THIS
         # prompt's targets: which listed functions/lines only this cluster's
         # cfg compiles, and which are shared code no test here reaches.
@@ -2028,7 +1838,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             attempt_history=attempt_history,
             project_context=project_context,
             old_block=_old_block,
-            what_worked=file_what_worked.get(rel_path, ""),
+            what_worked=_what_worked,
             retrospective=file_retrospectives.get(rel_path, ""),
             uncov_lines=uncov_lines,
             scaffold_chars=len(_scaffold_template),
@@ -2102,6 +1912,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                            _coverage_status_probe: str = _coverage_status_probe,
                            _behaviours_section: str = _behaviours_section,
                            _raw_text: str = _raw_text,
+                           _what_worked: str = _what_worked,
                            _file_fn_targets: tuple[FnTarget, ...] = _file_fn_targets,
                            _fn_span_lines: set[int] = _fn_span_lines,
                            coverage: float = coverage,
@@ -2138,13 +1949,15 @@ project-specific import paths, type construction patterns, and hard constraints.
                 attempt_history=attempt_history,
                 project_context=project_context,
                 old_block=_old_block,
-                what_worked=file_what_worked.get(rel_path, ""),
+                what_worked=_what_worked,
                 retrospective=file_retrospectives.get(rel_path, ""),
                 uncov_lines=_subset_lines,
                 scaffold_chars=(len(_scaffold_template)
                                 - len(_coverage_status_probe) + len(_sub_status)),
                 behaviours=_behaviours_section,
-                unexecuted_fns=_render_unexecuted_fns(_raw_text, _sub_targets),
+                unexecuted_fns=_with_note(
+                    _render_unexecuted_fns(_raw_text, _sub_targets, ctx.facts, ctx.reach),
+                    still_unexecuted(hist.committed_for, [t.label for t in _sub_targets])),
             )
             return _render_prompt(_ssecs, _sub_status,
                                   _cluster_rules=_scope_rules(_sub_targets, _sub_lines),
@@ -2187,7 +2000,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 blocks with no #[test] fns, then write `tests/{stem}_gen_{pass_n}.rs`
                 as an integration test (no path-mod in the source) and run the
                 compile-fix loop. Returns (status, final_block), status ∈
-                {"committed","no_tests","failed"}. On failure restores
+                {"committed","no_tests"} or the refusing gate (`block_failure`). On failure restores
                 `base_text` and unlinks the written test — so in split-and-merge
                 any subset files already committed before this one survive."""
             nonlocal _pass_had_work
@@ -2416,7 +2229,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                 return "committed", block
             if not _fc["reverted"]:
                 _revert_gen_tests_pass(abs_path, base_text, _sib)
-            return "failed", block
+            # Which gate the block was refused at last — the label the
+            # function's outcome carries (`fn_execution.block_failure`): a
+            # block that compiled and failed its own tests, or broke the
+            # contract, or has no world to run in, is not a compile failure.
+            return block_failure(runtime=bool(_fc["runtime"]),
+                                 contract=bool(_fc["contract"]),
+                                 sigs=frozenset(_fc["sigs"])), block
 
         block = ""
         _block_committed = False
@@ -2426,8 +2245,15 @@ project-specific import paths, type construction patterns, and hard constraints.
         # Lines whose prompt got a test block back — the evidence an
         # unexecuted function was aimed at, whether or not the block compiled.
         _aimed_lines: set[int] = set()
+        # (lines a block was aimed at, what became of it) per finalized
+        # block this pass — the per-block reason each aimed function's
+        # outcome is labelled with.
+        _aimed_blocks: list[tuple[frozenset[int], str]] = []
         _did_split = False
         _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pass_n)
+        # (tests/ file, the lines its prompt was aimed at) per committed block
+        # this pass: which file a committed function's outcome came from.
+        _committed_files: list[tuple[str, set[int]]] = []
         # Split-and-merge: partition the file's uncovered functions into N
         # disjoint subsets, generate a test block for each CONCURRENTLY
         # (shared-prefix prompts batch on the GPU), then commit each through
@@ -2474,11 +2300,14 @@ project-specific import paths, type construction patterns, and hard constraints.
                 if _merged is not None:
                     _pn = _next_gen_tests_n(abs_path)
                     _st, _ = _finalize_and_commit(_merged, _pn, _raw_text)
+                    _aimed_blocks.append((frozenset().union(*_raw_sub_lines), _st))
                     _block_committed = _st == "committed"
                     if _block_committed:
                         _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pn)
                         for _sl in _raw_sub_lines:
                             _ran_lines |= _sl
+                        _committed_files.append((str(gen_tests_integration_rel(abs_path.stem, _pn)),
+                                                 set().union(*_raw_sub_lines)))
                     _log(f"  [{module_name}] split-and-merge {rel_path}: "
                          f"{len(_raw_subs)} subset block(s) → 1 sibling ({_st})")
                 # Per-subset fallback: name clash (no merge) OR the merged block
@@ -2492,10 +2321,13 @@ project-specific import paths, type construction patterns, and hard constraints.
                     for _raw_sub, _sl in zip(_raw_subs, _raw_sub_lines, strict=True):
                         _pn = _next_gen_tests_n(abs_path)
                         _st, _ = _finalize_and_commit(_raw_sub, _pn, _base)
+                        _aimed_blocks.append((frozenset(_sl), _st))
                         if _st == "committed":
                             _ran_lines |= _sl
                             _base = abs_path.read_text(encoding="utf-8")
                             _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pn)
+                            _committed_files.append(
+                                (str(gen_tests_integration_rel(abs_path.stem, _pn)), set(_sl)))
                             _n_ok += 1
                     _block_committed = _n_ok > 0
                     _log(f"  [{module_name}] split-and-merge {rel_path}: {_reason} — "
@@ -2561,6 +2393,7 @@ project-specific import paths, type construction patterns, and hard constraints.
             # Single-shot: finalize + commit the one generated block.
             _aimed_lines |= uncov_lines
             _status, block = _finalize_and_commit(block, _pass_n, _raw_text)
+            _aimed_blocks.append((frozenset(uncov_lines), _status))
             if _status == "no_tests":
                 _fn_empty = aimed_fn_outcomes(
                     _file_fn_targets, _aimed_lines, _ran_lines, "no_tests")
@@ -2571,6 +2404,8 @@ project-specific import paths, type construction patterns, and hard constraints.
             if _block_committed:
                 _sibling_path = project_dir / gen_tests_integration_rel(abs_path.stem, _pass_n)
                 _ran_lines |= uncov_lines
+                _committed_files.append((str(gen_tests_integration_rel(abs_path.stem, _pass_n)),
+                                         set(uncov_lines)))
         elif not _did_split:
             _log_task0c_attempt(project_dir, rel_path, attempt, "", "", "no_block")
             _log(f"  [{module_name}] No test block extracted for {rel_path}.")
@@ -2579,9 +2414,15 @@ project-specific import paths, type construction patterns, and hard constraints.
         # that compiled, ran and added no line is exactly an attempt that did
         # not reach its function.
         _fn_pass = aimed_fn_outcomes(_file_fn_targets, _aimed_lines, _ran_lines,
-                                     "compile_failed")
+                                     "compile_failed", blocks=_aimed_blocks)
         _fn_outcomes.update(_fn_pass)
         _fn_attempted.update(_fn_pass)
+        # Which tests/ file each committed function's block landed in. Kept
+        # only if the block survives the quick-cov gate below.
+        _pass_committed_for = {
+            _t.label: [f for f, _ls in _committed_files
+                       if any(_t.first_line <= _ln <= _t.last_line for _ln in _ls)]
+            for _t in _file_fn_targets if _fn_pass.get(_t.site) == COMMITTED}
 
         # Quick per-file coverage snapshot after a successful append.
         _qcov_after: int | None = None
@@ -2620,9 +2461,12 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _revert_gen_tests_pass(abs_path, _raw_text, _sibling_path)
                     _block_committed = False
                     for _site, _why in _fn_pass.items():
-                        if _why == "ran":
+                        if _why == COMMITTED:
                             _fn_outcomes[_site] = "reverted"
+                    _pass_committed_for = {}
                     file_last_qcov[rel_path] = _prev_qcov  # restore tracker too
+        for _lbl, _files in _pass_committed_for.items():
+            hist.committed_for.setdefault(_lbl, []).extend(_files)
 
         # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
         # few-lines-remaining file, immediately try a second focused generation
@@ -2732,7 +2576,8 @@ project-specific import paths, type construction patterns, and hard constraints.
                 Attempt(metric=float(-len(uncov_lines)), improved=True))
             # Capture what worked so next attempt can reuse the same patterns.
             if _old_block:
-                _condensed_working = _condense_rust_to_signatures(_old_block, "gen_tests.rs")
+                _condensed_working = without_model_comments(
+                    _condense_rust_to_signatures(_old_block, "gen_tests.rs"))
                 _covered_sample = sorted(newly_covered)[:8]
                 _covered_note = (f" Lines newly covered: {_covered_sample}." if _covered_sample else "")
                 file_what_worked[rel_path] = (
@@ -2778,54 +2623,19 @@ project-specific import paths, type construction patterns, and hard constraints.
                     uncov_lines=uncov_lines,
                     unproductive_blocks=file_failed_blocks.get(rel_path, []) if _fire_deep else None,
                     consecutive_giveups=file_giveup_counts.get(rel_path, 0) if _STALL_CONTEXT else 0,
+                    unexecuted_note=_unexec_note,
                 )
                 if retro:
                     file_retrospectives[rel_path] = retro
                     _log(f"  [{module_name}] Retrospective: {retro[:300]}")
-                    # Immediately pragma UNREACHABLE/CFG_GATED functions — no point retrying
-                    # test generation for code that is intrinsically unmeasurable.
+                    # The verdict is evidence on the record and text for the
+                    # next prompt (the retrospective above), never an exclusion:
+                    # a line leaves the line reading only by the compiler's
+                    # proof or the artifact/cfg filters. A model's UNREACHABLE
+                    # pragma'd `format_err`'s `else` arm, which
+                    # `anyhow!("x {var}")` executes.
                     _retro_cats = _parse_retrospective_categories(retro)
                     _fn_verdicts.update(unambiguous_verdicts(_file_fn_targets, _retro_cats))
-                    _pragma_fns, _pragma_withheld = withhold_pending(
-                        _retro_cats["UNREACHABLE"] + _retro_cats["CFG_GATED"],
-                        _file_fn_targets)
-                    if _pragma_withheld:
-                        _log(f"  [{module_name}] {rel_path} — not pragma'd, still inside the "
-                             f"function attempt budget: {_pragma_withheld} (the classification "
-                             "is a hypothesis until the budget is spent).")
-                    if _pragma_fns:
-                        _log(f"  [{module_name}] Targeted pragma for: {_pragma_fns}")
-                        _pragma_ok = _task0c_targeted_pragma(
-                            project_dir, module_name, rel_path,
-                            uncov_lines, _pragma_fns, _TASK0C_MODEL,
-                        )
-                        if _pragma_ok:
-                            # Run quick-cov immediately with the new pragmas on disk.
-                            # If the file is now fully covered/excluded, skip it for
-                            # all future generation passes — no point burning LLM calls.
-                            _post_pragma = _quick_file_coverage(project_dir, module_name, rel_path)
-                            if _post_pragma is not None:
-                                _pp_cov, _pp_able = _post_pragma
-                                _pp_pct = (_pp_cov / _pp_able * 100.0) if _pp_able else 100.0
-                                _log(f"  [{module_name}] {rel_path} post-pragma quick-cov: "
-                                     f"{_pp_cov}/{_pp_able} ({_pp_pct:.1f}%)")
-                                if _pp_cov >= _pp_able and not _file_fn_targets:
-                                    _log(f"  [{module_name}] {rel_path} fully covered after pragma — "
-                                         f"skipping further generation.")
-                                    skipped_files.add(rel_path)
-                                elif _pp_cov >= _pp_able:
-                                    # A pragma is a line classification; the
-                                    # function criterion is measured on FN
-                                    # records. Skipping here would strand the
-                                    # file's unexecuted functions with no
-                                    # attempt ever charged, holding the stop
-                                    # open for nothing.
-                                    _log(f"  [{module_name}] {rel_path} fully covered after pragma, "
-                                         f"but {len(_file_fn_targets)} function(s) no test executes "
-                                         "remain targeted — not skipping.")
-                            # Reset stall so the file gets another generation pass for
-                            # any remaining TESTABLE/NEEDS_INTERNALS lines.
-                            file_stall_counts[rel_path] = 0
             if stall_n >= FILE_STALL_LIMIT:
                 _log(f"  [{module_name}] {rel_path} stalled for {FILE_STALL_LIMIT} consecutive "
                      f"attempts with no improvement — skipping this file.")
@@ -3016,9 +2826,7 @@ def task0c_augment_module(
     _strip_trailing_file_tag = deps.strip_trailing_file_tag
     _check_stop = deps.check_stop
     _task0c_mutation_pass = functools.partial(_engine_mutation_pass, deps)
-    _task0c_pragma_pass = functools.partial(_engine_pragma_pass, deps)
     _task0c_retrospective = functools.partial(_engine_retrospective, deps)
-    _task0c_targeted_pragma = functools.partial(_engine_targeted_pragma, deps)
     _test_augmentor_factory = deps.test_augmentor_factory
     ask = deps.ask
     extract_files = deps.extract_files
@@ -3138,12 +2946,24 @@ def task0c_augment_module(
                                    measure_reachability=(
                                        deps.measure_reachability
                                        if os.getenv("TASK0C_FN_REACHABILITY", "1") != "0"
-                                       else None))
+                                       else None),
+                                   enumerate_types=deps.enumerate_types)
     # Which functions no test can execute, proved from the compiler's MIR and
-    # public index before the first targeted attempt. Taken once
-    # per cluster entry: the tree's callers do not change while this runs.
-    _fn_proofs, _fn_proof_reason = read_by_construction(
-        project_dir, _current_cluster, _fn_inputs)
+    # public index before the first targeted attempt, and from the same two
+    # outputs which public calls reach the others (`domain.fn_routes`). Taken
+    # once per cluster entry: the tree's callers do not change while this runs.
+    _world_read = read_world_facts(project_dir, _current_cluster, _fn_inputs)
+    _fn_proofs, _fn_proof_reason = reachability_proofs(_world_read.verdicts), _world_read.reason
+    _world_facts = _world_read.facts
+    _reach_outcomes: Mapping[str, ReachOutcome] = {}
+    if callable(deps.load_reach):
+        _loaded_reach = deps.load_reach(project_dir, _cluster_label)
+        _reach_outcomes = _loaded_reach if isinstance(_loaded_reach, dict) else {}
+    if _world_facts is not None:
+        _emit("task0c.fn_routes", data={
+            "cluster": _cluster_label, "module": module_name,
+            "routed": len(_world_facts.routes),
+            "unnameable": sorted(_world_facts.unnameable_names())})
     _emit("task0c.fn_reachability", data={
         "cluster": _cluster_label, "module": module_name,
         "status": "ok" if not _fn_proof_reason else "unavailable",
@@ -3162,8 +2982,9 @@ def task0c_augment_module(
     if callable(deps.other_fn_records):
         _others = deps.other_fn_records(project_dir, _cluster_label, module_name)
         _fn_inherited = inherited_attempts(
-            r for r in (_others if isinstance(_others, list) else [])
-            if isinstance(r, FnCoverageRecord))
+            (r for r in (_others if isinstance(_others, list) else [])
+             if isinstance(r, FnCoverageRecord)),
+            budget=_fn_budget)
     _fn_record: FnCoverageRecord | None = None
     if callable(deps.load_fn_record):
         _loaded = deps.load_fn_record(project_dir, _cluster_label, module_name)
@@ -3209,6 +3030,12 @@ def task0c_augment_module(
     # gives the model informed, varying shots instead of one stale retro reused.
     RETRO_DEEP_AT_STALL = int(os.getenv("TASK0C_RETRO_DEEP_AT_STALL", "1"))
     _hist = Task0cFileHistory()
+    # A resumed process starts with what the record kept of which test files
+    # ran against each still-unexecuted function.
+    if _fn_record is not None:
+        for _p in _fn_record.pending:
+            if _p.committed_in:
+                _hist.committed_for[site_label(_p.target.site)] = list(_p.committed_in)
     # Track concrete attempts that compiled but added zero coverage to the
     # targeted lines. Fed to the deep retrospective so the classifier can see
     # which strategies the LLM has already tried — and revise its TESTABLE
@@ -3258,7 +3085,8 @@ def task0c_augment_module(
         _fn_reading = read_function_execution(project_dir, _current_cluster, _functions,
                                               _fn_inputs, _fn_proofs)
         _fn_record = fold_reading(_fn_record, _fn_reading,
-                                  attempt_budget=_fn_budget, inherited=_fn_inherited)
+                                  attempt_budget=_fn_budget, inherited=_fn_inherited,
+                                  committed=_hist.committed_for)
         _proved_targets = (_fn_reading.proved_targets
                            if isinstance(_fn_reading, FunctionExecution) else ())
         _contradicted = [site_label(k) for k in _fn_proofs
@@ -3354,12 +3182,10 @@ def task0c_augment_module(
             no_improvement_count += 1
             _log(f"  [{module_name}] No improvement ({covered_lines}/{coverable_lines} lines, delta {delta_lines:+d}) — stall count {no_improvement_count}/{MAX_NO_IMPROVEMENT}")
             if no_improvement_count >= MAX_NO_IMPROVEMENT:
-                _log(f"  [{module_name}] Coverage stalled at {coverage:.1f}% — switching to pragma pass.")
-                _task0c_pragma_pass(
-                    project_dir, module_name, module_dir, files_data, _TASK0C_MODEL
-                )
-                # Re-measure after pragma pass — if 100%, we're done; if not, outer
-                # loop will keep trying (or the outer no-improvement guard fires).
+                # No pragma pass: a model's judgement that a line is unreachable
+                # never removes it from the reading. The stop reads what is left.
+                _log(f"  [{module_name}] Coverage stalled at {coverage:.1f}% for "
+                     f"{no_improvement_count} attempt(s) — ending this module pass.")
                 break
         else:
             no_improvement_count = 0
@@ -3391,6 +3217,8 @@ def task0c_augment_module(
                 file_stall_limit=FILE_STALL_LIMIT,
                 retro_deep_at_stall=RETRO_DEEP_AT_STALL,
                 stall_context=_STALL_CONTEXT,
+                facts=_world_facts,
+                reach=_reach_outcomes,
             ),
         )
         if _pc.fn_verdicts:
@@ -3512,6 +3340,7 @@ def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, clus
     mod_prefix = str(module_dir) + "/"
     files: list[tuple[str, int, int, frozenset[int]]] = []
     not_actionable: dict[str, frozenset[int]] = {}
+    buckets: dict[str, dict[str, int]] = {}
     for fdata in files_data:
         if not fdata.abs_path.startswith(mod_prefix):
             continue
@@ -3532,8 +3361,10 @@ def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, clus
                                     cluster=cluster, **_line_filters(deps),
                                     spent_lines=lines_in(t for t in spent if t.site.file == rel))
             not_actionable[rel] = split.outside_denominator(unc)
+            buckets[rel] = bucket_counts(split)
         files.append((rel, fdata.covered, fdata.coverable, unc))
-    return judge_files(floor, files, not_actionable=not_actionable, spent=spent, stalled=stalled)
+    return judge_files(floor, files, not_actionable=not_actionable, spent=spent, stalled=stalled,
+                       buckets=buckets)
 
 
 def _spent_targets(reading: FunctionExecution | str,

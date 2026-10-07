@@ -88,7 +88,7 @@ class FakeAdapter:
     def collect_source_context(self, *a: Any) -> str: return "SRC"
     # CoverageDocs
     def regenerate(self, *a: Any) -> str:
-        self.calls.append("regen"); return "new-strategy"
+        self.calls.append("regen"); return self.s.get("regen_text", "new-strategy")
     # FlowAudit
     def run(self, ctx: str) -> None: self.calls.append("audit")
     # DocsMetrics
@@ -231,10 +231,12 @@ def test_step_fail_then_fix_fails_returns_failure(tmp_path: Path) -> None:
 
 # --- FailureAnalysisStep ----------------------------------------------------
 
-def _analysis(fa: FakeAdapter) -> FailureAnalysisStep:
-    return FailureAnalysisStep(analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
-                               coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
-                               genesis_audit_interval=5)
+def _analysis(fa: FakeAdapter, render: Any = None) -> FailureAnalysisStep:
+    return FailureAnalysisStep(
+        analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
+        coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
+        genesis_audit_interval=5,
+        render_strategy=render or (lambda _ctx, text: text))
 
 
 def test_analysis_advances_state_and_regens_on_update(tmp_path: Path) -> None:
@@ -246,6 +248,29 @@ def test_analysis_advances_state_and_regens_on_update(tmp_path: Path) -> None:
     assert res.state.iteration == 2 and res.state.prev_pass_count == 4
     assert res.state.no_improvement_streak == 0       # 4 > 2 improved
     assert "save_best" in fa.calls                    # new best (best was None)
+
+
+def test_a_regenerated_reply_reaches_the_next_iteration_rendered(tmp_path: Path) -> None:
+    from pipeline_core.adapters.strategy_facts import StrategyFacts
+    from pipeline_core.domain.fn_routes import PublicRoute, TypeFact, WorldFacts
+    model = ("IMPORTS:\n  wrong: use anyhow::DisplayError;\n"
+             "TYPES:\n  Error: anyhow!(\"msg\")\n")
+    world = WorldFacts("stable", unnameable=(
+        TypeFact("DisplayError", "src/wrapper.rs", (
+            PublicRoute("`<Option<T> as Context<T>>::context`",
+                        ("`Error::construct_from_display`",), "builds `DisplayError`"),)),))
+    fa = FakeAdapter(task4=(True, 4), validate_task4=(True, ""), regen_text=model)
+    store = StrategyFacts(read_world=lambda *_a, **_k: None, log=lambda *_a: None)
+
+    def render(ctx: RunContext, text: str) -> str:
+        return store.rendered(ctx.project_dir, text, (world,))
+
+    res = _analysis(fa, render).run(
+        _ctx(tmp_path), IterationState(iteration=1, prev_pass_count=2),
+        StepOutcome(False, "test", "out"), total_iters=0, coverage_strategy="old")
+    assert "NEVER: DisplayError" in res.coverage_strategy
+    assert "use anyhow::DisplayError" not in res.coverage_strategy
+    assert "Error: anyhow!" in res.coverage_strategy
 
 
 def test_analysis_genesis_stall_skips_regen(tmp_path: Path) -> None:

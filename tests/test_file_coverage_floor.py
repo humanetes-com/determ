@@ -121,3 +121,32 @@ def test_the_reading_round_trips_and_a_foreign_shape_reads_as_none() -> None:
     assert FileFloor.from_json(floor.to_json()) == floor
     assert FileFloor.from_json('{"files": [{"verdict": "maybe"}]}') is None
     assert FileFloor.from_json("not json") is None
+
+
+# --- the ceiling's split ---------------------------------------------------------
+
+def test_the_ceiling_split_counts_each_kind_and_names_the_reachable_functions() -> None:
+    from pipeline_core.domain.file_coverage_floor import UncoveredSplit, bucket_counts
+    splits = {
+        "src/backtrace.rs": UncoveredSplit(actionable=frozenset(), proved=frozenset({45, 46, 47, 48})),
+        "src/ptr.rs": UncoveredSplit(actionable=frozenset(),
+                                     proved=frozenset({23, 24, 25, 78, 79, 80, 139, 140, 141})),
+        "src/ensure.rs": UncoveredSplit(actionable=frozenset(), artifact=frozenset({99})),
+        "src/wrapper.rs": UncoveredSplit(actionable=frozenset(), spent=frozenset({40, 41, 42})),
+        # lib.rs 690 lies inside an executed function: actionable, in no bucket.
+        "src/lib.rs": UncoveredSplit(actionable=frozenset({690})),
+    }
+    floor = judge_files(90.0, _FILES, not_actionable=_proved_by_file(), spent=_SPENT, stalled=(),
+                        buckets={k: bucket_counts(v) for k, v in splits.items()})
+    assert floor.buckets() == {"proved": 13, "artifact": 1, "cfg": 0, "spent": 3}
+    assert floor.spent_owners() == ("src/wrapper.rs::fmt [impl Debug for DisplayError<M>]",)
+    assert floor.ceiling_split() == ("proved unreachable 13, LLVM artifact 1, cfg-filtered 0; "
+                                     "attempt budget spent 3 line(s) in 1 reachable function(s)")
+    assert FileFloor.from_json(floor.to_json()) == floor
+
+
+def test_negative_control_a_reading_without_splits_reports_zero_buckets() -> None:
+    floor = _judge(_proved_by_file())
+    assert floor.buckets() == {"proved": 0, "artifact": 0, "cfg": 0, "spent": 0}
+    # The spent function is still named: it owns an uncovered line of wrapper.rs.
+    assert floor.spent_owners() == ("src/wrapper.rs::fmt [impl Debug for DisplayError<M>]",)

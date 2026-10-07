@@ -48,6 +48,10 @@ from tests.test_fill_engine_usecases import (
 
 _LESSON = "Name the boxed error type in the turbofish; do not dereference it."
 _E0277 = "error[E0277]: the size for values of type `dyn Trait` cannot be known"
+# The same error with a different set on every attempt (`#N`): the loop stops
+# on its stalled floor. A repeated set ends the unit for the fill before any
+# retrospective could re-enter.
+_E0277_N = _E0277 + " #N"
 
 
 def _compile_record(scope: str = "") -> dict[str, Any]:
@@ -135,7 +139,7 @@ def _run(tmp_path: Path, fake: _LessonRetro) -> Any:
 def test_the_re_entry_prompt_carries_the_lesson_the_loop_just_wrote(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
-    fake = _LessonRetro(run=(1, _E0277), err=_E0277, body=("Ok(())", "R"))
+    fake = _LessonRetro(run_numbered=(1, _E0277_N), err=_E0277, body=("Ok(())", "R"))
     res = _run(tmp_path, fake)
     assert not res.filled
     assert "phase_c.fn.retro_retry" in fake.events
@@ -151,7 +155,7 @@ def test_control_without_the_loop_premise_the_re_entry_is_withheld(
     re-entry read the screen, it re-entered anyway (next control)."""
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
     monkeypatch.setattr(retro_gate, "earned_in_loop", lambda *a: False)
-    fake = _LessonRetro(run=(1, _E0277), err=_E0277, body=("Ok(())", "R"))
+    fake = _LessonRetro(run_numbered=(1, _E0277_N), err=_E0277, body=("Ok(())", "R"))
     _run(tmp_path, fake)
     assert "phase_c.fn.retro_retry" not in fake.events
     assert "phase_c.fn.retro_retry_withheld" in fake.events
@@ -168,7 +172,7 @@ def test_control_the_pre_fix_loop_re_enters_on_guidance_it_withholds(
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
     monkeypatch.setattr(retro_gate, "earned_in_loop", lambda *a: False)
     monkeypatch.setattr(fof, "informed_reentry", lambda v: True)
-    fake = _LessonRetro(run=(1, _E0277), err=_E0277, body=("Ok(())", "R"))
+    fake = _LessonRetro(run_numbered=(1, _E0277_N), err=_E0277, body=("Ok(())", "R"))
     _run(tmp_path, fake)
     assert "phase_c.fn.retro_retry" in fake.events
     assert fake.diagnose_calls == 2
@@ -181,7 +185,7 @@ def test_a_round_whose_lesson_the_screen_retires_does_not_re_enter(
     """Any retiring rule, not only the premise: an empty lesson carries
     nothing, so the improved floor alone buys no re-entry."""
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
-    fake = _LessonRetro(guidance="", run=(1, _E0277), err=_E0277,
+    fake = _LessonRetro(guidance="", run_numbered=(1, _E0277_N), err=_E0277,
                         body=("Ok(())", "R"))
     _run(tmp_path, fake)
     assert "phase_c.fn.retro_retry" not in fake.events

@@ -36,6 +36,7 @@ from pipeline_core.application.reconstruct.fill_routes import (
 )
 from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
 from pipeline_core.domain import unit_clock
+from pipeline_core.domain.body_ledger import ReportKeep, WaveKept
 from pipeline_core.domain.fill_context import route_scope
 from pipeline_core.domain.fill_schedule import (
     FillBudget,
@@ -110,6 +111,12 @@ class FillExecutionDeps:
     #: unchanged by this argument. Snapshot before owner-map admission
     #: or the spine locators become "attributed".
     attributed: frozenset[FnLocator] = frozenset()
+    #: Measured coverage owners the driver admitted (or attached a test to),
+    #: on this sweep or an earlier one, that are still on its ordered
+    #: frontier (`measured_owners_on_frontier`). Each must be a target of
+    #: some candidate run, opened or deferred with its reason; one that no
+    #: run writes is `owner_unrouted`. Empty (the default) checks nothing.
+    measured_owners: frozenset[FnLocator] = frozenset()
     #: The body ledger's per-unit verdicts (`fill_schedule.UnitEvidence`):
     #: every unit-writing run is ranked on its units' own graded landings.
     #: None keeps the route-row reading (no body ledger on this driver).
@@ -274,17 +281,31 @@ class _GroundGate:
 
 
 def _notify_wave(deps: FillExecutionDeps,
-                 reports: Sequence[RouteRunReport | None]) -> None:
+                 reports: Sequence[RouteRunReport | None],
+                 rows: Sequence[RouteLedgerRow] = ()) -> None:
     """Hand a finished (or stopped) wave's kept units to the driver's
-    unit-ledger writer. A wave whose every report is `empty` opened
-    nothing and is not reported; a failure in the writer is logged and
-    never ends the fill — the ledger records the fill, it does not run it."""
+    unit-ledger writer, each report's keep beside them (`WaveKept.reports`:
+    the units that report kept and its row's `newly_green`, rows in report
+    order). The writer decides which unit a green test is credited to
+    (`body_ledger.credited_green`), with the attribution it holds. A wave
+    whose every report is `empty` opened nothing and is not reported; a
+    failure in the writer is logged and never ends the fill — the ledger
+    records the fill, it does not run it."""
     if deps.on_wave_kept is None:
         return
     present = [r for r in reports if r is not None]
     if present and all(r.empty for r in present):
         return
-    kept = frozenset(u for r in present for u in r.kept)
+    keeps: list[ReportKeep] = []
+    for n, rep in enumerate(reports):
+        if rep is None or not rep.kept:
+            continue
+        row = rows[n] if n < len(rows) else None
+        keeps.append(ReportKeep(
+            frozenset(rep.kept),
+            None if row is None or row.newly_green is None
+            else frozenset(row.newly_green)))
+    kept = WaveKept(frozenset(u for r in present for u in r.kept), keeps)
     try:
         deps.on_wave_kept(kept)
     except Exception as exc:  # noqa: BLE001 — the ledger never ends a fill
@@ -370,6 +391,8 @@ def _row_for(
         started=started, minutes=minutes, model_calls=rep.model_calls,
         net_pass_delta=delta,
         newly_red=red, newly_crashed=crashed, newly_green=green,
+        filtered=tuple(sorted((u.file, u.fn_name, why)
+                              for u, why in rep.filtered.items())),
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),
         collateral=_pairs(rep.collateral & rep.reverted),
         target_tests=tuple(sorted(s.run.target_tests)),
@@ -412,7 +435,8 @@ def _check_schedule(sched: FillSchedule,
     found = violations(
         decided_from_schedule(sched), hollow_stubs=all_blocking(hollow),
         crash_blamed=deps.crash_blamed,
-        budget_minutes=sched.budget_minutes)
+        budget_minutes=sched.budget_minutes,
+        measured_owners=deps.measured_owners)
     if not found:
         return
     deps.log(f"  HEALTH ‼ SCHEDULE_INVARIANT fill {deps.iteration}: "
@@ -452,6 +476,9 @@ def _schedule_inputs(deps: FillExecutionDeps,
             {k.value: v for k, v in (deps.max_per_kind or {}).items()}
             if scheduled else {}),
     }
+    if scheduled and deps.measured_owners:
+        inputs["measured_owners"] = sorted(
+            f"{u.file}::{u.fn_name}" for u in deps.measured_owners)
     if scheduled and deps.unit_evidence is not None:
         inputs["standing_flat"] = {
             f"{u.file}::{u.fn_name}": sha
@@ -768,7 +795,8 @@ def execute_fill(
             rows.append(row)
             _log_row(deps, row, unchanged=rep.unchanged)
         _flush(rows[-len(wave):])
-        _notify_wave(deps, [reports.get(w.run.key) for w in wave])
+        _notify_wave(deps, [reports.get(w.run.key) for w in wave],
+                     rows[-len(wave):])
         for w in wave:
             rep_w = reports.get(w.run.key)
             if rep_w is not None:

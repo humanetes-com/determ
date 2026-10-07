@@ -43,7 +43,8 @@ from pipeline_core.domain.fn_reachability import (
 from pipeline_core.domain.fn_reachability import (
     proofs as reachability_proofs,
 )
-from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
+from pipeline_core.domain.fn_routes import WorldFacts, world_facts
+from pipeline_core.domain.models import FnRecord, FnSite, ModRecord, TypeRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,9 @@ class FnCriterionInputs:
     # (crate root, cluster) -> the world's MIR and public index; absent or
     # failing, nothing is proved and the budget behaves as it always did.
     measure_reachability: Callable[[Path, Any], Any] | None = None
+    # (crate root) -> the extractor's type records; absent, the reading
+    # names no unnameable type (the routes of functions are unaffected).
+    enumerate_types: Callable[[Path], Sequence[TypeRecord] | None] | None = None
 
 
 def _default_features(project_dir: Path) -> list[str]:
@@ -119,29 +123,56 @@ def _gather(project_dir: Path, cluster: Any,
     return _Gathered(records, candidates, file_texts)
 
 
+@dataclass(frozen=True, slots=True)
+class WorldRead:
+    """One reading of a cluster world: the oracle's verdicts and the routes,
+    from the same two compiler outputs. `reason` is non-empty when there is
+    no reading; both are empty then."""
+
+    verdicts: dict[FnSite, Verdict]
+    facts: WorldFacts | None
+    reason: str = ""
+
+
+def read_world_facts(project_dir: Path, cluster: Any,
+                     inputs: FnCriterionInputs) -> WorldRead:
+    """The verdicts (`domain.fn_reachability`) and the public routes
+    (`domain.fn_routes`) of this cluster's world, from ONE pair of compiler
+    runs."""
+    if not callable(inputs.measure_reachability):
+        return WorldRead({}, None, "no reachability reader")
+    got = _gather(project_dir, cluster, inputs)
+    if isinstance(got, str):
+        return WorldRead({}, None, got)
+    world = inputs.measure_reachability(project_dir, cluster)
+    if not isinstance(world, WorldReading):
+        return WorldRead({}, None, "the reachability reader returned no reading")
+    if not world.measured:
+        return WorldRead({}, None, world.reason or "the compiler output was empty")
+    surface = public_surface(world.rustdoc)
+    if surface is None:
+        return WorldRead({}, None, "the rustdoc JSON was not understood")
+    verdicts = read_world([c.record for c in got.candidates], mir_text=world.mir,
+                          surface=surface, file_texts=got.file_texts)
+    if not verdicts:
+        return WorldRead({}, None, "the MIR dump held no item")
+    types: Sequence[TypeRecord] = ()
+    if callable(inputs.enumerate_types):
+        types = [t for t in (inputs.enumerate_types(project_dir) or ())
+                 if isinstance(t, TypeRecord) and t.file in got.file_texts]
+    facts = world_facts(str(getattr(cluster, "name", "") or ""), mir_text=world.mir,
+                        surface=surface, records=[c.record for c in got.candidates],
+                        types=types, file_texts=got.file_texts)
+    return WorldRead(verdicts, facts)
+
+
 def read_verdicts(project_dir: Path, cluster: Any,
                   inputs: FnCriterionInputs) -> tuple[dict[FnSite, Verdict], str]:
     """The oracle's verdict per candidate function of this cluster, or the
     reason there is none. `Verdict.proof` is set for the unreachable ones and
     `Verdict.kept` says which fact keeps each of the others testable."""
-    if not callable(inputs.measure_reachability):
-        return {}, "no reachability reader"
-    got = _gather(project_dir, cluster, inputs)
-    if isinstance(got, str):
-        return {}, got
-    world = inputs.measure_reachability(project_dir, cluster)
-    if not isinstance(world, WorldReading):
-        return {}, "the reachability reader returned no reading"
-    if not world.measured:
-        return {}, world.reason or "the compiler output was empty"
-    surface = public_surface(world.rustdoc)
-    if surface is None:
-        return {}, "the rustdoc JSON was not understood"
-    verdicts = read_world([c.record for c in got.candidates], mir_text=world.mir,
-                          surface=surface, file_texts=got.file_texts)
-    if not verdicts:
-        return {}, "the MIR dump held no item"
-    return verdicts, ""
+    read = read_world_facts(project_dir, cluster, inputs)
+    return read.verdicts, read.reason
 
 
 def read_by_construction(project_dir: Path, cluster: Any,
@@ -187,7 +218,9 @@ def read_function_execution(
 def fold_reading(prior: FnCoverageRecord | None,
                  reading: FunctionExecution | str,
                  *, attempt_budget: int,
-                 inherited: Mapping[FnSite, int] | None = None) -> FnCoverageRecord:
+                 inherited: Mapping[FnSite, int] | None = None,
+                 committed: Mapping[str, Sequence[str]] | None = None,
+                 ) -> FnCoverageRecord:
     """The record after this measurement.
 
     An unavailable reading measures nothing (see the module docstring) but
@@ -199,4 +232,4 @@ def fold_reading(prior: FnCoverageRecord | None,
             return unmeasured_record(reading)
         return replace(prior, measured=False, reason=reading)
     return advance_record(prior, reading, attempt_budget=attempt_budget,
-                          inherited=inherited)
+                          inherited=inherited, committed=committed)

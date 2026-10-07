@@ -41,6 +41,7 @@ from pipeline_core.domain.behaviour_coverage import (
     is_doctest_spec,
     is_test_assertion_spec,
     normalize_record_files,
+    sites_for_hit_lines,
     test_command,
     units_for_hit_lines,
 )
@@ -121,6 +122,7 @@ def exercises_by_coverage(
     max_specs: int = 200,
     grcov_bin: Path | None = None,
     timeout: int = 600,
+    sites_out: dict[str, frozenset[str]] | None = None,
 ) -> tuple[dict[str, frozenset[str]], int]:
     """`behaviour_id → {"src/x.rs::fn", …}` plus the number of cargo/grcov
     invocations this call made (the instrumented build + per-spec run +
@@ -227,6 +229,12 @@ def exercises_by_coverage(
         units = units_for_hit_lines(hits, texts, recs)
         if units:
             out[spec.behaviour_id] = units
+        if sites_out is not None:
+            # The same hits by SITE: which `fmt` of a file ran, which the
+            # name-keyed `exercises` above cannot say.
+            sites = sites_for_hit_lines(hits, texts, recs)
+            if sites:
+                sites_out[spec.behaviour_id] = sites
     log(f"  [behaviour-exercises] attributed {len(out)} / {len(runnable)} "
         f"runnable spec(s) to units by coverage ({invocations} cargo/grcov "
         "invocation(s)).")

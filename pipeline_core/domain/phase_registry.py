@@ -146,6 +146,9 @@ PHASES: tuple[Phase, ...] = (
     _p("t0d.probes", "probes", "Probes", "Probes run on the original; stdout is the Then.", per_cluster=True),
     _p("t0d.exercises", "exercises", "Exercises",
        "Which functions each example enters, by coverage.", per_cluster=True),
+    _p("t0d.reach", "reach", "Reach probes",
+       "A probe along the MIR's public route to each function no example enters, "
+       "checked by its own coverage.", per_cluster=True),
     _p("t0d.emit", "emit", "Emit tests", "Captured values become real, executed tests.", per_cluster=True),
     _p("t0d.doc_examples", "doc examples", "Doc examples",
        "Once per module, after the clusters' passes: each runnable doc example of the "

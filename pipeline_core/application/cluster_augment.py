@@ -267,12 +267,25 @@ class ClusterAugmentor:
 
                 if status in ('done', 'ceiling', 'hard_block'):
                     if status == 'ceiling':
+                        # The split, not one sentence: lines no test can reach and
+                        # lines in reachable functions the pass gave up on are
+                        # different results, and only the first is a ceiling.
+                        split = (f" — {file_floor.ceiling_split()}"
+                                 if file_floor is not None and file_floor.files else
+                                 " — all remaining uncovered lines are cfg-filtered, LLVM "
+                                 "artifacts, in functions proved unreachable, or in functions "
+                                 "whose attempt budget is spent")
                         tel.log(
-                            f"  CEILING [{cluster.name}]: '{mod_name}' at {cov:.1f}% — all remaining "
-                            f"uncovered lines are cfg-filtered, LLVM artifacts, in functions proved "
-                            f"unreachable, or in functions whose attempt budget is spent. No further passes possible "
-                            f"in this cluster. Accepting and moving on."
+                            f"  CEILING [{cluster.name}]: '{mod_name}' at {cov:.1f}%{split}. "
+                            f"No further passes possible in this cluster. Accepting and moving on."
                         )
+                        owners = file_floor.spent_owners() if file_floor is not None else ()
+                        if owners:
+                            tel.log(
+                                f"  WARNING [{cluster.name}]: '{mod_name}' accepted with "
+                                f"{len(owners)} reachable function(s) no test executes, their "
+                                f"attempt budget spent: {', '.join(owners)}"
+                            )
                     elif status == 'hard_block':
                         tel.log(
                             f"  HARD BLOCK: '{mod_name}' [{cluster.name}] coverage stuck "

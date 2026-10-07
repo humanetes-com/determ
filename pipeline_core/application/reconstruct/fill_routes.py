@@ -102,6 +102,10 @@ class RouteRunReport:
     #: A session's minutes from its opening to the end of its first turn
     #: (`RouteLedgerRow.first_turn_minutes`); None for every other route.
     first_turn_minutes: float | None = None
+    #: Targets the run's planners dropped without opening them, each with the
+    #: predicate that dropped it (`RouteLedgerRow.filtered`). Empty: the
+    #: route names none.
+    filtered: Mapping[FnLocator, str] = field(default_factory=dict)
 
     @property
     def opened_units(self) -> frozenset[FnLocator]:

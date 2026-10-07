@@ -28,7 +28,7 @@ from pipeline_core.adapters.retros import retrospectives_path
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.refine import BEST_COMPILE_KEY
-from pipeline_core.domain.test_results import RegressionComparison
+from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 from tests.harness import (
     diag,
     install_cluster_scan,
@@ -83,7 +83,7 @@ def _regressing_guard(monkeypatch) -> None:
         excluded_crashed=(), not_run=(), measured=("t_green", "t_red"),
         base_pass=1, cur_pass=0, base_executed=2, cur_executed=2)
     monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
-        baseline=lambda *a, **k: object(),
+        baseline=lambda *a, **k: TestStateReading(binaries=()),
         gate=lambda *a, **k: (
             cmp, "REGRESSED previously-passing test(s): ['t_green']")))
 

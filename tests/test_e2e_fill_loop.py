@@ -232,26 +232,33 @@ def test_sig_change_hatch_applies_on_attempt_five(monkeypatch, tmp_path):
 RETRO_ANSWER = "CATEGORY: WRONG_TYPE_CHOICE\nGUIDANCE: return a u32 literal"
 
 
+def _alternating_errors(n: int) -> list:
+    """`n` failed checks whose error sets differ attempt to attempt at the
+    same count: the loop stops on a stalled floor, never on a repeated set
+    (which ends the unit for the fill)."""
+    codes = (("E0308", "mismatched types"), ("E0599", "no method named `x`"))
+    return [(101, ERR.format(code=codes[i % 2][0], msg=codes[i % 2][1]), [])
+            for i in range(n)]
+
+
 def test_retro_retry_recovers_after_first_fix_loop_exhausts(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
-    bodies = iter(["0", "0", "42"])
+    round1 = pipeline._PER_FN_FIX_MAX_STALLS + 1
+    bodies = iter(["0"] * round1 + ["42"])
     install_scripted_model(monkeypatch,
                            per_fn_body=lambda _fn: next(bodies, "42"))
     # Real (non-transient) retro → round 1 establishes the improvement
     # baseline → the fn re-enters the fix loop instead of being parked.
     monkeypatch.setattr(pipeline, "_ask_retrospective",
                         lambda *a, **k: RETRO_ANSWER)
-    # Round 1: same E-code twice → repeated-signature exit after 2 attempts.
-    # Round 2 (post-retro): attempt 3 compiles clean → filled.
+    # Round 1: one error per attempt, a different set each time → the floor
+    # stalls. Round 2 (post-retro): the next attempt compiles clean → filled.
     install_scripted_cargo(
-        monkeypatch,
-        check_diag=[(101, ERR.format(code="E0308", msg="mismatched types"), []),
-                    (101, ERR.format(code="E0308", msg="mismatched types"), []),
-                    (0, "", [])])
+        monkeypatch, check_diag=[*_alternating_errors(round1), (0, "", [])])
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 1 and res.remaining == 0
-    assert res.attempts == 3
+    assert res.attempts == round1 + 1
     assert "42" in text and "unimplemented!()" not in text
 
 
@@ -260,20 +267,42 @@ def test_retro_retry_parks_fn_when_error_floor_stops_improving(monkeypatch, tmp_
     install_scripted_model(monkeypatch, per_fn_body="0")
     monkeypatch.setattr(pipeline, "_ask_retrospective",
                         lambda *a, **k: RETRO_ANSWER)
-    # Every attempt fails with the SAME single error → round 1 baselines the
-    # error count, round 2 shows no strict improvement → fully exhausted.
+    # One error per attempt, never improving → round 1 baselines the error
+    # count, round 2 shows no strict improvement → fully exhausted.
+    rounds = 2 * (pipeline._PER_FN_FIX_MAX_STALLS + 1)
+    install_scripted_cargo(
+        monkeypatch, check_diag=_alternating_errors(rounds + 4))
+    res = _run(ws)
+    text = (ws / "src" / "lib.rs").read_text()
+    assert res.fns_filled == 0 and res.remaining == 1
+    assert res.attempts == rounds     # 2 rounds × stalled floor
+    assert "unimplemented!()" in text    # annotated stub restored
+    from pipeline_core.adapters.retros import load_retrospectives, retro_key
+    rec = load_retrospectives(ws)[retro_key("lib.rs", "answer", "")]
+    assert rec["fully_exhausted"] is True
+    assert rec["retrospective_count"] == 2
+
+
+def test_a_repeated_error_set_stores_the_retro_and_does_not_re_enter(
+        monkeypatch, tmp_path):
+    """The same error set on two attempts ends the unit
+    for the fill. The retrospective is stored (round 1 baselines it) and the
+    loop is not re-entered; the pre-fill stub stays."""
+    ws = _setup(monkeypatch, tmp_path)
+    install_scripted_model(monkeypatch, per_fn_body="0")
+    monkeypatch.setattr(pipeline, "_ask_retrospective",
+                        lambda *a, **k: RETRO_ANSWER)
     install_scripted_cargo(
         monkeypatch,
         check_diag=(101, ERR.format(code="E0308", msg="mismatched types"), []))
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.fns_filled == 0 and res.remaining == 1
-    assert res.attempts == 4          # 2 rounds × repeated-sig exit at 2
-    assert "unimplemented!()" in text    # annotated stub restored
+    assert res.attempts == 2
+    assert "unimplemented!()" in text
     from pipeline_core.adapters.retros import load_retrospectives, retro_key
     rec = load_retrospectives(ws)[retro_key("lib.rs", "answer", "")]
-    assert rec["fully_exhausted"] is True
-    assert rec["retrospective_count"] == 2
+    assert rec["retrospective_count"] == 1
 
 
 def test_transient_retro_does_not_trigger_immediate_retry(monkeypatch, tmp_path):

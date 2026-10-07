@@ -137,3 +137,44 @@ def test_the_retry_prompt_carries_the_blamed_types_inventory(
     retry = prompts[1]
     assert "blames `Gauge`" in retry
     assert "pub(crate) fn reading (& self) -> u32" in retry
+
+
+def test_a_generic_holder_is_found_through_the_impl_that_binds_it() -> None:
+    """Run `486447-5207101c`, session on `doc_lib_example_12`: three turns
+    wrote `Self::construct_from_context(context, self, None)` for
+    `Error::context` and failed E0277 `Error: core::error::Error`. The
+    crate's `ContextError<C, E>` holds `error: E` and implements the trait
+    only as `impl<C> StdError for ContextError<C, Error>`; the field-type
+    match could not see it and the appendix was empty. Controls: the same
+    record without that impl is not offered, and an impl for another type
+    argument is not either."""
+    from pipeline_core.domain.blamed_type_api import (
+        adapter_type_section,
+        adapter_types_for_diagnostic,
+    )
+    from pipeline_core.domain.models import FieldRecord, TraitImplRecord, TypeRecord
+
+    diag = (_FIXTURES / "e0277" / "error_not_stderr_session_486447.txt"
+            ).read_text(encoding="utf-8")
+
+    def _rec(impls: tuple[TraitImplRecord, ...]) -> TypeRecord:
+        return TypeRecord(
+            file="src/error.rs", kind="struct", name="ContextError",
+            generics="< C , E >",
+            fields=(FieldRecord(name="context", ty="C"),
+                    FieldRecord(name="error", ty="E")),
+            trait_impls=impls)
+
+    bound = TraitImplRecord(
+        header="impl<C> StdError for ContextError<C, Error> where C: Display",
+        trait_path="StdError", self_ty="ContextError<C, Error>")
+    generic = TraitImplRecord(header="impl<C, E> StdError for ContextError<C, E>",
+                              trait_path="StdError", self_ty="ContextError<C, E>")
+    other = TraitImplRecord(header="impl<C> StdError for ContextError<C, Other>",
+                            trait_path="StdError", self_ty="ContextError<C, Other>")
+    assert [r.name for r in adapter_types_for_diagnostic(diag, [_rec((generic, bound))])] == [
+        "ContextError"]
+    assert "impl<C> StdError for ContextError<C, Error>" in adapter_type_section(
+        diag, [_rec((generic, bound))])
+    assert adapter_types_for_diagnostic(diag, [_rec((generic,))]) == ()
+    assert adapter_types_for_diagnostic(diag, [_rec((other,))]) == ()

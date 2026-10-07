@@ -65,11 +65,18 @@ class BestTreeMark:
     # future consumer choosing between equal counts should prefer the
     # full-oracle tree.
     missing_count: int = 0
+    # Content hash of the cluster's LAYOUT (`.skeleton/<cluster>/src`) when
+    # the slot was written. A restore puts the layout back too, so restoring
+    # across a deliberate layout change (a retrigger's re-stub) would undo
+    # it; the entry restore requires the live layout to still be this one.
+    # "" on a slot written before the field: no entry restore from it.
+    layout_sha: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {"pass_count": self.pass_count, "iteration": self.iteration,
                 "tree_sha": self.tree_sha, "oracle_size": self.oracle_size,
-                "missing_count": self.missing_count}
+                "missing_count": self.missing_count,
+                **({"layout_sha": self.layout_sha} if self.layout_sha else {})}
 
     @staticmethod
     def from_dict(raw: Any) -> BestTreeMark | None:
@@ -106,7 +113,8 @@ class BestTreeMark:
         return BestTreeMark(
             pass_count=pass_count, iteration=iteration,
             tree_sha=str(sha) if isinstance(sha, str) and sha else UNKNOWN_TREE_SHA,
-            oracle_size=oracle_size, missing_count=missing_count)
+            oracle_size=oracle_size, missing_count=missing_count,
+            layout_sha=str(raw.get("layout_sha") or ""))
 
     def render(self) -> str:
         """How the mark is spelled in a log line."""

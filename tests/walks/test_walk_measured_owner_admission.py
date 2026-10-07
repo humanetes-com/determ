@@ -151,12 +151,15 @@ def _attribute_with_pair(*_a: Any, **_k: Any) -> AttributionResult:
                              dict(front), pairs=frozenset({_PAIR}))
 
 
-def _pair_row(outcome: RunOutcome) -> RouteLedgerRow:
+def _pair_row(outcome: RunOutcome, fill: int) -> RouteLedgerRow:
+    """One pair row of fill `fill` of an earlier process: the withholding
+    clock counts fills, so each graded buy is its own fill."""
     return RouteLedgerRow(
         kind=RouteKind.PAIR,
         label="pair src/a.rs::fmt + src/b.rs::owner_debug",
         targets=(("src/a.rs", "fmt"), ("src/b.rs", "owner_debug")),
         bodies_sha="deadbeef", oracle_fp=_ORACLE, outcome=outcome,
+        run_id="earlier-run", iteration=fill,
         target_tests=tuple(_REDS))
 
 
@@ -188,8 +191,8 @@ def test_a_spent_pair_stops_withholding_the_coverage_owners(
     returned nothing no longer holds the frontier at its own members: the
     measured spine unit is admitted and reaches a dispatched batch, and the
     log says what refuted the premise."""
-    rows = [_pair_row(RunOutcome.REVERTED)
-            for _ in range(DEFAULT_UNPAID_GRACE)]
+    rows = [_pair_row(RunOutcome.REVERTED, i + 1)
+            for i in range(DEFAULT_UNPAID_GRACE)]
     logs, events, batches = _replay_pair(monkeypatch, tmp_path, rows)
     lapsed = [d for e, d in events
               if e == "phase_c.dispatch.pair_withhold_lapsed"]
@@ -197,10 +200,10 @@ def test_a_spent_pair_stops_withholding_the_coverage_owners(
     assert set(lapsed[0]["tests"]) == set(_REDS)
     assert lapsed[0]["still_withholding"] == []
     assert all(v >= DEFAULT_UNPAID_GRACE
-               for v in lapsed[0]["unpaid_buys"].values())
+               for v in lapsed[0]["unpaid_fills"].values())
     assert any(_OWNER in b for b in batches), (
         "the admitted coverage owner must reach a dispatched batch")
-    assert any("has been bought and returned nothing" in ln for ln in logs)
+    assert any("without it turning them green" in ln for ln in logs)
 
 
 def test_negative_control_an_unspent_pair_still_withholds(
@@ -209,8 +212,8 @@ def test_negative_control_an_unspent_pair_still_withholds(
     fewer graded buys than the bound is still the paying fill, the coverage
     spine is admitted nowhere, and no batch holds it. Same walk, same
     coverage map, same hop — only the pair's record differs."""
-    rows = [_pair_row(RunOutcome.REVERTED)
-            for _ in range(DEFAULT_UNPAID_GRACE - 1)]
+    rows = [_pair_row(RunOutcome.REVERTED, i + 1)
+            for i in range(DEFAULT_UNPAID_GRACE - 1)]
     logs, events, batches = _replay_pair(monkeypatch, tmp_path, rows)
     assert not any(e == "phase_c.dispatch.pair_withhold_lapsed"
                    for e, _ in events)
@@ -236,8 +239,8 @@ def test_negative_control_an_unwired_oracle_still_withholds(
     """The same spent ledger that lapses above, read by a driver with no
     oracle wired: the rows may describe another tree entirely, so nothing
     is released. `""` is unrecorded here exactly as it is on a flat row."""
-    rows = [_pair_row(RunOutcome.REVERTED)
-            for _ in range(DEFAULT_UNPAID_GRACE)]
+    rows = [_pair_row(RunOutcome.REVERTED, i + 1)
+            for i in range(DEFAULT_UNPAID_GRACE)]
     _logs, events, batches = _replay_pair(
         monkeypatch, tmp_path, rows, oracle=None)
     assert not any(e == "phase_c.dispatch.pair_withhold_lapsed"

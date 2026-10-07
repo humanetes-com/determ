@@ -175,9 +175,18 @@ class PublicSurface:
     fn_spans: Mapping[str, tuple[tuple[int, int], ...]] = field(default_factory=dict)
     # A public function returns `impl Trait`: any type behind it is unnamed.
     opaque_return: bool = False
+    # `file -> names` of every item the index lists with a span in that file
+    # (types, traits, functions, constants, statics, macros): what a test in
+    # `tests/` can name, by the file that defines it. A `pub` item of a
+    # private module that nothing re-exports is absent.
+    item_names: Mapping[str, frozenset[str]] = field(default_factory=dict)
 
     def lists_fn(self, file: str, first_line: int) -> bool:
         return any(a <= first_line <= b for a, b in self.fn_spans.get(file, ()))
+
+    def names_item(self, file: str, name: str) -> bool:
+        """The index lists an item called `name` defined in `file`."""
+        return name in self.item_names.get(file, frozenset())
 
 
 def _walk_strings(node: object, out: set[str]) -> None:
@@ -212,6 +221,7 @@ def public_surface(rustdoc_json: str) -> PublicSurface | None:
     nameable: set[str] = set()
     exposed: set[str] = set()
     spans: dict[str, list[tuple[int, int]]] = {}
+    names: dict[str, set[str]] = {}
     opaque = False
     for item in index.values():
         if not isinstance(item, dict) or not isinstance(item.get("inner"), dict) or not item["inner"]:
@@ -226,6 +236,9 @@ def public_surface(rustdoc_json: str) -> PublicSurface | None:
         _walk_strings(inner, exposed)
         if isinstance(name, str):
             exposed.add(name)
+            where = item.get("span")
+            if kind != "impl" and isinstance(where, dict) and isinstance(where.get("filename"), str):
+                names.setdefault(where["filename"], set()).add(name)
         if kind == "function":
             sig = inner.get("sig") if isinstance(inner, dict) else None
             out_ty = sig.get("output") if isinstance(sig, dict) else None
@@ -240,7 +253,8 @@ def public_surface(rustdoc_json: str) -> PublicSurface | None:
                     continue
     return PublicSurface(
         nameable=frozenset(nameable), exposed=frozenset(exposed),
-        fn_spans={k: tuple(v) for k, v in spans.items()}, opaque_return=opaque)
+        fn_spans={k: tuple(v) for k, v in spans.items()}, opaque_return=opaque,
+        item_names={k: frozenset(v) for k, v in names.items()})
 
 
 # ------------------------------------------------------------------------ MIR
@@ -278,7 +292,7 @@ def parse_mir(text: str) -> tuple[MirBlock, ...]:
     return tuple(blocks)
 
 
-def _callee(line: str) -> str | None:
+def callee_of(line: str) -> str | None:
     """The callee text of a call terminator line, or None for any other line."""
     marker = line.find(" -> [")
     if marker < 0 or " = " not in line:
@@ -301,10 +315,10 @@ def _callee(line: str) -> str | None:
     return head[:open_at].split(" = ", 1)[1].strip()
 
 
-def _call_or_item(line: str) -> str | None:
+def call_or_item(line: str) -> str | None:
     """The callee of a call terminator, or the fn item a pointer coercion
     takes as a value (`_5 = <S as Tr>::m as fn(..) (PointerCoercion(ReifyFnPointer ..`)."""
-    callee = _callee(line)
+    callee = callee_of(line)
     if callee is not None:
         return callee
     if "FnPointer" in line and " = " in line and " as " in line:
@@ -328,7 +342,7 @@ def _method_of(callee: str) -> str:
     return toks[0] if toks else ""
 
 
-def _head_idents(callee: str) -> list[str]:
+def head_idents(callee: str) -> list[str]:
     """Identifiers of the callee's leading path, before its first generic list
     (`<Own<X> as Clone>::clone` -> [Own]; `ptr::Ref::<'_, T>::new` -> [ptr, Ref];
     `Option::<Ref<()>>::Some` -> [Option])."""
@@ -341,7 +355,7 @@ def _head_idents(callee: str) -> list[str]:
     return idents(s[:cut])
 
 
-def _as_trait(callee: str) -> str:
+def as_trait(callee: str) -> str:
     """`Tr` of a `<X as Tr>::m` callee, or ""."""
     if not callee.startswith("<"):
         return ""
@@ -409,13 +423,13 @@ class _World:
                         why = f"a value typed with `{ty}` is unsize-coerced to a dyn"
                         break
                 continue
-            callee = _call_or_item(ln)
+            callee = call_or_item(ln)
             if callee is None or not has_word(callee, ty):
                 continue
-            if ty in _head_idents(callee):
-                blanket = _BLANKET_DISPATCH.get(_as_trait(callee))
+            if ty in head_idents(callee):
+                blanket = _BLANKET_DISPATCH.get(as_trait(callee))
                 if blanket:
-                    why = f"`{ty}` is the receiver of a blanket-dispatching `{_as_trait(callee)}` call"
+                    why = f"`{ty}` is the receiver of a blanket-dispatching `{as_trait(callee)}` call"
                     break
                 continue
             if _method_of(callee) in _PLUMBING:
@@ -450,9 +464,9 @@ class _World:
         for b, ln in self._scan_lines():
             if not has_word(ln, ty):
                 continue
-            callee = _call_or_item(ln)
-            if callee is not None and ty in _head_idents(callee) \
-                    and _as_trait(callee) == trait:
+            callee = call_or_item(ln)
+            if callee is not None and ty in head_idents(callee) \
+                    and as_trait(callee) == trait:
                 return f"used in `{b.header[:60]}`: {ln.strip()[:90]}"
         return ""
 
@@ -470,20 +484,20 @@ class _World:
             if not blk.header.startswith(("fn ", "pub fn ", "unsafe fn ")):
                 continue
             if "impl at " not in blk.header:
-                if not rec.container and _header_name(blk.header) == rec.fn_name:
+                if not rec.container and header_name(blk.header) == rec.fn_name:
                     return True
                 continue
-            begin = _impl_begin(blk.header, rec.file)
+            begin = impl_begin(blk.header, rec.file)
             if begin is None:
                 continue
             starts.add(begin)
-            if _header_name(blk.header) == rec.fn_name:
+            if header_name(blk.header) == rec.fn_name:
                 named.add(begin)
         before = [x for x in starts if x <= first_line]
         return bool(before) and max(before) in named
 
 
-def _header_name(header: str) -> str:
+def header_name(header: str) -> str:
     """The fn name a MIR item header declares."""
     tail = header.split(">::", 1)[-1] if "impl at " in header else header
     head = tail.split("(", 1)[0]
@@ -491,7 +505,7 @@ def _header_name(header: str) -> str:
     return toks[-1] if toks else ""
 
 
-def _impl_begin(header: str, file: str) -> int | None:
+def impl_begin(header: str, file: str) -> int | None:
     """First line of the impl a method header names, when it is in `file`."""
     span = header.split("impl at ", 1)[1].split(">", 1)[0]
     parts = span.split(":")
@@ -501,7 +515,7 @@ def _impl_begin(header: str, file: str) -> int | None:
         return None
 
 
-def _first_line(rec: FnRecord, text: str) -> int:
+def record_first_line(rec: FnRecord, text: str) -> int:
     return text.count("\n", 0, rec.sig_byte_start) + 1
 
 
@@ -541,7 +555,7 @@ def _judge(rec: FnRecord, site: FnSite, text: str, world: _World,
     name = rec.fn_name
     if name in from_macros:
         return Verdict(site, kept="its name is spelled in a macro body that expands in the test crate")
-    first = _first_line(rec, text)
+    first = record_first_line(rec, text)
     if surface.lists_fn(rec.file, first):
         return Verdict(site, kept="it is in the public index (a test can name it)")
     if not world.defines(rec, first):

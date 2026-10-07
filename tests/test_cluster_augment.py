@@ -236,6 +236,22 @@ def test_ceiling_after_confirmed_passes_accepts() -> None:
     assert fake.module_sentinels["anyhow"] == 90.0
 
 
+def test_the_ceiling_line_splits_its_count_and_warns_on_spent_reachable_functions() -> None:
+    fake = FakeAdapter(augment_script={
+        ("stable", "anyhow"): [(96.6, 780, True, ""), (96.6, 780, True, "")]})
+    spent = "src/wrapper.rs::fmt [impl Debug for DisplayError<M>]"
+    fake.floor_scripts[("stable", "anyhow")] = [FileFloor(90.0, (
+        FileFloorReading("src/wrapper.rs", 18, 21, 18, 21, FILE_ACCOUNTED,
+                         buckets={"spent": 3}, spent_owners=(spent,)),
+        FileFloorReading("src/ptr.rs", 79, 79, 79, 88, FILE_MET, buckets={"proved": 9})))] * 2
+    _augmentor(fake).run(_ctx(fake, [_cluster("stable")], ["anyhow"], file_floor_pct=90.0))
+    ceiling = next(m for m in fake.logs if m.startswith("  CEILING [stable]"))
+    assert ("proved unreachable 9, LLVM artifact 0, cfg-filtered 0; attempt budget spent "
+            "3 line(s) in 1 reachable function(s)") in ceiling
+    assert any(m.startswith("  WARNING [stable]: 'anyhow' accepted with 1 reachable function(s)")
+               and spent in m for m in fake.logs)
+
+
 def test_pre_check_failure_zeros_all_modules() -> None:
     fake = FakeAdapter(augment_script={}, pre_check=False)
     _augmentor(fake).run(_ctx(fake, [_cluster("nightly")], ["a", "b"]))

@@ -595,6 +595,7 @@ def test_the_executor_logs_a_broken_schedule_loudly() -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     deps = SimpleNamespace(
         scheduled=True, crash_blamed=frozenset(inputs["crash_blamed"]),
+        measured_owners=frozenset(),
         iteration=5, cluster="stable", log=log.append,
         emit=lambda name, data: events.append((name, data)))
     _check_schedule(recorded, inputs["hollow"], deps)  # type: ignore[arg-type]
@@ -638,3 +639,78 @@ def test_the_ledger_slice_keeps_the_session_turn_price() -> None:
         "newly_green": [], "reason": "served",
         "minutes": 11.3, "model_calls": 2,
     }]
+
+
+def test_an_admitted_owner_no_candidate_writes_is_named() -> None:
+    """Run `486447-5207101c` fill 6: `src/ensure.rs::render` was admitted as
+    a measured owner and dispatched, and the only `ensure.rs` runs wrote the
+    `Buf` stubs. Controls: the same owner as a deferred run's target is a
+    named deferral, not a violation; an owner in an opened run is written."""
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.schedule_invariants import Decided, violations
+
+    render = FnLocator("src/ensure.rs", "render")
+    buf = FnLocator("src/ensure.rs", "new")
+    file_run = Decided(key="f", label="file src/ensure.rs",
+                       targets=frozenset({buf}), opened=True, share_minutes=5.0)
+    got = violations([file_run], hollow_stubs=None, measured_owners={render})
+    assert [v.kind for v in got] == ["owner_unrouted"]
+    assert "src/ensure.rs::render" in got[0].detail
+
+    parked = Decided(key="s", label="session[1 test(s), 3 unit(s)] #8",
+                     targets=frozenset({render}), opened=False,
+                     reason="pair_wait")
+    assert violations([file_run, parked], hollow_stubs=None,
+                      measured_owners={render}) == ()
+    opened = Decided(key="f2", label="file src/ensure.rs",
+                     targets=frozenset({render, buf}), opened=True,
+                     share_minutes=5.0)
+    assert violations([opened], hollow_stubs=None,
+                      measured_owners={render}) == ()
+    assert violations([file_run], hollow_stubs=None) == ()
+
+
+def test_an_owner_admitted_on_an_earlier_sweep_is_still_checked() -> None:
+    """The checker's input was this sweep's admits and
+    attaches inside the 12-cap batch, so `render`, admitted the sweep
+    before and still in `ordered`, was invisible to it. The input is every
+    owner-map unit still in `ordered` after the flat exclusion and the crash
+    scope. Controls: the same owner inside a deferral with a reason does not
+    fire; a unit `drop_standing_flat` removed has left `ordered`."""
+    from pipeline_core.domain.escalation_lifetime import measured_owners_on_frontier
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.schedule_invariants import Decided, violations
+
+    render = FnLocator("src/ensure.rs", "render")
+    flat = FnLocator("src/ensure.rs", "flat_one")
+    buf = FnLocator("src/ensure.rs", "new")
+    admitted_before = {render, flat}
+    this_sweep: set[FnLocator] = set()
+    batch = {buf}
+    # The old input: this sweep's admits inside the batch — empty.
+    assert (this_sweep & batch) == set()
+    ordered = [buf, render]          # `flat` left with the flat exclusion
+    owners = measured_owners_on_frontier(admitted_before | this_sweep, ordered)
+    assert owners == {render}
+    file_run = Decided(key="f", label="file src/ensure.rs",
+                       targets=frozenset({buf}), opened=True, share_minutes=5.0)
+    got = violations([file_run], hollow_stubs=None, measured_owners=owners)
+    assert [v.kind for v in got] == ["owner_unrouted"]
+    assert "src/ensure.rs::render" in got[0].detail
+    hollow = Decided(key="h", label="pair hollow", targets=frozenset({render}),
+                     opened=False, reason="hollow")
+    assert violations([file_run, hollow], hollow_stubs=None,
+                      measured_owners=owners) == ()
+
+
+def test_a_recorded_event_carries_its_admitted_owners() -> None:
+    """The census reads `measured_owners` off the schedule event; an event
+    that predates the field (or has no inputs) carries none."""
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.schedule_invariants import measured_owners_from_event
+
+    assert measured_owners_from_event(
+        {"inputs": {"measured_owners": ["src/ensure.rs::render"]}}) == frozenset(
+            {FnLocator("src/ensure.rs", "render")})
+    assert measured_owners_from_event({"inputs": {}}) == frozenset()
+    assert measured_owners_from_event({}) == frozenset()

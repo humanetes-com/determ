@@ -26,6 +26,7 @@ from pipeline_core.domain.models import (
     ImplBlock,
     TypeRecord,
 )
+from pipeline_core.domain.test_results import TestStateReading
 from tests.harness import (
     diag,
     install_cluster_scan,
@@ -299,7 +300,7 @@ def _regressing_guard(monkeypatch) -> None:
         excluded_crashed=(), not_run=(), measured=("t_keep", "t_pair"),
         base_pass=1, cur_pass=0, base_executed=2, cur_executed=2)
     monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
-        baseline=lambda *a, **k: object(),
+        baseline=lambda *a, **k: TestStateReading(binaries=()),
         gate=lambda *a, **k: (
             cmp, "This compiled, but it REGRESSED previously-passing "
                  "test(s): ['t_keep'] (cluster pass count 1→0).")))
@@ -322,7 +323,7 @@ def _crash_guard(monkeypatch) -> None:
         base_pass=1, cur_pass=0, base_executed=2, cur_executed=2,
         crash_lost_pass=1)
     monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
-        baseline=lambda *a, **k: object(),
+        baseline=lambda *a, **k: TestStateReading(binaries=()),
         gate=lambda *a, **k: (cmp, _CRASH_DETAIL)))
 
 
@@ -683,7 +684,7 @@ def test_a_crash_revert_puts_the_verdict_in_last_error_on_the_next_fill(
 def _clean_guard(monkeypatch) -> None:
     from types import SimpleNamespace
     monkeypatch.setattr(pipeline, "_regression_guard", SimpleNamespace(
-        baseline=lambda *a, **k: object(),
+        baseline=lambda *a, **k: TestStateReading(binaries=()),
         gate=lambda *a, **k: None))
 
 

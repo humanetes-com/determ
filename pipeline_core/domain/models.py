@@ -1166,6 +1166,10 @@ class ClusterFillResult:
     # next batch by blocker frequency — the field the two fill routes used
     # to leave on a log line that nothing outer consumed.
     payoff: PassPayoff | None = None
+    # Units a route's own gate refused after the schedule fixed them, with
+    # the gate's reason: `(file, fn, reason)` (per-fn's claim refusals —
+    # `premise`, `share`). Empty: none refused, or a caller that did not say.
+    unclaimed_fns: tuple[tuple[str, str, str], ...] = ()
     # Per-fill class histogram for this call (impl + per-fn combined).
     # None: caller/test did not populate it. The TDD driver prints the
     # previous call's histogram on the next iter line.

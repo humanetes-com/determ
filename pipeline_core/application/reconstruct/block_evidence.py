@@ -31,6 +31,7 @@ from pipeline_core.application.reconstruct.test_locator import (
     attributed_test_blocks,
 )
 from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
@@ -229,6 +230,7 @@ def assemble_block_evidence(
     escalated: frozenset[FnLocator] = frozenset(),
     crashed: frozenset[FnLocator] = frozenset(),
     aimed: frozenset[FnLocator] = frozenset(),
+    crash_sites: CrashSites | None = None,
     read_source: Callable[[str], str | None] | None = None,
     ledger_entries: Sequence[Any] = (),
     oracle_fp: str = "",
@@ -268,6 +270,7 @@ def assemble_block_evidence(
         evs.extend(collect_refill_evidence(
             b, all_blocks, frontier,
             escalated=escalated, crashed=crashed, aimed=aimed,
+            crash_sites=crash_sites,
             read_source=read_source,
             history=history_for_block(b, ledger_entries,
                                       oracle_fp=oracle_fp)))

@@ -16,6 +16,7 @@ stays silent.
 from __future__ import annotations
 
 from pipeline_core.domain.escalation_lifetime import (
+    attach_to_eligible_owners,
     escalate_to_measured_owners,
     withholding_paired_tests,
 )
@@ -338,11 +339,11 @@ def test_a_paired_test_withholds_only_while_its_pair_has_an_unspent_buy() -> Non
     spent = "t_spent"
     fresh = "t_fresh"
     buys = {spent: DEFAULT_UNPAID_GRACE, fresh: DEFAULT_UNPAID_GRACE - 1}
-    got = withholding_paired_tests([spent, fresh], unpaid_buys=buys)
+    got = withholding_paired_tests([spent, fresh], unpaid_fills=buys)
     assert got == frozenset({fresh})
 
     control = withholding_paired_tests(
-        [spent, fresh], unpaid_buys=buys, unpaid_grace=0)
+        [spent, fresh], unpaid_fills=buys, unpaid_grace=0)
     assert control == frozenset({spent, fresh})
 
 
@@ -351,9 +352,9 @@ def test_a_pair_nobody_has_a_row_for_still_withholds() -> None:
     been bought, so the premise it was given — that it is the paying fill —
     is untested and stands."""
     assert withholding_paired_tests(
-        ["t_fmt"], unpaid_buys={}) == frozenset({"t_fmt"})
+        ["t_fmt"], unpaid_fills={}) == frozenset({"t_fmt"})
     assert withholding_paired_tests(
-        ["t_fmt"], unpaid_buys={"t_fmt": 0}) == frozenset({"t_fmt"})
+        ["t_fmt"], unpaid_fills={"t_fmt": 0}) == frozenset({"t_fmt"})
 
 
 def test_a_lapsed_pair_admits_the_spine_the_unspent_one_withheld() -> None:
@@ -378,9 +379,57 @@ def test_a_lapsed_pair_admits_the_spine_the_unspent_one_withheld() -> None:
             already_owned=served,
             served=served,
             paired_tests=withholding_paired_tests(
-                ["t_fmt"], unpaid_buys={"t_fmt": unpaid}),
+                ["t_fmt"], unpaid_fills={"t_fmt": unpaid}),
         )
 
     assert _admit(DEFAULT_UNPAID_GRACE - 1) == {}
     lapsed = _admit(DEFAULT_UNPAID_GRACE)
     assert lapsed == {spine: {"t_fmt"}}
+
+
+def test_a_lapsed_test_is_attached_to_an_owner_already_eligible() -> None:
+    """Run `486447-5207101c` (2026-10-07), the shape at iter 7: the
+    renderer was admitted at iter 6 for a sibling and is eligible; the
+    lapsed test's coverage names it, and the admission skips it as already
+    owned — so no run aimed the renderer at that test. The attachment puts
+    the test on the eligible owner's target set. Negative control: the
+    admission alone returns nothing for that test."""
+    render = FnLocator("src/ensure.rs", "render")
+    disp = FnLocator("src/error.rs", "fmt")
+    impl = FnLocator("src/fmt.rs", "display")
+    vtable = FnLocator("src/error.rs", "vtable")
+    owners = {"test_if": frozenset({render, disp, impl, vtable}),
+              "test_unary": frozenset({render})}
+    units = {"test_if": {disp, impl}, "test_unary": {render}}
+    eligible = {render: {"test_unary"}, disp: {"test_if"}, impl: {"test_if"}}
+    served = {disp, impl, render}
+    paired = withholding_paired_tests(
+        ["test_if"], unpaid_fills={"test_if": DEFAULT_UNPAID_GRACE})
+
+    admitted = escalate_to_measured_owners(
+        owners=owners, units_by_test=units, graded=frozenset(),
+        unable=frozenset(), served=served, paired_tests=paired,
+        already_owned=frozenset(eligible))
+    assert admitted == {vtable: {"test_if"}}
+    assert render not in admitted
+
+    attached = attach_to_eligible_owners(
+        owners=owners, units_by_test=units, graded=frozenset(),
+        unable=frozenset(), served=served, paired_tests=paired,
+        eligible=eligible)
+    assert attached == {render: {"test_if"}}
+
+
+def test_a_withheld_test_is_not_attached() -> None:
+    """Control: the same eligible owner, the test still inside its pair's
+    grace — the gate is the admission's, so nothing is attached."""
+    render = FnLocator("src/ensure.rs", "render")
+    disp = FnLocator("src/error.rs", "fmt")
+    got = attach_to_eligible_owners(
+        owners={"test_if": frozenset({render, disp})},
+        units_by_test={"test_if": {disp}},
+        eligible={render: {"test_unary"}, disp: {"test_if"}},
+        graded=frozenset(), unable=frozenset(), served={disp, render},
+        paired_tests=withholding_paired_tests(
+            ["test_if"], unpaid_fills={"test_if": DEFAULT_UNPAID_GRACE - 1}))
+    assert got == {}

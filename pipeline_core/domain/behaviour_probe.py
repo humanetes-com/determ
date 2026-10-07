@@ -649,17 +649,33 @@ def is_public_crate_fn(
     reachable_files: frozenset[str] | None,
     type_files: Mapping[str, str] | None,
     cfg_set: CfgSet | None,
+    public_index: Mapping[str, frozenset[str]] | None = None,
 ) -> bool:
     """True when an example crate can call `rec`: exactly `pub`, not a test,
-    not under an aux dir or a hidden/cfg-dead module, and — when reachability
-    is known — its self type (for a method) or its file (for a free fn) is
-    reachable through a public chain of `mod` declarations."""
+    not under an aux dir or a hidden/cfg-dead module, and nameable from
+    outside the crate.
+
+    Nameable is read from ``public_index`` when one was measured (rustdoc's
+    index, `fn_reachability.PublicSurface.item_names`: names by defining
+    file): a free fn when the index lists it in its file, a method when it
+    does and also lists its self type. That is the fact — a `pub use` from a
+    private module makes an item nameable, and a mod-chain walk cannot see it
+    (run `88434-2e3bb4d7`, hardcrate: 14 `pub use` lines, a 4-name glossary).
+    Without an index, reachability through a public chain of `mod`
+    declarations (``reachable_files``) stands in: a method's self type, or a
+    free fn's file."""
     if not (rec.is_pub and rec.is_exactly_pub) or rec.is_test:
         return False
     if set(Path(rec.file).parts) & _AUX_DIRS:
         return False
     if _hidden_module_path(rec.mod_path) or _cfg_excluded(rec, cfg_set):
         return False
+    if public_index:
+        if rec.fn_name not in public_index.get(rec.file, frozenset()):
+            return False
+        self_ty = (impl_self_type(rec.container)
+                   if rec.container.startswith("impl") else None)
+        return self_ty is None or any(self_ty in names for names in public_index.values())
     if reachable_files is None:
         return True
     self_ty = impl_self_type(rec.container) if rec.container.startswith("impl") else None
@@ -756,6 +772,7 @@ def probe_targets(
     reachable_files: frozenset[str] | None = None,
     type_files: Mapping[str, str] | None = None,
     cfg_set: CfgSet | None = None,
+    public_index: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[str, ...]:
     """The externally-callable fns NO harvested example names in its code
     (:func:`example_code` — helpers, setup, when; whole-word on the bare fn
@@ -791,7 +808,8 @@ def probe_targets(
     texts = [example_code(s) for s in specs]
     labels: set[str] = set()
     for rec in fn_records:
-        if not is_public_crate_fn(rec, reachable_files, type_files, cfg_set):
+        if not is_public_crate_fn(rec, reachable_files, type_files, cfg_set,
+                                  public_index):
             continue
         if any(contains_word(t, rec.fn_name) for t in texts):
             continue

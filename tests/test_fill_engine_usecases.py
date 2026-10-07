@@ -83,6 +83,13 @@ class FakeFill:
         seq = self.s.get("run_seq")
         if seq:
             return seq.pop(0)
+        numbered = self.s.get("run_numbered")
+        if numbered:
+            # A different error set on every call at the same count: the
+            # fix loop stops on a stalled floor, never on a repeated set.
+            self._runs = getattr(self, "_runs", 0) + 1
+            rc, out = numbered
+            return rc, out.replace("#N", str(self._runs))
         return self.s.get("run", (0, ""))
     def check_diag(self, *a: Any, **k: Any) -> tuple[int, str, list[Any]]:
         rc, out = self.run(*a, **k)
@@ -90,6 +97,10 @@ class FakeFill:
     def build_test_cmd(self, *a: Any) -> str: return "cargo test"
     def u2_test_gate(self, *a: Any) -> Any:
         from pipeline_core.domain.test_report import U2Verdict
+        cycle = self.s.get("u2_cycle")
+        if cycle:
+            self._gates = getattr(self, "_gates", 0) + 1
+            return cycle[(self._gates - 1) % len(cycle)]
         return self.s.get("u2") or U2Verdict.accept()
     def test_regression_baseline(self, *a: Any) -> Any: return self.s.get("regr_base")
     def test_regression_gate(self, *a: Any, **kw: Any) -> Any: return self.s.get("regr")
@@ -1128,6 +1139,12 @@ def _hub_reject() -> Any:
                      self_failures=frozenset({"t_hub"}), detail="red")
 
 
+def _hub_reject2() -> Any:
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    return U2Verdict(U2Decision.REJECT,
+                     self_failures=frozenset({"t_hub2"}), detail="red")
+
+
 def test_sibling_blocked_rejection_is_kept_with_one_call(
         tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
@@ -1444,7 +1461,7 @@ def test_control_an_improving_retrospective_on_an_entered_unit_re_enters(
     coverage reading and not a broken retry path."""
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
     ws = _mk_ws(tmp_path)
-    fake = _ImprovingRetro(run=(1, "error[E0308]: mismatched types"),
+    fake = _ImprovingRetro(run_numbered=(1, "error[E0308]: mismatched types #N"),
                            body=("Ok(())", "R"))
     res = _run_bound(fake, ws, _cov_ctx(ws), entered=True)
     assert not res.filled
@@ -1479,13 +1496,18 @@ class _FlatFloorRetro(_ImprovingRetro):
 
 _SPLICE_ERR = ("error: `self` parameter is only allowed in associated "
                "functions\n --> src/lib.rs:1:15")
+# The same diagnostic with a different error set on every attempt (`#N`), so
+# the loop stops on its stalled floor: a repeated set ends the unit for the
+# fill before any retrospective round could re-enter.
+_SPLICE_ERR_N = ("error: `self` parameter is only allowed in associated "
+                 "functions #N\n --> src/lib.rs:1:15")
 
 
 def test_an_unimproved_round_whose_conviction_is_vetoed_does_not_re_enter(
         tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "6")
     ws = _mk_ws(tmp_path)
-    fake = _FlatFloorRetro(run=(1, _SPLICE_ERR), err=_SPLICE_ERR,
+    fake = _FlatFloorRetro(run_numbered=(1, _SPLICE_ERR_N), err=_SPLICE_ERR,
                            body=("Ok(())", "R"))
     res = _run_bound(fake, ws, _cov_ctx(ws), entered=True)
     assert not res.filled
@@ -1514,7 +1536,7 @@ def test_control_the_pre_fix_gate_re_enters_every_vetoed_round(
     exec(old, ns)
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "6")
     ws = _mk_ws(tmp_path)
-    fake = _FlatFloorRetro(run=(1, _SPLICE_ERR), err=_SPLICE_ERR,
+    fake = _FlatFloorRetro(run_numbered=(1, _SPLICE_ERR_N), err=_SPLICE_ERR,
                            body=("Ok(())", "R"))
     from pipeline_core.domain.coverage_slice import bind
     bind(_bound(True))
@@ -1535,8 +1557,11 @@ def test_control_the_pre_fix_gate_re_enters_every_vetoed_round(
 def test_exhaustion_summary_says_kept_when_the_salvage_kept(
         tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
-    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
-                         body=("Ok(())", "R"))
+    # Two failing sets in turn: the loop stops on its stalled floor. The
+    # same set twice is a repeated stop, which keeps nothing — that control
+    # is below.
+    fake = RecordingFill(run=(0, ""), u2_cycle=(_hub_reject(), _hub_reject2()),
+                         regr=None, body=("Ok(())", "R"))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
                               ctx=_ctx(ws))
     assert not res.filled, "exhaustion still reports no verdict-worthy fill"
@@ -1544,6 +1569,21 @@ def test_exhaustion_summary_says_kept_when_the_salvage_kept(
     assert any("best compiling body KEPT" in m for m in _summaries)
     assert not any("reverted after" in m for m in fake.logs), (
         "the disposition summary must not contradict the salvage keep")
+
+
+def test_a_repeated_failing_set_keeps_no_salvaged_body(tmp_path: Path) -> None:
+    """The same failing set on two attempts ends the unit
+    for the fill. The compiling body the salvage kept above is not kept; the
+    pre-fill body stays and the summary says reverted."""
+    ws = _mk_ws(tmp_path)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert not res.filled
+    assert any("same error set" in m for m in fake.logs)
+    assert not any("best compiling body KEPT" in m for m in fake.logs)
+    assert any("pre-fill body kept, no salvage" in m for m in fake.logs)
 
 
 def test_exhaustion_summary_says_reverted_when_the_salvage_failed(

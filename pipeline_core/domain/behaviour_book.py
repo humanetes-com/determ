@@ -180,6 +180,7 @@ def glossary_entries(
     *,
     reachable_files: frozenset[str] | None = None,
     cfg_set: CfgSet | None = None,
+    public_index: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[GlossaryEntry, ...]:
     """The crate's public vocabulary, sorted by name.
 
@@ -195,10 +196,18 @@ def glossary_entries(
     field-wise (`GlossaryEntry.merged`), so the signature of the record
     without a doc comment is not lost to the one with it."""
     src = dict(sources)
+    # With a measured public index (``public_index``, rustdoc's names by
+    # defining file) a type is in the vocabulary when the index lists it —
+    # a `pub use` from a private module included, a `pub` trait of a private
+    # inline module nobody re-exports excluded. Without one, the mod-chain
+    # walk (``reachable_files``) and file-scope declaration stand in.
     types = [t for t in type_records
-             if t.is_pub and t.is_exactly_pub and not t.mod_path and not t.external_path
+             if t.is_pub and t.is_exactly_pub and not t.external_path
              and t.kind in ("struct", "enum", "trait", "type")
-             and (reachable_files is None or t.file in reachable_files)]
+             and (t.name in public_index.get(t.file, frozenset())
+                  if public_index else
+                  not t.mod_path
+                  and (reachable_files is None or t.file in reachable_files))]
     type_files = {t.name: t.file for t in types}
     public_traits = {t.name for t in types if t.kind == "trait"}
     out: dict[str, GlossaryEntry] = {}
@@ -215,7 +224,8 @@ def glossary_entries(
         # whatever its own (absent) visibility says: trait impl methods carry
         # no `pub`, and the impl's self type may be a std type (`Result`).
         via_trait = name.split("::", 1)[0] in public_traits and "::" in name
-        if not via_trait and not is_public_crate_fn(rec, reachable_files, type_files, cfg_set):
+        if not via_trait and not is_public_crate_fn(rec, reachable_files, type_files, cfg_set,
+                                                    public_index):
             continue
         text = _source_for(rec.file, src)
         summary = doc_summary_before(text, _byte_to_char(text, rec.sig_byte_start)) if text else ""

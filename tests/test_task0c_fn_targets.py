@@ -41,6 +41,7 @@ from pipeline_core.application.tasks.task0c import (
 from pipeline_core.domain.cluster_plan import nightly_rules_for, plan_clusters, target_scope_rule
 from pipeline_core.domain.coverage import PerFileCoverage
 from pipeline_core.domain.fn_execution import FnTarget
+from pipeline_core.domain.fn_routes import FnRoutes, GatedDispatch, PublicRoute, TypeFact, WorldFacts
 from pipeline_core.domain.models import FnSite
 from tests.test_task0c_contract import _MICROCRATE, EXACT, _Harness
 
@@ -62,7 +63,8 @@ def _files(h: _Harness, lines: dict[str, list[int]]) -> list[PerFileCoverage]:
 
 def _run(h: _Harness, cluster: Any, lines: dict[str, list[int]],
          targets: tuple[FnTarget, ...], *, split_n: int = 1,
-         hist: Task0cFileHistory | None = None) -> _PhaseCOutcome:
+         hist: Task0cFileHistory | None = None,
+         facts: WorldFacts | None = None) -> _PhaseCOutcome:
     deps = h.deps
     object.__setattr__(deps, "nightly_rules_for_cluster", lambda: nightly_rules_for(cluster))
     return _run_phase_c(
@@ -72,7 +74,8 @@ def _run(h: _Harness, cluster: Any, lines: dict[str, list[int]],
         hist=hist if hist is not None else Task0cFileHistory(),
         ctx=_PhaseCCtx(deps=deps, current_cluster=cluster, cluster_label=cluster.name,
                        split_n=split_n, allow_line="", prelude_block="", prelude_names="",
-                       file_stall_limit=5, retro_deep_at_stall=1, stall_context=False),
+                       file_stall_limit=5, retro_deep_at_stall=1, stall_context=False,
+                       facts=facts),
         fn_targets=targets)
 
 
@@ -247,45 +250,41 @@ _NO_GAIN = "FUNCTION {name}: UNREACHABLE — dead code, add an ignore pragma"
 
 
 def _stalled_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
-                  targets: tuple[FnTarget, ...]) -> tuple[list[list[str]], list[str]]:
+                  targets: tuple[FnTarget, ...]) -> tuple[_Harness, list[_PhaseCOutcome], str]:
     """Two passes whose blocks add no line (quick coverage stays at the seed),
     so the file stalls on the second and the retrospective runs; it classifies
-    `name` UNREACHABLE. Returns the pragma calls and the log."""
+    `name` UNREACHABLE. Returns the harness, the outcomes and the source text
+    before the passes."""
     from pipeline_core.domain.refine import parse_retrospective_categories
     h = _Harness(tmp_path, monkeypatch, src_name="lib.rs",
                  replies=[EXACT, EXACT, _NO_GAIN.format(name=name)], target=0.0, specs=())
     object.__setattr__(h.deps, "quick_file_coverage", lambda pd, m, rel: (3, 10))
     object.__setattr__(h.deps, "parse_retrospective_categories", parse_retrospective_categories)
-    calls: list[list[str]] = []
-
-    def _pragma(deps: Any, project_dir: Path, module_name: str, rel_path: str,
-                uncov: set[int], fns: list[str], model: str) -> bool:
-        calls.append(list(fns))
-        return False
-
-    monkeypatch.setattr(task0c_mod, "_engine_targeted_pragma", _pragma)
+    before = (h.ws / "src" / "lib.rs").read_text(encoding="utf-8")
     hist = Task0cFileHistory()
-    for _ in range(2):
-        _run(h, _EXTRA, {"src/lib.rs": [48]}, targets, hist=hist)
-    return calls, h.logs
+    outs = [_run(h, _EXTRA, {"src/lib.rs": [48]}, targets, hist=hist) for _ in range(2)]
+    return h, outs, before
 
 
-def test_a_retrospective_verdict_does_not_pragma_a_function_still_in_its_budget(
+def test_a_retrospective_verdict_writes_nothing_to_the_source(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """nightly `ErrorImpl::fmt` / `thiserror_provide`: the retrospective said
-    UNREACHABLE for functions the record still held pending, a pragma hid
-    their lines, and the function reading kept counting them unexecuted. The
-    verdict is a hypothesis until the budget is spent."""
-    calls, logs = _stalled_pass(tmp_path, monkeypatch, "capacity_hint", (_HINT,))
-    assert calls == []
-    assert any("not pragma'd, still inside the function attempt budget: ['capacity_hint']" in ln
-               for ln in logs)
+    """anyhow's `format_err`: the retrospective said UNREACHABLE for an
+    executed function's `else` arm and a pragma hid line 690, which
+    `anyhow!("x {var}")` executes. A verdict is evidence on the record and text
+    for the next prompt; it never edits the source."""
+    h, outs, before = _stalled_pass(tmp_path, monkeypatch, "capacity_hint", (_HINT,))
+    assert any(ln.startswith("  [microcrate] Retrospective:") for ln in h.logs)
+    assert (h.ws / "src" / "lib.rs").read_text(encoding="utf-8") == before
+    assert not any("Targeted pragma" in ln or "[targeted-pragma]" in ln for ln in h.logs)
+    # The verdict is on the record for the pending function.
+    assert (_HINT.site, "UNREACHABLE") in outs[-1].fn_verdicts
 
 
-def test_negative_control_the_same_verdict_on_a_function_not_pending_pragmas(
+def test_negative_control_a_verdict_on_a_function_not_pending_writes_nothing_either(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    calls, _ = _stalled_pass(tmp_path / "ctl", monkeypatch, "target", ())
-    assert calls == [["target"]]
+    h, outs, before = _stalled_pass(tmp_path / "ctl", monkeypatch, "target", ())
+    assert (h.ws / "src" / "lib.rs").read_text(encoding="utf-8") == before
+    assert outs[-1].fn_verdicts == ()
 
 
 def test_a_trait_impl_target_is_told_the_route_that_reaches_it() -> None:
@@ -295,3 +294,87 @@ def test_a_trait_impl_target_is_told_the_route_that_reaches_it() -> None:
     out = task0c_mod._render_unexecuted_fns(src, (dbg,))
     assert "Reached through the trait, not by a direct call: `{:?}`, `{:#?}`" in out
     assert "Reached through the trait" not in task0c_mod._render_unexecuted_fns(src, (inherent,))
+
+
+# --- the world's routes and public index reach the prompt ----------------------
+
+_ROUTED = WorldFacts(
+    "extra_cap",
+    routes={"src/lib.rs::capacity_hint": FnRoutes(
+        (PublicRoute("`<Option<T> as Context<T>>::context`", ("`Error::from_display`",),
+                     "builds `DisplayError`"),),
+        (GatedDispatch("`<Error as fmt::Debug>::fmt`", "<dyn Error as Debug>::fmt", "alternate"),))},
+    unnameable=(TypeFact("MathError", "src/lib.rs",
+                         (PublicRoute("`checked_div`", (), "builds `MathError`"),)),),
+    item_names={"src/lib.rs": frozenset({"add", "checked_div", "capacity_hint"})})
+
+
+def test_a_routed_target_is_told_its_public_route_instead_of_the_generic_text(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT, _ADD), facts=_ROUTED)
+    prompt = h.prompts[0]
+    block = prompt.split("// NEVER EXECUTED by any test: src/lib.rs::capacity_hint", 1)[1]
+    block = block.split("// NEVER EXECUTED by any test:", 1)[0]
+    assert ("// Reached from the public API (callers in this crate's MIR): "
+            "`<Option<T> as Context<T>>::context` → `Error::from_display` (builds `DisplayError`)") in block
+    assert "only when `f.alternate()` is true (`{:#?}`)" in block
+    # Control: the unrouted target in the same prompt carries no route line.
+    other = prompt.split("// NEVER EXECUTED by any test: src/lib.rs::add", 1)[1]
+    assert "Reached from the public API" not in other.split("```", 1)[0]
+
+
+_API = "pub fn add(a: i32, b: i32) -> i32\npub enum MathError { DivByZero }\npub fn checked_div(a: i32, b: i32)"
+
+
+def test_the_api_section_lists_only_what_the_public_index_names(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
+    object.__setattr__(h.deps, "extract_public_symbols", lambda _t: _API)
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,), facts=WorldFacts(
+        "extra_cap", unnameable=_ROUTED.unnameable,
+        item_names={"src/lib.rs": frozenset({"add", "capacity_hint", "checked_div"})}))
+    api = h.prompts[0].split("Public API of `src/lib.rs`", 1)[1].split("```", 2)[1]
+    assert "pub fn add" in api
+    assert "pub enum MathError" not in api
+    assert ("// Internal, NOT nameable from tests/ (pub in a private module; do not `use` it): "
+            "`MathError`; built by `checked_div` (builds `MathError`)") in api
+
+
+def test_negative_control_without_a_reading_the_api_section_is_unchanged(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT], target=0.0, specs=())
+    object.__setattr__(h.deps, "extract_public_symbols", lambda _t: _API)
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,))
+    api = h.prompts[0].split("Public API of `src/lib.rs`", 1)[1].split("```", 2)[1]
+    assert "pub enum MathError" in api and "NOT nameable" not in api
+    assert "Reached from the public API" not in h.prompts[0]
+
+
+# --- a committed block aimed at a still-unexecuted function -----------------------
+
+def test_the_next_prompt_states_that_a_committed_block_left_its_target_at_zero(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT, EXACT], target=0.0, specs=())
+    hist = Task0cFileHistory()
+    first = _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,), hist=hist)
+    assert first.fn_outcomes == ((_HINT.site, "committed"),)
+    assert "still has 0 executions" not in h.prompts[0]
+    # The next measurement still counts it unexecuted: it is a target again.
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,), hist=hist)
+    prompt = h.prompts[-1]
+    assert "(a fact, not a hypothesis)" in prompt
+    assert re.search(r"- `tests/lib_gen_\d+\.rs` ran; `src/lib\.rs::capacity_hint` still has 0 executions\.",
+                     prompt), prompt[:3000]
+    # No cause is claimed for it.
+    assert "does not build" not in prompt
+
+
+def test_negative_control_an_executed_function_gets_no_zero_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    h = _Harness(tmp_path, monkeypatch, src_name="lib.rs", replies=[EXACT, EXACT], target=0.0, specs=())
+    hist = Task0cFileHistory()
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_HINT,), hist=hist)
+    # Executed now: not among the next pass's targets.
+    _run(h, _EXTRA, {"src/lib.rs": [48]}, (_ADD,), hist=hist)
+    assert "still has 0 executions" not in h.prompts[-1]

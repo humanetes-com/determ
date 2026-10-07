@@ -12,6 +12,7 @@ any internal call-sequence — synthesis is black-box usage, not implementation.
 from __future__ import annotations
 
 from pipeline_core.domain.behaviour import MAY_REPRESENTATION_NOTE
+from pipeline_core.domain.reach_probe import ReachTarget, side_hint
 from pipeline_core.prompts.sections import tag_block
 
 
@@ -59,6 +60,62 @@ Rules:
 - <WHEN> must evaluate to a RENDERED VALUE, never to a comparison (`==`, `!=`,
   `<=`, `>=`, `.contains(` are REJECTED). The ONLY booleans allowed are
   type-identity predicates: `x.is::<T>()` or `x.downcast_ref::<T>().is_some()`.
+- <WHEN> is ONE expression: never a statement, never a block, never a
+  `println!`, never an `assert`. <GIVEN> may not print and may not assert.
+- `{module_name}`'s public items are ALREADY imported (`use {module_name}::*;`
+  sits above the `fn main()` your <GIVEN> goes into). Any OTHER import goes at
+  the top of <GIVEN> as a normal `use` line.
+- You do NOT know the value. Never write it down; the harness prints it.
+"""
+
+
+def reach_name(i: int) -> str:
+    """The block name the reach ask gives its `i`-th line (1-based)."""
+    return f"reach_{i}"
+
+
+def build_reach_prompt(module_name: str, cfg_cluster: str, targets: tuple[ReachTarget, ...],
+                       public_surface: str, example_usages: str) -> str:
+    """The reach ask (`domain/reach_probe.py`): per line, the public call the
+    crate's MIR routes to a function no example enters, and how to render the
+    value it hands back. Only public items are named. Same output form as the
+    other asks, so the same parser and the same capture take the reply."""
+    lines = "".join(
+        f"- `{reach_name(i)}`: build the value with {t.route.public}{side_hint(t.route)}; "
+        f"then {t.action} (OBSERVE `{t.observe}`)\n"
+        for i, t in enumerate(targets, 1))
+    surface_block = tag_block("PUBLIC_API_SURFACE", public_surface)
+    examples_block = tag_block(
+        "EXAMPLE_USAGES", example_usages,
+        prefix="How this crate's public API is CALLED. Take the calls, never the "
+               "shape: these are the crate's own tests, so they assert — your "
+               "<GIVEN> and <WHEN> must not.\n```rust\n",
+        suffix="\n```")
+    return f"""Specify this crate's observable behaviour through its PUBLIC API.
+
+Crate: {module_name} | Cluster: {cfg_cluster}
+Goal: write ONE behaviour per line below, named exactly as the line says.
+<GIVEN> builds the value with the public call the line names (choose its inputs
+freely) and takes it out of the result as the line says. <WHEN> is that value,
+or the call the line asks for on it, as ONE expression. <OBSERVE> is the one
+the line gives.
+{lines}
+{surface_block}{examples_block}
+Output one block per line, EXACTLY this form and nothing else:
+
+  <BEHAVIOUR name="reach_1">
+  <GIVEN>
+  // zero or more Rust statements building the value; no printing, no asserting
+  </GIVEN>
+  <WHEN>a SINGLE Rust expression</WHEN>
+  <OBSERVE>display|debug|alt_debug</OBSERVE>
+  </BEHAVIOUR>
+
+Rules:
+- PUBLIC API ONLY. You have no access to the crate's internals — treat it as a
+  black box. Never guess or transcribe how a function is implemented internally.
+- <WHEN> must evaluate to a RENDERED VALUE, never to a comparison (`==`, `!=`,
+  `<=`, `>=`, `.contains(` are REJECTED).
 - <WHEN> is ONE expression: never a statement, never a block, never a
   `println!`, never an `assert`. <GIVEN> may not print and may not assert.
 - `{module_name}`'s public items are ALREADY imported (`use {module_name}::*;`

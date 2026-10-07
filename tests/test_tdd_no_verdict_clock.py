@@ -229,8 +229,11 @@ def test_the_clock_and_the_guard_share_one_stop_site(
     from pipeline_core.domain.best_tree_mark import BestTreeMark
     events: list[tuple[str, dict]] = []
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
+    # A layout the live tree is not: the entry restore declines it, and the
+    # restore read here is the one before the stop.
     _better = BestTreeMark(pass_count=95, iteration=1,
-                           tree_sha="a" * 16, oracle_size=101)
+                           tree_sha="a" * 16, oracle_size=101,
+                           layout_sha="f" * 16)
 
     seq = iter([_sweep(79, 22)])
     last = [_sweep(79, 22)]

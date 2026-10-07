@@ -31,6 +31,12 @@ reason (and, for a hold, the runs it waited on). On that:
 - ``nothing_opened`` — candidates exist that aim at something and none opened.
 - ``deferred_share`` / ``over_budget`` — a deferred run carries a positive
   share, or the opened shares exceed the budget.
+- ``owner_unrouted`` — a measured coverage owner the driver admitted (or
+  aimed at a newly admitted test) and dispatched is a target of NO candidate
+  run, opened or deferred. Run `486447-5207101c` (2026-10-07, fill 6):
+  `src/ensure.rs::render` was admitted for six failing `ensure!` tests and
+  every slice carrying it was hollow or parked, so nothing wrote it and no
+  deferral said why.
 
 These name no test, unit, trait or crate: the inputs are the schedule's own
 decisions, the hollow stubs and the blamed locators. The same checker runs in
@@ -59,6 +65,7 @@ __all__ = [
     "decided_from_event",
     "decided_from_schedule",
     "hollow_stubs_from_event",
+    "measured_owners_from_event",
     "violations",
 ]
 
@@ -88,7 +95,9 @@ class ScheduleViolation:
 def violations(decided: Sequence[Decided], *,
                hollow_stubs: Collection[FnLocator] | None,
                crash_blamed: Collection[FnLocator] = (),
-               budget_minutes: float = 0.0) -> tuple[ScheduleViolation, ...]:
+               budget_minutes: float = 0.0,
+               measured_owners: Collection[FnLocator] = (),
+               ) -> tuple[ScheduleViolation, ...]:
     """Every invariant the decision set breaks. ``hollow_stubs`` None means
     the caller does not know which stubs hold hollow tests (a recorded event
     that predates `inputs`); the blocker check then reads blamed locators
@@ -125,6 +134,13 @@ def violations(decided: Sequence[Decided], *,
             "writers were deferred: "
             + ", ".join(f"{d.label} ({d.reason or 'deferred'})"
                         for d in writers)))
+
+    for o in sorted(frozenset(measured_owners) - candidates_write,
+                    key=lambda u: (u.file, u.fn_name)):
+        out.append(ScheduleViolation(
+            "owner_unrouted",
+            f"{o.file}::{o.fn_name} is a measured coverage owner still on "
+            "the frontier, and no candidate run writes it"))
 
     if not opened and any(d.reason != "nothing_aimed" for d in deferred):
         out.append(ScheduleViolation(
@@ -201,6 +217,15 @@ def hollow_stubs_from_event(data: Mapping[str, Any]
     for locs in dict(inputs.get("hollow") or {}).values():
         stubs.update(_loc(x) for x in locs or ())
     return frozenset(stubs)
+
+
+def measured_owners_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
+    """The admitted measured owners a recorded event carries (empty for an
+    event that predates the field)."""
+    inputs = data.get("inputs")
+    if not isinstance(inputs, Mapping):
+        return frozenset()
+    return frozenset(_loc(x) for x in inputs.get("measured_owners") or ())
 
 
 def blamed_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:

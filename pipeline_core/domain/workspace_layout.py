@@ -90,7 +90,13 @@ PROJECT_INPUTS_HASH_NAME = "project_profile.inputs_hash"
 
 # Discovery pass output: import paths, type construction patterns, feature flags (BL-001).
 COVERAGE_STRATEGY_NAME = "coverage_strategy.md"
+# The computed part's hash (`domain.strategy_render.computed_hash`): a differing
+# hash re-renders that part on every load, a matching one leaves the file alone.
 COVERAGE_STRATEGY_HASH_NAME = "coverage_strategy.inputs_hash"
+# Per cluster world: the public routes and unnameable types read from rustc's
+# MIR and public index of the ORIGINAL crate (`domain.fn_routes`), taken while
+# the tree is still original and read by t0b's strategy file and t0d's probes.
+CONSTRUCTION_FACTS_NAME = "construction_facts.json"
 
 # Persistent chunk cache (task1 chunked synthesis); only wiped on explicit --clean.
 CHUNK_CACHE_DIR = ".chunk_cache"

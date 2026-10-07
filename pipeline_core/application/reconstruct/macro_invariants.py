@@ -60,6 +60,30 @@ def enumerate_macro_variants(src_dir: Path) -> list[tuple[str, str, str, str]]:
     return variants
 
 
+def defined_macro_names(src_dir: Path) -> frozenset[str]:
+    """Every `macro_rules!` name defined under `src_dir`."""
+    return frozenset(name for name, _cfg, _body, _src
+                     in enumerate_macro_variants(src_dir))
+
+
+def exported_macro_names(src_dir: Path) -> frozenset[str]:
+    """Names of the `macro_rules!` items carrying `#[macro_export]` — the only
+    ones a path can name (`crate::NAME!`, `$crate::NAME!`). Every other
+    `macro_rules!` lives in textual scope and is invoked by its bare name."""
+    out: set[str] = set()
+    for p in sorted(src_dir.rglob("*.rs")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        mask = code_mask(text)
+        for md in macro_definitions(text):
+            _head, attrs = outer_attributes_before(text, mask, md.decl_start)
+            if any("macro_export" in a for a in attrs):
+                out.add(md.name)
+    return frozenset(out)
+
+
 def compute_cluster_macro_invariants(src_dir: Path, cluster: BuildCluster | None) -> str:
     """For macros defined multiple times under different `#[cfg(...)]`,
     select the variant active under `cluster`'s cfg-set and render a
@@ -88,6 +112,7 @@ def compute_cluster_macro_invariants(src_dir: Path, cluster: BuildCluster | None
     # here. With the defaults carried it renders the std arm —
     # `Some(std::backtrace::Backtrace::capture())`.
     cfg_set = _cfg.cluster_cfg_set(cluster)
+    exported = exported_macro_names(src_dir)
     lines: list[str] = []
     for name in sorted(by_name):
         vs = by_name[name]
@@ -126,7 +151,14 @@ def compute_cluster_macro_invariants(src_dir: Path, cluster: BuildCluster | None
         if len(compact) > 240:
             compact = compact[:237] + "..."
         cfg_note = f" [cfg={cfg}]" if cfg else " [always]"
-        lines.append(f"{name}!(...){cfg_note} → {compact}")
+        # How the macro is named at a call. A `macro_rules!` without
+        # `#[macro_export]` has no path: run `486447-5207101c` (2026-10-07)
+        # saw this line, wrote `crate::backtrace::backtrace_if_absent!` and
+        # then `crate::backtrace_if_absent!`, failed E0433 twice, and its
+        # retrospective concluded the macro "does not exist".
+        call = (f"call as `crate::{name}!(...)`" if name in exported
+                else f"call as `{name}!(...)` — not exported, no path names it")
+        lines.append(f"{name}!(...){cfg_note} ({call}) → {compact}")
     if not lines:
         return ""
     header = (

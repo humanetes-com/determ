@@ -27,6 +27,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cfg_worlds import world_mark, worlds_of
 from pipeline_core.domain.cluster_membership_report import ClusterMembershipReport
+from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.dispatch import impl_route_covers
 from pipeline_core.domain.models import (
     FieldRecord,
@@ -332,6 +333,7 @@ def collect_impl_refill_targets(
     *,
     max_stubs: int = 12,
     crash_blamed: frozenset[FnLocator] | None = None,
+    crash_sites: CrashSites | None = None,
     file_primary: bool = False,
 ) -> list[ImplBlock]:
     """Block-level analog of
@@ -359,11 +361,14 @@ def collect_impl_refill_targets(
     never sees the conversion. Live: run ``1869206-7fd52754``, blamed
     ``into_boxed_dyn_error``, write list was ``object_boxed`` /
     ``object_drop`` / … graded REWRITE WITH THE PRODUCER. A locator in
-    ``crash_blamed`` is a refill even when no test convicts it.
+    ``crash_blamed`` is a refill even when no test convicts it — in the
+    container a culprit frame resolved to (``crash_sites``), so a blame on
+    one `fmt` does not admit its homonym in another impl.
     """
     if not (tdd_frontier_keys and tdd_frontier_tests):
         return blocks
     crashed = crash_blamed or frozenset()
+    at_site = crash_sites or CrashSites()
     homs = homonym_containers(blocks)
     out: list[ImplBlock] = []
     for b in blocks:
@@ -373,7 +378,9 @@ def collect_impl_refill_targets(
             if (loc := FnLocator(b.file, m.fn_name)) in tdd_frontier_keys
             and loc not in stub_keys
             and refill_admission(tdd_frontier_tests.tests_for(loc),
-                                 crash_blamed=loc in crashed) is not None
+                                 crash_blamed=at_site.blames(
+                                     crashed, b.file, m.fn_name, b.container))
+            is not None
         )
         probe = dataclasses.replace(b, refill_members=dispatched)
         covers = impl_route_covers(probe, max_stubs=max_stubs)
@@ -386,7 +393,8 @@ def collect_impl_refill_targets(
                     convicting_tests_for_member(
                         tdd_frontier_tests, b.file, m.fn_name, b.container,
                         homs.get((b.file, m.fn_name), (b.container,))),
-                    crash_blamed=FnLocator(b.file, m.fn_name) in crashed)
+                    crash_blamed=at_site.blames(
+                        crashed, b.file, m.fn_name, b.container))
                 is not None
             )
         out.append(dataclasses.replace(b, refill_members=refill) if refill else b)

@@ -30,7 +30,7 @@ re-admission, no per-test logging. Those belong to the fire alone.
 """
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -138,6 +138,7 @@ def escalation_fire_due(
     prev: frozenset[FnLocator] | None,
     served_at: Mapping[FnLocator, int],
     since: int,
+    unexecuted: Collection[FnLocator] = (),
 ) -> FireDecision:
     """The fire rule, with the premise it always had made explicit.
 
@@ -161,20 +162,56 @@ def escalation_fire_due(
     old rule; a persisted futility seed (the floor's `futile_units`, resumed
     across a code move) counts as served at 0, since that evidence IS the
     record of service — the resumed process still escalates at its first
-    sweep."""
+    sweep.
+
+    ``unexecuted`` is the units the last measured sweep proved no failing
+    test executes (`coverage_slice.red_dead_units`, positive evidence
+    only). Such a unit is never dispatched — it ranks last — and no rewrite
+    of it can move the test, so waiting for its service is waiting for
+    nothing. Run `486447-5207101c` (2026-10-07): ten `ensure!` tests were
+    held at `NOT escalating — … never dispatched: src/lib.rs::Ok` (an
+    identifier-scan attribution the coverage reading contradicts) on the
+    sweep whose service order classed `Ok` red-dead."""
     if prev is None or prev != units:
         return FireDecision(due=False, unserved=())
+    skip = frozenset(unexecuted)
     unserved = tuple(sorted(
-        (u for u in units if served_at.get(u, -1) < since),
+        (u for u in units if u not in skip and served_at.get(u, -1) < since),
         key=lambda u: (u.file, u.fn_name)))
     return FireDecision(due=not unserved, unserved=unserved)
+
+
+def red_dead_after_sweep(
+    previous: frozenset[FnLocator],
+    measured: frozenset[FnLocator] | None,
+) -> frozenset[FnLocator]:
+    """The red-dead set the next fire reads (`escalation_fire_due`'s
+    ``unexecuted``): this sweep's when it measured coverage, else the last
+    measured one. A sweep with no coverage reading is not evidence that a
+    unit became executed; replacing the set with empty there re-armed the
+    hold on `src/lib.rs::Ok` the sweep after. ``measured`` None is the
+    miss."""
+    return previous if measured is None else measured
+
+
+def measured_owners_on_frontier(
+    admitted: Collection[FnLocator], ordered: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """The measured coverage owners the schedule's `owner_unrouted` check
+    reads: every unit the owner map admitted or attached a test to, on this
+    sweep or an earlier one, that is still in `ordered` after the standing-
+    flat exclusion and the crash scope. This sweep's new admits alone hid
+    an owner admitted the sweep before (`render`, run `486447-5207101c`);
+    the dispatch batch alone hid one past the cap. A unit those exclusions
+    removed has left `ordered` and is not checked."""
+    have = frozenset(admitted)
+    return frozenset(k for k in ordered if k in have)
 
 
 def withholding_paired_tests(
     paired: Collection[str],
     *,
-    unpaid_buys: Mapping[str, int],
-    unopened_fills: Mapping[str, int] | None = None,
+    unpaid_fills: Mapping[str, int],
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
 ) -> frozenset[str]:
     """Of the leftovers a hop pair covers, the ones that still withhold
@@ -192,28 +229,26 @@ def withholding_paired_tests(
     files and the whole route mix returning wrong bodies.
 
     So the withholding is earned, not free, and it is earned by the same
-    evidence and the same bound the schedule already uses to lapse a
-    route's exemptions (`DEFAULT_UNPAID_GRACE`, `unpaid_pair_buys`): while
-    the pair has fewer than `unpaid_grace` graded buys that returned
-    nothing under this oracle it is still the paying fill and the coverage
-    spine is the spend that cannot pay — the ordering defect that earned
-    this clause (run `675471-0f3105f2`, 2026-09-10: 26 coverage locators
-    admitted and their never-served per-fn opened before the pair). Past
-    that bound the premise is refuted by the pair's own record and the
-    leftover admits its measured owners. On the live stable ledger the
-    three leftovers stood at 68 unpaid pair buys against a grace of 3.
+    bound the schedule already uses to lapse a route's exemptions
+    (`DEFAULT_UNPAID_GRACE`): while the pair has been the test's candidate
+    for fewer than `unpaid_grace` fills without paying it, under this
+    oracle, it is still the paying fill and the coverage spine is the
+    spend that cannot pay — the ordering defect that earned this clause
+    (run `675471-0f3105f2`, 2026-09-10: 26 coverage locators admitted and
+    their never-served per-fn opened before the pair). Past that bound the
+    premise is refuted by the pair's own record and the leftover admits
+    its measured owners, and it stays lapsed until a pair row pays THAT
+    test.
 
-    A test with no recorded count reads as 0 — a pair nobody has a row for
-    has not been bought, so it keeps the withholding. `unpaid_grace <= 0`
-    disables the lapse and restores the unconditional withholding.
-
-    A pair that does not OPEN earns nothing either: ``unopened_fills`` is
-    how many fills in a row had the pair as a candidate for the test and
-    opened it in none (`fill_schedule.unopened_pair_fills`). A graded buy
-    is the only thing the unpaid clock counts, so without this bound a
-    pair the schedule keeps deferring withholds for ever — run
-    `3127-6763a5c6` (2026-09-18) withheld 117 leftovers at `pair unpaid
-    0/3` across five fills that opened no pair. The same grace bounds it.
+    ``unpaid_fills`` is :func:`fill_schedule.unpaid_pair_fills`: one clock
+    over every fill the pair was the test's candidate, opened or deferred.
+    Two clocks compared with the grace apart (graded buys; fills with no
+    open) re-armed the withholding whenever the pair OPENED before the
+    buys reached the bound — run `486447-5207101c` withheld `test_if` again
+    at fill 6 after lapsing at fills 4 and 5. A test with no recorded
+    count reads as 0 — a pair nobody has a row for has not been a
+    candidate, so it keeps the withholding. `unpaid_grace <= 0` disables
+    the lapse and restores the unconditional withholding.
 
     This does not touch the ORDERING the 675471 complaint was really
     about: `run_blocks` still waits every non-pair run that shares the
@@ -222,11 +257,8 @@ def withholding_paired_tests(
     """
     if unpaid_grace <= 0:
         return frozenset(paired)
-    unopened = unopened_fills or {}
     return frozenset(
-        t for t in paired
-        if int(unpaid_buys.get(t, 0)) < unpaid_grace
-        and int(unopened.get(t, 0)) < unpaid_grace)
+        t for t in paired if int(unpaid_fills.get(t, 0)) < unpaid_grace)
 
 
 def attributed_cohorts(
@@ -303,13 +335,74 @@ def escalate_to_measured_owners(
     skip is a permanent lock, since nothing a fill does makes a leftover
     stop having a pair. Empty (the default) preserves every existing fire.
     """
+    already = frozenset(already_owned)
+    out: dict[FnLocator, set[str]] = {}
+    for tname, loc in _admissible_owners(
+            owners=owners, units_by_test=units_by_test, graded=graded,
+            unable=unable, permanently_exhausted=permanently_exhausted,
+            served=served, paired_tests=paired_tests):
+        if loc not in already:
+            out.setdefault(loc, set()).add(tname)
+    return out
+
+
+def attach_to_eligible_owners(
+    *,
+    owners: Mapping[str, Collection[FnLocator]],
+    units_by_test: Mapping[str, Collection[FnLocator]],
+    eligible: Mapping[FnLocator, Collection[str]],
+    graded: Collection[FnLocator],
+    unable: Collection[FnLocator],
+    permanently_exhausted: Collection[FnLocator] = (),
+    served: Collection[FnLocator] = (),
+    paired_tests: Collection[str] = (),
+) -> dict[FnLocator, set[str]]:
+    """The measured owners already on the frontier that a test the
+    admission would admit them for is not yet aimed by.
+
+    :func:`escalate_to_measured_owners` skips an owner that is already
+    eligible — it is not a new unit — and that skip also dropped the TEST:
+    the owner stayed aimed at the tests it was admitted for first, and a
+    test whose withholding lapsed later was put on no run that writes the
+    body its own coverage names. Run `486447-5207101c` (2026-10-07):
+    `src/ensure.rs::render` was admitted at iter 6 for six `ensure!` tests;
+    ten more lapsed their pair withholding at iter 7, every one executes
+    `render`, and the fill-7 file run on `render` aimed at the first five
+    only (`test_if` among the missing).
+
+    Same per-test gate as the admission, so the two cannot disagree about
+    which tests are measured-owner tests; the answer is only the tests an
+    eligible owner does not already carry.
+    """
+    out: dict[FnLocator, set[str]] = {}
+    for tname, loc in _admissible_owners(
+            owners=owners, units_by_test=units_by_test, graded=graded,
+            unable=unable, permanently_exhausted=permanently_exhausted,
+            served=served, paired_tests=paired_tests):
+        if loc in eligible and tname not in eligible[loc]:
+            out.setdefault(loc, set()).add(tname)
+    return out
+
+
+def _admissible_owners(
+    *,
+    owners: Mapping[str, Collection[FnLocator]],
+    units_by_test: Mapping[str, Collection[FnLocator]],
+    graded: Collection[FnLocator],
+    unable: Collection[FnLocator],
+    permanently_exhausted: Collection[FnLocator],
+    served: Collection[FnLocator],
+    paired_tests: Collection[str],
+) -> list[tuple[str, FnLocator]]:
+    """(test, owner) pairs past the measured-owner gate: the test is not
+    withheld by a pair, its attributed cohort is served or unable to pay,
+    and the owner is neither unable, exhausted nor graded flat."""
     served_keys = frozenset(served)
     unable_set = frozenset(unable)
-    already = frozenset(already_owned)
     exhausted = frozenset(permanently_exhausted)
     graded_set = frozenset(graded)
     paired = frozenset(paired_tests)
-    out: dict[FnLocator, set[str]] = {}
+    out: list[tuple[str, FnLocator]] = []
     for tname, owner_set in owners.items():
         if tname in paired:
             continue
@@ -321,8 +414,7 @@ def escalate_to_measured_owners(
         if not cohort <= done:
             continue
         for loc in owner_set:
-            if (loc in unable_set or loc in already or loc in exhausted
-                    or loc in graded_set):
+            if loc in unable_set or loc in exhausted or loc in graded_set:
                 continue
-            out.setdefault(loc, set()).add(tname)
+            out.append((tname, loc))
     return out

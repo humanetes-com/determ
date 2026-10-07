@@ -25,6 +25,7 @@ from pipeline_core.domain.generation import (
 from pipeline_core.domain.workspace_layout import (
     CHUNK_CACHE_DIR,
     CLUSTER_AUGMENTED_DIR,
+    CONSTRUCTION_FACTS_NAME,
     COVERAGE_SCRATCH_DIR,
     COVERAGE_STRATEGY_HASH_NAME,
     COVERAGE_STRATEGY_NAME,
@@ -59,9 +60,10 @@ def clean_state(
     hash_path          = project_dir / PROJECT_INPUTS_HASH_NAME
     strategy_path      = project_dir / COVERAGE_STRATEGY_NAME
     strategy_hash_path = project_dir / COVERAGE_STRATEGY_HASH_NAME
+    facts_path         = project_dir / CONSTRUCTION_FACTS_NAME
     state_p            = state_path(project_dir)
     for p in [functional_req_path, genesis_path, profile_path, context_path, hash_path,
-              strategy_path, strategy_hash_path, state_p]:
+              strategy_path, strategy_hash_path, facts_path, state_p]:
         if p.exists():
             p.unlink()
             _log.log(f"  Deleted {p.name}")

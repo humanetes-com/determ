@@ -37,8 +37,10 @@ that says what to do, so it is reconstructible from the kind alone.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from enum import Enum
+
+from pipeline_core.domain.compiler_help import CompilerFix, CompilerHelp, compiler_fixes
 
 # The distinctive phrase each rendered head carries. The renderer builds
 # its heads from these, and `kind_from_text` recognises them, so a wording
@@ -186,10 +188,73 @@ def last_error_prefix(last_error: str,
             "Your previous attempt compiled and ran; the tests below still "
             "fail — change its behavior, do not resubmit the same body:\n"
         )
+    helped = compiler_fixes(last_error)
+    if helped.covers_every_error:
+        return _compiler_fix_lead(helped)
+    if helped.fixes:
+        return _per_error_lead(helped)
     return (
         "Your previous attempt at this block produced these errors — "
         "the bodies below must resolve them; do not resubmit the "
         "same approach:\n"
+    )
+
+
+def _fix_choices(fixes: Sequence[CompilerFix]) -> str:
+    """Every alternative rustc listed, per fix: which one the crate can use
+    is not established here (a `no_std` crate has no `std::format`), so
+    none is singled out."""
+    parts = []
+    for fix in fixes:
+        alts = " or ".join(f"`{c}`" for c in fix.choices)
+        parts.append(f"{fix.help} — {alts}" if fix.help else alts)
+    return "; ".join(parts)
+
+
+_IMPORT_NOTE = (" A `use` line can open the body itself, or the path can be "
+                "written in full at the call.")
+
+
+def _imports(fixes: Sequence[CompilerFix]) -> bool:
+    return any(c.startswith("use ") for f in fixes for c in f.choices)
+
+
+def _compiler_fix_lead(helped: CompilerHelp) -> str:
+    """The lead-in when every error came with a fix the compiler offered:
+    the approach stands and the fix is the change."""
+    return (
+        "Your previous attempt failed to compile only on what the "
+        "compiler's `help:` below names. Keep that body and apply the fix "
+        "it suggests: " + _fix_choices(helped.fixes) + "."
+        + (_IMPORT_NOTE if _imports(helped.fixes) else "")
+        + "\n"
+    )
+
+
+def _per_error_lead(helped: CompilerHelp) -> str:
+    """The lead-in when some errors came with a code-bearing `help:` and
+    some did not: one sentence per error. An error the compiler offered a
+    fix for keeps the body for that error and names every choice; an error
+    with none keeps the sentence a diagnostic with no help gets. One vague
+    sentence for both told the model neither that the body stands nor which
+    fix to apply."""
+    sentences = []
+    for err in helped.per_error:
+        where = f" (at {err.at})" if err.at else ""
+        if err.fixes:
+            sentences.append(
+                f"For \"{err.head}\"{where}: keep that body for this error and "
+                "apply the fix the compiler's `help:` suggests: "
+                + _fix_choices(err.fixes) + ".")
+        else:
+            sentences.append(
+                f"For \"{err.head}\"{where}: the body below must resolve it; "
+                "do not resubmit the same approach for this error.")
+    return (
+        "Your previous attempt at this block produced these errors. "
+        + " ".join(sentences)
+        + (_IMPORT_NOTE if _imports(helped.fixes) else "")
+        + "\n"
     )
 
 

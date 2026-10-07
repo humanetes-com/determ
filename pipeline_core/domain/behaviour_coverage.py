@@ -31,7 +31,9 @@ from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.behaviour import BehaviourSpec
+from pipeline_core.domain.fn_execution import site_label
 
 SRC_PREFIX = "src/"
 
@@ -77,22 +79,21 @@ def _line_byte_starts(text: str) -> list[int]:
     return starts
 
 
-def units_for_hit_lines(
+def _records_hit(
     hits: Mapping[str, Sequence[int]],
     texts: Mapping[str, str],
     fn_records: Iterable[Mapping[str, Any]],
-) -> frozenset[str]:
-    """`{"src/x.rs::fn_name", …}` for every fn whose body span overlaps a hit
-    line. `hits`/`texts` are keyed by the crate-root file path; records are
-    normalised to that shape first. A file with hits but no text or no
-    records contributes nothing (never a guess)."""
+) -> list[dict[str, Any]]:
+    """The (crate-root normalised) records whose body span overlaps a hit
+    line, each once, the first span a line falls in winning."""
     recs = normalize_record_files(fn_records)
     by_file: dict[str, list[dict[str, Any]]] = {}
     for r in recs:
         if r.get("is_test"):
             continue
         by_file.setdefault(str(r.get("file", "")), []).append(r)
-    out: set[str] = set()
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
     for rel, lines in hits.items():
         file_recs = by_file.get(rel)
         text = texts.get(rel)
@@ -102,7 +103,7 @@ def units_for_hit_lines(
         n_lines = len(starts) - 1
         # (start_line, end_line) per record, 1-based inclusive: the lines whose
         # byte span overlaps [sig_byte_start, body_byte_end).
-        spans: list[tuple[int, int, str]] = []
+        spans: list[tuple[int, int, dict[str, Any]]] = []
         for r in file_recs:
             s = int(r.get("sig_byte_start", 0))
             e = int(r.get("body_byte_end", 0))
@@ -110,13 +111,39 @@ def units_for_hit_lines(
                 continue
             first = bisect_right(starts, s)          # line containing byte s
             last = bisect_right(starts, e - 1)       # line containing byte e-1
-            spans.append((max(1, first), min(n_lines, last), str(r.get("fn_name", ""))))
+            spans.append((max(1, first), min(n_lines, last), r))
         for ln in lines:
-            for first, last, name in spans:
+            for first, last, r in spans:
                 if first <= ln <= last:
-                    out.add(f"{rel}::{name}")
+                    if id(r) not in seen:
+                        seen.add(id(r))
+                        out.append(r)
                     break
-    return frozenset(out)
+    return out
+
+
+def units_for_hit_lines(
+    hits: Mapping[str, Sequence[int]],
+    texts: Mapping[str, str],
+    fn_records: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """`{"src/x.rs::fn_name", …}` for every fn whose body span overlaps a hit
+    line. `hits`/`texts` are keyed by the crate-root file path; records are
+    normalised to that shape first. A file with hits but no text or no
+    records contributes nothing (never a guess)."""
+    return frozenset(f"{r.get('file', '')}::{r.get('fn_name', '')}"
+                     for r in _records_hit(hits, texts, fn_records))
+
+
+def sites_for_hit_lines(
+    hits: Mapping[str, Sequence[int]],
+    texts: Mapping[str, str],
+    fn_records: Iterable[Mapping[str, Any]],
+) -> frozenset[str]:
+    """The same hits as site labels (`src/x.rs::fmt [impl Debug for X]`): a
+    `fmt` entered in a file names WHICH `fmt`, which `units_for_hit_lines`
+    cannot."""
+    return frozenset(site_label(record_site(r)) for r in _records_hit(hits, texts, fn_records))
 
 
 # --- which specs the exercise writer can run, and how ---------------------

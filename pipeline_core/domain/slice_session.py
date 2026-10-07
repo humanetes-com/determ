@@ -523,6 +523,25 @@ def slice_plan_gaps(
                          condensed=n_condensed)
 
 
+def executing_tests(
+    executed: Mapping[str, Collection[FnSite]], unit: FnSite,
+) -> frozenset[str]:
+    """The tests whose executed slice holds `unit`: the session's attribution
+    of a test to one body. Files compare in `norm_src_rel` form; a member
+    recorded with no container (a locator-only slice member) holds every
+    container of that name, and a `unit` with none matches any."""
+    file = norm_src_rel(unit.file)
+    out: set[str] = set()
+    for test, units in executed.items():
+        for u in units:
+            if (u.fn_name == unit.fn_name and norm_src_rel(u.file) == file
+                    and (not u.container or not unit.container
+                         or u.container == unit.container)):
+                out.add(test)
+                break
+    return frozenset(out)
+
+
 def locator_only_expansions(
     slices: Mapping[str, Collection[FnSite]],
     tree_sites: Iterable[FnSite],

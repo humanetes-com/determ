@@ -198,3 +198,25 @@ def test_the_scheduler_writes_what_the_run_opened() -> None:
                               opened=frozenset({a, b}))).opened == (
         ("src/e.rs", "a"), ("src/e.rs", "b"))
     assert row(None).opened is None
+
+
+def test_a_filtered_unit_names_the_predicate_that_dropped_it() -> None:
+    """Run `486447-5207101c` iter 6: the per-fn run held the three `Buf`
+    stubs and its claim gate refused them (`premise`), and the exit said only
+    the run's label. With the row's `filtered` the exit says why. Control: a
+    row that recorded no reason keeps naming the run."""
+    from pipeline_core.domain.fill_schedule import RouteKind, RouteLedgerRow, RunOutcome
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.unit_exit import ExitKind, unit_exits
+
+    u = FnLocator("src/ensure.rs", "new")
+    row = RouteLedgerRow(
+        kind=RouteKind.PER_FN, label="per-fn 6 stub(s)", targets=(("src/ensure.rs", "new"),),
+        bodies_sha="x", oracle_fp="o", outcome=RunOutcome.CASHED, opened=(),
+        filtered=(("src/ensure.rs", "new", "premise"),))
+    got = unit_exits([u], attempted=(), landed=(), rows=[row])[u]
+    assert got.kind is ExitKind.FILTERED and got.detail == "per-fn 6 stub(s): premise"
+    bare = RouteLedgerRow.from_dict({**row.to_dict(), "filtered": []})
+    assert bare is not None
+    assert unit_exits([u], attempted=(), landed=(), rows=[bare])[u].detail == "per-fn 6 stub(s)"
+    assert RouteLedgerRow.from_dict(row.to_dict()) == row

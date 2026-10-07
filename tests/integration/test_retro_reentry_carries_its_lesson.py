@@ -55,8 +55,13 @@ fn test_reading() {
     assert_eq!(Meter(3).reading(), 3);
 }
 """
-# Never compiles, the same diagnostic every attempt: `u8 + &str`.
+# Never compiles: `u8 + &str`.
 _BODY = 'self.0 + "one"'
+# Never compiles either, on a different error set (`E0599`). Alternating the
+# two keeps each attempt's error set different from the one before, so the
+# loop stops on a stalled floor; the same body every attempt stops it on a
+# repeated error set, which ends the unit for the fill.
+_OTHER = "self.0.no_such_method()"
 _LESSON = "Add an integer to the field; a string literal is not a number here."
 
 
@@ -98,7 +103,8 @@ def _workspace(tmp_path: Path) -> Path:
     return project
 
 
-def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
+def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch,
+              bodies: tuple[str, ...] = (_BODY, _OTHER), max_stalls: int = 2,
               ) -> tuple[_Tel, list[str], int]:
     import pipeline
     from pipeline_core.application.reconstruct.context import PerFnPassCtx
@@ -132,7 +138,10 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
 
     def ask_turns(messages: list[dict[str, Any]], **_k: Any) -> str:
         prompts.append(str(messages[-1]["content"]))
-        return f"<BODY>\n{_BODY}\n</BODY>"
+        body = bodies[min(len(prompts), len(bodies)) - 1]
+        if len(prompts) > len(bodies):
+            body = bodies[(len(prompts) - 1) % len(bodies)]
+        return f"<BODY>\n{body}\n</BODY>"
 
     def open_conversation(label: str, *, route: str = "per-fn",
                           sources: object = None,
@@ -153,7 +162,7 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
         retros=_Delegate(roles.retros, diagnose=diagnose,
                          extract_self_note=lambda *a, **k: None),
         tests=roles.tests, stall=roles.stall,
-        caps=FillCaps(per_fn_fix_hard_cap=6, per_fn_fix_max_stalls=2,
+        caps=FillCaps(per_fn_fix_hard_cap=6, per_fn_fix_max_stalls=max_stalls,
                       fix_err_cap=4000))
     unit = FnLocator("src/lib.rs", "reading")
     ctx = PerFnPassCtx(
@@ -213,3 +222,45 @@ def test_negative_control_without_the_loop_premise_the_round_does_not_re_enter(
     assert "phase_c.fn.retro_retry_withheld" in tel.events
     assert not any(_LESSON in p for p in prompts)
     assert diagnoses == 1
+
+
+def test_a_repeated_error_set_ends_the_unit_for_the_fill(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run `486447-5207101c`: `construct` stopped on the
+    same `E0433` twice, the retrospective was asked, and the same fill
+    still kept a body the sweep classed `wrong`. The same error set on two
+    attempts is the unit's outcome for the fill: the retrospective is
+    stored, the loop is not re-entered, and the pre-fill body stays."""
+    project = _workspace(tmp_path)
+    tel, prompts, diagnoses = _run_unit(project, monkeypatch, bodies=(_BODY,))
+    assert any("same error set after attempt 2" in m for m in tel.logs), (
+        "\n".join(tel.logs))
+    assert diagnoses == 1 and _stored(project)
+    assert "phase_c.fn.retro_retry" not in tel.events
+    assert len(prompts) == 2
+    lib = project / ".skeleton-filled" / _CLUSTER / "src" / "lib.rs"
+    assert lib.read_text() == _LIB
+
+
+def test_a_repeated_error_set_after_a_compiling_attempt_salvages_nothing(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The salvage half of the rule: attempt 1 compiles and fails its test,
+    attempts 2 and 3 repeat one error set. Before, the exit salvaged the
+    compiling `4` (a body the sweep then grades `wrong`); now the pre-fill
+    body stays. Control: the same sequence stopped on a stalled floor (no
+    repeated set) still salvages the compiling body."""
+    project = _workspace(tmp_path)
+    lib = project / ".skeleton-filled" / _CLUSTER / "src" / "lib.rs"
+    tel, _prompts, _d = _run_unit(project, monkeypatch,
+                                  bodies=("4", _BODY, _BODY), max_stalls=3)
+    assert any("same error set after attempt 3" in m for m in tel.logs), (
+        "\n".join(tel.logs))
+    assert lib.read_text() == _LIB
+
+    control = _workspace(tmp_path / "control")
+    lib_c = control / ".skeleton-filled" / _CLUSTER / "src" / "lib.rs"
+    tel_c, _p, _d = _run_unit(control, monkeypatch,
+                              bodies=("4", _BODY, _OTHER), max_stalls=2)
+    assert not any("same error set" in m for m in tel_c.logs)
+    assert "KEPT" in "\n".join(tel_c.logs) and "4" in lib_c.read_text(), (
+        "\n".join(tel_c.logs))

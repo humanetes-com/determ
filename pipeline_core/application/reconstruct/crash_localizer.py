@@ -37,6 +37,7 @@ from pipeline_core.domain.crash_site import (
     enclosing_fn_window,
     first_test_file_after_destructor,
     first_test_file_on_access,
+    origin_or_allocation,
     parse_asan_reports,
     relativize_frame_files,
     site_from_frames,
@@ -132,6 +133,18 @@ def _site_for_report(
     access = relativize_frame_files(report.access, str(workspace_root))
     origin = relativize_frame_files(report.origin, str(workspace_root))
     label = report.label
+    origin, _from_alloc = origin_or_allocation(
+        origin, relativize_frame_files(list(report.alloc), str(workspace_root)),
+        is_oracle_path)
+    if _from_alloc:
+        deps.log("  [phase-c/crash-localizer] "
+                 f"{report.kind} in {label}: the free stack's only workspace "
+                 "frames are the test's own — the origin is read from the "
+                 "allocation stack's crate frames: " + ", ".join(
+                     str(f.get("func") or "?") for f in origin
+                     if str(f.get("file") or "")
+                     and not str(f.get("file") or "").startswith("/")
+                     and not is_oracle_path(str(f.get("file") or "")))[:300])
     source_line, source_loc = _caller_source_line(origin, workspace_root)
     source_window: SourceWindow | None = None
     drv = language_driver()

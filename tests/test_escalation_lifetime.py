@@ -155,3 +155,51 @@ def test_a_non_format_test_is_untouched_by_the_format_gate() -> None:
         format_tests=frozenset({"unrelated"}))
     assert out.sustained == ("t",)
     assert out.dropped == ()
+
+
+def test_a_unit_no_failing_test_executes_does_not_hold_the_fire() -> None:
+    """Run `486447-5207101c` iter 7: `test_if`'s set was unchanged, every unit
+    in it served except `src/lib.rs::Ok`, which the previous sweep proved no
+    failing test executes and which therefore never reaches a batch. The
+    gate fires. Negative control: without the measured set it waits on
+    `Ok` for ever, exactly as the run logged."""
+    from pipeline_core.domain.escalation_lifetime import escalation_fire_due
+    from pipeline_core.domain.models import FnLocator
+
+    ok = FnLocator("src/lib.rs", "Ok")
+    disp = FnLocator("src/error.rs", "fmt")
+    impl = FnLocator("src/fmt.rs", "display")
+    units = frozenset({ok, disp, impl})
+    served = {disp: 5, impl: 6}
+    fired = escalation_fire_due(units, units, served, 4, unexecuted={ok})
+    assert fired.due and fired.unserved == ()
+    held = escalation_fire_due(units, units, served, 4)
+    assert not held.due and held.unserved == (ok,)
+    # A unit that is unserved AND executed still holds it.
+    still = escalation_fire_due(units, units, {disp: 5}, 4, unexecuted={ok})
+    assert not still.due and still.unserved == (impl,)
+
+
+def test_a_coverage_miss_keeps_the_last_measured_red_dead_set() -> None:
+    """The previous sweep classed `Ok` red-dead; this
+    sweep read no coverage. The driver stored this sweep's empty set, and
+    the next fire held again on `src/lib.rs::Ok`. A miss keeps the last
+    measured set; a measurement replaces it, even with empty; the first
+    sweep starts empty."""
+    from pipeline_core.domain.escalation_lifetime import (
+        escalation_fire_due,
+        red_dead_after_sweep,
+    )
+    ok = FnLocator("src/lib.rs", "Ok")
+    units = frozenset({ok, _u("render")})
+    served = {_u("render"): 2}
+    carried = red_dead_after_sweep(frozenset({ok}), None)
+    assert carried == {ok}
+    assert escalation_fire_due(units, units, served, since=1,
+                               unexecuted=carried).due
+    # The old store: the miss's empty set holds on `Ok` again.
+    held = escalation_fire_due(units, units, served, since=1,
+                               unexecuted=frozenset())
+    assert not held.due and held.unserved == (ok,)
+    assert red_dead_after_sweep(frozenset({ok}), frozenset()) == frozenset()
+    assert red_dead_after_sweep(frozenset(), None) == frozenset()

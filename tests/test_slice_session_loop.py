@@ -100,7 +100,7 @@ def test_a_compiling_turn_that_is_still_the_crash_is_not_kept(tmp_path):
         return baseline if lib == "SESSION_LIB" else after
 
     def ask(_m: object) -> str:
-        return '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>'
+        return '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT(f)</FN>'
 
     ports = _ports(measure=measure, ask=ask)
     ports = SessionPorts(
@@ -266,7 +266,7 @@ def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
 
     def ask(_m: object) -> str:
         return (
-            '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>\n'
+            '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT(f)</FN>\n'
             '<FN name="render" block="impl Renderer">NEW_REN</FN>'
         )
 
@@ -352,7 +352,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
     bodies = {disp_site: disp.body_text}
     replies = [
         '<REQUEST kind="file" arg="src/i.rs"/>',
-        '<FN name="debug" block="impl Inner < T >">write!(f, "x")</FN>',
+        '<FN name="debug" block="impl Inner < T >">write!(f, "x{}", this.value)</FN>',
     ]
     logs: list[str] = []
 
@@ -398,7 +398,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
     assert any("admitted 1 unit" in m for m in logs), logs
     assert debug_site in out.kept
     assert out.outcome == "kept"
-    assert (tmp_path / "src" / "i.rs").read_text() == 'write!(f, "x")'
+    assert (tmp_path / "src" / "i.rs").read_text() == 'write!(f, "x{}", this.value)'
 
     # Control: writing debug on turn 1, with no request, is out of scope.
     src2 = tmp_path / "ctrl"
@@ -409,7 +409,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
     rejected: list[str] = []
 
     def ask_ctrl(_m: object) -> str:
-        return '<FN name="debug" block="impl Inner < T >">write!(f, "x")</FN>'
+        return '<FN name="debug" block="impl Inner < T >">write!(f, "x{}", this.value)</FN>'
 
     def emit(_n, **kw):
         data = kw.get("data") or {}
@@ -433,3 +433,109 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
         all_records=(disp, debug))
     assert out_ctrl.kept == frozenset()
     assert any("not in this session's editable set" in r for r in rejected)
+
+
+def test_a_turn_that_ignores_an_input_is_kept_only_when_a_test_turns_green(tmp_path):
+    """Run `486447-5207101c`: the retreat body `let _ = (lhs, rhs);
+    Error::msg(msg)` was kept on no evidence. A session turn whose body
+    drops a declared input and turns nothing green is not kept, and the
+    next turn is told which input it dropped. Control: the same body, when
+    the aimed test passes after it, is kept — a test vouches for ignoring
+    an input (serde's `IgnoredAny` is correct that way)."""
+    asked: list[str] = []
+
+    def ask(m: object) -> str:
+        asked.append(str(m))
+        return ('<FN name="fmt" block="impl fmt::Display for Report">'
+                "let _ = f;\nOk(())</FN>")
+
+    root = _tree(tmp_path)
+    baseline = _reading(set(), {"t_box"})
+    still_red = _reading(set(), {"t_box"})
+    out = run_slice_session(
+        _ports(measure=lambda raw: baseline
+               if (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+               else still_red, ask=ask),
+        target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_box",), units=(_FMT,)),
+        records=_RECS, turn0="turn0", max_turns=2)
+    assert out.kept == frozenset()
+    assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+    assert len(asked) == 2
+    assert "never uses its input(s) `f`" in asked[1]
+
+    (tmp_path / "control").mkdir()
+    root2 = _tree(tmp_path / "control")
+    green = _reading({"t_box"}, set())
+    kept = run_slice_session(
+        _ports(measure=lambda raw: baseline
+               if (root2 / "src" / "lib.rs").read_text() == "SESSION_LIB"
+               else green, ask=ask),
+        target_src_dir=root2, cluster_name="t",
+        slice_=SessionSlice(tests=("t_box",), units=(_FMT,)),
+        records=_RECS, turn0="turn0", max_turns=1,
+        executed={"t_box": (_FMT,)})
+    assert kept.outcome == "accepted"
+    assert (root2 / "src" / "lib.rs").read_text() == "let _ = f;\nOk(())"
+
+
+_RENDER_DISCARD = FnSite("src/render.rs", "render", "impl Renderer")
+_RENDER_RECS = {
+    _FMT: _RECS[_FMT],
+    _RENDER_DISCARD: FnRecord(
+        file="src/render.rs", fn_name="render", container="impl Renderer",
+        sig_text=("fn render(msg: &'static str, lhs: &dyn Debug, "
+                  "rhs: &dyn Debug) -> Error"),
+        body_text="unimplemented!()"),
+}
+
+
+def _sibling_turn(root: Path, *, after: TestStateReading,
+                  executed: dict[str, tuple[FnSite, ...]]):
+    """One turn that writes `render`'s discard beside a `fmt` body."""
+    def ask(_m: object) -> str:
+        return ('<FN name="fmt" block="impl fmt::Display for Report">'
+                'write!(f, "{}", self.msg)</FN>\n'
+                '<FN name="render" block="impl Renderer">'
+                "let _ = (lhs, rhs);\nError::msg(msg)</FN>")
+
+    baseline = _reading(set(), {"t_fmt", "t_render"})
+    logs: list[str] = []
+    ports = _ports(measure=lambda raw: baseline
+                   if (root / "src" / "render.rs").read_text() == "SESSION_REN"
+                   else after, ask=ask)
+    ports = SessionPorts(**{
+        **{f: getattr(ports, f) for f in ports.__slots__},
+        "log": logs.append,
+        "enumerate_bodies": lambda: {
+            _FMT: (root / "src" / "lib.rs").read_text(),
+            _RENDER_DISCARD: (root / "src" / "render.rs").read_text()}})
+    out = run_slice_session(
+        ports, target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_fmt", "t_render"),
+                            units=(_FMT, _RENDER_DISCARD)),
+        records=_RENDER_RECS, turn0="turn0", max_turns=1, executed=executed)
+    return out, logs
+
+
+def test_a_sibling_turning_green_does_not_vouch_for_a_discard(tmp_path):
+    """The turn writes `render`'s `let _ = (lhs, rhs)`
+    beside `fmt`, and `fmt`'s own test turns green while `render`'s stays
+    red. The old flag (any test turned green) kept the discard. A body is
+    vouched only by a test that executes it, so the change set is declined.
+    Control: the same turn with `t_render` (which executes `render`) turned
+    green is kept. A target already green at the session's baseline turns
+    nothing green, so it vouches for nobody."""
+    executed = {"t_fmt": (_FMT,), "t_render": (_RENDER_DISCARD,)}
+    out, logs = _sibling_turn(
+        _tree(tmp_path), after=_reading({"t_fmt"}, {"t_render"}),
+        executed=executed)
+    assert out.kept == frozenset()
+    assert any("render ignores lhs, rhs" in m for m in logs), logs
+
+    (tmp_path / "vouched").mkdir()
+    root2 = _tree(tmp_path / "vouched")
+    out2, _ = _sibling_turn(
+        root2, after=_reading({"t_render"}, {"t_fmt"}), executed=executed)
+    assert _RENDER_DISCARD in out2.kept
+    assert (root2 / "src" / "render.rs").read_text().startswith("let _ = (lhs, rhs);")

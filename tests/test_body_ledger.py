@@ -19,6 +19,7 @@ from pipeline_core.domain.body_ledger import (
     LayoutDep,
     LedgerEntry,
     LedgerKey,
+    ReportKeep,
     ReseedPlan,
     SweepView,
     authored_layout_fp,
@@ -1100,3 +1101,61 @@ def test_an_advanced_row_is_not_a_flat_exclusion_or_a_rebuy() -> None:
     assert rebuy_hits([loc], standing, project=_KEY.project,
                       cluster=_KEY.cluster, run_id="now",
                       oracle_fp=_ORACLE) == ()
+
+
+def test_a_landing_is_credited_only_with_what_its_own_keep_turned_green() -> None:
+    """A convicting test turned green between two sweeps. The landing whose
+    keep recorded that test is `proven`; a landing whose keep recorded other
+    tests (or none) is a graded try that bought nothing, `flat`. Control: a
+    row with no recorded keep comparison keeps the old reading."""
+    from pipeline_core.domain.body_ledger import WaveKept, kept_green_of
+
+    before, after = _views(({"t_other"}, {"t_conv"}), ({"t_other", "t_conv"}, set()))
+    paid = _entry(kept_green=("t_conv",))
+    sibling = _entry(kept_green=())
+    legacy = _entry()
+    assert classify(paid, attributed={"t_conv"}, before=before, after=after,
+                    body_now_sha="")[0] is BodyState.PROVEN
+    assert classify(sibling, attributed={"t_conv"}, before=before, after=after,
+                    body_now_sha="")[0] is BodyState.FLAT
+    assert classify(legacy, attributed={"t_conv"}, before=before, after=after,
+                    body_now_sha="")[0] is BodyState.PROVEN
+    assert LedgerEntry.from_dict(paid.to_dict()) == paid
+    assert LedgerEntry.from_dict(legacy.to_dict()) == legacy
+
+    u = FnLocator("src/a.rs", "f")
+    kept = WaveKept({u}, [ReportKeep(frozenset({u}), frozenset({"t_conv"}))])
+    assert kept == frozenset({u})
+    assert kept_green_of(kept, u, {u: {"t_conv"}}) == ("t_conv",)
+    assert kept_green_of(frozenset({u}), u, {u: {"t_conv"}}) is None
+    # A legacy row: the only report that kept `u` recorded no comparison.
+    unrecorded = WaveKept({u}, [ReportKeep(frozenset({u}), None)])
+    assert kept_green_of(unrecorded, u, {u: {"t_conv"}}) is None
+
+
+def test_a_test_two_kept_units_share_is_credited_to_neither() -> None:
+    """One file row keeps two units and its comparison
+    turned `t` green. The row ran one cargo invocation for the spliced
+    file, so it cannot see which body paid. The old writer copied `{t}` onto
+    both and both graded PROVEN. Credit goes only to a unit that is the sole
+    kept unit of that report attributed to the test."""
+    from pipeline_core.domain.body_ledger import WaveKept, credited_green, kept_green_of
+
+    a, b = FnLocator("src/a.rs", "f"), FnLocator("src/a.rs", "g")
+    row = ReportKeep(frozenset({a, b}), frozenset({"tests/x.rs::t"}))
+    both = credited_green([row], {a: {"t"}, b: {"t"}})
+    assert both == {a: frozenset(), b: frozenset()}
+    before, after = _views((set(), {"t"}), ({"t"}, set()))
+    for u in (a, b):
+        entry = _entry(kept_green=tuple(sorted(both[u] or ())))
+        assert classify(entry, attributed={"t"}, before=before, after=after,
+                        body_now_sha="")[0] is BodyState.FLAT
+    # Only the first unit attributed to `t`: it is proven, the second flat.
+    only_a = credited_green([row], {a: {"t"}, b: {"other"}})
+    assert only_a == {a: frozenset({"t"}), b: frozenset()}
+    # A second report with no recorded comparison does not erase `{t}`.
+    unrec = ReportKeep(frozenset({a}), None)
+    assert credited_green([row, unrec], {a: {"t"}, b: {"other"}})[a] == {"t"}
+    assert credited_green([unrec, row], {a: {"t"}, b: {"other"}})[a] == {"t"}
+    wave = WaveKept({a, b}, [row, unrec])
+    assert kept_green_of(wave, a, {a: {"t"}, b: {"other"}}) == ("t",)

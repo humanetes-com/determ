@@ -890,6 +890,11 @@ class RunDeps:
     # configuration and starting workspace (`adapters.run_stats_recorder`):
     # `(root, project_dir, crate)`. A no-op unless the composition root binds it.
     start_run_stats: Callable[[Path, Path, str], None] = lambda _r, _p, _c: None
+    # The ORIGINAL crate's construction facts and the strategy file they
+    # render into (`adapters.strategy_facts.StrategyFacts`): `facts(project_dir,
+    # clusters, may_measure=)`, `rendered(project_dir, text, worlds)`. None
+    # keeps the strategy text exactly as the model wrote it.
+    construction_facts: Any = None
 
 
 def check_oracle_seal(deps: RunDeps, project_dir: Path,
@@ -1195,6 +1200,11 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             deps.log(f"  task0b already done — loading coverage_strategy.md ({len(coverage_strategy):,} chars).")
         else:
             _t0b_cached = False
+            # The tree is the original crate until t0b is done: measure the
+            # construction facts first, so the discovery prompt is handed the
+            # computed part as given instead of asked to restate it.
+            if deps.construction_facts is not None:
+                deps.construction_facts.facts(project_dir, _clusters, may_measure=True)
             coverage_strategy = deps.task0b_discovery(
                 strategy_path, project_dir, test_files, readme_text, project_profile,
                 clusters=_clusters,
@@ -1210,6 +1220,15 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     # Implementation selected by DEPENDENCY_GRAPH in .env (default: static).
     dep_graph = deps.dependency_graph_factory(project_dir, deps.ws_scan_deps)
     modules = dep_graph.topological_order()
+    # The computed part of the strategy file, on EVERY path that bound the
+    # text above (both skip branches included): what the t0c, task1 and fill
+    # prompts receive is this variable, so a write to the file alone would
+    # leave them on the model's text. Measured only while no module is
+    # stripped; afterwards the stored facts of the original are what there is.
+    if not _from_spec and deps.construction_facts is not None:
+        _original = not any(deps.phase_valid(project_dir, f"strip/{m}") for m in modules)
+        _worlds = deps.construction_facts.facts(project_dir, _clusters, may_measure=_original)
+        coverage_strategy = deps.construction_facts.rendered(project_dir, coverage_strategy, _worlds)
     is_multi_module = len(modules) > 1
 
     if is_multi_module:
@@ -1541,6 +1560,13 @@ def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         result = deps.module_reconstructor.run(
             run_ctx, total_iters=total_iters, coverage_strategy=coverage_strategy)
         total_iters, coverage_strategy = result.total_iters, result.coverage_strategy
+        # A regenerated strategy (forced t0b after a genesis update) is model
+        # text again: render the stored computed part back in. Never measured
+        # here — the tree is a reconstruction by now.
+        if deps.construction_facts is not None:
+            coverage_strategy = deps.construction_facts.rendered(
+                project_dir, coverage_strategy,
+                deps.construction_facts.facts(project_dir, _clusters, may_measure=False))
         if not result.converged:
             nonconverged_modules.add(module_name)
 

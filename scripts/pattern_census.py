@@ -2990,6 +2990,7 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
         blamed_from_event,
         decided_from_event,
         hollow_stubs_from_event,
+        measured_owners_from_event,
         violations,
     )
     out: list[str] = []
@@ -2999,7 +3000,8 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
         for v in violations(
                 decided_from_event(sc), hollow_stubs=hollow_stubs_from_event(sc),
                 crash_blamed=blamed_from_event(sc),
-                budget_minutes=float(sc.get("budget_minutes") or 0.0)):
+                budget_minutes=float(sc.get("budget_minutes") or 0.0),
+                measured_owners=measured_owners_from_event(sc)):
             out.append(f"iter {sc.get('iter')} {v.kind}: {v.detail}")
     return out
 
@@ -3081,7 +3083,7 @@ CLASS_NAMES = {
     "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
     "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",
     "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)",
-    "P44": "schedule invariant broken (a hold named a run that did not open, a blocker stub or crash-blamed locator had no opened writer, a fill opened nothing, or shares broke the budget; pre-fix a re-buy could hold a run and then be deferred itself, run 82925-203ed7b8 fills 5-6)",
+    "P44": "schedule invariant broken (a hold named a run that did not open, a blocker stub or crash-blamed locator had no opened writer, an admitted measured owner had no writer at all, a fill opened nothing, or shares broke the budget; pre-fix a re-buy could hold a run and then be deferred itself, run 82925-203ed7b8 fills 5-6)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

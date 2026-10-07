@@ -412,9 +412,19 @@ def err_sig_from_text(output: str) -> frozenset[str]:
     (`error\\[E\\d+\\]: .+`  |  `^error: .+`). For each line: an
     `error[E<digits>]: <≥1 char>` marker anywhere in the line contributes
     the substring from that marker to end-of-line; a line that STARTS with
-    `error: <≥1 char>` contributes the whole line."""
+    `error: <≥1 char>` contributes the whole line.
+
+    Read on the text with its colour codes stripped: the check's rendered
+    text is rustc's `rendered-ansi` field, where `error[E0277]` and its `: `
+    are split by an escape, so the scan matched none of rustc's errors and
+    the signature was only cargo's own `could not compile … due to N
+    previous error(s)` lines — two attempts with different errors and the
+    same count read as "the same error set". Those wrapper lines (and
+    rustc's `aborting due to …`) restate the count, so they are the
+    signature only when no rustc error line is present (a linker or
+    build-script failure)."""
     sigs: set[str] = set()
-    for ln in output.splitlines():
+    for ln in strip_ansi(output).splitlines():
         # error[E<digits>]: <≥1 char>  — anywhere, first marker wins (greedy .+ to EOL)
         i = ln.find("error[")
         while i != -1:
@@ -430,7 +440,12 @@ def err_sig_from_text(output: str) -> frozenset[str]:
         # ^error: <≥1 char>
         if ln.startswith("error: ") and len(ln) > len("error: "):
             sigs.add(ln)
-    return frozenset(sigs)
+    own = {g for g in sigs if not g.startswith(_COUNT_LINES)}
+    return frozenset(own or sigs)
+
+
+# Cargo's and rustc's closing lines: they restate how many errors there were.
+_COUNT_LINES = ("error: could not compile ", "error: aborting due to ")
 
 
 def err_sig(output: str) -> frozenset[str]:

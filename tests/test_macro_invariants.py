@@ -154,3 +154,21 @@ def test_previous_items_gate_never_reaches_a_variant_with_a_bare_neighbour(tmp_p
     )
     (tmp_path / "m.rs").write_text(src, encoding="utf-8")
     assert _preds(enumerate_macro_variants(tmp_path), "near") == [""]
+
+
+def test_each_listed_macro_says_how_a_call_names_it(tmp_path: Path) -> None:
+    """Run `486447-5207101c`: the section listed `backtrace_if_absent!` and
+    the reply called it as `crate::backtrace::backtrace_if_absent!`, E0433
+    twice. A `macro_rules!` without `#[macro_export]` is named by its bare
+    name only; an exported one by its crate path."""
+    (tmp_path / "m.rs").write_text(
+        '#[cfg(feature = "std")]\nmacro_rules! local { () => { 1 } }\n'
+        '#[cfg(not(feature = "std"))]\nmacro_rules! local { () => { 2 } }\n'
+        '#[macro_export]\n#[cfg(feature = "std")]\nmacro_rules! open { () => { 3 } }\n'
+        '#[macro_export]\n#[cfg(not(feature = "std"))]\nmacro_rules! open { () => { 4 } }\n',
+        encoding="utf-8")
+    out = compute_cluster_macro_invariants(tmp_path, _cluster([], ["std"]))
+    local = next(ln for ln in out.splitlines() if ln.startswith("local!"))
+    opened = next(ln for ln in out.splitlines() if ln.startswith("open!"))
+    assert "call as `local!(...)` — not exported, no path names it" in local
+    assert "call as `crate::open!(...)`" in opened

@@ -639,6 +639,56 @@ COMPILER_REJECTED = "compiler_rejected"
 # different expression. LAST_ERROR still carries the crashing body.
 TYPECHECKED_CALL = "typechecked_call"
 
+DENIES_DEFINED_NAME = "denies_defined_name"
+"""A lesson that says a name does not exist while the crate defines it.
+
+Run `486447-5207101c` (2026-10-07), per-fn `src/error.rs::construct`: two
+replies called the crate's own `backtrace_if_absent!` by a path
+(`crate::backtrace::backtrace_if_absent!`, `crate::backtrace_if_absent!`) and
+failed E0433; the retrospective wrote "Drop the hallucinated
+`crate::backtrace_if_absent!(&error)` macro invocation which does not exist".
+The macro exists (the same prompt listed it with its expansion); the path was
+wrong. A stored lesson that denies a defined name steers every later attempt
+away from the body the crate needs."""
+
+_DENIAL_MARKERS: tuple[str, ...] = (
+    "does not exist", "doesn't exist", "do not exist", "don't exist",
+    "nonexistent", "non-existent", "hallucinated", "is not defined",
+    "no such",
+)
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+_crate_names: frozenset[str] = frozenset()
+
+
+def bind_crate_names(names: Iterable[str]) -> None:
+    """The names the crate under reconstruction defines (fns, macros, types),
+    bound by the driver once per sweep — the same per-sweep binding the
+    coverage reading uses. Empty disables the rule."""
+    global _crate_names
+    _crate_names = frozenset(n for n in names if n)
+
+
+def _named_ident(span: str) -> str:
+    """The item a code span names: `crate::a::b!(x)` -> `b`."""
+    head = span.split("(", 1)[0].split("<", 1)[0].strip().rstrip("!").strip()
+    return head.rsplit("::", 1)[-1].strip()
+
+
+def denied_defined_names(guidance: str, names: Iterable[str]) -> tuple[str, ...]:
+    """The defined names a sentence of ``guidance`` calls nonexistent."""
+    defined = frozenset(names)
+    out: list[str] = []
+    for sentence in guidance_sentences(guidance):
+        low = sentence.lower()
+        if not any(m in low for m in _DENIAL_MARKERS):
+            continue
+        for span in _CODE_SPAN.findall(sentence):
+            ident = _named_ident(span)
+            if ident in defined and ident not in out:
+                out.append(ident)
+    return tuple(out)
+
+
 # Words a pinned literal can carry that name nothing: they occur in almost
 # any sentence of guidance, so a removal sentence carrying one would fire on
 # prose, not on the observable.
@@ -1245,6 +1295,8 @@ def screen_guidance(
         return GuidanceScreening("", "")
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
         return GuidanceScreening("", "hollow_tree")
+    if _crate_names and denied_defined_names(guidance, _crate_names):
+        return GuidanceScreening("", DENIES_DEFINED_NAME)
     # The same class by a different record: the lesson explains a crash or
     # abort the tree's holes decided (`CRASH_STUB_SITES`), and `blocked_on`
     # is empty because the failed body never named the stub it reached
@@ -1413,6 +1465,15 @@ def retired_guidance_line(
                 f"rounds={rec.get('retrospective_count') or 0} prescribes an "
                 f"approach rustc already rejected — NOT injected "
                 f"({COMPILER_REJECTED}): {head}")
+    if verdict.retired_by == DENIES_DEFINED_NAME:
+        head = " ".join(str(rec.get("guidance") or "").split())[:140]
+        denied = ", ".join(denied_defined_names(
+            str(rec.get("guidance") or ""), _crate_names))
+        return (f"[phase-c/retro-retired] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} says {denied} "
+                f"does not exist, and the crate defines it — NOT injected "
+                f"({DENIES_DEFINED_NAME}): {head}")
     if verdict.retired_by == TYPECHECKED_CALL:
         head = " ".join(str(rec.get("guidance") or "").split())[:140]
         return (f"[phase-c/retro-retired] {unit_key}: "

@@ -1020,6 +1020,19 @@ def judge_refill(
         baseline.ignored_names, verdict, baseline.positions)
 
 
+def turned_green(
+    baseline: TestStateReading | None, verdict: U2Verdict | None,
+) -> frozenset[str]:
+    """The tests a keep's scoped run saw passing that the in-lock baseline
+    did not (neither passing nor ignored): what the keep turned green. A test
+    green before the keep is observed passing after any body, so it is not
+    in this set. Either side missing is no observation: empty."""
+    if baseline is None or verdict is None:
+        return frozenset()
+    return frozenset(verdict.self_passed - baseline.passed_names
+                     - baseline.ignored_names)
+
+
 def reading_of_capture(
     out: str, *, sources: TestSource, timed_out: bool = False,
 ) -> TestStateReading:

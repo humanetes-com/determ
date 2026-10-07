@@ -251,9 +251,9 @@ def main() -> int:
             print(f"    leftover {t}: attributed-writes {aw}/{grace}, "
                   f"pair {unpaid[t]}/{grace}, row-level pair {old_unpaid[t]}")
         print(f"    measured-owners withholding  shipped: "
-              f"{sorted(withholding_paired_tests(tests, unpaid_buys=unpaid))}")
+              f"{sorted(withholding_paired_tests(tests, unpaid_fills=unpaid))}")
         print(f"    measured-owners withholding  control: "
-              f"{sorted(withholding_paired_tests(tests, unpaid_buys=old_unpaid))}")
+              f"{sorted(withholding_paired_tests(tests, unpaid_fills=old_unpaid))}")
     return 0
 
 

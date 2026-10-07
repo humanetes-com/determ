@@ -15,7 +15,7 @@ re-derives the hop every iteration and a pair that REVERTS keeps it.
 
 This script is the check that must pass before the word "validated" is
 written about the lapse: it runs the SHIPPED predicates
-(`domain/fill_schedule.unpaid_pair_buys`,
+(`domain/fill_schedule.unpaid_pair_fills`,
 `domain/escalation_lifetime.withholding_paired_tests`) over the real route
 ledger and the real coverage owner maps, and prints the negative controls
 beside the claim. It computes nothing itself — a re-implementation here would
@@ -81,7 +81,7 @@ from pipeline_core.domain.escalation_lifetime import (  # noqa: E402
 from pipeline_core.domain.fill_schedule import (  # noqa: E402
     DEFAULT_UNPAID_GRACE,
     RouteKind,
-    unpaid_pair_buys,
+    unpaid_pair_fills,
 )
 
 
@@ -143,8 +143,8 @@ def main() -> int:
         print("no PAIR row in the ledger — nothing withholds, nothing lapses.")
         return 0
 
-    unpaid = {t: unpaid_pair_buys(rows, t, oracle) for t in tests}
-    withheld = withholding_paired_tests(tests, unpaid_buys=unpaid)
+    unpaid = {t: unpaid_pair_fills(rows, t, oracle) for t in tests}
+    withheld = withholding_paired_tests(tests, unpaid_fills=unpaid)
     print()
     for t in tests:
         verdict = "WITHHOLDS" if t in withheld else "LAPSES   "
@@ -175,16 +175,16 @@ def main() -> int:
                      and r.oracle_fp == oracle]
         for n in range(1, grace + 1):
             prefix = pair_rows[:n]
-            k = unpaid_pair_buys(prefix, t, oracle)
-            w = withholding_paired_tests([t], unpaid_buys={t: k})
+            k = unpaid_pair_fills(prefix, t, oracle)
+            w = withholding_paired_tests([t], unpaid_fills={t: k})
             print(f"  prefix replay  as of graded pair buy {n}: unpaid {k} -> "
                   + ("WITHHOLDS" if t in w else "LAPSES"))
     other = "0" * len(oracle) if oracle else "none"
-    k_other = {t: unpaid_pair_buys(rows, t, other) for t in tests}
-    w_other = withholding_paired_tests(tests, unpaid_buys=k_other)
+    k_other = {t: unpaid_pair_fills(rows, t, other) for t in tests}
+    w_other = withholding_paired_tests(tests, unpaid_fills=k_other)
     print(f"  other oracle   {other}: unpaid {sorted(set(k_other.values()))} -> "
           f"{len(w_other)} of {len(tests)} WITHHOLD")
-    w_pre = withholding_paired_tests(tests, unpaid_buys=unpaid, unpaid_grace=0)
+    w_pre = withholding_paired_tests(tests, unpaid_fills=unpaid, unpaid_grace=0)
     print(f"  pre-fix        lapse disabled: {len(w_pre)} of {len(tests)} "
           "WITHHOLD (the lock this reproduces)")
     return 0

@@ -41,6 +41,7 @@ from typing import Any
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, body_sha
+from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.test_report import OTHER_COPY_MARK, parse_panic_location
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
@@ -288,6 +289,7 @@ def collect_refill_evidence(
     aimed: frozenset[FnLocator] = frozenset(),
     read_source: Callable[[str], str | None] | None = None,
     history: Mapping[str, Sequence[TryRecord]] | None = None,
+    crash_sites: CrashSites | None = None,
 ) -> tuple[RefillEvidence, ...]:
     """What the frontier supports for each of `block.refill_members`.
 
@@ -302,8 +304,12 @@ def collect_refill_evidence(
     leaves the rendered section byte-identical to the pre-history prompt.
     `aimed` is locators in the crash-evidence dict that are not origin-blame
     (`crash_texts` keys minus `crash_blamed`): callees of the faulting frame,
-    never convict, never revert. Without it they fall through to NAMED."""
+    never convict, never revert. Without it they fall through to NAMED.
+    `crash_sites` narrows both to the container a frame resolved to: `fmt`
+    under `impl Display` is not CRASHED for a fault in `impl Debug`'s
+    `fmt` (:class:`~pipeline_core.domain.crash_site.CrashSites`)."""
     out: list[RefillEvidence] = []
+    at_site = crash_sites or CrashSites()
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
         tests = (tuple(sorted(frontier.tests_for(key)))[:max_tests]
@@ -315,13 +321,13 @@ def collect_refill_evidence(
         # through to NAMED ("return it unchanged"). See `Attribution`.
         # A convicting test outranks the escalation: the unit's own failure is
         # better evidence than the measurement that its consumers were futile.
-        if key in crashed:
+        if at_site.blames(crashed, block.file, m.fn_name, block.container):
             grade = Attribution.CRASHED
         elif frontier is not None and frontier.convicting_for(key):
             grade = Attribution.DIRECT
         elif key in escalated:
             grade = Attribution.ESCALATED
-        elif key in aimed:
+        elif at_site.evidences(aimed, block.file, m.fn_name, block.container):
             grade = Attribution.AIMED
         else:
             grade = Attribution.NAMED

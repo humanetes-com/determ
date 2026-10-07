@@ -37,7 +37,6 @@ from pipeline_core.domain.fn_execution import (
     note_attempt,
     note_verdicts,
     unambiguous_verdicts,
-    withhold_pending,
 )
 from pipeline_core.domain.models import FnRecord, FnSite, ModRecord
 
@@ -210,7 +209,7 @@ def test_attempts_below_the_budget_keep_the_function_pending_and_the_stop_open()
     assert rec.pending[0].attempts == (1, 2, 1)
     rec = advance_record(rec, FunctionExecution(unexecuted=(_G,)), attempt_budget=3)
     assert rec.accounted
-    assert rec.unreached == (UnreachedFn(_G.site, (1, 2, 1), True, ('ran', 'ran', 'ran')),)
+    assert rec.unreached == (UnreachedFn(_G.site, (1, 2, 1), True, ('committed', 'committed', 'committed')),)
 
 
 def test_a_count_above_zero_removes_the_function_whatever_it_was() -> None:
@@ -300,7 +299,7 @@ def test_aimed_outcomes_name_the_function_a_block_was_written_for() -> None:
     both = aimed_fn_outcomes([_G, _S], aimed_lines={8}, ran_lines=set(), otherwise="compile_failed")
     assert both == {_G.site: "compile_failed"}                    # _S (1-4) was not in a prompt
     ran = aimed_fn_outcomes([_G, _S], aimed_lines={2, 8}, ran_lines={8}, otherwise="compile_failed")
-    assert ran == {_S.site: "compile_failed", _G.site: "ran"}
+    assert ran == {_S.site: "compile_failed", _G.site: "committed"}
     assert aimed_fn_outcomes([_G], aimed_lines=set(), ran_lines=set(), otherwise="x") == {}
 
 
@@ -339,8 +338,16 @@ def test_a_retrospective_verdict_attributes_only_to_a_name_that_is_one_site() ->
     assert unambiguous_verdicts([uniq], both) == {}
 
 
+def test_a_stored_ran_outcome_reads_as_committed() -> None:
+    """A committed block was aimed at the function: the old word `ran` read as
+    if the function executed, which only the next count says."""
+    rec = FnCoverageRecord(measured=True, pending=(PendingFn(_S, (1,), ("committed",)),))
+    legacy = rec.to_json().replace('"committed"', '"ran"')
+    assert FnCoverageRecord.from_json(legacy) == rec
+
+
 def test_a_verdict_is_evidence_on_the_record_and_changes_no_budget() -> None:
-    rec = FnCoverageRecord(measured=True, pending=(PendingFn(_S, (1,), ("ran",)),))
+    rec = FnCoverageRecord(measured=True, pending=(PendingFn(_S, (1,), ("committed",)),))
     said = note_verdicts(rec, {_S.site: "NEEDS_INTERNALS"})
     assert said.pending[0].verdict == "NEEDS_INTERNALS"
     assert said.pending[0].attempts == (1,) and said.accounted is False
@@ -348,12 +355,6 @@ def test_a_verdict_is_evidence_on_the_record_and_changes_no_budget() -> None:
     assert again.pending[0].verdict == "NEEDS_INTERNALS"
     assert FnCoverageRecord.from_json(said.to_json()) == said
 
-
-def test_a_pragma_is_withheld_from_a_function_the_record_still_holds_pending() -> None:
-    kept, withheld = withhold_pending(["_assert_send_sync", "fmt", "Own::clone"], [_S, FnTarget(
-        FnSite("src/e.rs", "fmt", "impl Debug for E"), 5, 7, False)])
-    assert withheld == ["fmt"] and kept == ["_assert_send_sync", "Own::clone"]
-    assert withhold_pending(["fmt"], []) == (["fmt"], [])             # nothing pending: untouched
 
 
 # --- unreachable by construction (domain.fn_reachability feeds these) --------
@@ -363,7 +364,6 @@ _PS = _S.site
 
 def _reading_with(*targets: FnTarget, executed: tuple[FnSite, ...] = ()) -> FunctionExecution:
     return FunctionExecution(executed=frozenset(executed), unexecuted=tuple(targets))
-
 
 def test_a_proof_moves_an_unexecuted_function_out_of_what_the_tests_are_asked() -> None:
     from pipeline_core.domain.fn_execution import apply_proofs
@@ -403,3 +403,66 @@ def test_the_end_gate_reads_a_proved_function_as_unreached_with_its_proof() -> N
     assert entry.outcomes == ("by_construction",) and entry.attempts == ()
     # Negative control: a site the record does not list is not accounted.
     assert rec.classify_stub(FnSite("src/e.rs", "elsewhere", "")) is None
+
+
+def test_another_worlds_proof_shortens_the_budget_but_not_the_first_attempt() -> None:
+    """313's second gap: a site stable proved unreachable gives nightly the
+    whole budget as spent — through the shared rule, so nightly still spends
+    one attempt of its own. Controls: a gated proof gives nothing; no budget
+    passed gives nothing (the pre-change call)."""
+    from pipeline_core.domain.fn_execution import ProvenFn
+
+    shared = ProvenFn(_S.site, "no caller in the public API", cluster_gated=False)
+    gated = ProvenFn(_S.site, "cfg-only", cluster_gated=True)
+    proved = FnCoverageRecord(measured=True, by_construction=(shared,))
+    assert inherited_attempts([proved], budget=3) == {_S.site: 3}
+    assert inherited_attempts([proved]) == {}
+    assert inherited_attempts(
+        [FnCoverageRecord(measured=True, by_construction=(gated,))], budget=3) == {}
+    round_trip = FnCoverageRecord.from_json(proved.to_json())
+    assert round_trip is not None and round_trip.by_construction == (shared,)
+
+
+def test_an_uncommitted_block_is_labelled_by_the_gate_that_refused_it() -> None:
+    """313's first gap: an admission-rejected block (it compiled, its own
+    tests failed) read `compile_failed`. The label is now the gate's."""
+    from pipeline_core.domain.fn_execution import (
+        COMPILE_FAILED,
+        CONTRACT,
+        NO_WORLD,
+        TESTS_FAILED,
+        block_failure,
+    )
+
+    assert block_failure(runtime=True, contract=False, sigs=frozenset({"t_x"})) == TESTS_FAILED
+    assert block_failure(runtime=False, contract=True, sigs=frozenset()) == CONTRACT
+    assert block_failure(runtime=True, contract=False,
+                         sigs=frozenset({"no_world"})) == NO_WORLD
+    assert block_failure(runtime=False, contract=False,
+                         sigs=frozenset({"E0277"})) == COMPILE_FAILED
+    t = _S
+    got = aimed_fn_outcomes([t], {t.first_line}, set(), COMPILE_FAILED,
+                            blocks=[(frozenset({t.first_line}), TESTS_FAILED)])
+    assert got == {t.site: TESTS_FAILED}
+    # Control: no block recorded — the caller's default, as before.
+    assert aimed_fn_outcomes([t], {t.first_line}, set(), COMPILE_FAILED) == {
+        t.site: COMPILE_FAILED}
+
+
+def test_committed_files_survive_a_relaunch_on_the_record() -> None:
+    """The review remainder: `committed_for` lived only in the process, so a
+    resumed one had the outcome on record and no file names. The record now
+    keeps them on the pending entry, merged across readings."""
+    from pipeline_core.domain.fn_execution import FunctionExecution, advance_record
+
+    reading = FunctionExecution(unexecuted=(_S,))
+    first = advance_record(None, reading, attempt_budget=3,
+                           committed={_S.label: ["tests/a_gen_1.rs"]})
+    assert first.pending[0].committed_in == ("tests/a_gen_1.rs",)
+    again = FnCoverageRecord.from_json(first.to_json())
+    assert again is not None and again.pending[0].committed_in == ("tests/a_gen_1.rs",)
+    second = advance_record(again, reading, attempt_budget=3,
+                            committed={_S.label: ["tests/a_gen_2.rs"]})
+    assert second.pending[0].committed_in == ("tests/a_gen_1.rs", "tests/a_gen_2.rs")
+    # Control: nothing committed, nothing recorded.
+    assert advance_record(None, reading, attempt_budget=3).pending[0].committed_in == ()

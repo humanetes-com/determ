@@ -73,6 +73,8 @@ def _run_deps(project_dir: Path) -> orchestrator.RunDeps:
         infer_build_check_command=MagicMock(return_value="cargo build"),
         wl_save_gen_tests_siblings=MagicMock(return_value={}),
         collect_examples=MagicMock(return_value=[]),
+        # No construction facts: the strategy text passes as the model wrote it.
+        construction_facts=None,
     )
 
     requirements_phase = MagicMock(name="requirements_phase")
@@ -389,3 +391,64 @@ def test_run_pipeline_reharvest_without_the_pre_augment_restore_aborts(tmp_path:
         orchestrator.run_pipeline(deps, args, tmp_path)
     assert exc.value.code == 2
     deps.cluster_augmentor.run.assert_not_called()
+
+
+# --- the strategy file's computed part, on every path that binds its text -----
+
+class _Facts:
+    """Records how the orchestrator asked for the construction facts and
+    renders by prefixing, so the text a phase receives shows it was rendered."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, bool]] = []
+
+    def facts(self, project_dir: Path, clusters: object, *, may_measure: bool) -> tuple[str, ...]:
+        self.calls.append(("facts", may_measure))
+        return ("world",)
+
+    def rendered(self, project_dir: Path, text: str, worlds: object) -> str:
+        self.calls.append(("rendered", bool(worlds)))
+        return "COMPUTED\n" + text
+
+
+def _with_facts(tmp_path: Path, *, done: set[str]) -> tuple[orchestrator.RunDeps, _Facts]:
+    facts = _Facts()
+    deps = replace(_run_deps(tmp_path), construction_facts=facts,
+                   phase_valid=MagicMock(side_effect=lambda _p, key: key in done))
+    return deps, facts
+
+
+def test_the_skip_branch_hands_the_rendered_strategy_to_the_requirements_phase(tmp_path: Path) -> None:
+    (tmp_path / "strategy.md").write_text("MODEL TEXT", encoding="utf-8")
+    deps, facts = _with_facts(tmp_path, done={"task0b"})
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    deps.task0b_discovery.assert_not_called()
+    assert deps.requirements_phase.run.call_args.kwargs["coverage_strategy"] == "COMPUTED\nMODEL TEXT"
+    assert facts.calls[0] == ("facts", True)   # no module stripped: the tree is original
+
+
+def test_a_fresh_discovery_measures_the_facts_before_the_model_call(tmp_path: Path) -> None:
+    deps, facts = _with_facts(tmp_path, done=set())
+    order: list[str] = []
+    deps.task0b_discovery.side_effect = lambda *a, **k: order.append("discovery") or "FRESH"
+    real = facts.facts
+
+    def facts_first(project_dir: Path, clusters: object, *, may_measure: bool) -> tuple[str, ...]:
+        order.append("facts")
+        return real(project_dir, clusters, may_measure=may_measure)
+
+    facts.facts = facts_first  # type: ignore[method-assign]
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert order[:2] == ["facts", "discovery"]
+    assert deps.requirements_phase.run.call_args.kwargs["coverage_strategy"] == "COMPUTED\nFRESH"
+
+
+def test_a_stripped_tree_is_rendered_from_stored_facts_never_measured(tmp_path: Path) -> None:
+    (tmp_path / "strategy.md").write_text("MODEL TEXT", encoding="utf-8")
+    deps, facts = _with_facts(tmp_path, done={"task0b", "strip/mod"})
+    with pytest.raises(SystemExit):
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert ("facts", True) not in facts.calls
+    assert facts.calls[0] == ("facts", False)

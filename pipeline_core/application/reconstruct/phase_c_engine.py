@@ -56,6 +56,7 @@ from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import cluster_cfg_set
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
+from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
 )
@@ -192,6 +193,7 @@ class PhaseCFillEngine:
         crash_blamed: frozenset[FnLocator] | None = None,
         *,
         every_stub_key: frozenset[FnLocator],
+        crash_sites: CrashSites | None = None,
     ) -> list[Stub]:
         """Frontier fns that are already FILLED (not stubs) but have a failing
         attributed test → behavioral re-fill targets (`refill=True`).
@@ -215,7 +217,9 @@ class PhaseCFillEngine:
         still stamp or it is stranded (run ``125003-269e2338``). A locator
         in ``crash_blamed`` is a refill even when no test convicts it: a
         crashed binary reports no verdict, and without the stamp the
-        blamed conversion never reaches the write list.
+        blamed conversion never reaches the write list. The blame admits the
+        container a culprit frame resolved to (``crash_sites``), not every
+        homonym of the locator.
 
         A frontier key that is neither a stub nor an enumerated fn resolves to
         nothing and would drop out here without a trace — the failure mode that
@@ -224,6 +228,7 @@ class PhaseCFillEngine:
         if not (tdd_frontier_keys and tdd_frontier_tests):
             return []
         crashed = crash_blamed or frozenset()
+        at_site = crash_sites or CrashSites()
         _stub_keys = set(every_stub_key) | {s.key for s in stubs}
         _records = [Stub.from_dict(r)
                     for r in self.ws.enumerate_fns(target_src_dir) or []]
@@ -247,7 +252,9 @@ class PhaseCFillEngine:
                 if (loc := FnLocator(m.file, m.fn_name)) not in _stub_keys
                 and loc in tdd_frontier_keys
                 and refill_admission(tdd_frontier_tests.tests_for(loc),
-                                     crash_blamed=loc in crashed) is not None)
+                                     crash_blamed=at_site.blames(
+                                         crashed, m.file, m.fn_name,
+                                         m.container)) is not None)
             probe = ImplBlock(
                 file=file, container=container, members=members,
                 stub_members=stub_m, refill_members=dispatched)
@@ -269,7 +276,8 @@ class PhaseCFillEngine:
                 tests = set(convicting_tests_for_member(
                     tdd_frontier_tests, rec.file, rec.fn_name, rec.container,
                     containers_by_key.get(rec.key, [rec.container])))
-            if refill_admission(tests, crash_blamed=rec.key in crashed) is None:
+            if refill_admission(tests, crash_blamed=at_site.blames(
+                    crashed, rec.file, rec.fn_name, rec.container)) is None:
                 continue
             out.append(replace(rec, refill=True))
             _seen.add(ident)
@@ -304,6 +312,7 @@ class PhaseCFillEngine:
         *,
         crash_blamed: frozenset[FnLocator],
         is_cfg_dead: Callable[[FnLocator], bool],
+        crash_sites: CrashSites | None = None,
     ) -> tuple[list[Stub], list[Stub], list[Stub]]:
         """The per-fn route's `(stubs, re-fills, refused)`: the re-fills the
         collector admits, then ONE cfg-dead refusal over stubs and re-fills
@@ -313,7 +322,8 @@ class PhaseCFillEngine:
         refills = self._collect_refill_targets(
             target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
             crash_blamed=crash_blamed,
-            every_stub_key=self._every_stub_key(target_src_dir))
+            every_stub_key=self._every_stub_key(target_src_dir),
+            crash_sites=crash_sites)
         dead = [s for s in (*stubs, *refills) if is_cfg_dead(s.key)]
         if not dead:
             return stubs, refills, []
@@ -357,6 +367,10 @@ class PhaseCFillEngine:
         # (`crash_site.memory_blamed_locators`): the only units the file
         # plan's ownership MUST is about.
         crash_memory_blamed: frozenset[FnLocator] | None = None,
+        # The blame and evidence at the bodies the frames ran
+        # (`crash_site.crash_sites_of`): the refill admission and the
+        # routes' member grades narrow a locator blame to that container.
+        crash_sites: CrashSites | None = None,
         crash_blocked: dict[str, str] | None = None,
         culprits_of: Callable[[str], Collection[FnLocator]] | None = None,
         # Leftover tests whose binary did not complete. The fill schedule
@@ -367,6 +381,10 @@ class PhaseCFillEngine:
         # (eligible plus hop-pair members). Empty skips coverage-split
         # marking so a call that does not snapshot keeps today's order.
         attributed: Collection[FnLocator] = (),
+        # Measured coverage owners this sweep admitted or attached that are
+        # in the dispatched batch; the schedule check names any that no
+        # candidate run writes (`schedule_invariants`, `owner_unrouted`).
+        measured_owners: Collection[FnLocator] = (),
         # The body ledger's per-unit verdicts, built by the TDD driver at
         # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
         # schedule's route-row reading.
@@ -508,6 +526,7 @@ class PhaseCFillEngine:
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
                 crash_memory_blamed=crash_memory_blamed,
+                crash_sites=crash_sites,
                 crash_blocked=crash_blocked,
                 culprits_of=culprits_of,
                 behaviour_specs=behaviour_specs,
@@ -531,6 +550,7 @@ class PhaseCFillEngine:
             skip_end_pass_test=skip_end_pass_test,
             tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
             crash_evidence=crash_evidence, crash_blamed=crash_blamed,
+            crash_sites=crash_sites,
             crash_blocked=crash_blocked, culprits_of=culprits_of,
             dispatch_ranks=dispatch_ranks,
             behaviour_specs=behaviour_specs, cfg_dead=_cfg_dead,
@@ -563,6 +583,7 @@ class PhaseCFillEngine:
                 unmeasurable_tests=unmeasurable_tests,
                 crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
                 attributed=frozenset(attributed),
+                measured_owners=frozenset(measured_owners),
                 unit_evidence=unit_evidence,
                 body_rows=body_rows,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
@@ -670,6 +691,7 @@ class PhaseCFillEngine:
         heal_file: Callable[[str], bool] | None = None,
         claim_refusal: Callable[..., str] | None = None,
         claim_release: Callable[[], None] | None = None,
+        crash_sites: CrashSites | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -722,6 +744,8 @@ class PhaseCFillEngine:
         # distinguish a frozen tree from mid-sweep splicing.
         _fills_landed_total = 0
         _last_payoff = None
+        # Every unit the claim gate refused in any pass, by its last reason.
+        _unclaimed_all: dict[str, str] = {}
 
         for pass_n in range(1, max_passes + 1):
             self.tel.check_stop(f"per-fn pass {pass_n}")
@@ -765,7 +789,7 @@ class PhaseCFillEngine:
             stubs, _refill_recs, _dead_here = self._per_fn_targets(
                 target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
                 crash_blamed=crash_blamed or frozenset(),
-                is_cfg_dead=_is_cfg_dead)
+                is_cfg_dead=_is_cfg_dead, crash_sites=crash_sites)
             if _dead_here:
                 self.tel.log(
                     f"  [phase-c/per-fn] cluster {cluster_name}: refused "
@@ -807,11 +831,13 @@ class PhaseCFillEngine:
                 _crash_now = bool(native_crashes(
                     parse_binary_results(_out_probe)))
                 _blamed = crash_blamed or frozenset()
+                _at_site = crash_sites or CrashSites()
                 _fresh_recs = [
                     r for r in _refill_recs
                     if refill_admission(
                         tdd_frontier_tests.tests_for(r.key) & _still_open,
-                        crash_blamed=_crash_now and r.key in _blamed)
+                        crash_blamed=_crash_now and _at_site.blames(
+                            _blamed, r.file, r.fn_name, r.container))
                     is not None]
                 _stale = [r for r in _refill_recs if r not in _fresh_recs]
                 if _stale:
@@ -1081,6 +1107,9 @@ class PhaseCFillEngine:
                 else:
                     _worker(_work_queue)
 
+            for _why_u, _units_u in _unclaimed.items():
+                for _name_u in _units_u:
+                    _unclaimed_all[_name_u] = _why_u
             _why_text = {
                 "premise": "a keep of this fill moved the tests they were "
                            "planned on",
@@ -1524,6 +1553,9 @@ class PhaseCFillEngine:
             payoff=_last_payoff,
             fill_classes=_fill_hist,
             joint_sets=tuple(dict.fromkeys(_joint_sets)),
+            unclaimed_fns=tuple(sorted(
+                (n.rsplit("::", 1)[0], n.rsplit("::", 1)[-1], why)
+                for n, why in _unclaimed_all.items())),
         )
 
 
@@ -1560,7 +1592,7 @@ class _PerFnRoute:
         live, refills, dead = eng._per_fn_targets(
             kw["target_src_dir"], stubs, keys, kw["tdd_frontier_tests"],
             crash_blamed=kw["crash_blamed"] or frozenset(),
-            is_cfg_dead=kw["is_cfg_dead"])
+            is_cfg_dead=kw["is_cfg_dead"], crash_sites=kw.get("crash_sites"))
         stub_locs = frozenset(st.key for st in live)
         targets = stub_locs | frozenset(r.key for r in refills)
         if not targets and not dead:
@@ -1614,7 +1646,8 @@ class _PerFnRoute:
             _reverted=kw["reverted"], _answer_lost=kw["answer_lost"],
             landed_before=kw["landed_before"], claim=clock.may_claim,
             heal_file=kw["heal_file"],
-            claim_refusal=clock.refusal, claim_release=clock.release)
+            claim_refusal=clock.refusal, claim_release=clock.release,
+            crash_sites=kw.get("crash_sites"))
         res = self.result
         disp = frozenset(kw["dispatched"]) - before_disp
         rev = frozenset(kw["reverted"]) - before_rev
@@ -1624,4 +1657,7 @@ class _PerFnRoute:
             classes={k: v for k, v in (res.fill_classes or FillClassHistogram()
                                        ).as_dict().items() if v},
             empty=(res.attempts == 0 and not disp),
-            joint_sets=res.joint_sets)
+            joint_sets=res.joint_sets,
+            filtered={FnLocator(f, n): why
+                      for f, n, why in res.unclaimed_fns
+                      if FnLocator(f, n) not in disp})

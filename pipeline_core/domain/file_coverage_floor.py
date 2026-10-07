@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from pipeline_core.domain.fn_execution import FnTarget
@@ -94,6 +94,12 @@ class FileFloorReading:
     # Why an `accounted` file is not held: the spent functions, or `stalled`.
     reason: str = ""
     open_lines: tuple[int, ...] = ()
+    # The file's uncovered lines by why they are not targets
+    # (`UncoveredSplit`): proved, artifact, cfg, spent. Only `spent` stays in
+    # the denominator.
+    buckets: Mapping[str, int] = field(default_factory=dict)
+    # The unreached functions whose spent budget owns an uncovered line here.
+    spent_owners: tuple[str, ...] = ()
 
     @property
     def pct(self) -> float:
@@ -111,9 +117,18 @@ class FileFloorReading:
         return f"{base} {self.verdict}" + (f": {self.reason}" if self.reason else "")
 
 
+def bucket_counts(split: UncoveredSplit | None) -> dict[str, int]:
+    """`{proved, artifact, cfg, spent}` line counts of one file's split."""
+    if split is None:
+        return {}
+    return {"proved": len(split.proved), "artifact": len(split.artifact),
+            "cfg": len(split.cfg_incompatible | split.cfg_excluded), "spent": len(split.spent)}
+
+
 def read_file(rel: str, *, raw_covered: int, raw_coverable: int,
               uncovered: Iterable[int], not_actionable: Iterable[int],
-              spent: Sequence[FnTarget], stalled: bool, floor: float) -> FileFloorReading:
+              spent: Sequence[FnTarget], stalled: bool, floor: float,
+              buckets: Mapping[str, int] | None = None) -> FileFloorReading:
     """One file's verdict.
 
     Only UNCOVERED lines leave the denominator: a covered line inside a proved
@@ -125,9 +140,12 @@ def read_file(rel: str, *, raw_covered: int, raw_coverable: int,
     coverable = max(0, raw_coverable - len(excluded))
     covered = min(raw_covered, coverable)
 
+    spent_owners = tuple(sorted({t.label for t in spent
+                                 if any(t.first_line <= ln <= t.last_line for ln in unc)}))
+
     def reading(verdict: str, reason: str = "") -> FileFloorReading:
         return FileFloorReading(rel, covered, coverable, raw_covered, raw_coverable,
-                                verdict, reason, open_lines)
+                                verdict, reason, open_lines, dict(buckets or {}), spent_owners)
 
     if coverable == 0:
         return reading(FILE_VACUOUS)
@@ -165,6 +183,27 @@ class FileFloor:
         return frozenset(f.rel for f in self.files
                          if f.verdict == FILE_ACCOUNTED and f.reason.startswith("stalled"))
 
+    def buckets(self) -> dict[str, int]:
+        """Every file's uncovered lines summed by why they are not targets."""
+        out = {"proved": 0, "artifact": 0, "cfg": 0, "spent": 0}
+        for f in self.files:
+            for k, v in f.buckets.items():
+                out[k] = out.get(k, 0) + int(v)
+        return out
+
+    def spent_owners(self) -> tuple[str, ...]:
+        return tuple(sorted({o for f in self.files for o in f.spent_owners}))
+
+    def ceiling_split(self) -> str:
+        """The ceiling's uncovered lines by kind, and the reachable functions
+        among them: `proved 13, artifact 3, cfg 0; budget spent 9 line(s) in 3
+        reachable function(s)`."""
+        b = self.buckets()
+        owners = self.spent_owners()
+        return (f"proved unreachable {b['proved']}, LLVM artifact {b['artifact']}, "
+                f"cfg-filtered {b['cfg']}; attempt budget spent {b['spent']} line(s) in "
+                f"{len(owners)} reachable function(s)")
+
     def summary(self) -> str:
         if not self.below:
             return f"every file at or above the {self.floor:.0f}% floor on reachable lines"
@@ -176,7 +215,8 @@ class FileFloor:
         return json.dumps({"floor": self.floor, "files": [
             {"file": f.rel, "covered": f.covered, "coverable": f.coverable,
              "raw_covered": f.raw_covered, "raw_coverable": f.raw_coverable,
-             "verdict": f.verdict, "reason": f.reason, "open": list(f.open_lines)}
+             "verdict": f.verdict, "reason": f.reason, "open": list(f.open_lines),
+             "buckets": dict(f.buckets), "spent_owners": list(f.spent_owners)}
             for f in self.files]}, indent=2) + "\n"
 
     @classmethod
@@ -195,7 +235,9 @@ class FileFloor:
                 str(f.get("file", "")), int(f.get("covered", 0)), int(f.get("coverable", 0)),
                 int(f.get("raw_covered", 0)), int(f.get("raw_coverable", 0)),
                 str(f["verdict"]), str(f.get("reason", "")),
-                tuple(int(x) for x in f.get("open", ()))))
+                tuple(int(x) for x in f.get("open", ())),
+                {str(k): int(v) for k, v in (f.get("buckets") or {}).items()},
+                tuple(str(x) for x in f.get("spent_owners", ()))))
         return cls(float(raw.get("floor", 0.0)), tuple(files))
 
     def event_data(self) -> dict[str, Any]:
@@ -207,14 +249,17 @@ class FileFloor:
 
 def judge_files(floor: float, files: Iterable[tuple[str, int, int, Iterable[int]]], *,
                 not_actionable: Mapping[str, Iterable[int]],
-                spent: Sequence[FnTarget], stalled: Iterable[str]) -> FileFloor:
+                spent: Sequence[FnTarget], stalled: Iterable[str],
+                buckets: Mapping[str, Mapping[str, int]] | None = None) -> FileFloor:
     """The floor over `files` as `(rel, raw_covered, raw_coverable, uncovered)`.
     `spent` are the unreached functions with their spans; a file in `stalled`
-    was given up by the generation pass."""
+    was given up by the generation pass; `buckets` are each file's
+    `bucket_counts`."""
     stalled_set = frozenset(stalled)
     return FileFloor(floor, tuple(
         read_file(rel, raw_covered=cov, raw_coverable=cvbl, uncovered=unc,
                   not_actionable=not_actionable.get(rel, ()),
                   spent=[t for t in spent if t.site.file == rel],
-                  stalled=rel in stalled_set, floor=floor)
+                  stalled=rel in stalled_set, floor=floor,
+                  buckets=(buckets or {}).get(rel))
         for rel, cov, cvbl, unc in sorted(files, key=lambda f: f[0])))

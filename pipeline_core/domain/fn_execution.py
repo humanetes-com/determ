@@ -373,6 +373,11 @@ class PendingFn:
     # exactly this site; evidence the next pass is asked to test, never a
     # reason to stop on its own.
     verdict: str = ""
+    # The `tests/` files of committed blocks aimed at this function. Kept on
+    # the record so a resumed process can still say "those files ran and it
+    # has 0 executions" (`test_evidence.still_unexecuted`); in-process
+    # history alone lost it at every relaunch.
+    committed_in: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,6 +406,10 @@ class ProvenFn:
 
     site: FnSite
     proof: str
+    # The site is compiled only in THIS cluster's world. A proof is per world
+    # (a cfg can add a caller), so another world reads a gated proof as
+    # nothing; an ungated one is the same body the other world compiles.
+    cluster_gated: bool = False
 
 
 # How a stub reads against augmentation's record, for the gates downstream.
@@ -528,7 +537,8 @@ class FnCoverageRecord:
                  "last_line": p.target.last_line,
                  "cluster_gated": p.target.cluster_gated,
                  "attempts": list(p.attempts), "outcomes": list(p.outcomes),
-                 "verdict": p.verdict}
+                 "verdict": p.verdict,
+                 **({"committed_in": list(p.committed_in)} if p.committed_in else {})}
                 for p in self.pending],
             "unreached": [
                 {**_site_json(u.site), "cluster_gated": u.cluster_gated,
@@ -536,7 +546,8 @@ class FnCoverageRecord:
                  "verdict": u.verdict}
                 for u in self.unreached],
             "unmeasured": [_site_json(s) for s in self.unmeasured],
-            "by_construction": [{**_site_json(p.site), "proof": p.proof}
+            "by_construction": [{**_site_json(p.site), "proof": p.proof,
+                                 "cluster_gated": p.cluster_gated}
                                 for p in self.by_construction],
         }, indent=2) + "\n"
 
@@ -561,18 +572,20 @@ class FnCoverageRecord:
                                    int(p.get("last_line", 0)),
                                    bool(p.get("cluster_gated", False))),
                           tuple(int(a) for a in p.get("attempts", [])),
-                          tuple(str(o) for o in p.get("outcomes", [])),
-                          str(p.get("verdict", "")))
+                          tuple(_LEGACY_OUTCOMES.get(str(o), str(o)) for o in p.get("outcomes", [])),
+                          str(p.get("verdict", "")),
+                          tuple(str(f) for f in p.get("committed_in", []) or []))
                 for p in raw.get("unexecuted", [])),
             unreached=tuple(
                 UnreachedFn(_site_of(u), tuple(int(a) for a in u.get("attempts", [])),
                             bool(u.get("cluster_gated", False)),
-                            tuple(str(o) for o in u.get("outcomes", [])),
+                            tuple(_LEGACY_OUTCOMES.get(str(o), str(o)) for o in u.get("outcomes", [])),
                             str(u.get("verdict", "")))
                 for u in raw.get("unreached", [])),
             unmeasured=tuple(_site_of(s) for s in raw.get("unmeasured", [])),
             by_construction=tuple(
-                ProvenFn(_site_of(p), str(p.get("proof", "")))
+                ProvenFn(_site_of(p), str(p.get("proof", "")),
+                         bool(p.get("cluster_gated", False)))
                 for p in raw.get("by_construction", []) if isinstance(p, dict)),
         )
 
@@ -583,8 +596,14 @@ def unmeasured_record(reason: str) -> FnCoverageRecord:
 
 def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
                    *, attempt_budget: int,
-                   inherited: Mapping[FnSite, int] | None = None) -> FnCoverageRecord:
+                   inherited: Mapping[FnSite, int] | None = None,
+                   committed: Mapping[str, Sequence[str]] | None = None,
+                   ) -> FnCoverageRecord:
     """Fold a new reading into the record.
+
+    ``committed`` is site label -> the `tests/` files committed blocks aimed
+    at that function this process; a still-unexecuted function keeps the
+    union of what the record held and these (`PendingFn.committed_in`).
 
     A count above 0 makes a function executed, whatever it was before — an
     unreached function a later block happened to reach is executed. A
@@ -607,6 +626,7 @@ def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
     pending: list[PendingFn] = []
     unreached: list[UnreachedFn] = []
     budget = max(1, attempt_budget)
+    _gated_proved = {t.site: t.cluster_gated for t in reading.proved_targets}
     for target in reading.unexecuted:
         before = spent.get(target.site)
         attempts = before.attempts if before is not None else ()
@@ -618,7 +638,10 @@ def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
             unreached.append(UnreachedFn(target.site, attempts, target.cluster_gated,
                                          outcomes, verdict))
         else:
-            pending.append(PendingFn(target, attempts, outcomes, verdict))
+            files = tuple(dict.fromkeys(
+                (*(before.committed_in if isinstance(before, PendingFn) else ()),
+                 *((committed or {}).get(target.label, ())))))
+            pending.append(PendingFn(target, attempts, outcomes, verdict, files))
     return FnCoverageRecord(
         measured=True,
         candidates=reading.candidates,
@@ -626,25 +649,72 @@ def advance_record(prior: FnCoverageRecord | None, reading: FunctionExecution,
         pending=tuple(pending),
         unreached=tuple(unreached),
         unmeasured=reading.unmeasured,
-        by_construction=tuple(ProvenFn(site, why)
-                              for site, why in reading.by_construction),
+        by_construction=tuple(
+            ProvenFn(site, why, _gated_proved.get(site, False))
+            for site, why in reading.by_construction),
     )
 
 
+# A committed block was aimed at the function. It says nothing about whether
+# the function executed: the next measurement's count does (`was "ran"`,
+# which read as if it did; stored records with the old word read as this).
+COMMITTED = "committed"
+_LEGACY_OUTCOMES = {"ran": COMMITTED}
+
+
 def aimed_fn_outcomes(targets: Iterable[FnTarget], aimed_lines: Iterable[int],
-                      ran_lines: Iterable[int], otherwise: str) -> dict[FnSite, str]:
+                      ran_lines: Iterable[int], otherwise: str, *,
+                      blocks: Iterable[tuple[frozenset[int], str]] = (),
+                      ) -> dict[FnSite, str]:
     """Per target a prompt carried, what became of the block written for it:
-    `ran` when a committed block's lines cover the function, else `otherwise`
-    (why the block did not reach it). A target no aimed line falls in was not
-    in a prompt that got a block back and is absent."""
+    `committed` when a committed block's lines cover the function, else the
+    status of the last block aimed at it (``blocks``: the lines each block
+    was aimed at and its `block_failure` label), else `otherwise`. A target
+    no aimed line falls in was not in a prompt that got a block back and is
+    absent."""
     aimed = sorted(set(aimed_lines))
     ran = sorted(set(ran_lines))
+    block_list = list(blocks)
     out: dict[FnSite, str] = {}
     for t in targets:
-        if any(t.first_line <= ln <= t.last_line for ln in aimed):
-            out[t.site] = ("ran" if any(t.first_line <= ln <= t.last_line for ln in ran)
-                           else otherwise)
+        if not any(t.first_line <= ln <= t.last_line for ln in aimed):
+            continue
+        if any(t.first_line <= ln <= t.last_line for ln in ran):
+            out[t.site] = COMMITTED
+            continue
+        why = otherwise
+        for lines, status in block_list:
+            if status != COMMITTED and any(
+                    t.first_line <= ln <= t.last_line for ln in lines):
+                why = status
+        out[t.site] = why
     return out
+
+
+#: A block's fix loop ended on its own tests failing (it compiled).
+TESTS_FAILED = "tests_failed"
+#: A block's fix loop ended on a contract refusal.
+CONTRACT = "contract"
+#: A block had no cfg world it could run in.
+NO_WORLD = "no_world"
+#: A block's fix loop ended on a compile error.
+COMPILE_FAILED = "compile_failed"
+
+
+def block_failure(*, runtime: bool, contract: bool,
+                  sigs: frozenset[str]) -> str:
+    """The outcome label of a block the gen-tests fix loop did not commit,
+    from the gate that refused it last. Before this every uncommitted block
+    read `compile_failed`, so a reading of "the compile loop is the defect"
+    blamed the compile loop for blocks that compiled and failed their own
+    tests, broke the contract or had no world (313's first gap)."""
+    if "no_world" in sigs:
+        return NO_WORLD
+    if contract:
+        return CONTRACT
+    if runtime:
+        return TESTS_FAILED
+    return COMPILE_FAILED
 
 
 def unambiguous_verdicts(targets: Iterable[FnTarget],
@@ -665,35 +735,27 @@ def unambiguous_verdicts(targets: Iterable[FnTarget],
     return out
 
 
-def withhold_pending(names: Iterable[str],
-                     pending: Iterable[FnTarget]) -> tuple[list[str], list[str]]:
-    """Split the names a retrospective classified unreachable into those a
-    pragma may act on and those it may not.
-
-    A function still pending in the function-execution record has not had its
-    attempt budget spent: the classification is the model's hypothesis, and
-    the record owns the decision with evidence (attempts aimed at the function
-    that executed nothing). A pragma written on the hypothesis hides the
-    function's lines and keeps it counted unexecuted, so the two readings
-    disagree for the rest of the run. Matching is by bare name — the
-    retrospective names functions that way — so a name any pending target
-    carries is withheld."""
-    held = {t.site.fn_name for t in pending}
-    kept: list[str] = []
-    withheld: list[str] = []
-    for n in names:
-        (withheld if n.rsplit("::", 1)[-1] in held else kept).append(n)
-    return kept, withheld
-
-
-def inherited_attempts(others: Iterable[FnCoverageRecord]) -> dict[FnSite, int]:
+def inherited_attempts(others: Iterable[FnCoverageRecord], *,
+                       budget: int = 0) -> dict[FnSite, int]:
     """The attempts other clusters spent per site, for `advance_record`.
     Only a shared body counts there: an entry another cluster owns
-    (`cluster_gated`) is code this world does not compile."""
+    (`cluster_gated`) is code this world does not compile.
+
+    A site another world PROVED no test can execute counts as ``budget``
+    attempts spent there. It is not copied as a proof — a cfg of this world
+    can add a caller — so it passes through `advance_record`'s rule: this
+    world still spends one attempt of its own before the site is unreached.
+    Before this, a proof stored with zero attempts gave the other world
+    nothing, and a world whose own reachability read was unavailable paid
+    the whole budget on a body the first world had settled."""
     out: dict[FnSite, int] = {}
     for rec in others:
         if not rec.measured:
             continue
+        if budget > 0:
+            for proved in rec.by_construction:
+                if not proved.cluster_gated:
+                    out[proved.site] = max(out.get(proved.site, 0), budget)
         for p in rec.pending:
             if not p.target.cluster_gated:
                 out[p.target.site] = out.get(p.target.site, 0) + len(p.attempts)
@@ -714,14 +776,14 @@ def note_attempt(record: FnCoverageRecord, sites: Iterable[FnSite],
     number as `.task0c_attempts.jsonl` records it; the number restarts at 1
     when the cluster loop re-enters augmentation for another module pass, so
     it is evidence to quote, never a key to de-duplicate on. `outcomes` is
-    what the block did, per site (`ran` when absent)."""
+    what the block did, per site (`committed` when absent)."""
     hit = {canon_site(s) for s in sites}
     if not hit:
         return record
     why = {canon_site(k): v for k, v in (outcomes or {}).items()}
     pending = tuple(
         replace(p, attempts=(*p.attempts, attempt),
-                outcomes=(*p.outcomes, why.get(p.target.site, "ran")))
+                outcomes=(*p.outcomes, why.get(p.target.site, COMMITTED)))
         if p.target.site in hit else p
         for p in record.pending)
     return replace(record, pending=pending)
