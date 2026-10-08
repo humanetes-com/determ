@@ -79,6 +79,7 @@ from pipeline_core.domain.body_ledger import (
     rebuy_hits,
     rows_for_units,
     standing_on_tree,
+    tests_creditable_to_locator,
 )
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites, FrontierAdmission
 from pipeline_core.domain.coverage_slice import (
@@ -6353,6 +6354,7 @@ def run_phase_c_tdd(
             _evidence: Callable[..., dict[tuple[str, str], str]] = (
                 _landing_evidence),
             _recs_prior: list[Any] | None = _recs_before,
+            _convicting: Mapping[Any, Any] = convicting,
         ) -> int:
             if (deps.ledger_append is None or deps.enumerate_fns is None
                     or _before is None):
@@ -6388,7 +6390,13 @@ def run_phase_c_tdd(
                 # have paid (a test only one kept unit of that report is
                 # attributed to), so the sweep credits a landing only with
                 # what it paid.
-                _attr_w = {u: _elig.get(u, ()) for u in kept_hint}
+                # A locator row is every body of that name. A test that
+                # convicts only some of those containers is not credited
+                # to the collapsed row.
+                _attr_w = {
+                    u: tests_creditable_to_locator(
+                        _elig.get(u, ()), _convicting, u.file, u.fn_name)
+                    for u in kept_hint}
                 rows_w = [replace(r, kept_green=kept_green_of(
                     kept_hint, FnLocator(r.key.file, r.key.fn_name), _attr_w))
                     for r in rows_w]

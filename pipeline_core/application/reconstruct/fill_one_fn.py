@@ -67,7 +67,7 @@ from pipeline_core.domain.coverage_slice import (
     unreached_by as coverage_unreached_by,
 )
 from pipeline_core.domain.crash_keep import SameCrashJudge
-from pipeline_core.domain.crash_site import blame_outside_unit
+from pipeline_core.domain.crash_site import CrashSites, blame_outside_unit
 from pipeline_core.domain.declined import declined_guidance
 from pipeline_core.domain.dispatch import sibling_blocked_u2_failures
 from pipeline_core.domain.fill_class import (
@@ -404,9 +404,12 @@ class FillOneFn:
         _last_declined: list[tuple[str, ...]] = [()]
         _last_own_panics: list[tuple[str, ...]] = [()]
         # A crash-implicated fn is never exhaustion-skipped: the localized
-        # faulting stack is evidence no prior attempt ever saw.
-        _crash_evidence = (ctx.crash_evidence or {}).get(
-            FnLocator(rel_file, fn_name), "")
+        # faulting stack is evidence no prior attempt ever saw. The text is
+        # this body's container, not the locator's merged string: two `fmt`
+        # bodies share `(file, fn_name)` and only the one a frame resolved
+        # to carries the crash.
+        _crash_evidence = (ctx.crash_sites or CrashSites()).evidence_for(
+            ctx.crash_evidence or {}, rel_file, fn_name, container)
         _unit_key = self.retros.retro_key(rel_file, fn_name, container)
         # Crash-blocked: a previous attempt was reverted for a crash-only
         # regression whose localized blame lies wholly OUTSIDE this unit.

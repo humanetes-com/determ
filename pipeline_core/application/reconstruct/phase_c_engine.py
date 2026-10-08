@@ -982,6 +982,7 @@ class PhaseCFillEngine:
                 behaviour_specs=behaviour_specs,
                 crash_evidence=crash_evidence,
                 crash_blamed=crash_blamed,
+                crash_sites=crash_sites,
                 crash_blocked=crash_blocked,
                 culprits_of=culprits_of,
                 still_stubbed=_pass_stub_keys,

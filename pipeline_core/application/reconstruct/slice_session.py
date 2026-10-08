@@ -60,8 +60,9 @@ from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
 from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
+    identity_name,
     ignored_inputs_feedback,
-    vouched_bodies,
+    vouched_for_keep,
 )
 from pipeline_core.domain.llm_output import extract_fn_bodies
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
@@ -699,25 +700,28 @@ def run_slice_session(
             # change set is not kept and the transcript says which inputs
             # were dropped.
             _ignoring = declined_by_ignored_inputs(
-                ((r.unit.fn_name, r.sig_text, r.body) for r in cs.routed),
-                vouched=vouched_bodies(
-                    {r.unit.fn_name: executing_tests(executed or {}, r.unit)
+                ((r.unit.fn_name, r.sig_text, r.body, r.unit.container)
+                 for r in cs.routed),
+                vouched=vouched_for_keep(
+                    {(r.unit.fn_name, r.unit.container): executing_tests(
+                        executed or {}, r.unit)
                      for r in cs.routed},
                     reading.newly_green))
             if _ignoring:
                 _restore(pre)
                 ports.log(
                     f"  [phase-c/declined] session {label}: turn {turns} — "
-                    + ", ".join(f"{n} ignores {', '.join(i)}"
+                    + ", ".join(f"{identity_name(n)} ignores {', '.join(i)}"
                                 for n, i in sorted(_ignoring.items()))
                     + " and no test turned green; not kept.")
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "declined",
                     "units": [site_payload(u) for u in sorted(cs.units)],
-                    "ignored": {n: list(i) for n, i in sorted(_ignoring.items())}})
+                    "ignored": {identity_name(n): list(i)
+                                for n, i in sorted(_ignoring.items())}})
                 pending = (
                     "RESULT: this change compiled and was not kept.\n"
-                    + "\n".join(ignored_inputs_feedback(n, i)
+                    + "\n".join(ignored_inputs_feedback(identity_name(n), i)
                                 for n, i in sorted(_ignoring.items()))
                     + "\n" + render_budget_turn(max_turns - turns))
                 continue

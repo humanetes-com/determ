@@ -13,6 +13,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.models import FillResult, FnLocator, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
 
@@ -106,6 +107,12 @@ class PerFnPassCtx:
     # localized": a keep that wrote a crash_blamed unit whose aimed tests
     # still crash is then refused, never silently kept.
     culprits_of: Callable[[str], Collection[Any]] | None = None
+    # Blame and evidence at the bodies the frames ran
+    # (`crash_site.CrashSites`). The prompt's crash text is
+    # `evidence_for` of this unit's container. None is the locator
+    # reading: a caller with no site map, and every test that builds a
+    # context without one.
+    crash_sites: CrashSites | None = None
 
 
 def fill_skip(rec: Stub, attempts: int) -> FillResult:

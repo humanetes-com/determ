@@ -46,7 +46,9 @@ from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain.assertion_position import TestKey, outcomes_of
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.attribution import container_key
+from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.oracle_ledger import bare_test_name
 
 GATE_VERSION = "bl1"
@@ -934,6 +936,43 @@ class WaveKept(frozenset[FnLocator]):
         obj = super().__new__(cls, units)
         obj.reports = tuple(reports)
         return obj
+
+
+def tests_creditable_to_locator(
+    tests: Collection[str],
+    convicting: Mapping[FnSite, Collection[str]],
+    file: str,
+    fn_name: str,
+) -> frozenset[str]:
+    """The tests of `tests` this locator's ledger row may be credited with.
+
+    The row is one unit for every body of `(file, fn_name)` — the ordered
+    tuple `rows_for_units` stores. When `convicting` names two or more
+    containers of that name, a test that convicts only some of them was
+    not paid by the unit as a whole, so it is left out of the row's
+    credit. A test the map does not split, and a name with fewer than
+    two containers, stay on the locator."""
+    bare = {bare_test_name(t) for t in tests}
+    want = norm_src_rel(file)
+    holders: dict[str, set[str]] = {}
+    for site, site_tests in convicting.items():
+        # A locator key has no container. It does not name a body, so it
+        # does not split the row — the same reading as an empty container.
+        container = getattr(site, "container", "")
+        if (getattr(site, "fn_name", None) != fn_name
+                or norm_src_rel(getattr(site, "file", "")) != want
+                or not container):
+            continue
+        holders.setdefault(container_key(container), set()).update(
+            bare_test_name(t) for t in site_tests)
+    if len(holders) < 2:
+        return frozenset(bare)
+    confined: set[str] = set()
+    for test in {t for ts in holders.values() for t in ts}:
+        who = [c for c, ts in holders.items() if test in ts]
+        if len(who) < len(holders):
+            confined.add(test)
+    return frozenset(t for t in bare if t not in confined)
 
 
 def credited_green(

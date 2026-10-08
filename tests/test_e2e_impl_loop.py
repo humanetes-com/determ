@@ -145,18 +145,48 @@ def test_impl_floor_stall_reverts_block(monkeypatch, tmp_path):
 
 
 def test_impl_repeated_error_signature_stops_after_two(monkeypatch, tmp_path):
-    # Retro-retry parity with the per-fn path: the repeated-signature exit
-    # still fires at 2 attempts per round; retro round 1 baselines the error
-    # count (always eligible), round 2 shows no strict improvement -> parked.
+    """A repeated error set is the block's outcome for this fill.
+
+    Two identical compile failures stop it. The retrospective is stored.
+    The loop is not re-entered, the maximal turn is not bought, and the
+    green check waiting after those two is never reached. The pre-fill
+    stubs stay."""
     ws = _setup(monkeypatch, tmp_path)
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(
         monkeypatch,
-        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+        check_diag=[(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (101, "error: x", [diag("src/lib.rs", code="E0308")]),
+                    (0, "", [])])
     res = _run(ws)
     assert res.impls_filled == 0 and res.impls_failed == 1
-    # 2 rounds x repeated-sig exit at 2, plus round 1's maximal turn.
-    assert res.attempts == 5
+    assert res.attempts == 2
+    assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
+    from pipeline_core.adapters.retros import load_retrospectives, retro_key
+    rec = load_retrospectives(ws)[retro_key("lib.rs", "*impl*", "impl Foo")]
+    assert rec["retrospective_count"] == 1
+    ev_path = Path(pipeline._EVENTS_LOG)
+    ev = ev_path.read_text(encoding="utf-8") if ev_path.exists() else ""
+    assert "phase_c.impl.retro_retry" not in ev
+    assert "phase_c.impl.fill.maximal" not in ev
+    assert "phase_c.impl.fill.salvaged" not in ev
+
+
+def test_impl_repeated_stop_keeps_no_compiling_image(monkeypatch, tmp_path):
+    """The same failing set on two attempts that compiled. Salvage is
+    holding that image, and the fill does not write it back: the pre-fill
+    stubs stay."""
+    from pipeline_core.domain.test_report import U2Verdict
+    ws = _setup(monkeypatch, tmp_path)
+    _install_model(monkeypatch, [RESPONSE_BOTH])
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    install_app_seams(
+        monkeypatch,
+        u2_test_gate=lambda *a, **k: U2Verdict.reject(
+            frozenset({"test_kind"}), "test kind ... FAILED"))
+    res = _run(ws)
+    assert res.impls_filled == 0 and res.impls_failed == 1
+    assert res.attempts == 2
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
@@ -435,14 +465,24 @@ def test_all_target_not_stub_refusals_count_as_complete(monkeypatch, tmp_path):
 # --- Maximal last-resort attempt (budgets off) --------------------------------
 
 
+def _two_reds_then_green():
+    """Two compile failures with different codes, then a clean check.
+
+    The codes differ, so the repeated-signature stop does not fire. With
+    PHASE_C_IMPL_MAX_STALLS=1 the second failure stalls the floor."""
+    return [(101, "error: x", [diag("src/lib.rs", code="E0308")]),
+            (101, "error: x", [diag("src/lib.rs", code="E0425")]),
+            (0, "", [])]
+
+
 def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
-    """Budgeted loop dies (identical-error stop), then the ONE maximal
-    attempt — whole file + tests + full error — fills the block."""
+    """The floor stalls on two different error codes, then the ONE maximal
+    attempt — whole file + tests + full error — fills the block. A repeated
+    error set does not buy this turn."""
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     _install_model(monkeypatch, [RESPONSE_BOTH])
-    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
-    install_scripted_cargo(
-        monkeypatch, check_diag=[red, red, (0, "", [])])
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res = _run(ws)
     text = (ws / "src" / "lib.rs").read_text()
     assert res.impls_filled == 1 and res.fns_filled == 2
@@ -455,25 +495,27 @@ def test_maximal_last_resort_rescues_exhausted_block(monkeypatch, tmp_path):
 
 def test_maximal_disabled_by_env(monkeypatch, tmp_path):
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
     # Cap retro rounds to 1 so no informed retry fires either — this test
     # pins ONLY that the maximal-last-resort path is env-disabled.
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "1")
     _install_model(monkeypatch, [RESPONSE_BOTH])
-    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
-    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res = _run(ws)
     assert res.impls_failed == 1        # green 3rd check never reached
+    assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
 
 
 def test_impl_retro_retry_recovers_on_second_round(monkeypatch, tmp_path):
-    # The value pin: round 1 exhausts (repeated sig), the retro's guidance
-    # feeds an immediate second round whose fill compiles clean -> filled.
+    # The value pin: round 1 exhausts on a stalled floor (two different
+    # codes, so this is not the repeated-signature stop), the retro's
+    # guidance feeds an immediate second round whose fill compiles clean.
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
     _install_model(monkeypatch, [RESPONSE_BOTH, RESPONSE_BOTH, RESPONSE_BOTH])
-    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
-    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res = _run(ws)
     assert res.impls_filled == 1 and res.impls_failed == 0
     assert res.attempts == 3            # 2 failed + 1 green post-retro
@@ -489,12 +531,14 @@ def test_noncompiling_block_hands_its_stubs_to_the_per_fn_route(
     # reverts the file on any error, so a block that never compiles has
     # nothing to keep however far its floor falls.
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
     monkeypatch.setenv("PHASE_C_IMPL_NONCOMPILING_ROUNDS_MAX", "1")
     _install_model(monkeypatch, [RESPONSE_BOTH])
+    # The codes alternate, so the repeated-signature stop does not fire and
+    # the cap is what ends the block.
     install_scripted_cargo(
-        monkeypatch,
-        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+        monkeypatch, check_diag=_alternating_compile_errors("E0308", "E0425"))
     res = _run(ws)
     assert res.impls_filled == 0 and res.impls_failed == 1
     assert (ws / "src" / "lib.rs").read_text() == IMPL_LIB
@@ -509,23 +553,35 @@ def test_noncompiling_block_hands_its_stubs_to_the_per_fn_route(
     monkeypatch.setenv("PHASE_C_IMPL_NONCOMPILING_ROUNDS_MAX", "99")
     _install_model(monkeypatch, [RESPONSE_BOTH])
     install_scripted_cargo(
-        monkeypatch,
-        check_diag=(101, "error: x", [diag("src/lib.rs", code="E0308")]))
+        monkeypatch, check_diag=_alternating_compile_errors("E0308", "E0425"))
     res2 = _run(ws2)
     assert res2.impls_filled == 0
     assert res2.attempts == 4, res2.attempts
 
 
+def _alternating_compile_errors(*codes: str):
+    """A cargo script whose error code alternates, so consecutive attempts
+    are not a repeated signature."""
+    n = {"i": 0}
+
+    def _check():
+        code = codes[n["i"] % len(codes)]
+        n["i"] += 1
+        return (101, "error: x", [diag("src/lib.rs", code=code)])
+
+    return _check
+
+
 def test_noncompiling_cap_does_not_fire_once_something_compiled(
         monkeypatch, tmp_path):
-    # The cap keys on "never once compiled", not on "failed". A block that has
-    # a compiling image in hand still has something salvage can keep, so the
-    # retro rounds stay available to improve on it.
+    # The cap keys on "never once compiled", not on "failed". Round 1 stalls
+    # on two different codes (not a repeated set) without a compiling image,
+    # and the retro round still runs and lands the block.
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
     _install_model(monkeypatch, [RESPONSE_BOTH, RESPONSE_BOTH, RESPONSE_BOTH])
-    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
-    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res = _run(ws)
     assert res.impls_filled == 1 and res.impls_failed == 0
 
@@ -2040,11 +2096,13 @@ def test_impl_round_whose_lesson_would_not_reach_the_prompt_does_not_re_enter(
     # The re-entry reads the same screen now: an improved floor whose
     # retrospective carries nothing the prompt will show buys no round.
     ws = _setup(monkeypatch, tmp_path)
+    monkeypatch.setenv("PHASE_C_IMPL_MAX_STALLS", "1")
     monkeypatch.setenv("PHASE_C_MAXIMAL_LAST_RESORT", "0")
     _retro_says(monkeypatch, "")
     _install_model(monkeypatch, [RESPONSE_BOTH])
-    red = (101, "error: x", [diag("src/lib.rs", code="E0308")])
-    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    # Different codes: the floor stalls and the repeated-signature stop
+    # stays quiet, so the screen is what decides the re-entry.
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res = _run(ws)
     assert res.impls_filled == 0
     assert res.attempts == 2          # round 1 only: nothing to re-enter on
@@ -2054,7 +2112,7 @@ def test_impl_round_whose_lesson_would_not_reach_the_prompt_does_not_re_enter(
     ws2 = _setup(monkeypatch, tmp_path / "b")
     _retro_says(monkeypatch, "Return the tag field; do not construct a Foo.")
     _install_model(monkeypatch, [RESPONSE_BOTH])
-    install_scripted_cargo(monkeypatch, check_diag=[red, red, (0, "", [])])
+    install_scripted_cargo(monkeypatch, check_diag=_two_reds_then_green())
     res2 = _run(ws2)
     assert res2.impls_filled == 1 and res2.attempts == 3
 

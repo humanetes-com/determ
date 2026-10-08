@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
 
+from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite, Frontier, SiteFrontier
 from pipeline_core.domain.rust_idents import _skip_generics, canon_token_text
 
@@ -195,6 +196,29 @@ class FailureFrontier:
 
     def tests_for(self, key: FnLocator) -> set[str]:
         return self.dispatch.get(key, set())
+
+    def tests_for_body(self, file: str, fn_name: str, container: str) -> set[str]:
+        """The tests attributed to this body.
+
+        The dispatch map keys `(file, fn_name)`, so it is the reading when
+        this name has one container or the convicting map does not split
+        the containers. When convicting names two or more containers of
+        this name, each body gets only the tests that convict that
+        container: a test of one body does not attribute to the other.
+        A container the map does not name gets nothing — the locator fact
+        does not stand for a body the sweep already told apart."""
+        loc = set(self.tests_for(FnLocator(file, fn_name)))
+        if not container:
+            return loc
+        want = norm_src_rel(file)
+        distinguished = {
+            container_key(site.container)
+            for site in self.convicting
+            if site.fn_name == fn_name and norm_src_rel(site.file) == want
+            and site.container}
+        if len(distinguished) < 2:
+            return loc
+        return set(self.convicting_for_site(FnSite(file, fn_name, container)))
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         """Union of every site with this file+name — file-first U2 still

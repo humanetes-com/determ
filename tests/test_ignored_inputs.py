@@ -88,6 +88,63 @@ def test_a_sibling_turning_green_in_one_file_reply_does_not_vouch_for_a_discard(
     assert turned_green(baseline, None) == frozenset()
 
 
+def test_two_bodies_of_one_name_are_vouched_by_their_own_container() -> None:
+    """Two `fmt` bodies in one keep. The sweep's convicting map names both
+    containers, and only the Debug body's test turned green. That body is
+    kept; the Display discard is declined. A bare-name vouch does not cover
+    either distinguished body. When the map does not split the containers,
+    the locator's tests stand for both, and one green test vouches both.
+    A keep of one container stays keyed by the bare name."""
+    from pipeline_core.domain.attribution import FailureFrontier
+    from pipeline_core.domain.ignored_inputs import (
+        body_identity,
+        is_declined,
+        vouched_for_keep,
+    )
+    from pipeline_core.domain.models import FnLocator, FnSite
+
+    sig = "fn fmt(&self, f: &mut Formatter) -> fmt::Result"
+    discard = "let _ = f;\nOk(())"
+    debug = "impl fmt::Debug for Error"
+    display = "impl fmt::Display for Error"
+    bodies = [("fmt", sig, discard, debug), ("fmt", sig, discard, display)]
+    loc = FnLocator("src/error.rs", "fmt")
+    split = FailureFrontier.build(
+        {loc: {"test_debug", "test_display"}},
+        {FnSite("src/error.rs", "fmt", debug): {"test_debug"},
+         FnSite("src/error.rs", "fmt", display): {"test_display"}},
+    )
+    attributed = {
+        ("fmt", debug): split.tests_for_body("src/error.rs", "fmt", debug),
+        ("fmt", display): split.tests_for_body("src/error.rs", "fmt", display),
+    }
+    assert attributed[("fmt", debug)] == {"test_debug"}
+    assert attributed[("fmt", display)] == {"test_display"}
+    vouched = vouched_for_keep(attributed, {"test_debug"})
+    declined = declined_by_ignored_inputs(bodies, vouched=vouched)
+    assert not is_declined("fmt", debug, declined)
+    assert is_declined("fmt", display, declined)
+    assert "fmt" not in declined
+    bare = declined_by_ignored_inputs(bodies, vouched={"fmt"})
+    assert set(bare) == {body_identity("fmt", debug),
+                         body_identity("fmt", display)}
+
+    whole = FailureFrontier.of_direct({loc: {"test_debug"}})
+    standing = {
+        ("fmt", c): whole.tests_for_body("src/error.rs", "fmt", c)
+        for c in (debug, display)}
+    assert standing[("fmt", debug)] == standing[("fmt", display)] == {"test_debug"}
+    assert declined_by_ignored_inputs(
+        bodies, vouched=vouched_for_keep(standing, {"test_debug"})) == {}
+
+    assert vouched_for_keep(
+        {("render", "impl Foo"): {"test_render"}}, {"test_render"}) == {"render"}
+    assert declined_by_ignored_inputs(
+        [("render", _RENDER_SIG, _body("render_discard_f200fbd6.txt"),
+          "impl Foo")],
+        vouched={"render"}) == {}
+
+
 def test_reads_are_reads() -> None:
     sig = "fn f(buf: &mut String, lhs: &dyn Debug) -> fmt::Result"
     assert ignored_inputs(sig, 'let _ = write!(buf, "{:?}", lhs);\nOk(())') == ()

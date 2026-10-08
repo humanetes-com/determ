@@ -1133,6 +1133,40 @@ def test_a_landing_is_credited_only_with_what_its_own_keep_turned_green() -> Non
     assert kept_green_of(unrecorded, u, {u: {"t_conv"}}) is None
 
 
+def test_a_test_of_one_container_is_not_credited_to_the_shared_locator() -> None:
+    """The ledger row is one unit for every body of `(file, fn_name)`.
+    When convicting names two containers, a test that convicts only one
+    of them is not credited to that collapsed row. A test in every
+    container, and a test the map does not split, stay. One container,
+    and an empty-container site, leave the locator's tests unchanged."""
+    from pipeline_core.domain.body_ledger import tests_creditable_to_locator
+    from pipeline_core.domain.models import FnSite
+
+    debug = FnSite("src/error.rs", "fmt", "impl fmt::Debug for Error")
+    display = FnSite("src/error.rs", "fmt", "impl fmt::Display for Error")
+    convicting = {debug: {"test_debug"}, display: {"test_display"}}
+    assert tests_creditable_to_locator(
+        {"test_debug", "test_display", "test_shared"},
+        convicting, "src/error.rs", "fmt") == frozenset({"test_shared"})
+    both = {debug: {"test_both", "test_debug"},
+            display: {"test_both", "test_display"}}
+    assert tests_creditable_to_locator(
+        {"test_both", "test_debug"}, both, "src/error.rs", "fmt") == (
+            frozenset({"test_both"}))
+    assert tests_creditable_to_locator(
+        {"test_debug"}, {debug: {"test_debug"}}, "src/error.rs", "fmt") == (
+            frozenset({"test_debug"}))
+    assert tests_creditable_to_locator(
+        {"test_debug"},
+        {FnSite("src/error.rs", "fmt", ""): {"test_debug"}},
+        "src/error.rs", "fmt") == frozenset({"test_debug"})
+    # A locator-keyed map names no container. The row's tests stay.
+    from pipeline_core.domain.models import FnLocator
+    assert tests_creditable_to_locator(
+        {"t2"}, {FnLocator("src/a.rs", "depth"): {"t2"}},
+        "src/a.rs", "depth") == frozenset({"t2"})
+
+
 def test_a_test_two_kept_units_share_is_credited_to_neither() -> None:
     """One file row keeps two units and its comparison
     turned `t` green. The row ran one cargo invocation for the spliced

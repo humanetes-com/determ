@@ -163,8 +163,10 @@ from pipeline_core.domain.fill_schedule import (
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
+    identity_name,
     ignored_inputs_feedback,
-    vouched_bodies,
+    is_declined,
+    vouched_for_keep,
 )
 from pipeline_core.domain.impl_routing import (
     containers_in_file,
@@ -2673,16 +2675,18 @@ def prepare_impl_fill(
                 if (rc == 0 and not _peel_refuse_keep
                         and (not _u2_reject or _bank is not None
                              or _crash_keep_file or _nonregr_keep_file)):
-                    _vouched_f = vouched_bodies(
-                        {b.fn_name: _frontier_tests.tests_for(
-                            FnLocator(file_rel, b.fn_name)) for b in _landed},
+                    _vouched_f = vouched_for_keep(
+                        {(b.fn_name, b.container): _frontier_tests.tests_for_body(
+                            file_rel, b.fn_name, b.container) for b in _landed},
                         turned_green(_baseline_test, _u2_file))
                     _ignoring_f = declined_by_ignored_inputs(
-                        ((b.fn_name, b.sig_text, b.body) for b in _landed),
+                        ((b.fn_name, b.sig_text, b.body, b.container)
+                         for b in _landed),
                         vouched=_vouched_f)
                     if _ignoring_f:
                         _keep_f = [b for b in _landed
-                                   if b.fn_name not in _ignoring_f]
+                                   if not is_declined(
+                                       b.fn_name, b.container, _ignoring_f)]
                         restore(_pre)
                         for b in _keep_f:
                             if not _splice_fn_with_where(
@@ -2695,13 +2699,16 @@ def prepare_impl_fill(
                                 break
                         _landed = _keep_f
                         spliced_now = len(_landed)
-                        _note_reverted(file_rel, tuple(sorted(_ignoring_f)))
+                        _note_reverted(file_rel, tuple(
+                            identity_name(n) for n in sorted(_ignoring_f)))
                         for _n, _ign in sorted(_ignoring_f.items()):
-                            _text_refused[_n] = ignored_inputs_feedback(_n, _ign)
+                            _shown = identity_name(_n)
+                            _text_refused[_n] = ignored_inputs_feedback(
+                                _shown, _ign)
                             _cls(FillOutcomeClass.DECLINED,
-                                 f"{file_rel}::{_n}", "file")
+                                 f"{file_rel}::{_shown}", "file")
                             _verdict_row(
-                                f"{file_rel}::{_n}", Disposition.REVERT,
+                                f"{file_rel}::{_shown}", Disposition.REVERT,
                                 "declined — ignores its input(s) "
                                 + ", ".join(_ign)
                                 + " and no attributed test was observed passing",
@@ -2713,15 +2720,17 @@ def prepare_impl_fill(
                              f"{len(_ignoring_f)} body(ies) ignore declared "
                              "input(s) with no attributed test observed "
                              "passing — not kept: "
-                             + ", ".join(f"{n} ({', '.join(i)})" for n, i
-                                         in sorted(_ignoring_f.items()))
+                             + ", ".join(
+                                 f"{identity_name(n)} ({', '.join(i)})"
+                                 for n, i in sorted(_ignoring_f.items()))
                              + (f"; {spliced_now} other body(ies) re-spliced"
                                 if spliced_now else ""))
                         _emit("phase_c.fill.declined", data={
                             "cluster": cluster_name, "unit": glabel,
                             "route": "file", "reason": "ignored_inputs",
-                            "names": sorted(_ignoring_f),
-                            "ignored": {n: list(i) for n, i
+                            "names": sorted(
+                                identity_name(n) for n in _ignoring_f),
+                            "ignored": {identity_name(n): list(i) for n, i
                                         in sorted(_ignoring_f.items())}})
                         if not _landed:
                             # Nothing of the reply stands: the same outcome
@@ -2732,7 +2741,8 @@ def prepare_impl_fill(
                             _file_kind = LastErrorKind.COMPILE
                             if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
                                 _revert_cls = None
-                                _retry_names = frozenset(_ignoring_f)
+                                _retry_names = frozenset(
+                                    identity_name(n) for n in _ignoring_f)
                                 _retry_note = (
                                     "No body from your last reply was kept. "
                                     "The bodies for "
@@ -3045,11 +3055,15 @@ def prepare_impl_fill(
         # stacks from a localized binary crash) — rendered into the prompt
         # and an override for the exhaustion skip: a localized crash is
         # evidence no prior attempt ever saw.
+        # This block's members, at this block's container. A same-named
+        # member of another impl shares the locator and does not share
+        # the text a frame resolved to this container.
+        _at_crash = crash_sites or CrashSites()
         _crash_txts = tuple(dict.fromkeys(
-            txt for loc, txt in (crash_evidence or {}).items()
-            if loc.file == block.file
-            and loc.fn_name in {m.fn_name for m in block.stub_members}
-            | {m.fn_name for m in block.refill_members}))
+            t for name in dict.fromkeys(
+                m.fn_name for m in (*block.stub_members, *block.refill_members))
+            if (t := _at_crash.evidence_for(
+                crash_evidence or {}, block.file, name, block.container))))
         _block_crash_evidence = "\n\n".join(_crash_txts)
         # Honor cross-iter exhaustion — if a prior retrospective marked
         # this block GENUINELY_HARD it's skipped. A crash-implicated block is
@@ -3737,9 +3751,9 @@ def prepare_impl_fill(
                              f"target_canon={target_canon!r}")
                 spliced_now = 0
                 _impl_spliced: list[str] = []
-                # (name, signature, body) of every body this attempt landed,
-                # for the keep's ignored-input decline.
-                _impl_landed: list[tuple[str, str, str]] = []
+                # (name, signature, body, container) of every body this
+                # attempt landed, for the keep's ignored-input decline.
+                _impl_landed: list[tuple[str, str, str, str]] = []
                 refusals: list[str] = []
                 # What each refusal that judges the reply's TEXT tells the
                 # next turn (`splice_feedback.reply_refusal_feedback`).
@@ -3789,7 +3803,7 @@ def prepare_impl_fill(
                         spliced_now += 1
                         _impl_spliced.append(fn_data["fn_name"])
                         _impl_landed.append((fn_data["fn_name"], _rb.sig_text,
-                                             str(fn_data["body"])))
+                                             str(fn_data["body"]), container))
                         if reason == "ok_xml_unescaped":
                             _log(f"  [phase-c/impl] {block_id}: "
                                  f"`{fn_data['fn_name']}` landed only after "
@@ -4040,10 +4054,10 @@ def prepare_impl_fill(
                 # (`domain/ignored_inputs`); without one the attempt is a
                 # decline and the next one is told which inputs it dropped.
                 _ignoring_i = (declined_by_ignored_inputs(
-                    _impl_landed, vouched=vouched_bodies(
-                        {_n: _frontier_tests.tests_for(
-                            FnLocator(block.file, _n))
-                         for _n, _sig, _body in _impl_landed},
+                    _impl_landed, vouched=vouched_for_keep(
+                        {(_n, _c): _frontier_tests.tests_for_body(
+                            block.file, _n, _c)
+                         for _n, _sig, _body, _c in _impl_landed},
                         turned_green(_baseline_test, _u2_impl)))
                     if rc == 0 and (not _u2_impl_reject
                                     or _bank_impl is not None or _crash_keep)
@@ -4053,22 +4067,23 @@ def prepare_impl_fill(
                     _note_reverted(block.file, _impl_spliced, collateral=True)
                     for _n in sorted(_ignoring_i):
                         _cls(FillOutcomeClass.DECLINED,
-                             f"{block.file}::{_n}", "impl")
+                             f"{block.file}::{identity_name(_n)}", "impl")
                     last_error_excerpt = "\n\n".join(
-                        ignored_inputs_feedback(_n, _ign)
+                        ignored_inputs_feedback(identity_name(_n), _ign)
                         for _n, _ign in sorted(_ignoring_i.items()))
                     last_error_kind = LastErrorKind.COMPILE
                     _log(f"  [phase-c/declined] impl {block_id}: "
                          f"{len(_ignoring_i)} body(ies) ignore declared "
                          "input(s) with no attributed test observed passing "
                          "— attempt reverted: "
-                         + ", ".join(f"{n} ({', '.join(i)})" for n, i
-                                     in sorted(_ignoring_i.items())))
+                         + ", ".join(
+                             f"{identity_name(n)} ({', '.join(i)})" for n, i
+                             in sorted(_ignoring_i.items())))
                     _emit("phase_c.fill.declined", data={
                         "cluster": cluster_name, "unit": block_id,
                         "route": "impl", "reason": "ignored_inputs",
-                        "names": sorted(_ignoring_i),
-                        "ignored": {n: list(i) for n, i
+                        "names": sorted(identity_name(n) for n in _ignoring_i),
+                        "ignored": {identity_name(n): list(i) for n, i
                                     in sorted(_ignoring_i.items())}})
                     _verdict_row(
                         block_id, Disposition.REVERT,
@@ -4347,7 +4362,15 @@ def prepare_impl_fill(
                  f"at {gauge.best} for {gauge.stalls} iter(s) "
                  f"codes={_codes or '—'} — stopping this block.")
 
+        # A repeated error set is the block's outcome for this fill. The
+        # retrospective may still be stored. The loop is not re-entered,
+        # the maximal turn is not bought, and salvage does not write a
+        # compiling image — the pre-fill bodies stay. The same rule as the
+        # per-fn path (`_on_fn_repeated`).
+        _repeated_stop: list[int] = []
+
         def _on_impl_repeated(attempt_n: int, gauge: FloorStall) -> None:
+            _repeated_stop.append(attempt_n)
             _codes = sorted(ecodes_in_text(last_error_excerpt))
             _log(f"  [phase-c/impl] {block_id}: identical errors "
                  f"after attempt {attempt_n} codes={_codes or '—'} — stopping.")
@@ -4452,6 +4475,7 @@ def prepare_impl_fill(
             # prompt; cost is one LLM call on an already-failed block.
             _loss = _last_loss[0] if _last_loss else None
             _maximal_on = (_retro_round == 1
+                           and not _repeated_stop
                            and os.getenv("PHASE_C_MAXIMAL_LAST_RESORT", "1") != "0")
             _sig_unchanged = attempt_invariant(_sig_history)
             if _maximal_on and not may_escalate_to_last_resort(
@@ -4786,6 +4810,13 @@ def prepare_impl_fill(
                     "retro_round": _retro_round,
                     "retired_by": _prior_verdict.retired_by,
                 })
+            if _repeated_stop:
+                if _retry_informed:
+                    _log(f"  [phase-c/impl] {block_id}: retro round "
+                         f"{_retro_round} stored; not re-entering — the fix "
+                         "loop stopped on a repeated error set, which ends "
+                         "the block for this fill.")
+                break
             if not (_retry_informed and _retro_round < _retro_rounds_max):
                 break
             if (salvage.best is None
@@ -4852,7 +4883,10 @@ def prepare_impl_fill(
                 model_calls=fix_attempt)
             return
         if members_filled_this_block == 0 and not block_already_complete:
-            _salvaged = salvage.best
+            # A repeated stop keeps nothing: the pre-fill bodies are the
+            # block's state for this fill, including when a compiling
+            # attempt is sitting in salvage.
+            _salvaged = None if _repeated_stop else salvage.best
             if _salvaged is not None:
                 with _splice_check_lock:
                     _sv_base = _test_regression_baseline(
@@ -5343,9 +5377,9 @@ def prepare_impl_fill(
                 # Bodies refused for their own TEXT (`reply_refusal_feedback`):
                 # a failed attempt the next turn repairs, not a lost answer.
                 _pair_text_refused: list[str] = []
-                # (unit, signature, body) of every body the pair landed, for
-                # the keep's ignored-input decline.
-                _pair_landed: list[tuple[str, str, str]] = []
+                # (unit, signature, body, container) of every body the pair
+                # landed, for the keep's ignored-input decline.
+                _pair_landed: list[tuple[str, str, str, str]] = []
                 for b, _htxt, _hwc in _half_ctx:
                     _routing = route_fn_bodies(
                         _pair_parsed, target=b.container, related=[],
@@ -5373,7 +5407,7 @@ def prepare_impl_fill(
                                 _fd["fn_name"])
                             _pair_landed.append((
                                 f"{b.file}::{_fd['fn_name']}", _rb.sig_text,
-                                str(_fd["body"])))
+                                str(_fd["body"]), _rb.container))
                         else:
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_fd['fn_name']}` failed: {_reason}")
@@ -5410,7 +5444,7 @@ def prepare_impl_fill(
                                 _em.fn_name)
                             _pair_landed.append((
                                 f"{_eb.file}::{_em.fn_name}", _em.sig_text,
-                                str(_efd["body"])))
+                                str(_efd["body"]), _eb.container))
                         else:
                             _log(f"  [phase-c/pair] {pair_id}: splice "
                                  f"`{_em.fn_name}` failed: {_reason}")
@@ -5630,16 +5664,21 @@ def prepare_impl_fill(
                 # bodies, with no test attributed to that body turned green
                 # by the write, is not kept; the pair record carries the
                 # reason to the next buy.
+                _pair_attr: dict[tuple[str, str], set[str]] = {}
+                for _u, _sig, _body, _c in _pair_landed:
+                    # The unit is `file::fn`. One split from the right: a
+                    # path has no `::`.
+                    _parts = _u.rsplit("::", 1)
+                    _pair_attr[(_u, _c)] = _frontier_tests.tests_for_body(
+                        _parts[0], _parts[-1], _c)
                 _ignoring_p = declined_by_ignored_inputs(
-                    _pair_landed, vouched=vouched_bodies(
-                        {_u: _frontier_tests.tests_for(
-                            FnLocator(*_u.rsplit("::", 1)))
-                         for _u, _sig, _body in _pair_landed},
-                        turned_green(_pair_baseline, _pair_u2)))
+                    _pair_landed, vouched=vouched_for_keep(
+                        _pair_attr, turned_green(_pair_baseline, _pair_u2)))
                 if _ignoring_p:
                     _revert_pair()
                     _pfeed = "\n\n".join(
-                        ignored_inputs_feedback(u.rsplit("::", 1)[-1], i)
+                        ignored_inputs_feedback(
+                            identity_name(u).rsplit("::", 1)[-1], i)
                         for u, i in sorted(_ignoring_p.items()))
                     with _counters_lock:
                         impls_failed += 1
@@ -6146,7 +6185,7 @@ def prepare_impl_fill(
                 file_chars=_sl.file_chars or SESSION_FILE_CHARS,
                 installable=_installable_sites,
                 crash_evidence=crash_evidence_for_units(
-                    crash_evidence or {}, _sl.units),
+                    crash_evidence or {}, _sl.units, crash_sites),
                 behaviour_must=_behaviour_must(*_records.values()))
             _pull_file.file = _sl.files[0]
 

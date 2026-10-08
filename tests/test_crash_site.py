@@ -1361,6 +1361,7 @@ def test_the_two_fmt_homonyms_do_not_share_evidence_or_a_refill_admission() -> N
     from pipeline_core.domain.crash_site import (
         blamed_locators,
         crash_evidence_by_locator,
+        crash_evidence_for_units,
         crash_sites_of,
     )
     from pipeline_core.domain.models import FnRecord, FnSite, ImplBlock
@@ -1380,8 +1381,22 @@ def test_the_two_fmt_homonyms_do_not_share_evidence_or_a_refill_admission() -> N
     assert sites.blames(blamed, "src/error.rs", "fmt", debug)
     assert not sites.blames(blamed, "src/error.rs", "fmt", display)
     evidence = crash_evidence_by_locator((site,))
+    # The per-fn and impl pastes call evidence_for for the container they
+    # are filling. The session paste calls crash_evidence_for_units with
+    # the same site map. A session whose only unit is the Display body
+    # carries no Debug crash text. Without the site map the locator join
+    # still hands that body the one shared string.
+    debug_site = FnSite("src/error.rs", "fmt", debug)
+    display_site = FnSite("src/error.rs", "fmt", display)
     assert sites.evidence_for(evidence, "src/error.rs", "fmt", debug)
     assert sites.evidence_for(evidence, "src/error.rs", "fmt", display) == ""
+    assert crash_evidence_for_units(evidence, [display_site])
+    assert crash_evidence_for_units(
+        evidence, [display_site], sites) == ""
+    assert crash_evidence_for_units(evidence, [debug_site], sites)
+    assert crash_evidence_for_units(
+        evidence, [display_site, debug_site], sites) == (
+            crash_evidence_for_units(evidence, [debug_site], sites))
     assert sites.evidences(evidence.keys(), "src/error.rs", "caller", "")
 
     def block(cont: str) -> ImplBlock:

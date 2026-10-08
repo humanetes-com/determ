@@ -35,10 +35,17 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Iterable, Mapping, Sequence, Set
 
+from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.oracle_ledger import bare_test_name
 
-__all__ = ["IgnoredInputs", "declined_by_ignored_inputs", "ignored_inputs",
-           "ignored_inputs_feedback", "input_names", "vouched_bodies"]
+__all__ = ["IgnoredInputs", "body_identity", "declined_by_ignored_inputs",
+           "identity_name", "ignored_inputs", "ignored_inputs_feedback",
+           "input_names", "is_declined", "vouched_bodies", "vouched_for_keep"]
+
+# Separates a body name from its container in a vouch identity. A name
+# with no container, and a name whose keep holds only one container, stays
+# the bare name the locator-keyed keep already compares.
+_BODY_SEP = "\x1f"
 
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _SELF_PARAMS = frozenset({"self"})
@@ -216,6 +223,34 @@ def ignored_inputs(sig: str, body: str) -> tuple[str, ...]:
 IgnoredInputs = dict[str, tuple[str, ...]]
 
 
+def body_identity(name: str, container: str = "") -> str:
+    """The keep's identity of one body. A container is part of it only when
+    the caller is distinguishing homonyms; an empty container is the name."""
+    key = container_key(container) if container else ""
+    return f"{name}{_BODY_SEP}{key}" if key else name
+
+
+def identity_name(identity: str) -> str:
+    """The function name of a :func:`body_identity`."""
+    return identity.split(_BODY_SEP, 1)[0]
+
+
+def _split_body(item: tuple[str, ...]) -> tuple[str, str, str, str]:
+    if len(item) >= 4:
+        return item[0], item[1], item[2], item[3]
+    return item[0], item[1], item[2], ""
+
+
+def _distinguished(names: Iterable[tuple[str, str]]) -> set[str]:
+    """Names this keep holds under two or more containers. Those are the
+    homonyms a bare name cannot vouch separately."""
+    got: dict[str, set[str]] = {}
+    for name, container in names:
+        if container:
+            got.setdefault(name, set()).add(container_key(container))
+    return {name for name, keys in got.items() if len(keys) >= 2}
+
+
 def vouched_bodies(
     attributed: Mapping[str, Collection[str]], turned_green: Collection[str],
 ) -> frozenset[str]:
@@ -229,22 +264,59 @@ def vouched_bodies(
         if any(bare_test_name(t) in green for t in tests))
 
 
+def vouched_for_keep(
+    attributed: Mapping[tuple[str, str], Collection[str]],
+    turned_green: Collection[str],
+) -> frozenset[str]:
+    """The bodies, of `attributed` (`(name, container)` -> the tests
+    attributed to that body), with at least one own test in `turned_green`.
+
+    A name the keep holds under one container is the bare name, which is
+    what :func:`vouched_bodies` returns. A name it holds under two or more
+    is :func:`body_identity` of each, so one body's green test does not
+    vouch the other body of that name."""
+    green = {bare_test_name(t) for t in turned_green}
+    split = _distinguished(attributed)
+    out: set[str] = set()
+    for (name, container), tests in attributed.items():
+        if not any(bare_test_name(t) in green for t in tests):
+            continue
+        out.add(body_identity(name, container) if name in split else name)
+    return frozenset(out)
+
+
+def is_declined(name: str, container: str,
+                declined: Mapping[str, object]) -> bool:
+    """True when `declined` (the dict :func:`declined_by_ignored_inputs`
+    returned) names this body. A distinguished homonym matches its
+    identity; every other body matches its name."""
+    if body_identity(name, container) in declined:
+        return True
+    return name in declined
+
+
 def declined_by_ignored_inputs(
-    bodies: Iterable[tuple[str, str, str]], *, vouched: Set[str],
+    bodies: Iterable[tuple[str, ...]], *, vouched: Set[str],
 ) -> IgnoredInputs:
-    """Of `(name, sig, body)` triples a keep would land, the ones that are a
-    decline: they ignore a declared input and are not in `vouched`, the
-    names whose own attributed tests this keep turned green
-    (:func:`vouched_bodies`). A vouched body declines nothing — the test,
-    not the text, says whether ignoring an input is right — and it vouches
-    for no other body of the same keep."""
+    """Of `(name, sig, body)` or `(name, sig, body, container)` tuples a
+    keep would land, the ones that are a decline: they ignore a declared
+    input and are not in `vouched`. `vouched` is the names
+    (:func:`vouched_bodies`) or the identities (:func:`vouched_for_keep`)
+    whose own attributed tests this keep turned green. A vouched body
+    declines nothing — the test, not the text, says whether ignoring an
+    input is right — and it vouches for no other body of the same keep.
+    Two bodies of one name under different containers are keyed apart, so
+    one's vouch is not the other's."""
+    parsed = [_split_body(b) for b in bodies]
+    split = _distinguished((name, container) for name, _, _, container in parsed)
     out: IgnoredInputs = {}
-    for name, sig, body in bodies:
-        if name in vouched:
+    for name, sig, body, container in parsed:
+        ident = body_identity(name, container) if name in split else name
+        if ident in vouched:
             continue
         ignored = ignored_inputs(sig, body)
         if ignored:
-            out[name] = ignored
+            out[ident] = ignored
     return out
 
 
