@@ -12,7 +12,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,6 +81,28 @@ class Task3Deps:
     # its oracle tally (`application/behaviour_agreement.py`). Counts only;
     # nothing it returns is read here. None takes no reading.
     measure_agreement: Callable[[Path, Any, int, int], object] | None = None
+    # (project_dir, cluster name) -> the red ledger t2a wrote at that
+    # cluster's end (`adapters/red_ledger_store`): printed beside a red
+    # cluster's verdict, so the FAIL names each red test and what held it.
+    # None prints nothing.
+    red_ledger: Callable[[Path, str], Mapping[str, Any]] | None = None
+
+
+def red_ledger_lines(stored: Mapping[str, Any], *, limit: int = 40) -> list[str]:
+    """The stored red ledger as task 3 prints it: the per-class count and
+    one line per red test, or one line saying t2a wrote none."""
+    entries = list(stored.get("entries") or [])
+    if not entries:
+        return ["red ledger: none written by t2a for this cluster"]
+    counts: dict[str, int] = {}
+    for e in entries:
+        counts[str(e.get("class"))] = counts.get(str(e.get("class")), 0) + 1
+    lines = [f"red ledger (t2a {stored.get('close_kind') or 'end'}): "
+             f"{len(entries)} red test(s): "
+             + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))]
+    lines.extend(f"  {e.get('class')}: {e.get('test')} — {e.get('why')}"
+                 for e in entries[:limit])
+    return lines
 
 
 def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
@@ -148,7 +170,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
         try:
             result = subprocess.run(
                 deps.parse_cmd(cluster_cmd),
-                cwd=project_dir, capture_output=True, text=True,
+                cwd=project_dir, capture_output=True, text=True, errors="replace",
                 timeout=deps.test_timeout, env=cluster_env,
             )
             rc = result.returncode
@@ -200,6 +222,9 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
                     "passes are absent here (not gated).")
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
+        if status != ClusterStatus.PASS and deps.red_ledger is not None:
+            for _line in red_ledger_lines(deps.red_ledger(project_dir, cluster.name)):
+                log(f"  [task3/{cluster.name}] {_line}")
         per_cluster_results.append({
             "cluster": cluster.name,
             "status": status,

@@ -18,6 +18,7 @@ import os
 import shlex
 import shutil
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from contextlib import suppress
@@ -1507,7 +1508,15 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         donor_clusters={c.name: c for c in clusters},
                     )
                 except Exception as _ce:
-                    self.tel.log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}")
+                    # The traceback is the only record of WHICH call raised:
+                    # run `39786-fd38e72f` (2026-10-09) kept the message alone
+                    # and the raising decode could not be named.
+                    _tb = traceback.format_exc()
+                    self.tel.log(f"  {tag} cluster crashed: {type(_ce).__name__}: {_ce}\n{_tb}")
+                    self.tel.emit("task2a.cluster_crashed", data={
+                        "cluster": cluster.name,
+                        "exception": f"{type(_ce).__name__}: {_ce}",
+                        "traceback": _tb})
                     res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}"}
                 if not res.get("ok"):
                     self.tel.log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
@@ -2483,7 +2492,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
         try:
             r = subprocess.run(
                 ["git", "-C", str(repo), "log", "--format=%H", "--", repo_rel],
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, errors="replace", timeout=30)
             if r.returncode != 0:
                 return []
             blobs: list[bytes] = []

@@ -512,7 +512,7 @@ def one_shot_fill(
                     tests_block += f"// {trel} :: {tn}\n{tsrc}\n\n"
             must = behaviour_must_instruction(
                 behaviour_specs,
-                units=(IdentityMustUnit(fn, container, sig_text),))
+                units=(IdentityMustUnit(fn, container, sig_text, rel),))
             prompt = build_behavior_fix_prompt(
                 thinking_directive=thinking_directive, file_rel=rel, fn_name=fn,
                 sig_text=sig_text, cur_body=cur_body, tests_block=tests_block,

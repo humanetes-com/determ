@@ -41,6 +41,7 @@ class FailureAnalysisStep:
         artifacts: Artifacts, coverage_docs: CoverageDocs, audit: FlowAudit,
         docs: DocsMetrics, telemetry: Telemetry, genesis_audit_interval: int,
         render_strategy: Callable[[RunContext, str], str],
+        lessons: Callable[[RunContext, int], int] | None = None,
     ) -> None:
         self._analyst = analyst
         self._journal = journal
@@ -55,6 +56,11 @@ class FailureAnalysisStep:
         # what this returns, so the computed part is rendered here, before
         # that iteration, from the facts stored for the original crate.
         self._render_strategy = render_strategy
+        # Task 4's per-test pass (`test_lessons.run_test_lessons`): a lesson
+        # per red test from what t2a tried for it, for the next t2a. Returns
+        # how many were admitted; None runs no such pass.
+        self._lessons = lessons
+        self.lessons_admitted = 0
 
     def run(
         self, ctx: RunContext, state: IterationState, outcome: StepOutcome, *,
@@ -70,6 +76,10 @@ class FailureAnalysisStep:
         t4_source_context = self._artifacts.collect_source_context(
             ctx.project_dir, ctx.module_manifest, ctx.existing_test_files)
         self._tel.set_current(ctx.project_dir, f"task4/{ctx.module_name} / genesis update (iter {it})")
+        if self._lessons is not None:
+            with phase_scope("t4", module=ctx.module_name, attempt=it,
+                             detail="per-test lessons"):
+                self.lessons_admitted += self._lessons(ctx, it)
         with phase_scope("t4", module=ctx.module_name, attempt=it):
             _t4_ok, current_pass = self._analyst.task4(
                 ctx.genesis_path, ctx.module_req_path, test_output, it, ctx.project_dir,

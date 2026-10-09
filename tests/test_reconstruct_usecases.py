@@ -410,3 +410,28 @@ def test_analysis_restores_the_best_tree_when_the_build_breaks(tmp_path: Path) -
                       StepOutcome(False, "build", "error[E0308]"),
                       total_iters=0, coverage_strategy="x")
     assert "restore_best" in fa.calls and "save_best" not in fa.calls
+
+
+def test_reconstructor_ends_red_when_the_refill_has_nothing_new(tmp_path: Path) -> None:
+    """The re-entry into t2a is gated on task 4 having admitted a lesson
+    since the last one: without one, the next t2a would send the prompts it
+    already sent. The module ends non-converged at the first refill point
+    instead of iterating to the plateau cap. Control: a refill that re-enters
+    (True) keeps iterating."""
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
+                                telemetry=fa, plateau_abort=8,
+                                stall_refill_iters=2,
+                                stall_refill=lambda pd, m: False)
+    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert not res.converged and "no new lesson" in res.out_of_reach
+    assert fa.events.count("module.iter") == 3, "baseline + 2 non-improving"
+    fa2 = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
+                      task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    coord2 = ModuleReconstructor(step=_step(fa2), analysis=_analysis(fa2),
+                                 telemetry=fa2, plateau_abort=8,
+                                 stall_refill_iters=2,
+                                 stall_refill=lambda pd, m: True)
+    coord2.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert fa2.events.count("module.iter") == 9, "runs to the plateau cap"

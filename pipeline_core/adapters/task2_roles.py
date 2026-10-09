@@ -161,7 +161,7 @@ class CargoBackendAdapter:
     def run_raw(self, cmd: list[str], cwd: Path, env: dict[str, str],
                 timeout: int) -> tuple[int, str, str]:
         try:
-            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+            r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace",
                                timeout=timeout, env=env)
             return r.returncode, r.stdout or "", r.stderr or ""
         except subprocess.TimeoutExpired as e:

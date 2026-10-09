@@ -40,7 +40,7 @@ class CargoBuildScriptReader:
         with contextlib.suppress(subprocess.TimeoutExpired, OSError):
             subprocess.run(
                 ["cargo", "check", "--quiet"],
-                cwd=project_dir, capture_output=True, text=True,
+                cwd=project_dir, capture_output=True, text=True, errors="replace",
                 timeout=_PROBE_TIMEOUT, env=env,
             )
 

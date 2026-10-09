@@ -192,7 +192,7 @@ def reattach_gen_tests(
                 _vchk = subprocess.run(
                     ["cargo", "check", "--tests"],
                     cwd=project_dir, capture_output=True,
-                    text=True, timeout=300, env=d.cargo_env(),
+                    text=True, errors="replace", timeout=300, env=d.cargo_env(),
                 )
             except Exception as _e:
                 d.log(f"  [reattach] validate cargo check failed: {_e}")

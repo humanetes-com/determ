@@ -107,7 +107,7 @@ class FixerAdapter:
         no_run_cmd = self.insert_no_run(test_command)
         try:
             nr = subprocess.run(no_run_cmd, shell=True, cwd=str(project_dir),
-                                capture_output=True, text=True, timeout=120)
+                                capture_output=True, text=True, errors="replace", timeout=120)
             if nr.returncode != 0:
                 self.log("  --no-run failed: build error causes zero tests.")
                 return "build", test_output + (

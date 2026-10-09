@@ -36,7 +36,7 @@ def git_default_branch(project_dir: Path) -> str:
     ]:
         try:
             out = subprocess.check_output(cmd, cwd=project_dir,
-                                          stderr=subprocess.DEVNULL, text=True).strip()
+                                          stderr=subprocess.DEVNULL, text=True, errors="replace").strip()
             return out.split("/")[-1]
         except Exception:
             pass
@@ -53,7 +53,7 @@ def git_file_hash(root: Path, filename: str) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--format=%h", "-1", filename],
-            cwd=root, capture_output=True, text=True, timeout=5,
+            cwd=root, capture_output=True, text=True, errors="replace", timeout=5,
         )
         h = result.stdout.strip()
         return h if h else "unknown"
@@ -79,7 +79,7 @@ def git_commit(deps: WorkspaceDeps, project_dir: Path, message: str, *, managed:
         deps.log(f"  [git] committed: {message}")
         try:
             _sha = subprocess.run(["git", "rev-parse", "--short=12", "HEAD"],
-                                  cwd=project_dir, capture_output=True, text=True,
+                                  cwd=project_dir, capture_output=True, text=True, errors="replace",
                                   timeout=5).stdout.strip()
         except Exception:
             _sha = ""
@@ -103,7 +103,7 @@ def git_checkpoint(deps: WorkspaceDeps, project_dir: Path, message: str, *,
     git_commit(deps, project_dir, message, managed=managed)
     try:
         dirty = subprocess.run(["git", "status", "--porcelain"], cwd=project_dir,
-                               check=True, capture_output=True, text=True).stdout.strip()
+                               check=True, capture_output=True, text=True, errors="replace").stdout.strip()
     except Exception as e:
         deps.log(f"  [git] status failed: {e}")
         return False
@@ -270,12 +270,12 @@ def setup_workspace(deps: WorkspaceDeps, repo: str, workspace_dir: Path,
     # Checkout or create pipeline branch
     current = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=dest, capture_output=True, text=True,
+        cwd=dest, capture_output=True, text=True, errors="replace",
     ).stdout.strip()
     if current != "pipeline":
         branches = subprocess.run(
             ["git", "branch", "--list", "pipeline"],
-            cwd=dest, capture_output=True, text=True,
+            cwd=dest, capture_output=True, text=True, errors="replace",
         ).stdout.strip()
         if branches:
             subprocess.run(["git", "checkout", "pipeline"],

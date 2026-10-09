@@ -63,7 +63,7 @@ def list_git_tags(project_dir: Path, pattern: str) -> list[str]:
     try:
         result = subprocess.run(
             ["git", "tag", "-l", pattern],
-            cwd=project_dir, capture_output=True, text=True, check=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace", check=True,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"git tag listing failed: {e}") from e
@@ -74,7 +74,7 @@ def _commit_of(project_dir: Path, ref: str) -> str:
     """The full commit sha a tag (lightweight or annotated) resolves to."""
     result = subprocess.run(
         ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
-        cwd=project_dir, capture_output=True, text=True, check=True,
+        cwd=project_dir, capture_output=True, text=True, errors="replace", check=True,
     )
     return result.stdout.strip()
 
@@ -179,7 +179,7 @@ class _WorkspaceRestore:
         try:
             out = subprocess.run(
                 ["git", "diff", "--name-status", tag],
-                cwd=project_dir, capture_output=True, text=True, check=True,
+                cwd=project_dir, capture_output=True, text=True, errors="replace", check=True,
             ).stdout
         except subprocess.CalledProcessError as e:
             self.log(f"  [{self.label}] could not describe the reset to {tag}: {e}")
@@ -315,7 +315,7 @@ class RestoreFromPreAugment(_WorkspaceRestore):
         phase read as done. Untracked-but-not-ignored files are exactly the
         ones a git-managed run should never have left behind, and they go."""
         out = subprocess.run(["git", "clean", "-fd"],
-                             cwd=project_dir, check=True, capture_output=True, text=True).stdout
+                             cwd=project_dir, check=True, capture_output=True, text=True, errors="replace").stdout
         for line in out.splitlines():
             if line.startswith("Removing "):
                 self.log(f"  Deleted {line[len('Removing '):]} (untracked)")

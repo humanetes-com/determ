@@ -595,7 +595,7 @@ def test_the_executor_logs_a_broken_schedule_loudly() -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     deps = SimpleNamespace(
         scheduled=True, crash_blamed=frozenset(inputs["crash_blamed"]),
-        measured_owners=frozenset(),
+        measured_owners=frozenset(), due=frozenset(),
         iteration=5, cluster="stable", log=log.append,
         emit=lambda name, data: events.append((name, data)))
     _check_schedule(recorded, inputs["hollow"], deps)  # type: ignore[arg-type]
@@ -714,3 +714,44 @@ def test_a_recorded_event_carries_its_admitted_owners() -> None:
             {FnLocator("src/ensure.rs", "render")})
     assert measured_owners_from_event({"inputs": {}}) == frozenset()
     assert measured_owners_from_event({}) == frozenset()
+
+
+def _due_of(seed: int, runs: list[Any]) -> frozenset[FnLocator]:
+    """Owed functions for one seed: a sample of what some candidate writes
+    (a function no candidate writes is the driver's to place in the batch,
+    and the checker names it whatever the schedule does)."""
+    written = sorted({u for r in runs for u in r.targets},
+                     key=lambda u: (u.file, u.fn_name))
+    rng = random.Random(seed * 7919 + 1)
+    return frozenset(rng.sample(written, min(len(written), rng.randint(0, 3))))
+
+
+def test_every_owed_function_some_candidate_writes_gets_an_opened_writer() -> None:
+    """Every generated seed: with `due`, no owed function a candidate writes
+    is left without an opened writer, whatever held, re-bought or capped its
+    writers. Control: the same seeds scheduled without `due` (the pre-cover
+    admission) starve owed functions on some seeds, so the property can
+    fail."""
+    broken: list[str] = []
+    starved_before = 0
+    for seed in SEEDS:
+        case = _case(seed)
+        due = _due_of(seed, case["runs"])
+        if not due:
+            continue
+        with_due = schedule(
+            case["runs"], case["rows"], oracle_fp=ORACLE, hollow=case["hollow"],
+            budget_minutes=case["budget"], crash_blamed=case["blamed"],
+            attributed=case["attributed"], max_per_kind=case["max_per_kind"],
+            unpaid_grace=case["unpaid_grace"], bodies_sha=lambda _t: "b",
+            due=due)
+        found = [v for v in violations(
+            decided_from_schedule(with_due), hollow_stubs=None, due=due)
+            if v.kind == "slice_unit_starved"]
+        broken.extend(f"seed {seed}: {v.render()}" for v in found)
+        starved_before += any(
+            v.kind == "slice_unit_starved" for v in violations(
+                decided_from_schedule(_schedule(case)), hollow_stubs=None,
+                due=due))
+    assert not broken, f"{len(broken)} violation(s):\n" + "\n".join(broken[:20])
+    assert starved_before > 0, "the generator never starves an owed function"

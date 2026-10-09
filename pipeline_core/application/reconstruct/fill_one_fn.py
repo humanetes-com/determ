@@ -97,9 +97,11 @@ from pipeline_core.domain.reasoning_cap import serving_units
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.refill_evidence import (
     asserted_output_literals_from_tests,
+    observed_stub_excerpts,
     pinned_observables_from_tests,
     render_test_excerpts,
     sweep_excerpts,
+    unit_notes_text,
 )
 from pipeline_core.domain.refine import (
     CompilingSalvage,
@@ -772,6 +774,9 @@ class FillOneFn:
                     ctx.tdd_frontier_tests,
                     read_source=reconstruction_file_reader(
                         ctx.target_src_dir, ctx.project_dir))))
+            _note = unit_notes_text((_unit_loc,), ctx.tdd_frontier_tests)
+            if _note:
+                error_excerpt = f"{error_excerpt}\n{_note}" if error_excerpt else _note
         attempts_log: list[str] = []
         first_failed_body = ""
         first_error_excerpt = ""
@@ -884,7 +889,14 @@ class FillOneFn:
                         behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
-                                fn_name, container, sig_text),))),
+                                fn_name, container, sig_text, rel_file),)),
+                        observed="\n".join(x for x in (
+                            observed_stub_excerpts(
+                                (_unit_loc,), ctx.tdd_frontier_tests,
+                                read_source=reconstruction_file_reader(
+                                    ctx.target_src_dir, ctx.project_dir)),
+                            unit_notes_text((_unit_loc,),
+                                            ctx.tdd_frontier_tests)) if x)),
                     fr_path=ctx.fr_path,
                     joint_output=_joint_on,
                 )
@@ -969,7 +981,7 @@ class FillOneFn:
                         behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
-                                fn_name, container, sig_text),))),
+                                fn_name, container, sig_text, rel_file),))),
                     # Open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.

@@ -10,6 +10,7 @@ state + the boundary providers derived from them. Later stages move the
 `_X_DEPS` use-case wiring and the `main` run-loop here."""
 from __future__ import annotations
 
+import contextlib
 import functools
 import json
 import os as _os
@@ -51,6 +52,12 @@ from pipeline_core.adapters.artifacts import (
 )
 from pipeline_core.adapters.asan_sweep import run_asan_sweep as _asan_run_sweep
 from pipeline_core.adapters.ask_client import AskClient
+from pipeline_core.adapters.ask_ledger_store import (
+    load_ask_ledger as _load_ask_ledger,
+)
+from pipeline_core.adapters.ask_ledger_store import (
+    save_ask_ledger as _save_ask_ledger,
+)
 from pipeline_core.adapters.augment_engine import (
     CargoAugmentEngine,
     StaticRustTestAugmentor,
@@ -238,6 +245,12 @@ from pipeline_core.adapters.reconstruct_roles import (
 from pipeline_core.adapters.recorded_entry import (
     recorded_entry_sets_for as _recorded_entry_sets_for,
 )
+from pipeline_core.adapters.red_ledger_store import (
+    load_red_ledger as _load_red_ledger,
+)
+from pipeline_core.adapters.red_ledger_store import (
+    save_red_ledger as _save_red_ledger,
+)
 from pipeline_core.adapters.repo_spec_docs import (
     make_repo_spec_section as _make_repo_spec_section,
 )
@@ -249,6 +262,9 @@ from pipeline_core.adapters.retros import (
 )
 from pipeline_core.adapters.retros import (
     is_fn_fully_exhausted as _retros_is_exhausted,
+)
+from pipeline_core.adapters.retros import (
+    last_compile_errors as _last_compile_errors,
 )
 from pipeline_core.adapters.retros import (
     load_retrospectives as _retros_load,
@@ -332,6 +348,12 @@ from pipeline_core.adapters.task2_roles import (
 from pipeline_core.adapters.telemetry import JsonlEventEmitter, LogTelemetry
 from pipeline_core.adapters.telemetry import (
     emit_per_file_test_overview as _emit_per_file_test_overview,
+)
+from pipeline_core.adapters.test_lessons_store import (
+    load_lessons as _load_lessons,
+)
+from pipeline_core.adapters.test_lessons_store import (
+    save_lessons as _save_lessons,
 )
 from pipeline_core.adapters.test_runner import CallableTestRunner
 from pipeline_core.adapters.test_worlds import test_passes_in_world
@@ -539,6 +561,7 @@ from pipeline_core.application.reconstruct.retrospective import (
 from pipeline_core.application.reconstruct.retrospective import (
     whole_tree_retrospective as _whole_tree_retro_impl,
 )
+from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.application.reconstruct.scheduling import (
     leaf_first_fn_order as _leaf_first_fn_order,
 )
@@ -559,6 +582,10 @@ from pipeline_core.application.reconstruct.splice import (
 )
 from pipeline_core.application.reconstruct.test_grouping import (
     group_tests as _group_tests_impl,
+)
+from pipeline_core.application.reconstruct.test_lessons import (
+    LessonPassDeps,
+    run_test_lessons,
 )
 from pipeline_core.application.reconstruct.test_locator import (
     find_tests_for_fn as _find_tests_for_fn,
@@ -2151,6 +2178,7 @@ def build_app(
         test_timeout=cfg.test_timeout,
         reference=_reference,
         cluster_env=cluster_cargo_env,
+        red_ledger=_load_red_ledger,
     )
 
     def _cluster_check_factory(project_dir: Path) -> Callable[[], tuple[bool, str]] | None:
@@ -2442,6 +2470,35 @@ def build_app(
         lock_deps=lock_deps, reattach_deps=reattach_deps,
         no_improvement_threshold=cfg.no_improvement_threshold,
     )
+    def _lesson_test_files(project_dir: Path, cluster: str) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for root in (project_dir / "tests", project_dir / "src"):
+            for f in sorted(root.rglob("*.rs")) if root.is_dir() else ():
+                with contextlib.suppress(OSError):
+                    out[str(f)] = f.read_text(encoding="utf-8", errors="replace")
+        return out
+
+    def _lesson_unit_bodies(project_dir: Path, cluster: str) -> dict[str, str]:
+        tree = project_dir / ".skeleton-filled" / cluster
+        if not tree.is_dir():
+            return {}
+        return {f"{r.file}::{r.fn_name}": r.body_text
+                for r in (enumerate_fns(tree) or [])}
+
+    _lessons_deps = LessonPassDeps(
+        ask=lambda prompt: ports.ask(prompt, model=settings.task_models.task4),
+        load_red_ledger=_load_red_ledger, load_lessons=_load_lessons,
+        save_lessons=_save_lessons, test_files=_lesson_test_files,
+        unit_bodies=_lesson_unit_bodies, log=ports.log,
+        emit=lambda ev, **k: telemetry.emit(ev, **k))
+    _lessons_since_refill = {"n": 0}
+
+    def _run_lessons(ctx: RunContext, it: int) -> int:
+        n = run_test_lessons(ctx.project_dir, [c.name for c in ctx.clusters],
+                             _lessons_deps, iteration=str(it))
+        _lessons_since_refill["n"] += n
+        return n
+
     failure_analysis = FailureAnalysisStep(
         analyst=analyst, journal=failure_journal, ratchet=BestTreeRatchet(),
         artifacts=workspace_artifacts, coverage_docs=coverage_docs,
@@ -2450,13 +2507,23 @@ def build_app(
         render_strategy=lambda ctx, text: construction_facts.rendered(
             ctx.project_dir, text,
             construction_facts.facts(ctx.project_dir, ctx.clusters, may_measure=False)),
+        lessons=_run_lessons,
     )
-    def _stall_refill(project_dir: Path, module: str) -> None:
+    def _stall_refill(project_dir: Path, module: str) -> bool:
         # Same keys restart_from.sh task2a clears — the manual escape hatch,
-        # now fired automatically on a stalled repair loop.
+        # now fired automatically on a stalled repair loop. Only when task 4
+        # admitted a lesson since the last re-entry: without one the next
+        # t2a would send the prompts it already sent.
+        if (helpers.settings_now().phase_c_driver is PhaseCDriver.TDD
+                and _lessons_since_refill["n"] <= 0):
+            # The TDD driver writes the red ledger the lessons are read
+            # from; the legacy driver writes none, so it keeps re-entering.
+            return False
+        _lessons_since_refill["n"] = 0
         for _key in (f"task2a/{module}", f"task2b/{module}", f"task2c/{module}"):
             mark_phase(project_dir, _key, "pending",
                        detail="auto-reset: stalled repair iterations")
+        return True
 
     module_reconstructor = ModuleReconstructor(
         step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
@@ -2888,6 +2955,17 @@ def build_app(
             route_ledger_rows=fill_roles.route_ledger.load,
             reference_measurement=_reference,
             augmentation_fn_record=augment_store.cluster_fn_record,
+            # The baked suite, for the tiers a red test owes; and the ask
+            # ledger, so a resumed process does not re-owe what the last one
+            # already asked.
+            behaviour_specs_for=lambda pd, cl: load_behaviour_suite(pd, cl).specs,
+            load_ask_ledger=_load_ask_ledger,
+            save_ask_ledger=_save_ask_ledger,
+            # The red ledger every cluster end writes; task 3 prints it and
+            # task 4's per-test pass reads it.
+            save_red_ledger=_save_red_ledger,
+            last_compile_errors=_last_compile_errors,
+            load_lessons=_load_lessons,
         ),
         impl_fill_deps=ImplFillDeps(
             build_dispatch_family_section=build_dispatch_family_section,

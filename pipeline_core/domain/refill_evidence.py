@@ -366,6 +366,69 @@ def sweep_excerpts(
     return tuple(out)
 
 
+#: The head of a still-stubbed function's OBSERVED section.
+OBSERVED_HEAD = (
+    "OBSERVED for `{fn}` (still a stub): failing tests that already run past "
+    "every stub and fail through it printed this; the body you write must "
+    "change what they observed:")
+
+
+def observed_stub_excerpts(
+    keys: Iterable[FnLocator], frontier: FailureFrontier | None, *,
+    read_source: Callable[[str], str | None] | None = None,
+    max_tests: int = 4,
+) -> str:
+    """For each still-stubbed function in `keys`, what its failing tests that
+    are NOT held in a stub printed on the sweep (`observed_tests_for`), or ""
+    when none did. A stub's first fill otherwise shows no test's words: the
+    re-fill sections read `refill_members` only (run `39786-fd38e72f`,
+    2026-10-09, fill 3: `test_large_alignment` ran past every stub, owed the
+    stubbed `src/fmt.rs::debug`, and its `called Option::unwrap() on a None
+    value` was in none of the prompts written for it)."""
+    if frontier is None:
+        return ""
+    lines: list[str] = []
+    for key in keys:
+        tests = sorted(frontier.observed_tests_for(key))[:max_tests]
+        excerpts = sweep_excerpts(tests, frontier, read_source=read_source)
+        if excerpts:
+            lines.append(OBSERVED_HEAD.format(fn=key.fn_name))
+            lines.extend(render_test_excerpts(excerpts))
+    return "\n".join(lines)
+
+
+#: The head of a unit note whose last body did not compile.
+COMPILE_NOTE_HEAD = ("LAST ANSWER for `{fn}` did not compile; the compiler "
+                     "said (do not repeat it):")
+
+
+def unit_notes_text(keys: Iterable[FnLocator],
+                    frontier: FailureFrontier | None, *,
+                    max_chars: int = 900) -> str:
+    """The frontier's per-unit notes for `keys` (`FailureFrontier.unit_notes`:
+    the compiler's words on a unit's last body that did not compile), or ""
+    when none. Printed beside the unit's test evidence on every route."""
+    if frontier is None or not frontier.unit_notes:
+        return ""
+    return "\n".join(note[:max_chars] for key in keys
+                     if (note := frontier.unit_notes.get(key, "")))
+
+
+def compile_note(fn_name: str, diagnostic: str, *, max_chars: int = 700) -> str:
+    """A unit note for a last body that did not compile."""
+    return "\n".join([COMPILE_NOTE_HEAD.format(fn=fn_name),
+                      *("  " + ln for ln in diagnostic[:max_chars].splitlines())])
+
+
+#: The head of a unit note carrying task 4's lessons.
+LESSON_NOTE_HEAD = ("LESSONS for `{fn}` from the analysis after the last fill "
+                    "(what earlier answers got wrong for these tests):")
+
+
+def lesson_note(fn_name: str, lessons: str) -> str:
+    return f"{LESSON_NOTE_HEAD.format(fn=fn_name)}\n{lessons}" if lessons else ""
+
+
 def render_test_excerpts(excerpts: Iterable[tuple[str, str]]) -> list[str]:
     """`  <test> said:` plus its words indented beneath — the lines the
     REFILL section prints per member, and the per-fn refill seed prints

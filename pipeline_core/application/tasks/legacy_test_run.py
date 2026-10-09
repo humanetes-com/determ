@@ -60,7 +60,7 @@ def run_legacy_single(
         try:
             result = subprocess.run(
                 deps.parse_cmd(test_command),
-                cwd=project_dir, capture_output=True, text=True,
+                cwd=project_dir, capture_output=True, text=True, errors="replace",
                 timeout=deps.test_timeout, env=env,
             )
         except subprocess.TimeoutExpired:

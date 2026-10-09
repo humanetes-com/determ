@@ -512,6 +512,10 @@ class BehaviourSpec:
     helper_keys: tuple[str, ...] = ()
     helpers: tuple[str, ...] = field(default=(), compare=False)
     rules: tuple[Rule, ...] = field(default=(), compare=False)
+    # The book features listing this example, attached by the suite like
+    # `rules` and never serialized: a function's reach (which features'
+    # examples run it) is read off this (`candidate_tiers.feature_reach`).
+    features: tuple[str, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,
@@ -1057,14 +1061,18 @@ class BehaviourSuite:
 def _resolve(
     specs: Sequence[BehaviourSpec], helpers: dict[str, str], features: Sequence[Feature],
 ) -> tuple[BehaviourSpec, ...]:
-    """`specs` with `helpers` (text of their helper keys) and `rules` (the
+    """`specs` with `helpers` (text of their helper keys), `rules` (the
     kept rules citing them — the book's word, so a suite without features
-    attaches none) attached. Idempotent."""
+    attaches none) and `features` (the features listing them) attached.
+    Idempotent."""
     by_example: dict[str, list[Rule]] = {}
+    feats_of: dict[str, list[str]] = {}
     for f in features:
         for r in f.rules:
             for eid in r.example_ids:
                 by_example.setdefault(eid, []).append(r)
+        for eid in f.example_ids:
+            feats_of.setdefault(eid, []).append(f.item)
     out: list[BehaviourSpec] = []
     for s in specs:
         # One text per key, so `helper_items` pairs each key with its own
@@ -1072,10 +1080,11 @@ def _resolve(
         texts = (tuple(helpers.get(k, "") for k in s.helper_keys)
                  if any(k in helpers for k in s.helper_keys) else s.helpers)
         rules = tuple(by_example.get(s.behaviour_id, ()))
-        if texts == s.helpers and rules == s.rules:
+        feats = tuple(dict.fromkeys(feats_of.get(s.behaviour_id, ())))
+        if texts == s.helpers and rules == s.rules and feats == s.features:
             out.append(s)
         else:
-            out.append(replace(s, helpers=texts, rules=rules))
+            out.append(replace(s, helpers=texts, rules=rules, features=feats))
     return tuple(out)
 
 

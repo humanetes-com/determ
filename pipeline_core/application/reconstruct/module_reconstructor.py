@@ -38,7 +38,7 @@ class ModuleReconstructor:
         self, *, step: ReconstructionStep, analysis: FailureAnalysisStep,
         telemetry: Telemetry, plateau_abort: int = 0,
         stall_refill_iters: int = 0,
-        stall_refill: Callable[[Path, str], None] | None = None,
+        stall_refill: Callable[[Path, str], bool | None] | None = None,
         out_of_reach: Callable[[RunContext, str], str] | None = None,
     ) -> None:
         self._step = step
@@ -128,7 +128,19 @@ class ModuleReconstructor:
                 self._tel.emit("module.stall_refill", module=ctx.module_name,
                                data={"iteration": state.iteration,
                                      "streak": state.no_improvement_streak})
-                self._stall_refill(ctx.project_dir, ctx.module_name)
+                if self._stall_refill(ctx.project_dir, ctx.module_name) is False:
+                    # Nothing new for the writer: t4 admitted no lesson since
+                    # the last re-entry, so another t2a would ask what it
+                    # already asked. The module ends here, red, with its red
+                    # ledger, instead of iterating to the plateau cap.
+                    why = ("no new lesson since the last t2a re-entry — "
+                           "another fill would send what it already sent")
+                    self._tel.log(f"\n  [stall-refill] {ctx.module_name}: {why}; "
+                                  "module is non-converged.")
+                    self._tel.emit("module.nonconverged", module=ctx.module_name,
+                                   data={"iteration": state.iteration,
+                                         "reason": "no_new_lesson"})
+                    return ModuleResult(total_iters, coverage_strategy, False, why)
 
             if self._plateau_abort and state.stuck(self._plateau_abort):
                 self._tel.log(

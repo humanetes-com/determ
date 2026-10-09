@@ -11,8 +11,9 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+import traceback
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -80,6 +81,26 @@ from pipeline_core.domain.body_ledger import (
     rows_for_units,
     standing_on_tree,
     tests_creditable_to_locator,
+)
+from pipeline_core.domain.candidate_tiers import (
+    DEFAULT_MISSES,
+    LADDER,
+    UNREAD,
+    AskLedger,
+    DueReading,
+    JointCandidate,
+    due_reading,
+    evidence_text,
+    feature_reach,
+    joint_candidates,
+    joint_note,
+    merge_slices,
+    miss_reasons,
+    render_failed,
+    share_batch,
+    slices_by_key,
+    tiers_event,
+    unit_key,
 )
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites, FrontierAdmission
 from pipeline_core.domain.coverage_slice import (
@@ -153,6 +174,7 @@ from pipeline_core.domain.evidence_premise import evidence_fingerprints
 from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
+    RouteKind,
     RouteLedgerRow,
     unit_evidence_from,
     unpaid_pair_fills,
@@ -223,11 +245,14 @@ from pipeline_core.domain.reasoning_cap import (
     summarize_followup_salvage,
     units_all_replies_capped,
 )
+from pipeline_core.domain.red_ledger import RunFacts, red_ledger, render_red_ledger
 from pipeline_core.domain.reference_floor import (
     ReferenceMeasurement,
     judge_cluster_binaries,
+    pairs_of,
     reference_floor_close_reason,
 )
+from pipeline_core.domain.refill_evidence import compile_note, lesson_note
 from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.refine import (
     Attempt,
@@ -551,6 +576,35 @@ class PhaseCTddDeps:
     # stubs it closes with (`close_stub_account`). None: the close says nothing
     # about them, as before.
     augmentation_fn_record: Callable[..., Any] | None = None
+    # `(project_dir, cluster) -> Sequence[BehaviourSpec]`: the baked suite's
+    # specs with their features attached. A function's reach (which book
+    # features' examples run it) orders a red test's slice into the tiers it
+    # owes (`domain/candidate_tiers`), and it is what turns the owed tiers
+    # and the `cluster_failed` exit on. A suite that loads empty still turns
+    # them on, with every slice one tier. None (a driver built without a
+    # baked suite, which is how the scripted driver tests build it) keeps the
+    # pre-tier dispatch: no owed functions, no exit on exhaustion.
+    behaviour_specs_for: Callable[..., Sequence[Any]] | None = None
+    # `(project_dir, cluster) -> AskLedger` and `(project_dir, cluster,
+    # AskLedger) -> None`: every (function, red test) fingerprint a fill
+    # asked, kept across processes (`adapters/ask_ledger_store`). None keeps
+    # the ledger in this process only.
+    load_ask_ledger: Callable[..., Any] | None = None
+    save_ask_ledger: Callable[..., None] | None = None
+    # `(project_dir, cluster, entries, *, run_id, close_kind) -> None`: the
+    # red ledger written at every cluster end (`domain/red_ledger`,
+    # `adapters/red_ledger_store`). None: logged and emitted only.
+    save_red_ledger: Callable[..., None] | None = None
+    # `(project_dir) -> {unit: compiler words}`: each unit's last body that
+    # did not compile (`adapters/retros.last_compile_errors`). An owed
+    # function whose last miss was a compile failure carries it into its
+    # next prompt on every route. None: no such note.
+    last_compile_errors: Callable[..., Mapping[FnLocator, str]] | None = None
+    # `(project_dir) -> LessonStore`: what task 4 wrote per red test after
+    # the last fill (`domain/test_lessons`). A new lesson re-owes the
+    # function it names for that test, and every prompt that writes the
+    # function prints it. None: no lessons.
+    load_lessons: Callable[..., Any] | None = None
 
 
 class SweepReading(NamedTuple):
@@ -1338,6 +1392,133 @@ def run_phase_c_tdd(
     # cost — see `domain/dispatch_batch.py` for the measurement and for why the
     # cursor is a set rather than an index. 0 disables batching (pre-cap
     # behaviour); a frontier already under the cap never notices it.
+    # What a red test owes (`domain/candidate_tiers`): its executed slice in
+    # tiers by reach (how many book features' examples run each function),
+    # asked once per fingerprint. Read once per cluster; the ask ledger is
+    # the one written back after every fill.
+    _reach: dict[str, frozenset[str]] = {}
+    _owed_on = deps.behaviour_specs_for is not None
+    if deps.behaviour_specs_for is not None:
+        with suppress(OSError, ValueError, TypeError, KeyError, AttributeError):
+            _reach = feature_reach(deps.behaviour_specs_for(project_dir, cluster.name))
+    _asks: AskLedger = AskLedger()
+    if deps.load_ask_ledger is not None:
+        with suppress(OSError, ValueError, TypeError, AttributeError):
+            _loaded_asks = deps.load_ask_ledger(project_dir, cluster.name)
+            if isinstance(_loaded_asks, AskLedger):
+                _asks = _loaded_asks
+    _due: DueReading = DueReading({})
+    # Fills an owed function may be offered and land nothing, per (test,
+    # fingerprint), before it counts as asked (`candidate_tiers`). 0: only a
+    # landing spends it, and a function no route writes holds the cluster
+    # open until the backstop.
+    _owed_misses = int(os.getenv("TDD_OWED_MISSES", str(DEFAULT_MISSES)))
+    _owed_cut: dict[FnLocator, int] = {}
+    # The rungs an owed function climbs before its test is spent: a unit
+    # route, then the slice session when sessions run (`candidate_tiers`).
+    _ladder: tuple[str, ...] = (
+        LADDER if os.getenv("SLICE_SESSION", "1") != "0" else LADDER[:1])
+    _joint_now: tuple[JointCandidate, ...] = ()
+    _lesson_store: Any = None
+    _withdrawn_told: set[str] = set()
+
+    def _this_fill_rows(iter_no: int | None = None) -> list[RouteLedgerRow]:
+        """This run's route-ledger rows for this cluster (one fill's when
+        `iter_no` is given): what each run targeted, kept, reverted, and
+        which tests it turned red or green."""
+        if deps.route_ledger_rows is None:
+            return []
+        try:
+            rows_ = deps.route_ledger_rows(project_dir.name, cluster.name)
+        except (OSError, ValueError, TypeError):
+            return []
+        return [r_ for r_ in rows_
+                if (not deps.run_id or r_.run_id == deps.run_id)
+                and (iter_no is None or r_.iteration == iter_no)]
+
+    def _withdrawn_now() -> frozenset[str]:
+        """Red tests (bare names) every failing copy of which the original
+        crate also fails or skips under this cluster's cfg
+        (`reference_floor`). They cannot be made green: withdrawn from the
+        owed reading and named once."""
+        if deps.reference_measurement is None:
+            return frozenset()
+        _refm_w = deps.reference_measurement(project_dir)
+        _v_w = judge_cluster_binaries(
+            _refm_w if isinstance(_refm_w, ReferenceMeasurement) else None,
+            cluster.name, parse_binary_results(output))
+        if _v_w is None:
+            return frozenset()
+        _failed_w = pairs_of(parse_binary_results(output))[1]
+        _excused = {bare_test_name(n_) for _l, n_ in
+                    _failed_w - _v_w.unexcused_failures}
+        _kept = {bare_test_name(n_) for _l, n_ in _v_w.unexcused_failures}
+        return frozenset(_excused - _kept)
+
+    def _owed_now(hold: StubHold,
+                  frontier_now: Mapping[FnLocator, Collection[str]],
+                  slices: Mapping[str, Collection[FnSite]],
+                  tree: str) -> DueReading:
+        """This sweep's owed tiers: the red tests (`cur_failed`) less those
+        the original fails too, each one's executed slice (the session
+        slicer's map, else what the frontier attributes to it, else the
+        crate function its first failure is inside), the sweep's own failure
+        text per test, the stub each test dies in, and the tree it was read
+        on."""
+        red = sorted({bare_test_name(t_) for t_ in cur_failed})
+        primary = {bare_test_name(t_): v_
+                   for t_, v_ in slices_by_key(slices).items()}
+        fallback: dict[str, set[str]] = {}
+        for u_, ts_ in frontier_now.items():
+            for t_ in ts_:
+                fallback.setdefault(bare_test_name(t_), set()).add(unit_key(u_))
+        site: dict[str, frozenset[str]] = {}
+        if deps.enumerate_fns is not None:
+            _first = stub_hold_of(
+                output,
+                make_fn_site_locator(
+                    SimpleNamespace(enumerate_fns=deps.enumerate_fns),
+                    target_src_dir),
+                is_stub=lambda _s: True)
+            site = {bare_test_name(t_): frozenset(unit_key(locator_of(x_))
+                                                  for x_ in ss_)
+                    for t_, ss_ in _first.by_test.items()}
+        evidence = {bare_test_name(t_): e_
+                    for t_, e_ in failure_evidence_by_test(output).items()}
+        held = {bare_test_name(t_): frozenset(unit_key(locator_of(x_))
+                                              for x_ in ss_)
+                for t_, ss_ in hold.by_test.items()}
+        withdrawn = _withdrawn_now()
+        nonlocal _joint_now
+        _oracle_now = _oracle_fp(iter_n)
+        _joint_now = joint_candidates(
+            [r_ for r_ in _this_fill_rows()
+             if not _oracle_now or r_.oracle_fp == _oracle_now], red)
+        if _joint_now:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                     f"{len(_joint_now)} reverted run(s) had turned red "
+                     "test(s) green; their units are owed again together: "
+                     + "; ".join(f"{c.label} (gained "
+                                 f"{', '.join(sorted(c.gained)[:4])})"
+                                 for c in _joint_now[:4]))
+        for t_ in sorted(withdrawn - _withdrawn_told):
+            deps.log(f"  {tag} [phase-c/tdd] withdrawn: {t_} fails on the "
+                     "ORIGINAL crate under this cluster's cfg; it cannot be "
+                     "made green and is out of the owed reading.")
+            deps.emit("phase_c.tdd.withdrawn", data={
+                "cluster": cluster.name, "iter": iter_n, "test": t_})
+        _withdrawn_told.update(withdrawn)
+        nonlocal _lesson_store
+        if deps.load_lessons is not None:
+            with suppress(OSError, ValueError, TypeError):
+                _lesson_store = deps.load_lessons(project_dir)
+        return due_reading(
+            red, slices=merge_slices(primary, fallback, red, site),
+            reach=_reach, evidence=evidence, held=held, ledger=_asks,
+            tree=tree, misses=_owed_misses, withdrawn=withdrawn,
+            joint=_joint_now, ladder=_ladder,
+            lessons=(_lesson_store.digests() if _lesson_store is not None
+                     else None))
     _dispatch_cap = int(os.getenv("PHASE_C_TDD_MAX_DISPATCH",
                                   str(DEFAULT_MAX_DISPATCH)))
     # Units this PASS has already handed to the engine. Cleared when a pass
@@ -2043,6 +2224,8 @@ def run_phase_c_tdd(
         str, frozenset[str], frozenset[tuple[str, str]],
         frozenset[tuple[str, str]], frozenset[str]], Any] | None = None
 
+    # The last sweep's capture; read at the exit (the red ledger's words).
+    output: str = ""
     while True:
         iter_n += 1
         # The coverage binding is NOT cleared here: it stands from its
@@ -2382,9 +2565,38 @@ def run_phase_c_tdd(
         # instead leaves the baseline pinned to the pre-fill tree, so the next
         # real breach reverts the good fill too and the loop re-fills it
         # forever at zero payoff.
+        def _held_of(output_: str, vanished_: Iterable[str],
+                     ) -> dict[str, frozenset[FnLocator]]:
+            """Per failing test (bare name), the still-stubbed functions its
+            first failure is inside — the reading the ledger needs to tell a
+            test that observed a landed body from one that died first in
+            another stub. Read off the tree as it stands at the grade."""
+            if deps.enumerate_fns is None:
+                return {}
+            try:
+                _keys_h = frozenset(deps.scan_unimplemented_for_cluster(
+                    target_src_dir, cluster).units)
+
+                def _is_stub_h(site_: FnSite,
+                               keys_: frozenset[FnLocator] = _keys_h) -> bool:
+                    return locator_of(site_) in keys_
+
+                _hold_h = stub_hold_of(
+                    output_,
+                    make_fn_site_locator(
+                        SimpleNamespace(enumerate_fns=deps.enumerate_fns),
+                        target_src_dir),
+                    is_stub=_is_stub_h,
+                    vanished=vanished_, test_files=_test_files)
+            except (OSError, ValueError, TypeError, AttributeError):
+                return {}
+            return {bare_test_name(t_): frozenset(locator_of(x_) for x_ in ss_)
+                    for t_, ss_ in _hold_h.by_test.items()}
+
         def _sweep_view_of(output_: str, failed_: Iterable[str],
                            vanished_: Iterable[str],
                            reconciled_: bool, *,
+                           held_: Mapping[str, frozenset[FnLocator]] | None = None,
                            _epoch: int = _destruction_epoch) -> SweepView:
             """The ledger's view of one sweep capture. `failed_` is the
             sweep's reconciled failing set (crash-vanished names included,
@@ -2398,7 +2610,8 @@ def run_phase_c_tdd(
                 # Where each failing test panicked: the one reading that can
                 # tell a body which got a test past an assertion from one that
                 # moved nothing, when both leave the verdict vector identical.
-                positions=assertion_positions(output_, _oracle_source))
+                positions=assertion_positions(output_, _oracle_source),
+                held=held_)
 
         def _grade_landing(row_: LedgerEntry, before_: SweepView,
                            after_: SweepView, *, _iter: int = iter_n,
@@ -2689,7 +2902,8 @@ def run_phase_c_tdd(
         # as failing; `of_sweep` takes them back out, so a test whose binary
         # aborted judges `unmeasured` rather than `lost`.
         _sweep_view = _sweep_view_of(output, _measure.failed, _oracle.vanished,
-                                     _rec.reconciled)
+                                     _rec.reconciled,
+                                     held_=_held_of(output, _oracle.vanished))
         if _ledger_rows and deps.ledger_append is not None:
             _judged: list[LedgerEntry] = [
                 _grade_landing(_row, _ledger_before or _sweep_view, _sweep_view)
@@ -5726,9 +5940,112 @@ def run_phase_c_tdd(
         # the chain-only cohort keeps its rank at the head of `ordered` but
         # walks the cursor, so a 63-unit inference is traversed across
         # batches instead of its first 12 being re-bought every sweep.
+        # WHAT THE RED TESTS OWE. A red test held in a stub owes the stub;
+        # otherwise its executed slice, in tiers by reach, and the first tier
+        # with a function not yet spent under the test's fingerprint (its
+        # failure text, moving only with the tree) is owed. Spent: a body
+        # landed under that fingerprint, or `TDD_OWED_MISSES` offers landed
+        # nothing.
+        # Owed functions go to the head of the batch, behind crash evidence,
+        # past the cursor, the flat exclusion and the exhausted set: each of
+        # those is right about one unit and none can see that, together, they
+        # kept a red test's wrong body out of every prompt (run
+        # `14141-9a904822`: `src/ensure.rs::render`, fills 3-8). When every
+        # red test is spent, nothing new can be asked: the cluster ends
+        # FAILED and names what is red, what holds it, what nothing could be
+        # attributed to and what the original fails too.
+        _asks = _asks.for_oracle(_oracle_fp(iter_n))
+        _due = DueReading({})
+        if _owed_on:
+            try:
+                _due = _owed_now(_stub_hold, eligible, _session_slices,
+                                 _tree_sha)
+            except (KeyError, ValueError, TypeError, AttributeError, OSError) as _owed_exc:
+                # A reading that cannot be taken owes nothing and ends
+                # nothing: the dispatch is today's for this sweep, loudly.
+                deps.log(f"  HEALTH ‼ OWED_READING iter {iter_n}: the owed "
+                         f"tiers could not be read ({_owed_exc!r}); this "
+                         "sweep dispatches without them and cannot end "
+                         "the cluster as failed.")
+        if _owed_on:
+            # The words of each test that owes something, as the frontier
+            # will carry them: `scripts/owed_prompt_words.py` checks the
+            # prompts the fill sends against these.
+            _words_now = {bare_test_name(t_): evidence_text(e_)[:240]
+                          for t_, e_ in failure_evidence_by_test(output).items()}
+            deps.emit("phase_c.tdd.owed", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "owed": sorted(f"{u.file}::{u.fn_name}" for u in _due.units),
+                "exhausted": _due.exhausted, "unread": sorted(_due.unread),
+                "unread_spent": sorted(_due.unread_spent),
+                "withdrawn": sorted(_due.withdrawn),
+                "tests": tiers_event(_due),
+                "words": {t_: _words_now[t_] for t_, r_ in
+                          sorted(_due.by_test.items())
+                          if r_.owed and t_ in _words_now}})
+        if _due.exhausted and not _crash_grades:
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: cluster_failed — every "
+                f"stub and tier of every one of the {len(_due.by_test)} red "
+                "test(s) has been asked under its current evidence (a body "
+                f"landed, or {_owed_misses} offers landed nothing); nothing "
+                "new can be asked. This cluster is NOT green:")
+            for _line in render_failed(_due):
+                deps.log(f"  {tag}   {_line}")
+            deps.emit("phase_c.tdd.cluster_failed", data={
+                "cluster": cluster.name, "iter": iter_n, "kind": "exhausted",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "tests": tiers_event(_due)})
+            deps.emit("phase_c.tdd.iter", data={
+                **_prov,
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": len(ordered), "kind": "cluster_failed",
+                "pass_count": pass_count, "fail_count": fail_count,
+            })
+            _close_kind = "cluster_failed"
+            break
+        if _due.units:
+            _due_units = _due.units
+            _known = dict(ordered)
+            _head_keys = [k for k, _ in ordered if k in _crash_grades]
+            _rest = [(k, ts) for k, ts in ordered
+                     if k not in _crash_grades and k not in _due_units]
+            _owed_keys = sorted(_due_units - set(_crash_grades),
+                                key=lambda x: (x.file, x.fn_name))
+            # Crash evidence first, but never every slot while owed
+            # functions wait (`candidate_tiers.share_batch`).
+            _tier_of: dict[FnLocator, int] = {}
+            for _r in _due.by_test.values():
+                for _u_key in _r.owed:
+                    _loc_t = FnLocator(*_u_key.rsplit("::", 1))
+                    _tier_of[_loc_t] = min(_tier_of.get(_loc_t, 1 << 30),
+                                           max(_r.owed_tier, 0))
+            _first, _after = share_batch(
+                _head_keys, _owed_keys, _dispatch_cap,
+                cut_streak=_owed_cut, tier_of=_tier_of, misses=_owed_misses)
+            _items_of = {u: (u, set(_known.get(u, set()))
+                             | set(_due.tests_for(u))) for u in _owed_keys}
+            ordered = ([_items_of.get(k) or (k, _known.get(k, set()))
+                        for k in _first]
+                       + [(k, _known.get(k, set())) for k in _after]
+                       + _rest)
+            _owed_items = [_items_of[u] for u in _owed_keys]
+            for _u, _ts in _owed_items:
+                eligible.setdefault(_u, set()).update(_ts)
+            deps.log(
+                f"  {tag} [phase-c/dispatch] iter {iter_n}: "
+                f"{len(_due_units)} owed function(s) of "
+                f"{sum(1 for r in _due.by_test.values() if r.owed)} red "
+                "test(s) lead the batch (a tier not yet asked under its "
+                "evidence): " + ", ".join(
+                    f"{u.file}::{u.fn_name}" for u in sorted(
+                        _due_units, key=lambda x: (x.file, x.fn_name))[:10]))
         _batch = take_batch([key for key, _ in ordered], _pass_attempted,
                             _dispatch_cap, cohort=_pass_cohort,
-                            exempt=_crash_cohort.cursor_exempt)
+                            exempt=_crash_cohort.cursor_exempt | _due.units)
+        # Fills in a row each owed function has been cut by the cap.
+        _owed_cut = {u: (0 if u in _batch.keys else _owed_cut.get(u, 0) + 1)
+                     for u in _due.units}
         if _crash_grades:
             _aimed = [k for k in _batch.keys if k in _crash_grades]
             _n_site = len(_crash_cohort.cursor_exempt)
@@ -6456,7 +6773,34 @@ def run_phase_c_tdd(
         # `assert!(s.contains(..))` panics without printing `s`, and six
         # prompts of run `3003-93e9a9bf` carried that panic line while the
         # string under test reached none of them.
+        # An owed function whose last offer missed on a compile failure: its
+        # next prompt says what the compiler said (`unit_notes_text`).
+        _compile_notes: dict[FnLocator, str] = {}
+        if deps.last_compile_errors is not None and _due.units:
+            _compile_missed = {
+                FnLocator(*u_.rsplit("::", 1))
+                for t_, r_ in _due.by_test.items() for u_, fp_ in r_.owed.items()
+                if _asks.reason(u_, t_, fp_) == "compile"}
+            if _compile_missed:
+                with suppress(OSError, ValueError, TypeError):
+                    _errs = deps.last_compile_errors(project_dir)
+                    _compile_notes = {u_: compile_note(u_.fn_name, _errs[u_])
+                                      for u_ in _compile_missed if _errs.get(u_)}
+        # Task 4's lessons for each owed function and the tests owing it.
+        if _lesson_store is not None and _due.units:
+            for _lu in _due.units:
+                _ln = lesson_note(_lu.fn_name, _lesson_store.render_for(
+                    unit_key(_lu), _due.tests_for(_lu)))
+                if _ln:
+                    _compile_notes[_lu] = "\n".join(
+                        x for x in (_compile_notes.get(_lu, ""), _ln) if x)
         _sweep_evidence = failure_evidence_by_test(output)
+        # A gained test of a refused joint answer carries the note into every
+        # prompt that prints its words (`candidate_tiers.joint_note`).
+        for _t_ev in list(_sweep_evidence):
+            _jn = joint_note(_joint_now, bare_test_name(_t_ev))
+            if _jn:
+                _sweep_evidence[_t_ev] = f"{_sweep_evidence[_t_ev]}\n{_jn}"
         if (deps.assert_probe is not None and cur_failed
                 and os.getenv("ASSERT_PROBE", "1") != "0"):
             _probe_by_file: dict[Path, list[str]] = {}
@@ -6533,6 +6877,7 @@ def run_phase_c_tdd(
                 found.update(site.culprit_locators)
             return frozenset(found)
 
+        _fill_crash: tuple[BaseException, str] | None = None
         try:
             with collect_stream_meta() as _fill_meta:
                 sub = deps.task2_fill_fns_one_by_one(
@@ -6578,7 +6923,12 @@ def run_phase_c_tdd(
                         # The formatter dispatcher/implementer pairs the
                         # attribution hop resolved — the engine's pair route
                         # dispatches a cross-file pair as one transaction.
-                        pairs=_attr.pairs),
+                        pairs=_attr.pairs,
+                        # Tests whose first failure is inside a stub: their
+                        # words are that stub's panic, so a stub's first fill
+                        # shows the OTHER tests' words (`observed_tests_for`).
+                        held=(bare_test_name(t_) for t_ in _stub_hold.by_test),
+                        unit_notes=_compile_notes),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
                     ledger_entries=_ledger_entries(),
@@ -6599,6 +6949,9 @@ def run_phase_c_tdd(
                     attributed=_attributed_locs,
                     measured_owners=measured_owners_on_frontier(
                         _owner_map_units, (k for k, _ in ordered)),
+                    due=_due.units & frozenset(_batch.keys),
+                    due_rungs={u_: _due.rung_of(u_)
+                               for u_ in _due.units & frozenset(_batch.keys)},
                     unit_evidence=_unit_evidence,
                     body_rows=_body_rows,
                     # The pool starts units in the order this driver chose;
@@ -6620,15 +6973,38 @@ def run_phase_c_tdd(
                     fill_premise=_plan_premise,
                     fill_ground_now=_ground_now,
                 )
-        except BaseException:
+        except BaseException as _fill_exc:
             # Before the restore: a restored tree no longer holds these
             # bodies, and the ledger is where a body outlives the tree.
             _record_landed_rows("stopped during the fill pass", frozenset())
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
-            raise
+            # A stop (`SystemExit` from the graceful sentinel, an interrupt)
+            # leaves the process as before. An ordinary exception is a
+            # crash of THIS cluster: it ends FAILED with its traceback and
+            # its red list, not as an abort that names nothing. Run
+            # `39786-fd38e72f` (2026-10-09) lost stable at 137/165 to a
+            # `UnicodeDecodeError` whose traceback no record kept.
+            if not isinstance(_fill_exc, Exception):
+                raise
+            _fill_crash = (_fill_exc, traceback.format_exc())
         finally:
             fill_phase_clock.disarm()
+        if _fill_crash is not None:
+            _exc_c, _tb_c = _fill_crash
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cluster_failed "
+                     f"(crashed) — {type(_exc_c).__name__}: {_exc_c}. This "
+                     "cluster is NOT green. Traceback:\n" + _tb_c)
+            for _line in render_failed(_due):
+                deps.log(f"  {tag}   {_line}")
+            deps.emit("phase_c.tdd.cluster_failed", data={
+                "cluster": cluster.name, "iter": iter_n, "kind": "crashed",
+                "exception": f"{type(_exc_c).__name__}: {_exc_c}",
+                "traceback": _tb_c,
+                "pass_count": pass_count, "fail_count": fail_count,
+                "tests": tiers_event(_due)})
+            _close_kind = "crashed"
+            break
         # What the engine ACTUALLY dispatched. The frontier is what the
         # driver asked for; the engine narrows it (the impl route defers
         # itself behind free-fn blockers, the per-fn route takes only
@@ -6679,6 +7055,48 @@ def run_phase_c_tdd(
                 _bodies_before, unit_bodies(_recs_after_fill, frontier_keys)))
             if _recs_after_fill is not None and _bodies_before is not None
             else frozenset())
+        # An owed function whose body LANDED was asked under this sweep's
+        # evidence: the next sweep owes it again only if its red tests say
+        # something new. One offered and landing nothing is a miss; enough
+        # misses under unchanged evidence spend it too, so a function no
+        # route writes (or whose every reply is refused) cannot hold the
+        # cluster open. An unread red test counts a miss per sweep.
+        if _due.units or _due.unread:
+            _ans, _mis = _due.answered(frozenset(_batch.keys),
+                                       _landed_after_fill)
+            _fill_rows = _this_fill_rows(iter_n)
+            _session_kept = {f"{a_}::{b_}" for r_ in _fill_rows
+                             if r_.kind == RouteKind.SESSION
+                             for a_, b_ in r_.kept}
+            _new_asks = sum(
+                _asks.record(u_, t_, fp_, rung=(
+                    "session" if u_ in _session_kept else "unit"))
+                for u_, t_, fp_ in _ans)
+            _why_missed = miss_reasons({u_ for u_, _t, _f in _mis}, _fill_rows)
+            _spent_now: list[str] = []
+            for u_, t_, fp_ in _mis:
+                _rung_m = _due.by_test[t_].rungs.get(u_, "") if t_ in _due.by_test else ""
+                if (_asks.miss(u_, t_, fp_, _why_missed.get(u_, ""), rung=_rung_m)
+                        == _owed_misses):
+                    _spent_now.append(f"{u_} (for {t_}, {_why_missed.get(u_, '')})")
+            for t_ in sorted(_due.unread):
+                _asks.miss(UNREAD, t_, _due.fingerprints.get(t_, ""))
+            if _spent_now:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
+                         f"{len(_spent_now)} owed function(s) offered "
+                         f"{_owed_misses} fill(s) with nothing landed under "
+                         "unchanged evidence, now spent: "
+                         + ", ".join(_spent_now[:8]))
+            if deps.save_ask_ledger is not None:
+                with suppress(OSError):
+                    deps.save_ask_ledger(project_dir, cluster.name, _asks)
+            deps.emit("phase_c.tdd.asked", data={
+                "cluster": cluster.name, "iter": iter_n, "new": _new_asks,
+                "owed": len(_due.units),
+                "asked": sorted({u_ for u_, _t, _f in _ans}),
+                "missed": sorted({u_ for u_, _t, _f in _mis}),
+                "spent_by_misses": _spent_now,
+                "unread": sorted(_due.unread)})
         # A unit no route opened had no turn: put it back on the pass once.
         # If this batch closed the pass, the closure is taken back — the
         # traversal it counted did not happen for these units.
@@ -7227,6 +7645,31 @@ def run_phase_c_tdd(
                 "fns": sorted(f"{k.file}::{k.fn_name}" for k in _spared_live),
                 "cfg_inactive_excluded": _spared_dead})
         last_total_filled = total_filled
+
+    # THE RED LEDGER. Every cluster end (green, failed, crashed, floor,
+    # backstop) says, per red test, whether the pipeline or the model held
+    # it (`domain/red_ledger`). Only with the owed reading on: without it
+    # every test would read "never offered".
+    if _owed_on:
+        try:
+            _red_entries = red_ledger(
+                last_failed, reading=_due, ledger=_asks,
+                runs=[RunFacts.of_row(r_) for r_ in _this_fill_rows()],
+                words={bare_test_name(t_): e_ for t_, e_ in
+                       failure_evidence_by_test(output).items()})
+            for _line in render_red_ledger(_red_entries):
+                deps.log(f"  {tag} [phase-c/tdd] {_line}")
+            deps.emit("phase_c.tdd.red_ledger", data={
+                "cluster": cluster.name, "close_kind": _close_kind,
+                "entries": [e_.to_dict() for e_ in _red_entries]})
+            if deps.save_red_ledger is not None:
+                deps.save_red_ledger(
+                    project_dir, cluster.name,
+                    [e_.to_dict() for e_ in _red_entries],
+                    run_id=deps.run_id or "", close_kind=_close_kind)
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as _rl_exc:
+            deps.log(f"  {tag} HEALTH ‼ RED_LEDGER: could not be written "
+                     f"({_rl_exc!r})")
 
     # Every `break` above lands here — backstop, timeout, stall exit, and the
     # green exit that `_cluster_done` excuses. One place rather than at each

@@ -75,7 +75,7 @@ def _run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None,
     not this class, and a 120s bound can kill a healthy instrumented
     compile)."""
     if timeout is None:
-        return subprocess.run(cmd, cwd=cwd, env=env, text=True,
+        return subprocess.run(cmd, cwd=cwd, env=env, text=True, errors="replace",
                               capture_output=True, check=False)
     ran = run_bounded(cmd, cwd=cwd, env=env, timeout=timeout)
     return subprocess.CompletedProcess(

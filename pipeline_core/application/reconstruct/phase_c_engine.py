@@ -385,6 +385,9 @@ class PhaseCFillEngine:
         # in the dispatched batch; the schedule check names any that no
         # candidate run writes (`schedule_invariants`, `owner_unrouted`).
         measured_owners: Collection[FnLocator] = (),
+        # What the red tests owe this fill (`candidate_tiers.due_reading`):
+        # each gets an opened writer whatever deferred it.
+        due: Collection[FnLocator] = (),
         # The body ledger's per-unit verdicts, built by the TDD driver at
         # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
         # schedule's route-row reading.
@@ -584,6 +587,7 @@ class PhaseCFillEngine:
                 crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
                 attributed=frozenset(attributed),
                 measured_owners=frozenset(measured_owners),
+                due=frozenset(due),
                 unit_evidence=unit_evidence,
                 body_rows=body_rows,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
@@ -1372,7 +1376,7 @@ class PhaseCFillEngine:
                                         behaviour_must=behaviour_must_instruction(
                                             behaviour_specs,
                                             units=(IdentityMustUnit(
-                                                fn, container_for_fn, sig_t),))),
+                                                fn, container_for_fn, sig_t, rel_f),))),
                                     fr_path=fr_path,  # note recall
                                     kind=_kind,
                                 )

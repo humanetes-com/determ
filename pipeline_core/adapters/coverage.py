@@ -112,7 +112,7 @@ def run_tarpaulin(deps: CoverageDeps, project_dir: Path, module_name: str) -> Co
         cmd += ["--exclude-files", pat]
     try:
         result = subprocess.run(
-            cmd, cwd=project_dir, capture_output=True, text=True,
+            cmd, cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=deps.build_timeout, env=deps.cargo_env(),
         )
         if not json_path.exists():
@@ -218,14 +218,14 @@ def quick_coverage_grcov(deps: CoverageDeps, project_dir: Path,
     try:
         subprocess.run(
             ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1"],
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=deps.build_timeout, env=env,
         )
         if not list(profraw_dir.glob("*.profraw")):
             return None
         out_json = coverage_output(project_dir, f"grcov_quick_{module_name}.json")
         subprocess.run(_grcov_cmd(deps, profraw_dir, project_dir, out_json),
-                       cwd=project_dir, capture_output=True, text=True, timeout=60, check=True)
+                       cwd=project_dir, capture_output=True, text=True, errors="replace", timeout=60, check=True)
         return _parse_coveralls(out_json, project_dir)
     except Exception:
         return None
@@ -260,7 +260,7 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
         # Step 1: run tests with instrumentation.
         result = subprocess.run(
             ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=deps.build_timeout, env=env,
         )
         if result.returncode != 0 and not list(profraw_dir.glob("*.profraw")):
@@ -270,7 +270,7 @@ def run_grcov(deps: CoverageDeps, project_dir: Path, module_name: str) -> Covera
         # Step 2: run grcov to produce coveralls JSON.
         out_json = coverage_output(project_dir, f"grcov_{module_name}.json")
         subprocess.run(_grcov_cmd(deps, profraw_dir, project_dir, out_json),
-                       cwd=project_dir, capture_output=True, text=True,
+                       cwd=project_dir, capture_output=True, text=True, errors="replace",
                        timeout=120, check=True)
         return _parse_coveralls(out_json, project_dir)
 
@@ -389,7 +389,7 @@ class LlvmCovProvider(CoverageProvider):
         cmd += ["--", "--test-threads=1", "--no-capture"]
         try:
             result = subprocess.run(
-                cmd, cwd=project_dir, capture_output=True, text=True,
+                cmd, cwd=project_dir, capture_output=True, text=True, errors="replace",
                 timeout=self._deps.build_timeout, env=env,
             )
             if result.returncode != 0 and not lcov_path.exists():

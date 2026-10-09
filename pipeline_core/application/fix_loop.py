@@ -436,7 +436,7 @@ def generate_fix_loop(
             else:
                 result = subprocess.run(
                     deps.parse_cmd(check_cmd), cwd=project_dir,
-                    capture_output=True, text=True, timeout=timeout, env=env,
+                    capture_output=True, text=True, errors="replace", timeout=timeout, env=env,
                 )
                 output = join_capture(result.stdout, result.stderr)
                 if result.returncode == 0:

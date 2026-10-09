@@ -51,6 +51,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from pipeline_core.domain.behaviour import (
+    BehaviourClass,
     BehaviourSpec,
     ExampleGiven,
     Feature,
@@ -66,6 +67,7 @@ from pipeline_core.domain.behaviour import (
     then_value_text,
 )
 from pipeline_core.domain.behaviour_probe import is_public_crate_fn
+from pipeline_core.domain.candidate_tiers import culprits, feature_reach
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.example_setup import IMPORTS_KEY_SUFFIX, helper_key_parts
 from pipeline_core.domain.models import FnRecord, TypeRecord
@@ -1005,6 +1007,7 @@ class AimedUnit:
 
     name: str
     container: str = ""
+    file: str = ""
 
 
 def _unit_qualifiers(unit: AimedUnit) -> set[str]:
@@ -1049,13 +1052,22 @@ def rules_for_units(
        reaches `new` in `impl Error`, not `new` in `impl Chain`;
     2. rules whose sentence names one of the units by its glossary spelling
        (`Type::fn`, `Trait::fn`, or a free fn);
-    3. rules citing an example in `identity_ids` — the identity examples the
+    3. rules whose feature's examples are the only ones that run one of the
+       units (`candidate_tiers.culprits`, read off the specs' `exercises` and
+       the features attached to them). A macro feature (`ensure!`) names no
+       function, so aims 1 and 2 reach nothing; the functions only its
+       examples execute are the ones that implement it. A unit with no file
+       (an aiming caller that did not pass one) is skipped by this aim;
+    4. rules citing an example in `identity_ids` — the identity examples the
        identity instruction already aims at these units by signature and
        container (`select_identity_must`), so a constructor that decides a
        TypeId gets the rule those examples illustrate.
 
-    Coverage `exercises` are never read: they are what every example ran, not
-    what decides its Then."""
+    `exercises` never aim a rule by themselves: every example runs the whole
+    call chain (77 of 94 `ensure!` examples run the same 23 functions on the
+    anyhow harvest), so "this example ran the unit" says nothing about what
+    decides its Then. Only exclusivity does: a function no other feature's
+    example runs."""
     if cap <= 0 or not units:
         return ()
     rules: dict[str, Rule] = {}
@@ -1078,6 +1090,17 @@ def rules_for_units(
 
     take(feature_aims)
     take(lambda r: any(_names_unit(t, u) for t in r.terms for u in units))
+    keyed = [f"{u.file}::{u.name}" for u in units if u.file]
+    if keyed:
+        reach = feature_reach(specs)
+        only: dict[str, frozenset[str]] = {}
+
+        def culprit_aims(r: Rule) -> bool:
+            if r.feature not in only:
+                only[r.feature] = culprits(r.feature, reach)
+            return any(k in only[r.feature] for k in keyed)
+
+        take(culprit_aims)
     ident = set(identity_ids)
     if ident:
         take(lambda r: bool(ident & set(r.example_ids)))
@@ -1093,7 +1116,13 @@ def render_rules(rules: Sequence[Rule], specs_by_id: Mapping[str, BehaviourSpec]
              "checked against the examples it cites):"]
     for r in rules:
         lines.append(f"- {r.sentence}")
-        ex = next((specs_by_id[i] for i in r.example_ids if i in specs_by_id), None)
+        cited = [specs_by_id[i] for i in r.example_ids if i in specs_by_id]
+        # A bounded-resource example states the limit and the fallback the
+        # sentence names; the first plain example usually shows only the
+        # common case, which is what a body can already get right.
+        ex = next((c for c in cited
+                   if c.klass is BehaviourClass.BOUNDED_RESOURCE),
+                  cited[0] if cited else None)
         if ex is not None and ex.then is not None:
             when = " ".join(example_when(ex).split())[:160]
             value = then_value_text(ex.then).replace("\n", "\\n")[:160]

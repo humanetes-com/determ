@@ -742,16 +742,30 @@ class SweepView:
     #: position; never defaulted, since a sentinel line would read as
     #: movement.
     positions: Mapping[TestKey, int] = field(default_factory=dict)
+    #: bare test name -> the still-stubbed functions its first failure is
+    #: inside (`test_outcome.stub_hold_of`). A test held at a function other
+    #: than the graded one stopped before the graded body could matter to
+    #: it, so it does not judge that body (`classify`). Empty = no reading,
+    #: and every test that ran judges as before.
+    held: Mapping[str, frozenset[FnLocator]] = field(default_factory=dict)
 
     @property
     def ran(self) -> frozenset[str]:
         return self.passed | self.failed
+
+    def observers_of(self, unit: FnLocator, tests: Iterable[str]) -> frozenset[str]:
+        """`tests` minus those held at a still-stubbed function other than
+        `unit`."""
+        return frozenset(
+            t for t in tests
+            if not (h := self.held.get(t)) or unit in h)
 
     @classmethod
     def of_sweep(
         cls, *, passed: Iterable[str], failed: Iterable[str],
         vanished: Iterable[str], intact: bool, epoch: int,
         positions: Mapping[TestKey, int],
+        held: Mapping[str, frozenset[FnLocator]] | None = None,
     ) -> SweepView:
         """The ledger's view of a sweep whose failed set the score has already
         padded with crash-vanished tests.
@@ -772,7 +786,8 @@ class SweepView:
         gone = frozenset(vanished)
         return cls(passed=frozenset(passed),
                    failed=frozenset(t for t in failed if t not in gone),
-                   intact=intact, epoch=epoch, positions=positions)
+                   intact=intact, epoch=epoch, positions=positions,
+                   held=dict(held or {}))
 
 
 def judgment_attributed(
@@ -845,7 +860,20 @@ def classify(
     (`TestOutcomes.refuses`, the rule every keep reads). Run
     `273278-22529e44` (2026-09-29) refuted eight landings that each turned
     convicting tests green, on line order over `src/` stub sites."""
+    # A convicting test whose first failure, after the landing, is inside a
+    # DIFFERENT still-stubbed function never reached this body: it stopped
+    # first. It judges nothing about the unit. Run `14141-9a904822`
+    # (2026-10-08): `src/ensure.rs::render` was graded FLAT at iter 3 while
+    # 12 of its 15 convicting tests died inside the stubbed Display
+    # `src/error.rs::fmt` that prints the message it builds. Across ten cold
+    # runs 62 FLAT rows were graded with every convicting test held that way.
+    # Only a test that was ALREADY failing is dropped that way: a test green
+    # before the landing and dying in another stub after it reached that stub
+    # through the new body, so it is the landing's loss and refutes it.
     names = frozenset(attributed)
+    held_elsewhere = names - after.observers_of(
+        FnLocator(entry.key.file, entry.key.fn_name), names)
+    names = names - (held_elsewhere - before.passed)
     if not names or not (names & after.ran):
         return BodyState.UNMEASURED, ()
     if body_now_sha and body_now_sha != entry.body_sha:

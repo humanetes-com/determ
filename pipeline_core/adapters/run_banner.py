@@ -34,7 +34,7 @@ def banner_lines(pipeline_file: Path, run_id: str, argv: list[str],
     with suppress(Exception):
         git_hash = " git=" + subprocess.check_output(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=pipeline_file.parent, stderr=subprocess.DEVNULL, text=True,
+            cwd=pipeline_file.parent, stderr=subprocess.DEVNULL, text=True, errors="replace",
         ).strip()
     bar = "=" * 60
     started = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")

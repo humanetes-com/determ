@@ -308,9 +308,9 @@ class StdTypeSource:
 def _probe_rustc() -> tuple[Path | None, str | None]:
     try:
         sysroot = subprocess.run(["rustc", "--print", "sysroot"], capture_output=True,
-                                 text=True, timeout=30)
+                                 text=True, errors="replace", timeout=30)
         version = subprocess.run(["rustc", "--version"], capture_output=True,
-                                 text=True, timeout=30)
+                                 text=True, errors="replace", timeout=30)
     except Exception:
         return None, None
     if sysroot.returncode != 0 or version.returncode != 0:

@@ -523,7 +523,7 @@ def strip_and_bake_module(
         _sp.step("strip.commit")
         _porc = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=project_dir, capture_output=True, text=True, timeout=10,
+            cwd=project_dir, capture_output=True, text=True, errors="replace", timeout=10,
         ).stdout.strip()
         if _porc:
             if not d.git_commit(project_dir,

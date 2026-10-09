@@ -126,7 +126,7 @@ def compile_skeleton_check(
     try:
         proc = subprocess.run(
             ["cargo", "check", "--lib", "--quiet"],
-            cwd=skel_dir, env=env, capture_output=True, text=True, timeout=timeout,
+            cwd=skel_dir, env=env, capture_output=True, text=True, errors="replace", timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return False, f"cargo check did not run: {exc}"
@@ -176,7 +176,7 @@ def compile_filled_check(
     try:
         proc = subprocess.run(
             ["cargo", "check", "--lib", "--quiet"],
-            cwd=crate_dir, env=env, capture_output=True, text=True,
+            cwd=crate_dir, env=env, capture_output=True, text=True, errors="replace",
             timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError) as exc:

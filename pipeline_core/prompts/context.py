@@ -51,6 +51,10 @@ class PerFnSections:
     # writable with it as extra <FN> blocks. "" when none, or when the
     # route cannot write extras.
     coupled: str = ""
+    # What the failing tests that already run past every stub printed for
+    # this still-stubbed fn (`refill_evidence.observed_stub_excerpts`). ""
+    # for a re-fill (its seed excerpt carries them) or when no such test.
+    observed: str = ""
 
 
 @dataclass(frozen=True, slots=True)

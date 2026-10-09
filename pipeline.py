@@ -372,7 +372,7 @@ def init_events(product: str) -> None:
     try:
         result = subprocess.run(
             ["git", "-C", str(Path(__file__).parent), "rev-parse", "--short=12", "HEAD"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, errors="replace", timeout=5,
         )
         _RUN_CONTEXT["pipeline_sha"] = result.stdout.strip() or "unknown"
     except Exception:

@@ -41,7 +41,7 @@ class StaticRustTestAugmentor(TestAugmentor):
     def lib_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
         result = subprocess.run(
             shlex.split(f"cargo build -p {module_name} --lib"),
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=self._build_timeout, env=self._cargo_env(),
         )
         return result.returncode == 0, result.stdout + result.stderr
@@ -49,7 +49,7 @@ class StaticRustTestAugmentor(TestAugmentor):
     def test_harness_compiles(self, project_dir: Path, module_name: str) -> tuple[bool, str]:
         result = subprocess.run(
             shlex.split(f"cargo test -p {module_name} --no-run"),
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=self._build_timeout, env=self._cargo_env(),
         )
         return result.returncode == 0, result.stdout + result.stderr
@@ -147,7 +147,7 @@ class CargoAugmentEngine:
         return False only when the cluster is genuinely unbuildable."""
         result = subprocess.run(
             ["cargo", "build", "-p", module_name],
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=self._build_timeout, env=self._cargo_env(),
         )
         if result.returncode == 0:
@@ -165,7 +165,7 @@ class CargoAugmentEngine:
             self._log(f"  cluster/{cluster.name}: running setup.sh rust nightly ...")
             r = subprocess.run(
                 ["bash", str(setup), "rust", "nightly"],
-                capture_output=False, text=True, timeout=600,
+                capture_output=False, text=True, errors="replace", timeout=600,
             )
             if r.returncode != 0:
                 self._log(f"  cluster/{cluster.name}: setup.sh rust nightly failed — skipping cluster.")
@@ -177,7 +177,7 @@ class CargoAugmentEngine:
         cluster.requires_nightly = True   # _cargo_env now sets RUSTUP_TOOLCHAIN=nightly
         result2 = subprocess.run(
             ["cargo", "build", "-p", module_name],
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=self._build_timeout, env=self._cargo_env(),
         )
         if result2.returncode != 0:

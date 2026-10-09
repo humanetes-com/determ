@@ -351,6 +351,10 @@ class IdentityMustUnit:
     name: str
     container: str = ""
     sig: str = ""
+    #: The unit's file, so a rule can be aimed at the functions only its
+    #: feature's examples run (`candidate_tiers.culprits`). Empty = that aim
+    #: is skipped and the declaration aims stand alone.
+    file: str = ""
 
 
 # Production members are ``FnRecord`` (``fn_name``/``sig_text``). The VO
@@ -492,6 +496,7 @@ def coerce_identity_unit(item: IdentityMustInput) -> IdentityMustUnit:
             name=item.fn_name,
             container=item.container or "",
             sig=item.sig_text or "",
+            file=item.file or "",
         )
     raise TypeError(
         "identity-must unit needs IdentityMustUnit or FnRecord; "

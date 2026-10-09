@@ -65,7 +65,7 @@ class ClusterMerger:
         for name, src_path, cfg_pred in cluster_files:
             cmd += ["--cluster", f"{name}:{src_path}:{cfg_pred}"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
         except Exception as e:
             self.log(f"  [skeleton-merge] extractor invocation failed: {e}")
             return None

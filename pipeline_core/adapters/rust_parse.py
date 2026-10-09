@@ -30,7 +30,7 @@ def rustfmt_parse_diagnostic(text: str, *, edition: str = "2021",
     try:
         run = subprocess.run(
             ["rustfmt", "--edition", edition, "--emit", "stdout"],
-            input=text, capture_output=True, text=True, timeout=timeout)
+            input=text, capture_output=True, text=True, errors="replace", timeout=timeout)
     except (OSError, subprocess.SubprocessError):
         return ""
     if run.returncode == 0:

@@ -61,7 +61,7 @@ def pipeline_start_time() -> float:
     try:
         out = subprocess.run(
             ["pgrep", "-f", r"python.*pipeline\.py"],
-            capture_output=True, text=True).stdout
+            capture_output=True, text=True, errors="replace").stdout
         for pid in out.strip().split():
             try:
                 with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:

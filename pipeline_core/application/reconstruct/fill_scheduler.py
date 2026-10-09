@@ -117,6 +117,16 @@ class FillExecutionDeps:
     #: some candidate run, opened or deferred with its reason; one that no
     #: run writes is `owner_unrouted`. Empty (the default) checks nothing.
     measured_owners: frozenset[FnLocator] = frozenset()
+    #: What the red tests owe this fill (`candidate_tiers.due_reading`): a
+    #: tier of an executed slice no prompt has asked under the current
+    #: evidence. Each gets an opened writer whatever deferred it
+    #: (`fill_schedule._cover_due`); one with none is `slice_unit_starved`.
+    #: Empty (the default) changes nothing.
+    due: frozenset[FnLocator] = frozenset()
+    #: Each owed function's ladder rung (`candidate_tiers.LADDER`): a
+    #: function owed on the session rung is covered only by an opened
+    #: session run. Empty: every owed function is owed on the unit rung.
+    due_rungs: Mapping[FnLocator, str] = field(default_factory=dict)
     #: The body ledger's per-unit verdicts (`fill_schedule.UnitEvidence`):
     #: every unit-writing run is ranked on its units' own graded landings.
     #: None keeps the route-row reading (no body ledger on this driver).
@@ -436,7 +446,8 @@ def _check_schedule(sched: FillSchedule,
         decided_from_schedule(sched), hollow_stubs=all_blocking(hollow),
         crash_blamed=deps.crash_blamed,
         budget_minutes=sched.budget_minutes,
-        measured_owners=deps.measured_owners)
+        measured_owners=deps.measured_owners,
+        due=deps.due)
     if not found:
         return
     deps.log(f"  HEALTH ‼ SCHEDULE_INVARIANT fill {deps.iteration}: "
@@ -479,6 +490,8 @@ def _schedule_inputs(deps: FillExecutionDeps,
     if scheduled and deps.measured_owners:
         inputs["measured_owners"] = sorted(
             f"{u.file}::{u.fn_name}" for u in deps.measured_owners)
+    if scheduled and deps.due:
+        inputs["due"] = sorted(f"{u.file}::{u.fn_name}" for u in deps.due)
     if scheduled and deps.unit_evidence is not None:
         inputs["standing_flat"] = {
             f"{u.file}::{u.fn_name}": sha
@@ -588,7 +601,9 @@ def execute_fill(
         attributed=deps.attributed if deps.scheduled else (),
         session_min_turns=deps.session_min_turns if deps.scheduled else 0,
         bodies_sha=bodies_sha,
-        unit_evidence=deps.unit_evidence if deps.scheduled else None)
+        unit_evidence=deps.unit_evidence if deps.scheduled else None,
+        due=deps.due if deps.scheduled else (),
+        due_rungs=deps.due_rungs if deps.scheduled else None)
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"

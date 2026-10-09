@@ -374,7 +374,7 @@ def behaviour_must_instruction(
     parts: list[str] = []
     if picked:
         parts.append("MUST: " + "; ".join(_fmt_outcome(s.then) for s in picked))
-    aimed = ([AimedUnit(u.name, u.container) for u in (coerce_identity_unit(x) for x in units)]
+    aimed = ([AimedUnit(u.name, u.container, u.file) for u in (coerce_identity_unit(x) for x in units)]
              or [AimedUnit(n) for n in fn_names if n])
     rules = list(rules_for_units(specs, aimed, identity_ids=[s.behaviour_id for s in picked],
                                  cap=rules_cap))

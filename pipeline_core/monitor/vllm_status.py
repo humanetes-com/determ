@@ -79,7 +79,7 @@ def vllm_status_rows(width: int) -> list[str]:
                 # and no log lines, which reads as a hung container.
                 ps = subprocess.check_output(
                     ["docker", "ps", "--format", "{{.ID}} {{.Image}}"],
-                    stderr=subprocess.DEVNULL, timeout=2, text=True
+                    stderr=subprocess.DEVNULL, timeout=2, text=True, errors="replace"
                 )
                 for row in ps.splitlines():
                     ident, _, image = row.partition(" ")
@@ -89,7 +89,7 @@ def vllm_status_rows(width: int) -> list[str]:
             if cid:
                 logs = subprocess.check_output(
                     ["docker", "logs", "--tail", "6", cid],
-                    stderr=subprocess.STDOUT, timeout=2, text=True
+                    stderr=subprocess.STDOUT, timeout=2, text=True, errors="replace"
                 ).splitlines()
                 for line in logs:
                     rows.append(dim((line[:width-1] + "…") if len(line) > width else line))

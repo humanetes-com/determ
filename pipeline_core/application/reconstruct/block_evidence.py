@@ -44,8 +44,10 @@ from pipeline_core.domain.refill_evidence import (
     escalated_refill_names,
     history_for_block,
     inferred_refill_names,
+    observed_stub_excerpts,
     pinned_observables_from_tests,
     render_refill_evidence,
+    unit_notes_text,
     wraps_crate_tuple_struct,
 )
 from pipeline_core.domain.test_results import RegressedAttempt, said_lines
@@ -321,6 +323,20 @@ def assemble_block_evidence(
             prior_leaves, prior_pins, prior_regressed_output,
             prior_regressed_attempt)
         rendered = f"{rendered}\n{section}" if rendered else section
+    # A still-stubbed target's OBSERVED section: what its failing tests that
+    # run past every stub printed. Empty for a frontier with no such test,
+    # so a call without one renders exactly as before.
+    observed = observed_stub_excerpts(
+        (FnLocator(b.file, m.fn_name) for b in target_blocks
+         for m in b.stub_members),
+        frontier, read_source=read_source)
+    if observed:
+        rendered = f"{rendered}\n{observed}" if rendered else observed
+    notes = unit_notes_text(
+        (FnLocator(b.file, m.fn_name) for b in target_blocks
+         for m in (*b.stub_members, *b.refill_members)), frontier)
+    if notes:
+        rendered = f"{rendered}\n{notes}" if rendered else notes
     # Name-match fallback, after the attributed channel exactly as before.
     fill_target_names = [
         m.fn_name for b in target_blocks

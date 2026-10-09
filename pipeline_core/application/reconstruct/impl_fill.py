@@ -246,10 +246,12 @@ from pipeline_core.domain.refill_evidence import (
     escalated_refill_names,
     history_for_block,
     inferred_refill_names,
+    observed_stub_excerpts,
     pinned_observables_from_tests,
     quote_panic_site,
     render_refill_evidence,
     tuple_struct_names,
+    unit_notes_text,
     wraps_crate_tuple_struct,
 )
 from pipeline_core.domain.refill_stamp import (
@@ -1611,11 +1613,12 @@ def prepare_impl_fill(
                 if hit is None:
                     hit = r
             if hit is None:
-                return IdentityMustUnit(name=name, container=container)
+                return IdentityMustUnit(name=name, container=container,
+                                        file=file_rel)
             return IdentityMustUnit(
                 name=name,
                 container=str(hit.get("container") or container),
-                sig=str(hit.get("sig_text") or ""))
+                sig=str(hit.get("sig_text") or ""), file=file_rel)
         # Whether an ESCALATED member of each block WRAPS — constructs a
         # crate tuple struct inside another call's argument list
         # (`wraps_crate_tuple_struct`) — read off the extractor's body of that
@@ -1986,8 +1989,17 @@ def prepare_impl_fill(
                 fill_plan=_plans,
                 tests_block="\n\n".join(f"// {p}\n{t}" for p, t in test_blocks),
                 refill_evidence="\n".join(
-                    s for s in (_file_refill_evidence, _install_evidence,
-                                _bypass_evidence) if s),
+                    s for s in (_file_refill_evidence,
+                                observed_stub_excerpts(
+                                    (FnLocator(b.file, m.fn_name)
+                                     for b in fblocks for m in b.stub_members),
+                                    _frontier_tests, read_source=_read_source),
+                                unit_notes_text(
+                                    (FnLocator(b.file, m.fn_name)
+                                     for b in fblocks
+                                     for m in (*b.stub_members, *b.refill_members)),
+                                    _frontier_tests),
+                                _install_evidence, _bypass_evidence) if s),
                 blueprint=_bp_slice, notes=notes_section,
                 # E0616/E0599 feedback carries the blamed type's crate-visible
                 # fn inventory (`with_blamed_type_api`) — deterministic per

@@ -573,6 +573,11 @@ class ScheduledRun:
     #: of its own had left them with no opened writer (stage 3 of
     #: :func:`admit_ranked`). Empty for a run the pass opened.
     blocker_writer: tuple[str, ...] = ()
+    #: The owed functions (``file::fn``, :mod:`candidate_tiers`) this run was
+    #: opened for after a deferral had left them with no opened writer — a
+    #: red test's tier asked under evidence no prompt has carried yet. Empty
+    #: for a run the pass opened.
+    starved_writer: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -588,6 +593,7 @@ class ScheduledRun:
             "held_by": list(self.held_by),
             "prior_reason": self.prior_reason, "position": self.position,
             "blocker_writer": list(self.blocker_writer),
+            "starved_writer": list(self.starved_writer),
         }
 
 
@@ -611,6 +617,9 @@ class FillSchedule:
             if s.blocker_writer:
                 bits.append("opened as the only writer of "
                             + ", ".join(s.blocker_writer))
+            if s.starved_writer:
+                bits.append("starved: opened for owed "
+                            + ", ".join(s.starved_writer))
             if s.lapsed:
                 bits.append("grace spent: " + ", ".join(s.lapsed))
             if s.mutual:
@@ -1942,8 +1951,15 @@ def schedule(
     session_min_turns: int = 0,
     bodies_sha: Callable[[frozenset[FnLocator]], str] | None = None,
     unit_evidence: UnitEvidence | None = None,
+    due: Collection[FnLocator] = (),
+    due_rungs: Mapping[FnLocator, str] | None = None,
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
+
+    ``due`` is what the red tests owe this fill (:mod:`candidate_tiers`):
+    functions on a tier no prompt has asked under the current evidence.
+    Each must have an opened writer; whatever deferred its writers, the
+    cover stage opens the first one (:func:`admit_ranked`).
 
     A run whose route writes each target on its own (``unit_tests``) is
     ranked by unit: its re-buy units are carved into a run of their own
@@ -2096,7 +2112,7 @@ def schedule(
         budget_minutes=budget_minutes, today_order=today_order,
         crash_blamed=blamed, max_per_kind=max_per_kind,
         attributed=attributed, unpaid_grace=unpaid_grace,
-        session_min_turns=session_min_turns)
+        session_min_turns=session_min_turns, due=due, due_rungs=due_rungs)
 
 
 #: One candidate as the ranking stage leaves it: the run, its rank class,
@@ -2117,6 +2133,8 @@ def admit_ranked(
     attributed: Collection[FnLocator] = (),
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
     session_min_turns: int = 0,
+    due: Collection[FnLocator] = (),
+    due_rungs: Mapping[FnLocator, str] | None = None,
 ) -> FillSchedule:
     """Order the ranked candidates, decide which open, allot the budget.
 
@@ -2137,6 +2155,12 @@ def admit_ranked(
     3. COVER — a blocker (a stub a leftover test is hollow on, or a
        crash-blamed locator) that some candidate writes and no opened run
        writes opens its first deferred writer in order, whatever deferred it.
+       So does a ``due`` function: a red test's owed tier. Every hold here is
+       right about one run and none can see that, together, they kept a red
+       test's wrong body from every prompt: run `14141-9a904822`
+       (2026-10-08) left `src/ensure.rs::render` in no candidate for fills
+       3-4, reported-not-routed in 5-6 and deferred `pair_wait` in 7-8 while
+       16 of the 21 leftovers failed through it.
 
     Why stage 2 is one pass with the self-deferrals inside it: the re-buy
     deferral used to run after the holds, so a re-buy could hold a run and
@@ -2338,8 +2362,10 @@ def admit_ranked(
         opened_runs.append(run)
         kept.append(s)
 
-    # STAGE 3 — every blocker a candidate writes has an opened writer.
+    # STAGE 3 — every blocker a candidate writes has an opened writer, and
+    # so has every function a red test owes this fill.
     kept, waiting = _cover_blockers(kept, waiting, hollow, blamed)
+    kept, waiting = _cover_due(kept, waiting, frozenset(due), due_rungs or {})
     scheduled = kept
 
     if budget_minutes <= 0:
@@ -2407,6 +2433,51 @@ def _cover_blockers(
             reason=s.prior_reason or s.reason, prior_reason="",
             weight=max(s.weight, 1),
             blocker_writer=tuple(sorted(
+                f"{u.file}::{u.fn_name}" for u in hit))))
+    return sorted([*opened, *promoted], key=lambda s: s.position), still
+
+
+def _cover_due(
+    opened: list[ScheduledRun], deferred: list[ScheduledRun],
+    due: frozenset[FnLocator],
+    due_rungs: Mapping[FnLocator, str] | None = None,
+) -> tuple[list[ScheduledRun], list[ScheduledRun]]:
+    """Open, in schedule order, the first deferred writer of every owed
+    function no opened run writes. The promoted run keeps the reason it was
+    ranked with, takes weight at least 1 and names what it opened for
+    (`starved_writer`). A function owed on the session rung
+    (`due_rungs`) is covered only by a session run: its unit rung is spent,
+    and another unit route would ask the question it already asked. A
+    function no candidate writes at all is the driver's to put in a run (it
+    is placed in the dispatched batch, so the routes plan one);
+    `schedule_invariants` names it if none does."""
+    if not due:
+        return opened, deferred
+    rungs = due_rungs or {}
+
+    def needs_session(u: FnLocator) -> bool:
+        return rungs.get(u, "unit") == "session"
+
+    def covers(s: ScheduledRun, u: FnLocator) -> bool:
+        return u in s.run.targets and (
+            not needs_session(u) or s.run.kind == RouteKind.SESSION)
+
+    uncovered = {u for u in due if not any(covers(s, u) for s in opened)}
+    if not uncovered:
+        return opened, deferred
+    promoted: list[ScheduledRun] = []
+    still: list[ScheduledRun] = []
+    for s in sorted(deferred, key=lambda d: d.position):
+        hit = frozenset(u for u in uncovered if covers(s, u))
+        if not hit:
+            still.append(s)
+            continue
+        uncovered -= hit
+        promoted.append(replace(
+            s, deferred=False, share_minutes=None, held_by=(),
+            reason=s.prior_reason or s.reason, prior_reason="",
+            weight=max(s.weight, 1),
+            starved_writer=tuple(sorted(
                 f"{u.file}::{u.fn_name}" for u in hit))))
     return sorted([*opened, *promoted], key=lambda s: s.position), still
 

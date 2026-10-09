@@ -165,7 +165,7 @@ def sealed_oracle_files(project_dir: Path, tag: str) -> dict[str, str] | None:
     (a workspace sealed before the seal existed, or not git-managed)."""
     root = Path(project_dir)
     ls = subprocess.run(["git", "ls-tree", "-r", "--name-only", tag],
-                        cwd=root, capture_output=True, text=True)
+                        cwd=root, capture_output=True, text=True, errors="replace")
     if ls.returncode != 0:
         return None
     rels = [r for r in ls.stdout.splitlines() if r and _is_oracle_path(r)]

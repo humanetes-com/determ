@@ -51,7 +51,7 @@ class MutationTester:
         if file_rel:
             cmd += ["--file", file_rel]
         try:
-            subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+            subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, errors="replace",
                            timeout=timeout, env=self.cargo_env())
         except Exception:
             return None
@@ -83,7 +83,7 @@ class MutationTester:
             sib.write_text(test_code, encoding="utf-8")
             tgt.write_text(orig.rstrip() + decl, encoding="utf-8")
             cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
-            r = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True,
+            r = subprocess.run(cmd, cwd=project_dir, capture_output=True, text=True, errors="replace",
                                timeout=timeout, env=self.cargo_env())
             if r.returncode != 0:
                 return (False, False)            # invalid test (won't compile/pass)
@@ -150,7 +150,7 @@ class MutationTester:
                 cmd = ["cargo"] + ([f"+{tc}"] if tc else []) + ["test", "--quiet"]
                 try:
                     rr = subprocess.run(cmd, cwd=project_dir, capture_output=True,
-                                        text=True, timeout=timeout, env=self.cargo_env())
+                                        text=True, errors="replace", timeout=timeout, env=self.cargo_env())
                 except Exception:
                     continue
                 if rr.returncode != 0:

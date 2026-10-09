@@ -31,6 +31,12 @@ reason (and, for a hold, the runs it waited on). On that:
 - ``nothing_opened`` — candidates exist that aim at something and none opened.
 - ``deferred_share`` / ``over_budget`` — a deferred run carries a positive
   share, or the opened shares exceed the budget.
+- ``slice_unit_starved`` — a function a red test owes this fill (a tier of
+  its executed slice that no prompt has asked under the current evidence,
+  `candidate_tiers`) has no opened writer. Run `14141-9a904822`
+  (2026-10-08): `src/ensure.rs::render`, the one wrong body behind 16 of the
+  21 leftovers, went unwritten from fill 3 to fill 8 while every per-test
+  predicate over its 19-function slice was satisfied by writing the others.
 - ``owner_unrouted`` — a measured coverage owner the driver admitted (or
   aimed at a newly admitted test) and dispatched is a target of NO candidate
   run, opened or deferred. Run `486447-5207101c` (2026-10-07, fill 6):
@@ -63,6 +69,7 @@ __all__ = [
     "all_blocking",
     "blamed_from_event",
     "decided_from_event",
+    "due_from_event",
     "decided_from_schedule",
     "hollow_stubs_from_event",
     "measured_owners_from_event",
@@ -97,6 +104,7 @@ def violations(decided: Sequence[Decided], *,
                crash_blamed: Collection[FnLocator] = (),
                budget_minutes: float = 0.0,
                measured_owners: Collection[FnLocator] = (),
+               due: Collection[FnLocator] = (),
                ) -> tuple[ScheduleViolation, ...]:
     """Every invariant the decision set breaks. ``hollow_stubs`` None means
     the caller does not know which stubs hold hollow tests (a recorded event
@@ -134,6 +142,16 @@ def violations(decided: Sequence[Decided], *,
             "writers were deferred: "
             + ", ".join(f"{d.label} ({d.reason or 'deferred'})"
                         for d in writers)))
+
+    for u in sorted(frozenset(due) - written, key=lambda x: (x.file, x.fn_name)):
+        writers = [d for d in deferred if u in d.targets]
+        out.append(ScheduleViolation(
+            "slice_unit_starved",
+            f"{u.file}::{u.fn_name} is owed by a red test and no opened run "
+            "writes it"
+            + ("; its writers were deferred: " + ", ".join(
+                f"{d.label} ({d.reason or 'deferred'})" for d in writers)
+               if writers else "; no candidate run writes it")))
 
     for o in sorted(frozenset(measured_owners) - candidates_write,
                     key=lambda u: (u.file, u.fn_name)):
@@ -217,6 +235,15 @@ def hollow_stubs_from_event(data: Mapping[str, Any]
     for locs in dict(inputs.get("hollow") or {}).values():
         stubs.update(_loc(x) for x in locs or ())
     return frozenset(stubs)
+
+
+def due_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
+    """The owed functions a recorded schedule event's inputs carry; empty
+    for an event that predates them."""
+    inputs = data.get("inputs")
+    if not isinstance(inputs, Mapping):
+        return frozenset()
+    return frozenset(_loc(x) for x in inputs.get("due") or ())
 
 
 def measured_owners_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:

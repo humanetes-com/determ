@@ -73,7 +73,7 @@ class CliExtractor:
             return None
         cmd = [str(self._bin), subcmd, "--input", str(src_dir), *_cfg_args(cfg_true, cfg_false)]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
         except Exception:
             return None
         if r.returncode != 0:
@@ -128,7 +128,7 @@ class CliExtractor:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         cmd = [str(self._bin), "--input", str(input_dir), "--output", str(output_dir), "--report", *_cfg_args(cfg_true, cfg_false)]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=120)
         except subprocess.TimeoutExpired:
             return SkeletoniseResult(False, [], "skeleton-extractor timed out (>120s)")
         except Exception as e:
@@ -153,7 +153,7 @@ class CliExtractor:
             return True
         cmd = [str(self._bin), "--parse-check", "--input", str(file_path)]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=30)
         except Exception:
             return True
         return r.returncode == 0
@@ -166,7 +166,7 @@ class CliExtractor:
         for name, src_path, cfg_pred in cluster_files:
             cmd += ["--cluster", f"{name}:{src_path}:{cfg_pred}"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
         except Exception:
             return False
         return r.returncode == 0

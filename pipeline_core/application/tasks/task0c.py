@@ -520,7 +520,7 @@ def _engine_runtime_gate(
     run = subprocess.run(
         ["cargo", "test", "-p", module_name, "--test", test_bin, "--",
          "--test-threads=1"],
-        cwd=project_dir, capture_output=True, text=True,
+        cwd=project_dir, capture_output=True, text=True, errors="replace",
         timeout=timeout, env=cargo_env(),
     )
     return judge_block(block, (run.stdout or "") + (run.stderr or ""),
@@ -1266,7 +1266,7 @@ corrected content here
                 # Check if even `cargo build` (no tests) fails — means LLM damaged source.
                 _lib_only = subprocess.run(
                     ["cargo", "build", "-p", module_name],
-                    cwd=project_dir, capture_output=True, text=True,
+                    cwd=project_dir, capture_output=True, text=True, errors="replace",
                     timeout=BUILD_TIMEOUT, env=_cargo_env(),
                 )
                 if _lib_only.returncode != 0:
@@ -1279,7 +1279,7 @@ corrected content here
                         _rel = str(_sf.relative_to(project_dir))
                         _r = subprocess.run(
                             ["git", "checkout", "HEAD", "--", _rel],
-                            cwd=project_dir, capture_output=True, text=True,
+                            cwd=project_dir, capture_output=True, text=True, errors="replace",
                         )
                         if _r.returncode != 0:
                             _log(f"    git restore failed for {_rel}: {_r.stderr[:100]}")
@@ -2093,7 +2093,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _sib.write_text(_integ, encoding="utf-8")
                 check = subprocess.run(
                     ["cargo", "test", "--no-run", "-p", module_name],
-                    cwd=project_dir, capture_output=True, text=True,
+                    cwd=project_dir, capture_output=True, text=True, errors="replace",
                     timeout=BUILD_TIMEOUT, env=_cargo_env(),
                 )
                 if check.returncode == 0:
@@ -2531,7 +2531,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 _retry_sibling.write_text(_retry_body, encoding="utf-8")
                 _retry_check = subprocess.run(
                     ["cargo", "test", "--no-run", "-p", module_name],
-                    cwd=project_dir, capture_output=True, text=True,
+                    cwd=project_dir, capture_output=True, text=True, errors="replace",
                     timeout=BUILD_TIMEOUT, env=_cargo_env(),
                 )
                 if _retry_check.returncode != 0:
@@ -2734,7 +2734,7 @@ def _diagnose_and_fix_regression(
     log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
     reg_result = subprocess.run(
         ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
-        cwd=project_dir, capture_output=True, text=True,
+        cwd=project_dir, capture_output=True, text=True, errors="replace",
         timeout=build_timeout, env=cargo_env(),
     )
     if reg_result.returncode != 0:

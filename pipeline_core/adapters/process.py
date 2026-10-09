@@ -192,7 +192,7 @@ def run_bounded(
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), env=dict(env) if env is not None else None,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
             start_new_session=True, preexec_fn=_child_setup)
     except FileNotFoundError as exc:
         return BoundedRun(

@@ -97,7 +97,7 @@ def _toolchain_id(toolchain: str | None) -> str:
     """
     cmd = ["rustc"] + ([f"+{toolchain}"] if toolchain else []) + ["-vV"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        out = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
     except (OSError, subprocess.SubprocessError):
         return ""
     return (out.stdout or "").strip()
@@ -155,7 +155,7 @@ def pristine_ref(project_dir: Path) -> str:
     for ref in ("master", "main", "origin/HEAD", "origin/master", "origin/main"):
         try:
             out = subprocess.run(["git", "rev-parse", "--verify", "--quiet", ref],
-                                 cwd=project_dir, capture_output=True, text=True,
+                                 cwd=project_dir, capture_output=True, text=True, errors="replace",
                                  timeout=60)
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -163,7 +163,7 @@ def pristine_ref(project_dir: Path) -> str:
             return ref
     try:
         out = subprocess.run(["git", "rev-list", "--max-parents=0", "HEAD"],
-                             cwd=project_dir, capture_output=True, text=True,
+                             cwd=project_dir, capture_output=True, text=True, errors="replace",
                              timeout=60)
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -178,7 +178,7 @@ def _add_worktree(project_dir: Path, ref: str, dest: Path) -> bool:
     try:
         out = subprocess.run(
             ["git", "worktree", "add", "--detach", str(dest), ref],
-            cwd=project_dir, capture_output=True, text=True, timeout=300)
+            cwd=project_dir, capture_output=True, text=True, errors="replace", timeout=300)
     except (OSError, subprocess.SubprocessError) as exc:
         log(f"  [reference] worktree add failed: {exc}")
         return False
@@ -195,12 +195,12 @@ def _remove_worktree(project_dir: Path, dest: Path) -> None:
     pipeline into a copier, so removal is unconditional and never deferred."""
     with suppress(OSError, subprocess.SubprocessError):
         subprocess.run(["git", "worktree", "remove", "--force", str(dest)],
-                       cwd=project_dir, capture_output=True, text=True, timeout=120)
+                       cwd=project_dir, capture_output=True, text=True, errors="replace", timeout=120)
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     with suppress(OSError, subprocess.SubprocessError):
         subprocess.run(["git", "worktree", "prune"], cwd=project_dir,
-                       capture_output=True, text=True, timeout=120)
+                       capture_output=True, text=True, errors="replace", timeout=120)
 
 
 def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterReference:
@@ -214,7 +214,7 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
     t0 = time.monotonic()
     try:
         res = subprocess.run(deps.parse_cmd(" ".join(cmd_parts)), cwd=tree,
-                             capture_output=True, text=True,
+                             capture_output=True, text=True, errors="replace",
                              timeout=deps.test_timeout, env=env)
         rc = res.returncode
         output = (res.stdout or "") + "\n" + (res.stderr or "")

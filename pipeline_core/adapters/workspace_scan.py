@@ -293,7 +293,7 @@ class StaticDependencyGraph(DependencyGraph):
             result = subprocess.run(
                 ["cargo", "metadata", "--format-version", "1", "--no-deps"],
                 cwd=str(self._project_dir),
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, errors="replace", timeout=60,
             )
             if result.returncode != 0:
                 return False

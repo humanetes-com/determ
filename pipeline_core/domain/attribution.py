@@ -146,6 +146,17 @@ class FailureFrontier:
     # seams and the frontier already travels all of them. Only cross-file
     # pairs ever dispatch (`pair_for_unit`).
     pairs: frozenset[FormatterPair] = frozenset()
+    # Failing tests (bare names) whose first failure is inside a
+    # still-stubbed function (`test_outcome.StubHold`): their words are that
+    # stub's own panic and say nothing about any body. Every other failing
+    # test on a unit OBSERVED it (`observed_tests_for`), and a stub's first
+    # fill shows what those printed (run `39786-fd38e72f` fill 3: an owed
+    # test's `unwrap()` on `None` reached none of its stub's prompts).
+    held: frozenset[str] = frozenset()
+    # Per unit, a note every prompt that prints this unit's evidence carries:
+    # the compiler's words on its last body when its last owed offer missed
+    # on a compile failure (`refill_evidence.unit_notes_text`).
+    unit_notes: Mapping[FnLocator, str] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -154,6 +165,8 @@ class FailureFrontier:
         evidence: Mapping[str, str] | None = None,
         sources: Mapping[str, str] | None = None,
         pairs: Iterable[FormatterPair] = (),
+        held: Iterable[str] = (),
+        unit_notes: Mapping[FnLocator, str] | None = None,
     ) -> FailureFrontier:
         sites: SiteFrontier = {}
         for key, tests in convicting.items():
@@ -177,7 +190,8 @@ class FailureFrontier:
             if any(dispatch.get(loc) for loc in p.member_locators()))
         return cls(dict(dispatch), sites,
                    dict(evidence or {}), dict(sources or {}),
-                   live_pairs)
+                   live_pairs, frozenset(t.rsplit("::", 1)[-1] for t in held),
+                   dict(unit_notes or {}))
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:
@@ -196,6 +210,12 @@ class FailureFrontier:
 
     def tests_for(self, key: FnLocator) -> set[str]:
         return self.dispatch.get(key, set())
+
+    def observed_tests_for(self, key: FnLocator) -> set[str]:
+        """`tests_for(key)` minus the tests held in a still-stubbed function:
+        the tests whose words are about a body, not about a stub."""
+        return {t for t in self.tests_for(key)
+                if t.rsplit("::", 1)[-1] not in self.held}
 
     def tests_for_body(self, file: str, fn_name: str, container: str) -> set[str]:
         """The tests attributed to this body.

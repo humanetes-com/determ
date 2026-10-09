@@ -379,6 +379,7 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------- line shapes
 
@@ -2989,6 +2990,7 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
     from pipeline_core.domain.schedule_invariants import (
         blamed_from_event,
         decided_from_event,
+        due_from_event,
         hollow_stubs_from_event,
         measured_owners_from_event,
         violations,
@@ -3001,7 +3003,8 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
                 decided_from_event(sc), hollow_stubs=hollow_stubs_from_event(sc),
                 crash_blamed=blamed_from_event(sc),
                 budget_minutes=float(sc.get("budget_minutes") or 0.0),
-                measured_owners=measured_owners_from_event(sc)):
+                measured_owners=measured_owners_from_event(sc),
+                due=due_from_event(sc)):
             out.append(f"iter {sc.get('iter')} {v.kind}: {v.detail}")
     return out
 
@@ -3025,6 +3028,109 @@ def detect_p44(run: Run, iters: list[dict]) -> list[dict]:
              "key": sorted(kinds), "refs": [run.start_ref]}]
 
 
+def _sibling(name: str) -> Any:
+    """A fixture script beside this one, imported by path (the census is
+    run as a script, but its rows are also imported by tests)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        name, Path(__file__).resolve().parent / f"{name}.py")
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_P45_EVENTS: dict[str, Any] | None = None
+P45_FILLS = 3
+
+
+def detect_p45(run: Run, iters: list[dict]) -> list[dict]:
+    """A function on a red test's executed slice that no opened run wrote
+    for `P45_FILLS` fills after that test's failure last moved
+    (`scripts/starved_slice_units.py`). Pre-fix `src/ensure.rs::render`
+    went unwritten from fill 3 to fill 8 of run `14141-9a904822` while 16
+    of the 21 leftovers failed through it."""
+    global _P45_EVENTS
+    mod = _sibling("starved_slice_units")
+    if _P45_EVENTS is None:
+        try:
+            _P45_EVENTS = mod.load_events(str(EVENTS_PATH), set())
+        except OSError:
+            _P45_EVENTS = {}
+    ev = (_P45_EVENTS or {}).get(run.run_id)
+    if not ev:
+        return []
+    fills = [(n, units) for n, units, _p in mod.starved_by_fill(ev, P45_FILLS)
+             if units]
+    if not fills:
+        return []
+    units = sorted({u for _n, us in fills for u in us})
+    return [{"evidence": f"{len(units)} function(s) starved past {P45_FILLS} "
+                         f"fill(s) in {len(fills)} fill(s) (fills "
+                         + ", ".join(str(n) for n, _ in fills[:8]) + "): "
+                         + ", ".join(units[:8]),
+             "key": units[:12], "refs": [run.start_ref]}]
+
+
+_P46_ROWS: dict[str, Any] | None = None
+
+
+def detect_p46(run: Run, iters: list[dict]) -> list[dict]:
+    """FLAT ledger rows graded while every convicting test died first inside
+    a DIFFERENT still-stubbed function (`scripts/flat_while_held.py`): a
+    grade with no evidence about the body. Pre-fix 62 such rows over ten
+    cold runs."""
+    global _P46_ROWS
+    if _P46_ROWS is None:
+        mod = _sibling("flat_while_held")
+        index = Path(__file__).resolve().parent.parent / "logs" / "body_ledger"
+        rows: dict[str, Any] = {}
+        for idx in sorted(index.glob("*/index.jsonl")):
+            try:
+                for r, row in mod.flat_while_held(str(idx), str(EVENTS_PATH)).items():
+                    rows[r] = row
+            except OSError:
+                continue
+        _P46_ROWS = rows
+    row = (_P46_ROWS or {}).get(run.run_id)
+    if not row or not int(row["held"]):
+        return []
+    return [{"evidence": f"{row['held']} FLAT row(s) graded while every "
+                         f"convicting test died in another stub "
+                         f"({row['observed']} with an observing test): "
+                         + "; ".join(list(row["examples"])[:3]),
+             "key": [str(x).split(" (")[0] for x in list(row["examples"])[:12]],
+             "refs": [run.start_ref]}]
+
+
+_P47_LEDGERS: dict[str, Any] | None = None
+
+
+def detect_p47(run: Run, iters: list[dict]) -> list[dict]:
+    """A cluster ended with a red test in a PIPELINE class of its red ledger
+    (`scripts/red_ledger.py`): refused_gain, compile_loss or never_offered.
+    Each one is a defect of the pipeline, never an acceptable end.
+    No row before the ledger existed (2026-10-09)."""
+    global _P47_LEDGERS
+    mod = _sibling("red_ledger")
+    if _P47_LEDGERS is None:
+        try:
+            _P47_LEDGERS = mod.ledgers_by_run(str(EVENTS_PATH))
+        except OSError:
+            _P47_LEDGERS = {}
+    hits = [(str(led.get("cluster")), e)
+            for led in (_P47_LEDGERS or {}).get(run.run_id, [])
+            for e in mod.pipeline_entries(led)]
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} red test(s) in a pipeline class: "
+                         + "; ".join(f"[{c}] {e.get('class')} {e.get('test')}"
+                                     for c, e in hits[:6]),
+             "key": sorted({f"{e.get('class')}:{e.get('test')}"
+                            for _c, e in hits})[:12],
+             "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3044,7 +3150,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P34": detect_p34, "P35": detect_p35, "P36": detect_p36,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
              "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
-             "P43": detect_p43, "P44": detect_p44}
+             "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
+             "P46": detect_p46, "P47": detect_p47}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3084,6 +3191,9 @@ CLASS_NAMES = {
     "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",
     "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)",
     "P44": "schedule invariant broken (a hold named a run that did not open, a blocker stub or crash-blamed locator had no opened writer, an admitted measured owner had no writer at all, a fill opened nothing, or shares broke the budget; pre-fix a re-buy could hold a run and then be deferred itself, run 82925-203ed7b8 fills 5-6)",
+    "P45": "starved slice function (a function on a red test's executed slice no opened run wrote for 3 fills after the test's failure last moved; pre-fix src/ensure.rs::render went unwritten fills 3-8 of run 14141-9a904822)",
+    "P47": "red ledger pipeline class (a cluster ended with a red test the pipeline held: a reverted run had turned it green, every offer failed to compile, or no route ever wrote its functions)",
+    "P46": "flat while held elsewhere (a FLAT grade whose every convicting test died first inside a different still-stubbed function; pre-fix 62 rows over ten cold runs)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

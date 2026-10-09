@@ -40,7 +40,7 @@ def run_build_check(
     try:
         result = subprocess.run(
             parse_cmd(build_cmd),
-            cwd=project_dir, capture_output=True, text=True,
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
             timeout=build_timeout, env=cargo_env(),
         )
         output = (result.stdout + "\n" + result.stderr).strip()

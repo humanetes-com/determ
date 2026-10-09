@@ -24,6 +24,7 @@ from pipeline_core.log import emit, log
 
 __all__ = [
     "canon_container", "futile_suspension_keys", "is_fn_fully_exhausted",
+    "last_compile_errors",
     "load_retrospectives", "migrate_absolute_gate_retros",
     "migrate_confounded_retros", "reset_exhaustion_flags",
     "retire_unblocked_convictions", "retro_evidence_texts", "retro_key",
@@ -345,6 +346,36 @@ def retro_evidence_texts(project_dir: Path) -> dict[FnLocator, str]:
         for unit in units:
             by_unit.setdefault(unit, {})[str(key)] = rec
     return {unit: retro_evidence_text(rows) for unit, rows in by_unit.items()}
+
+
+def last_compile_errors(project_dir: Path) -> dict[FnLocator, str]:
+    """Per unit, the compiler's words on its last body that did not compile
+    (`last_compile_error`, else `last_error_preview` of a record whose last
+    attempt had errors), from every row naming it. A unit whose last body
+    compiled has no entry. Read by the driver for an owed function whose
+    last offer missed on a compile failure: the next prompt for it says so.
+    Before this, only the pair route read the stored error into a later
+    fill's prompt (its `LAST_ERROR`); the per-fn, file and impl routes
+    printed a compile error within the fill that produced it only (run
+    `14141-9a904822`: 59 compile reverts, 36 of them at a first attempt)."""
+    store = load_retrospectives(project_dir)
+    out: dict[FnLocator, str] = {}
+    for key, rec in store.items():
+        if not isinstance(rec, dict):
+            continue
+        text = str(rec.get("last_compile_error") or "")
+        if not text and int(rec.get("error_count") or 0) > 0:
+            text = str(rec.get("last_error_preview") or "")
+        if not text:
+            continue
+        parts = str(key).split("::")
+        units: set[FnLocator] = set()
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            units.add(FnLocator(parts[0], parts[1]))
+        units |= locators_from_scope(rec.get("joint_members") or ())
+        for unit in units:
+            out[unit] = text
+    return out
 
 
 def suspend_futile_guidance(
