@@ -49,6 +49,26 @@ def test_held_names_match_whatever_path_prefix_the_test_carries() -> None:
     assert fr.observed_tests_for(_DEBUG) == {"test_large_alignment"}
 
 
+def test_an_owed_test_is_printed_ahead_of_the_alphabetical_rest() -> None:
+    """Five observed tests, the owed one last alphabetically. Its words
+    lead the stub prompt, and the cap of six still drops the last of the
+    rest when a seventh test is observed."""
+    names = [f"test_{c}" for c in "abcdef"] + ["test_z"]
+    evidence = {n: f"panic {n} unique" for n in names}
+    fr = FailureFrontier.build(
+        {_DEBUG: set(names)}, {_DEBUG: set(names)}, evidence=evidence,
+        owed={_DEBUG: frozenset({"test_z"})})
+    text = observed_stub_excerpts((_DEBUG,), fr)
+    assert "panic test_z unique" in text
+    assert text.index("panic test_z unique") < text.index("panic test_a unique")
+    assert "panic test_f unique" not in text
+    held = observed_stub_excerpts(
+        (_DEBUG,), FailureFrontier.build(
+            {_DEBUG: set(names)}, {_DEBUG: set(names)}, evidence=evidence,
+            held=names, owed={_DEBUG: frozenset({"test_z"})}))
+    assert held == ""
+
+
 def test_the_per_fn_stub_prompt_renders_the_observed_section() -> None:
     empty = {"macros": "", "notes": "", "container": "", "types": "",
              "invariants": "", "siblings": "", "crate_idioms": "",

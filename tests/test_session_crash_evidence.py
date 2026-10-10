@@ -78,4 +78,24 @@ def test_turn0_without_evidence_has_no_block() -> None:
     # Negative control: the pre-fix turn 0 — the target's own words only.
     prompt = _turn0("")
     assert "<CRASH_EVIDENCE>" not in prompt and CYCLE not in prompt
-    assert "has overflowed its stack" in prompt
+
+
+def test_turn0_renders_unit_notes_and_an_empty_note_adds_nothing() -> None:
+    """A compiler diagnostic or a lesson for an editable unit is in turn 0.
+    Empty notes leave the prompt bytes without the tag."""
+    sl = SessionSlice(tests=("t_ring",), units=(_site(PING),))
+    common = {
+        "module_name": "m", "cluster_name": "c", "slice_": sl,
+        "records": {_site(PING): PING}, "all_records": [PING],
+        "file_texts": {"src/ring.rs": f"{PING.sig_text} {{ {PING.body_text} }}"},
+        "target_evidence": {"t_ring": "thread 't_ring' has overflowed its stack"},
+        "test_blocks": [], "types_section": "",
+    }
+    noted = build_slice_session_prompt(
+        **common, unit_notes="LESSONS for `ping`\ncannot return 0")
+    assert "<UNIT_NOTES>" in noted and "cannot return 0" in noted
+    assert noted.index("<UNIT_NOTES>") < noted.index("THE SLICE")
+    bare = build_slice_session_prompt(**common)
+    assert "<UNIT_NOTES>" not in bare
+    assert bare == _turn0("")
+    assert "has overflowed its stack" in bare

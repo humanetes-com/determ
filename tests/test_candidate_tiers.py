@@ -317,8 +317,10 @@ def test_the_ledger_round_trips_misses_and_tree_readings() -> None:
     led = AskLedger(oracle_fp="o")
     led.miss("u", "t", "f")
     led.settle("t", "T", "f")
+    led.joint_repaired.add("pair a")
     back = AskLedger.from_dict(led.to_dict())
     assert back.missed("u", "t", "f") == 1 and back.last == {"t": ("T", "f")}
+    assert back.joint_repaired == {"pair a"}
 
 
 def test_a_crash_cohort_no_longer_takes_every_slot_from_the_owed_set() -> None:
@@ -355,6 +357,21 @@ def test_an_owed_function_cut_for_its_misses_goes_ahead_of_the_crash_cohort() ->
                            misses=3)
     assert first[0] == "o7"
     assert len(first[:12]) == 12
+
+
+def test_an_owed_function_crash_ranked_past_the_take_stays_in_the_batch() -> None:
+    """Overlap is the owed share, once. A wider function cut once does not
+    take the narrowest tier's slot."""
+    from pipeline_core.domain.candidate_tiers import share_batch
+    crash = [f"c{i:02d}" for i in range(12)] + ["narrow"]
+    owed = ["narrow", "wide", *[f"o{i:02d}" for i in range(24)]]
+    tier = {"narrow": 0, "wide": 5, **{f"o{i:02d}": 3 for i in range(24)}}
+    first, after = share_batch(crash, owed, 12, cut_streak={"wide": 1},
+                               tier_of=tier, misses=3)
+    batch = first[:12]
+    assert batch.count("narrow") == 1
+    assert "narrow" not in after and "wide" not in batch
+    assert sum(u.startswith("c") for u in batch) == 6
 
 
 def _row(label: str, reverted, newly_red, newly_green):  # type: ignore[no-untyped-def]
@@ -398,11 +415,44 @@ def test_control_a_revert_with_no_gain_or_a_gain_no_longer_red_owes_nothing() ->
     assert joint_candidates(kept, ["t"]) == ()
 
 
+def test_the_union_gate_accepts_only_when_gains_and_losses_are_green() -> None:
+    """Accept: the candidate's gains stayed green and its newly red tests
+    came back. Refute: a gained test is red after (the joint answer lost the
+    candidate's own gain). A test outside the candidate's gained and lost
+    sets says nothing about it: the rest of the fill wrote other bodies.
+    Control: an unrelated test going red neither accepts nor refutes more
+    than the candidate's own tests decide."""
+    from pipeline_core.domain.candidate_tiers import JointCandidate, joint_accept
+    ok = joint_accept(gained={"t_gain"}, lost={"t_lost"},
+                      after_green={"t_kept", "t_gain", "t_lost"})
+    assert ok.accept and not ok.refute
+    empty = joint_accept(gained=set(), lost={"t_lost"}, after_green={"t_kept"})
+    assert not empty.accept and not empty.refute
+    assert empty.why == "empty gained owes nothing"
+    gain_lost = joint_accept(gained={"t_gain"}, lost={"t_lost"},
+                             after_green={"t_lost"})
+    assert gain_lost.refute and not gain_lost.accept
+    open_ = joint_accept(gained={"t_gain"}, lost={"t_lost"},
+                         after_green={"t_gain"})
+    assert not open_.accept and not open_.refute
+    unrelated = joint_accept(gained={"t_gain"}, lost={"t_lost"},
+                             after_green={"t_gain", "t_lost"})
+    assert unrelated.accept, "a green elsewhere turning red is not the joint's"
+    bare = JointCandidate("pair", frozenset({"a"}), frozenset({"g"}),
+                          frozenset({"l"}))
+    same = JointCandidate("pair", frozenset({"a"}), frozenset({"g"}),
+                          frozenset({"l"}), bodies={})
+    with_body = JointCandidate("pair", frozenset({"a"}), frozenset({"g"}),
+                               frozenset({"l"}), bodies={"a": "fn a() {}"})
+    assert bare.digest == same.digest and with_body.digest != bare.digest
+
+
 def test_the_ladder_asks_the_session_after_the_unit_route() -> None:
-    """A function is spent for a test only once asked on every rung: a body
-    landed through a unit route leaves it owed on the session rung; three
-    session offers that land nothing spend it and the next tier follows.
-    Control: a one-rung ladder spends it on the first landing (unchanged)."""
+    """A unit landing leaves the function owed on the session rung. A
+    session offer no route planned does not spend that rung and does not
+    erase a unit-rung reason. A planned session that lands nothing does
+    spend it, and the next tier follows. A one-rung ladder spends on the
+    first landing."""
     from pipeline_core.domain.candidate_tiers import LADDER
     led = AskLedger()
     first = _owed(["test_atom"], led)
@@ -416,9 +466,156 @@ def test_the_ladder_asks_the_session_after_the_unit_route() -> None:
     one = _owed(["test_atom"], led)
     assert set(one.by_test["test_atom"].owed) != set(t1.owed)
     for u, fp in r.owed.items():
-        for _ in range(3):
-            led.miss(u, "test_atom", fp, "not_planned", rung="session")
+        led.miss(u, "test_atom", fp, "compile", rung="unit")
+        counts = [led.miss(u, "test_atom", fp, "not_planned", rung="session")
+                  for _ in range(3)]
+        assert counts == [1, 2, 3], "an unplanned offer is still an offer"
+        assert led.reason(u, "test_atom", fp) == "compile", \
+            "an unplanned session offer does not erase the unit-rung reason"
+        assert led.route_absent(u, "test_atom"), \
+            "a session never planned for its bound reads absent"
     nxt = due_reading(["test_atom"], slices=_SLICES, reach=_REACH, evidence={},
                       held={}, ledger=led, ladder=LADDER)
     assert nxt.by_test["test_atom"].owed_tier > r.owed_tier
     assert set(nxt.by_test["test_atom"].rungs.values()) == {"unit"}
+
+
+def test_a_session_never_planned_still_ends_the_test() -> None:
+    """Liveness: 50 session offers no route planned used to leave the
+    function owed forever, so the cluster could not end. They now spend the
+    rung after the bound, and the test is exhausted."""
+    from pipeline_core.domain.candidate_tiers import LADDER
+    sl = {"t": frozenset({"a::f"})}
+    led = AskLedger()
+    r = due_reading(["t"], slices=sl, reach={}, evidence={}, held={},
+                    ledger=led, ladder=LADDER)
+    fp = r.fingerprints["t"]
+    led.record("a::f", "t", fp, rung="unit")
+    for _ in range(50):
+        led.miss("a::f", "t", fp, "not_planned", rung="session")
+    assert due_reading(["t"], slices=sl, reach={}, evidence={}, held={},
+                       ledger=led, ladder=LADDER).exhausted
+
+
+def test_a_session_route_that_cannot_be_built_is_spent_once() -> None:
+    from pipeline_core.domain.candidate_tiers import LADDER
+    led = AskLedger()
+    first = _owed(["test_atom"], led)
+    owed = dict(first.by_test["test_atom"].owed)
+    for u, fp in owed.items():
+        for _ in range(3):
+            led.miss(u, "test_atom", fp, "not_planned", rung="unit")
+        led.note_absent(u, "test_atom", fp, "session")
+    nxt = due_reading(["test_atom"], slices=_SLICES, reach=_REACH, evidence={},
+                      held={}, ledger=led, ladder=LADDER)
+    assert not set(nxt.by_test["test_atom"].owed) & set(owed)
+    assert nxt.by_test["test_atom"].owed_tier > first.by_test["test_atom"].owed_tier
+
+
+def test_a_held_stub_climbs_to_the_session_and_unplanned_offers_spend_it_by_the_bound() -> None:
+    from pipeline_core.domain.candidate_tiers import LADDER
+    led = AskLedger()
+    held = {"test_atom": frozenset({"src/ensure.rs::render"})}
+    first = due_reading(["test_atom"], slices=_SLICES, reach=_REACH,
+                        evidence={}, held=held, ledger=led, ladder=LADDER)
+    assert first.by_test["test_atom"].rungs["src/ensure.rs::render"] == "unit"
+    fp = first.by_test["test_atom"].owed["src/ensure.rs::render"]
+    led.record("src/ensure.rs::render", "test_atom", fp, rung="unit")
+    second = due_reading(["test_atom"], slices=_SLICES, reach=_REACH,
+                         evidence={}, held=held, ledger=led, ladder=LADDER)
+    assert second.by_test["test_atom"].rungs["src/ensure.rs::render"] == "session"
+    led.miss("src/ensure.rs::render", "test_atom", fp, "not_planned",
+             rung="session")
+    third = due_reading(["test_atom"], slices=_SLICES, reach=_REACH,
+                        evidence={}, held=held, ledger=led, ladder=LADDER)
+    assert third.by_test["test_atom"].rungs["src/ensure.rs::render"] == "session"
+    for _ in range(2):
+        led.miss("src/ensure.rs::render", "test_atom", fp, "not_planned",
+                 rung="session")
+    assert due_reading(["test_atom"], slices=_SLICES, reach=_REACH,
+                       evidence={}, held=held, ledger=led, ladder=LADDER).exhausted
+
+
+def test_a_repair_matches_the_folded_fingerprint_and_a_pending_digest_is_not_one() -> None:
+    led = AskLedger()
+    led.note_repair("src/a.rs::f", "t", "fp", "saw")
+    assert led.repair_seen("src/a.rs::f", "t", "fp")
+    assert led.repair_seen("src/a.rs::f", "t", "fp+joint")
+    folded = AskLedger()
+    folded.note_repair("src/a.rs::f", "t", "fp+extra", "saw")
+    assert folded.repair_seen("src/a.rs::f", "t", "fp+other")
+    assert not folded.repair_seen("src/a.rs::f", "t", "nope")
+    pending = AskLedger()
+    assert pending.note_compile_pending("src/a.rs::f", "t", "fp")
+    assert pending.reason("src/a.rs::f", "t", "fp") == "compile"
+    assert pending.missed("src/a.rs::f", "t", "fp") == 0
+    assert not pending.repair_seen("src/a.rs::f", "t", "fp")
+    assert not pending.note_compile_pending("src/a.rs::f", "t", "fp"), \
+        "pending once per fingerprint: the caller charges the next one"
+    assert pending.note_compile_pending("src/a.rs::f", "t", "fp2")
+
+
+def test_a_withdrawn_test_is_named_when_the_cluster_fails() -> None:
+    reading = due_reading(["t_orig"], slices={}, reach={}, evidence={}, held={},
+                          ledger=AskLedger(), withdrawn={"t_orig"})
+    assert any(line.startswith("t_orig: withdrawn:")
+               for line in render_failed(reading))
+
+
+def test_a_candidate_keeps_bodies_from_a_mapping_or_from_tuples() -> None:
+    from pipeline_core.domain.candidate_tiers import joint_candidates
+
+    class _Row(dict):
+        label = "pair"
+        reverted = (("src/a.rs", "f"),)
+        newly_red = ("sib",)
+        newly_green = ("t",)
+
+    mapped = _Row({"candidate_bodies": {
+        "src/a.rs::f": "fn f() {}", "src/a.rs::empty": ""}})
+    (c,) = joint_candidates([mapped], ["t"])
+    assert c.bodies == {"src/a.rs::f": "fn f() {}"}
+    tuples = _row("pair", (("src/a.rs", "f"),), ("sib",), ("t",))
+    tuples.candidate_bodies = [
+        ("src/a.rs", "g", "fn g() {}"),
+        ("src/a.rs::h", "fn h() {}"),
+        ("src/a.rs", "skip", ""),
+        ("bare",),
+    ]
+    (c2,) = joint_candidates([tuples], ["t"])
+    assert c2.bodies == {"src/a.rs::g": "fn g() {}", "src/a.rs::h": "fn h() {}"}
+
+
+def test_a_rejected_joint_answer_takes_back_only_the_candidate_functions() -> None:
+    """A function still holding the candidate body gets its prior body; one
+    the fill rewrote keeps the fill's body; nothing outside the candidate is
+    in the map. The previous rollback restored whole files and erased every
+    other body the fill landed in them."""
+    from pipeline_core.domain.candidate_tiers import joint_rollback
+    cand = {"f": ("CAND_F",), "g": ("CAND_G",)}
+    prior = {"f": ("OLD_F",), "g": ("OLD_G",)}
+    tree = {"f": ("CAND_F",), "g": ("FILL_G",), "h": ("FILL_H",)}
+    back = joint_rollback(cand, prior, lambda u: tree[u])
+    assert back == {"f": ("OLD_F",)}
+
+
+def test_a_compile_reason_from_an_earlier_evidence_state_does_not_count_now() -> None:
+    led = AskLedger()
+    led.miss("u", "t", "old_fp", "compile")
+    assert led.reason_on("u", "t", "old_fp") == "compile"
+    assert led.reason_on("u", "t", "old_fp+L123") == "compile", "a fold of it"
+    assert led.reason_on("u", "t", "new_fp") == "", \
+        "a new evidence state does not inherit the old diagnostic"
+
+
+def test_the_latest_reverted_body_is_the_one_kept() -> None:
+    from pipeline_core.domain.fill_attempts import FillAttempts
+    att = FillAttempts.__new__(FillAttempts)
+    import threading
+    att._lock = threading.Lock()
+    att._bodies = {}
+    att.remember_bodies({"src/a.rs::f": "FIRST"})
+    att.remember_bodies({"src/a.rs::f": "SECOND", "src/a.rs::g": ""})
+    assert att.remembered_bodies([FnLocator("src/a.rs", "f"),
+                                  FnLocator("src/a.rs", "g")]) == {
+        "src/a.rs::f": "SECOND"}

@@ -157,6 +157,10 @@ class FailureFrontier:
     # the compiler's words on its last body when its last owed offer missed
     # on a compile failure (`refill_evidence.unit_notes_text`).
     unit_notes: Mapping[FnLocator, str] = field(default_factory=dict)
+    # Per unit, the red tests that unit owes this sweep (`DueReading.tests_for`).
+    # Stub and re-fill excerpts print these before the other observed tests.
+    # Empty keeps alphabetical order.
+    owed: Mapping[FnLocator, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def build(
@@ -167,6 +171,7 @@ class FailureFrontier:
         pairs: Iterable[FormatterPair] = (),
         held: Iterable[str] = (),
         unit_notes: Mapping[FnLocator, str] | None = None,
+        owed: Mapping[FnLocator, Iterable[str]] | None = None,
     ) -> FailureFrontier:
         sites: SiteFrontier = {}
         for key, tests in convicting.items():
@@ -188,10 +193,14 @@ class FailureFrontier:
         live_pairs = frozenset(
             p for p in pairs
             if any(dispatch.get(loc) for loc in p.member_locators()))
+        owed_out: dict[FnLocator, frozenset[str]] = {}
+        for key, names in (owed or {}).items():
+            loc = key if isinstance(key, FnLocator) else FnLocator(key[0], key[1])
+            owed_out[loc] = frozenset(str(t) for t in names)
         return cls(dict(dispatch), sites,
                    dict(evidence or {}), dict(sources or {}),
                    live_pairs, frozenset(t.rsplit("::", 1)[-1] for t in held),
-                   dict(unit_notes or {}))
+                   dict(unit_notes or {}), owed_out)
 
     @classmethod
     def of_direct(cls, attributed: Frontier) -> FailureFrontier:

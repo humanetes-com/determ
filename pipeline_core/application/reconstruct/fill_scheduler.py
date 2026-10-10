@@ -409,7 +409,9 @@ def _row_for(
         classes=dict(rep.classes), share_minutes=share, reason=s.reason,
         joint_sets=tuple(_pairs(frozenset(js)) for js in rep.joint_sets),
         opened=(_pairs(rep.opened_units) if report is not None else None),
-        first_turn_minutes=rep.first_turn_minutes)
+        first_turn_minutes=rep.first_turn_minutes,
+        candidate_bodies=dict(rep.candidate_bodies),
+        joint_repaired=bool(getattr(rep, "joint_repaired", False)))
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,

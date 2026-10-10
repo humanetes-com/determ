@@ -197,6 +197,10 @@ class SessionOutcome:
     #: end of its first turn; None when no turn made a call. The fill
     #: schedule prices the first turn apart from the turns after it.
     first_turn_minutes: float | None = None
+    #: `file::fn` -> body, snapshotted while a regressed turn that turned
+    #: tests green is still on the tree. Empty when the session did not
+    #: revert a gain.
+    candidate_bodies: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def unmeasured(self) -> bool:
@@ -418,6 +422,7 @@ def run_slice_session(
     # good (its targets, then losses beyond the best's, then the net)
     # becomes it; a worse one is put back to its bytes before the next turn.
     best: _JudgedState | None = None
+    _best_bodies: dict[str, str] = {}
     # The best judged state the END-OF-SESSION KEEP GATE would leave on the
     # tree. That gate is `TurnReading.regressed` (the sweep's rule: a strict
     # net gain forgives a newly-red test, at or below zero any loss
@@ -741,6 +746,15 @@ def run_slice_session(
             if restored_to is None:
                 images = _images()
                 best = _JudgedState(turns, reading, images)
+                # The joint ask's candidate: this turn's changed bodies, read
+                # while this turn is the one on the tree. Read at the end,
+                # the tree could hold a later turn's bodies instead.
+                _best_bodies = (
+                    {f"{site_.file}::{site_.fn_name}": text_
+                     for site_, text_ in ports.enumerate_bodies().items()
+                     if text_ and text_ != baseline_bodies.get(site_)}
+                    if (reading.regressed and reading.newly_green
+                        and reading.newly_red) else {})
             if keep_best and end_on_keepable and not reading.regressed and (
                     keepable is None
                     or judge_against_best(reading, keepable.reading).holds):
@@ -826,6 +840,8 @@ def run_slice_session(
     # reading is not evidence the session may throw away, and the peel can
     # only reach a subset of the refused state, never the other turn's bodies.
     ended: _JudgedState | None = best
+    _candidate_bodies: dict[str, str] = (
+        dict(_best_bodies) if best is not None else {})
     if (not accepted and best is not None and best.reading.regressed
             and keepable is not None and keepable.turn != best.turn):
         _restore(keepable.images)
@@ -889,7 +905,8 @@ def run_slice_session(
         preferred_turn=best.turn if best is not None else None,
         restored_turns=restored_turns, capped_turns=capped_turns,
         judged_turns=judged_turns, judged_capped_turns=judged_capped,
-        first_turn_minutes=first_turn_minutes)
+        first_turn_minutes=first_turn_minutes,
+        candidate_bodies=_candidate_bodies)
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,

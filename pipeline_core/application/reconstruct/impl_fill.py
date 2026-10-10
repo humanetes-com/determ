@@ -2969,6 +2969,12 @@ def prepare_impl_fill(
                             snapshot = _pre.text("replace")
                             continue
                     return
+                if _regr_file is not None:
+                    # The bodies that turned a test green, kept off the tree
+                    # the restore puts back, for the joint ask.
+                    attempts.remember_bodies({
+                        f"{file_rel}::{b.fn_name}": b.body
+                        for b in _landed if b.body})
                 restore(_pre)
                 # The whole reply is restored: the peel did not narrow the
                 # failure to its bodies, so no one of them is convicted by it.
@@ -5591,6 +5597,9 @@ def prepare_impl_fill(
                     stub_free=stub_free, hollow_before=_pair_hollow_before)
                 if _pair_regr is not None:
                     _rcmp, _rdetail = _pair_regr
+                    attempts.remember_bodies({
+                        str(key): str(body)
+                        for key, _sig, body, _cont in _pair_landed if body})
                     _revert_pair()
                     _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
                          f"regressed sibling test(s): {_rcmp.summary}.")
@@ -6198,7 +6207,9 @@ def prepare_impl_fill(
                 installable=_installable_sites,
                 crash_evidence=crash_evidence_for_units(
                     crash_evidence or {}, _sl.units, crash_sites),
-                behaviour_must=_behaviour_must(*_records.values()))
+                behaviour_must=_behaviour_must(*_records.values()),
+                unit_notes=unit_notes_text(
+                    (locator_of(u) for u in _sl.units), _frontier_tests))
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:
@@ -6422,7 +6433,8 @@ def prepare_impl_fill(
                 first_turn_minutes=_out.first_turn_minutes,
                 # Every slice unit with a record was editable and in view;
                 # a unit with none (`_missing`) was left out inside the run.
-                opened=frozenset(locator_of(u) for u in _records))
+                opened=frozenset(locator_of(u) for u in _records),
+                candidate_bodies=dict(_out.candidate_bodies))
 
         return SessionRoute(_plans, _run_one_session, served, log=_log)
 
@@ -6479,7 +6491,11 @@ def prepare_impl_fill(
         after = now.classes.as_dict()
         classes = {k: after[k] - before.get(k, 0) for k in after
                    if after[k] - before.get(k, 0)}
-        return RouteRunReport.from_delta(delta, classes)
+        report = RouteRunReport.from_delta(delta, classes)
+        bodies = attempts.remembered_bodies(delta.reverted)
+        if bodies:
+            report = replace(report, candidate_bodies=bodies)
+        return report
 
     def _blocks_after_pair() -> list[ImplBlock]:
         if not _pair_served:

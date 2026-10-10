@@ -539,3 +539,37 @@ def test_a_sibling_turning_green_does_not_vouch_for_a_discard(tmp_path):
         root2, after=_reading({"t_render"}, {"t_fmt"}), executed=executed)
     assert _RENDER_DISCARD in out2.kept
     assert (root2 / "src" / "render.rs").read_text().startswith("let _ = (lhs, rhs);")
+
+
+def test_a_regressed_turn_that_gained_keeps_only_its_changed_bodies(tmp_path):
+    """The joint ask's candidate is the best turn's CHANGED bodies, read
+    while that turn is on the tree: a turn that turned the target green and
+    a sibling red. An unchanged body is not a candidate (it was snapshotted
+    whole before, every body of the slice)."""
+    root = _tree(tmp_path)
+    baseline = _reading({"t_sib"}, {"t_target"})
+    after = _reading({"t_target"}, {"t_sib"})
+
+    def measure(raw):
+        lib = (root / "src" / "lib.rs").read_text()
+        return baseline if lib == "SESSION_LIB" else after
+
+    ports = _ports(measure=measure, ask=lambda _m: (
+        '<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT(f)</FN>'))
+    ports = SessionPorts(
+        ask_turns=ports.ask_turns, splice=ports.splice,
+        check=lambda: (0, "", []), focus_errors=lambda out, f: out,
+        blamed_type_api=lambda t: t, measure_suite=measure,
+        read_source=lambda p: None,
+        enumerate_bodies=lambda: {
+            _FMT: (root / "src" / "lib.rs").read_text(),
+            _RENDER: (root / "src" / "render.rs").read_text()},
+        answer_pulls=lambda r, conversation="": None,
+        log=lambda m: None, emit=lambda *a, **k: None,
+        check_graceful_stop=lambda s: None,
+        same_crash=SameCrashJudge(frozenset(), None))
+    out = run_slice_session(
+        ports, target_src_dir=root, cluster_name="t",
+        slice_=SessionSlice(tests=("t_target",), units=(_FMT, _RENDER)),
+        records=_RECS, turn0="turn0", max_turns=1)
+    assert out.candidate_bodies == {"src/lib.rs::fmt": "NEW_FMT(f)"}

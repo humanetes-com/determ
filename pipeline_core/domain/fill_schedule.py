@@ -417,6 +417,12 @@ class RouteLedgerRow:
     #: dropped by a planner that does not say why. Empty on every row written
     #: before 2026-10-07.
     filtered: tuple[tuple[str, str, str], ...] = ()
+    #: `file::fn` -> body text captured before this run's revert restored
+    #: the tree. Empty on rows that reverted nothing worth replaying, and
+    #: on every row written before the joint ask kept bodies.
+    candidate_bodies: Mapping[str, str] = field(default_factory=dict)
+    #: The union gate repaired this run's gained revert. Absent on older rows.
+    joint_repaired: bool = False
 
     @property
     def identity(self) -> str:
@@ -453,6 +459,9 @@ class RouteLedgerRow:
                                    else None),
             **({"filtered": [list(t) for t in self.filtered]}
                if self.filtered else {}),
+            **({"candidate_bodies": dict(sorted(self.candidate_bodies.items()))}
+               if self.candidate_bodies else {}),
+            **({"joint_repaired": True} if self.joint_repaired else {}),
         }
 
     @classmethod
@@ -500,6 +509,10 @@ class RouteLedgerRow:
                 (str(t[0]), str(t[1]), str(t[2]))
                 for t in raw.get("filtered") or ()
                 if isinstance(t, (list, tuple)) and len(t) == 3),
+            candidate_bodies={
+                str(k): str(v) for k, v in dict(
+                    raw.get("candidate_bodies") or {}).items() if v},
+            joint_repaired=bool(raw.get("joint_repaired", False)),
         )
 
     def to_json(self) -> str:

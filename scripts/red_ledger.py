@@ -28,7 +28,8 @@ import sys
 from collections import Counter
 from typing import Any
 
-PIPELINE = frozenset({"refused_gain", "compile_loss", "never_offered"})
+PIPELINE = frozenset({"refused_gain", "compile_loss", "never_offered",
+                       "evidence_missing"})
 
 
 def ledgers_by_run(events_path: str, runs: set[str] | None = None,

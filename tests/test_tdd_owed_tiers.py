@@ -51,7 +51,10 @@ def _specs() -> list[Any]:
 def _run(tmp_path: Path, monkeypatch, *, owed: bool,
          events: list[tuple[str, dict]], fills: list[dict],
          raise_on: int = 0, exc: BaseException | None = None,
-         logs: list[str] | None = None) -> ClusterFillResult:
+         logs: list[str] | None = None,
+         cargo: tuple[int, str] | None = None,
+         reference: Any = None, rows: Any = None,
+         compile_errors: Any = None) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "0" if owed else "3")
@@ -81,11 +84,14 @@ def _run(tmp_path: Path, monkeypatch, *, owed: bool,
         order_frontier=lambda eligible, counts_: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
-        run_cargo=lambda *a, **k: (101, _FLAT),
+        run_cargo=lambda *a, **k: (101, _FLAT) if cargo is None else cargo,
         scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
         scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
         behaviour_specs_for=(lambda pd, cl: _specs()) if owed else None,
+        reference_measurement=reference,
+        route_ledger_rows=rows,
+        last_compile_errors=compile_errors,
     )
     return run_phase_c_tdd(
         deps, project_dir=tmp_path, target_src_dir=tmp_path, tests_dir_files=[],
@@ -181,6 +187,11 @@ def test_a_fill_that_raises_ends_the_cluster_failed_with_its_traceback(
                for line in logs)
     assert result.exhausted and result.failed_tests
     assert len(fills) == 2, "no fill after the crash"
+    crashed = [d for ev, d in events if ev == "task2a.cluster_crashed"]
+    assert len(crashed) == 1
+    assert crashed[0]["cluster"] == "stable"
+    assert "UnicodeDecodeError" in crashed[0]["exception"]
+    assert "Traceback" in crashed[0]["traceback"]
 
 
 def test_control_a_stop_still_leaves_the_process(
@@ -193,26 +204,144 @@ def test_control_a_stop_still_leaves_the_process(
         _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
              raise_on=2, exc=SystemExit(0))
     assert not [d for ev, d in events if ev == "phase_c.tdd.cluster_failed"]
+    assert not [d for ev, d in events if ev == "task2a.cluster_crashed"]
 
 
 def test_with_sessions_on_each_function_climbs_the_ladder_before_it_is_spent(
         tmp_path: Path, monkeypatch) -> None:
-    """The ladder: `render` is offered on the unit rung, then on the session
-    rung (no session route exists in this script, so each rung is spent by
-    its misses), and only then does `fmt` follow. The cluster still ends on
-    the exit, not on the backstop."""
+    """The ladder: `render` is offered on the unit rung `DEFAULT_MISSES`
+    times (those offers land nothing and no route planned them). The
+    session slice in this script is empty, so the session rung is absent
+    once — not spent by another `DEFAULT_MISSES` of offers no route
+    planned — and only then does `fmt` follow. The red test is never
+    offered. The cluster ends on the exit, not on the backstop."""
     monkeypatch.setenv("SLICE_SESSION", "1")
     events: list[tuple[str, dict]] = []
     fills: list[dict] = []
     _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills)
     asked = [d for ev, d in events if ev == "phase_c.tdd.asked"]
     k = DEFAULT_MISSES
-    assert [a["missed"] for a in asked[:2 * k]] == [["src/a.rs::render"]] * (2 * k)
-    assert asked[2 * k]["missed"] == ["src/a.rs::fmt"]
+    assert [a["missed"] for a in asked[:k]] == [["src/a.rs::render"]] * k
+    assert asked[k]["missed"] == ["src/a.rs::render"]
+    assert any("route_absent" in s for s in asked[k]["spent_by_misses"])
+    assert asked[k + 1]["missed"] == ["src/a.rs::fmt"]
+    assert len(asked) == 2 * (k + 1)
     owed = [d for ev, d in events if ev == "phase_c.tdd.owed"]
-    rungs = [d["tests"]["t1"].get("rungs") for d in owed[:2 * k]]
+    rungs = [d["tests"]["t1"].get("rungs") for d in owed]
     assert rungs[0] == {"src/a.rs::render": "unit"}
     assert rungs[k] == {"src/a.rs::render": "session"}
+    assert rungs[k + 1] == {"src/a.rs::fmt": "unit"}
     iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
     assert iters[-1]["kind"] == "cluster_failed"
-    assert len(iters) == 4 * k + 1
+    assert len(iters) == 2 * (k + 1) + 1
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert len(ledger) == 1
+    assert [e["class"] for e in ledger[0]["entries"]] == ["never_offered"]
+
+
+_GREEN = (
+    "running 1 test\n"
+    "test t1 ... ok\n\n"
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n")
+_FLOOR = (
+    "     Running tests/t.rs (target/debug/deps/t-1)\n"
+    "\nrunning 2 tests\n"
+    "test t_ok ... ok\n"
+    "test t1 ... FAILED\n\n"
+    "failures:\n\n"
+    "---- t1 stdout ----\n"
+    "thread 't1' panicked at tests/t.rs:3:5:\n"
+    "assertion `left == right` failed\n\n"
+    "failures:\n    t1\n\n"
+    "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out\n")
+
+
+def test_a_green_cluster_emits_an_empty_red_ledger(
+        tmp_path: Path, monkeypatch) -> None:
+    events: list[tuple[str, dict]] = []
+    fills: list[dict] = []
+    result = _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
+                  cargo=(0, _GREEN))
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert len(ledger) == 1 and ledger[0]["close_kind"] == "green"
+    assert ledger[0]["entries"] == []
+    assert not result.failed_tests and not result.exhausted
+    iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert iters[-1]["kind"] == "pass"
+
+
+def test_a_first_sweep_floor_names_the_originals_failure_withdrawn(
+        tmp_path: Path, monkeypatch) -> None:
+    """The original fails `t1`. The floor closes on the first sweep, before
+    the loop has a slice, and the ledger says withdrawn."""
+    from pipeline_core.domain.reference_floor import (
+        ClusterReference,
+        ReferenceMeasurement,
+        pairs_of,
+    )
+    from pipeline_core.domain.test_results import parse_binary_results
+    passed, failed, _, _ = pairs_of(parse_binary_results(_FLOOR))
+    ref = ReferenceMeasurement(key="k", clusters={"stable": ClusterReference(
+        cluster="stable", passed=passed, failed=failed,
+        announced=len(passed) + len(failed),
+        reported=len(passed) + len(failed), rc=101)})
+    events: list[tuple[str, dict]] = []
+    fills: list[dict] = []
+    _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
+         cargo=(101, _FLOOR), reference=lambda _pd: ref)
+    iters = [d for ev, d in events if ev == "phase_c.tdd.iter"]
+    assert iters[-1]["kind"] == "reference_floor"
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert len(ledger) == 1 and ledger[0]["close_kind"] == "reference floor"
+    assert [e["class"] for e in ledger[0]["entries"]] == ["withdrawn"]
+    assert not fills, "the floor closes before a fill"
+
+
+def test_a_compile_miss_is_repaired_once_and_the_diagnostic_reaches_the_next_ask(
+        tmp_path: Path, monkeypatch) -> None:
+    """The first offer that does not compile is not a miss: the next ask
+    carries the compiler's `Invented` diagnostic, and one failed repair
+    then counts as one miss. A compiling reply (`fmt`) counts its misses
+    and no repair turn."""
+    from pipeline_core.domain.fill_schedule import (
+        RouteKind,
+        RouteLedgerRow,
+        RunOutcome,
+    )
+    monkeypatch.setenv("SLICE_SESSION", "0")
+
+    def _row(iteration: int, fn: str, *, calls: int,
+             compile: bool) -> RouteLedgerRow:
+        return RouteLedgerRow(
+            kind=RouteKind.PER_FN, label="per-fn src/a.rs",
+            targets=(("src/a.rs", fn),), bodies_sha="b", oracle_fp="o",
+            outcome=RunOutcome.DECLINED, iteration=iteration,
+            cluster="stable", model_calls=calls,
+            classes={"compile": 1} if compile else {"wrong": 1})
+
+    def _rows(_name: str, _cluster: str) -> list[RouteLedgerRow]:
+        rows = [_row(i, "render", calls=calls, compile=True)
+                for i, calls in enumerate((1, 2, 2, 2), start=1)]
+        base = 1 + DEFAULT_MISSES + 1
+        rows.extend(_row(base + j, "fmt", calls=1, compile=False)
+                    for j in range(DEFAULT_MISSES))
+        return rows
+
+    events: list[tuple[str, dict]] = []
+    fills: list[dict] = []
+    _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
+         rows=_rows,
+         compile_errors=lambda _pd: {
+             _TARGET: "cannot find type `Invented` in this scope"})
+    asked = [d for ev, d in events if ev == "phase_c.tdd.asked"]
+    k = DEFAULT_MISSES
+    assert [a["missed"] for a in asked[:k + 1]] == [["src/a.rs::render"]] * (k + 1)
+    assert not asked[0]["spent_by_misses"]
+    assert any("compile" in s for s in asked[k]["spent_by_misses"])
+    note = fills[1]["tdd_frontier_tests"].unit_notes[_TARGET]
+    assert "Invented" in note and "did not compile" in note
+    assert asked[k + 1]["missed"] == ["src/a.rs::fmt"]
+    assert any("no_landing" in s for s in asked[k + k]["spent_by_misses"])
+    assert not any("compile" in s for s in asked[k + k]["spent_by_misses"])
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert [e["class"] for e in ledger[0]["entries"]] == ["model_limit"]

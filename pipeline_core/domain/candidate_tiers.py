@@ -67,7 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -77,6 +77,9 @@ __all__ = [
     "DEFAULT_MISSES",
     "LADDER",
     "JointCandidate",
+    "JointVerdict",
+    "joint_rollback",
+    "joint_accept",
     "joint_candidates",
     "joint_note",
     "miss_reasons",
@@ -228,6 +231,16 @@ class AskLedger:
     reasons: dict[str, dict[str, str]] = field(default_factory=dict)
     #: (unit, test) -> fingerprint -> rung -> "asked" or the miss count.
     rungs: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
+    #: (unit, test) -> fingerprints whose ask carried the test's own words.
+    words: dict[str, set[str]] = field(default_factory=dict)
+    #: (unit, test) -> fingerprint -> digest of the diagnostic a repair saw.
+    repairs: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: (unit, test) -> fingerprints whose rung cannot be built (no slice).
+    absent: dict[str, set[str]] = field(default_factory=dict)
+    #: Route-run labels a joint answer repaired (accept, or not a refutation).
+    joint_repaired: set[str] = field(default_factory=set)
+    #: (unit, test) -> fingerprints a compile miss was left pending on once.
+    pending: dict[str, set[str]] = field(default_factory=dict)
 
     @staticmethod
     def _key(unit: str, test: str) -> str:
@@ -278,23 +291,118 @@ class AskLedger:
         return ""
 
     def miss(self, unit: str, test: str, fp: str, reason: str = "",
-             rung: str = "") -> int:
+             rung: str = "", misses: int = DEFAULT_MISSES) -> int:
         """Record one offer that landed nothing, and why (on `rung` when
-        given); the count after it (on that rung when given)."""
+        given); the count after it (on that rung when given).
+
+        Every offer counts: an offer no route planned is still an offer, and
+        a rung that only ever finds no planned run must end, or the cluster
+        never reaches "nothing new can be asked" (a session the planner never
+        opens for a test kept its functions owed forever). A session-rung
+        offer no route planned does not erase a real reason already stored
+        for this fingerprint, and once it has spent the rung that way the
+        rung is recorded absent: the test reads never-offered on that rung,
+        not the model's."""
+        key = self._key(unit, test)
+        unplanned_side = reason == "not_planned" and rung not in ("", "unit")
         on_rung = 0
         if rung:
-            per_r = self.rungs.setdefault(self._key(unit, test), {}).setdefault(fp, {})
+            per_r = self.rungs.setdefault(key, {}).setdefault(fp, {})
             if per_r.get(rung, 0) >= 0:
                 per_r[rung] = per_r.get(rung, 0) + 1
             on_rung = max(per_r[rung], 0)
-        per = self.misses.setdefault(self._key(unit, test), {})
+        per = self.misses.setdefault(key, {})
         per[fp] = per.get(fp, 0) + 1
         if reason:
-            self.reasons.setdefault(self._key(unit, test), {})[fp] = reason
+            slot = self.reasons.setdefault(key, {})
+            if not unplanned_side or not slot.get(fp):
+                slot[fp] = reason
+        if unplanned_side and misses > 0 and on_rung >= misses:
+            self.absent.setdefault(key, set()).add(fp)
         return on_rung if rung else per[fp]
+
+    def note_words(self, unit: str, test: str, fp: str) -> None:
+        """The ask for `(unit, test)` under `fp` carried the test's words."""
+        if fp:
+            self.words.setdefault(self._key(unit, test), set()).add(fp)
+
+    def words_carried(self, unit: str, test: str, fp: str) -> bool:
+        got = self.words.get(self._key(unit, test), set())
+        if fp in got:
+            return True
+        bare = fp.split("+", 1)[0]
+        return bare in got or any(x.split("+", 1)[0] == bare for x in got)
+
+    def note_repair(self, unit: str, test: str, fp: str, digest: str = "") -> None:
+        """A repair turn saw this compile miss's diagnostic (`digest`)."""
+        self.repairs.setdefault(self._key(unit, test), {})[fp] = digest
+
+    def repair_seen(self, unit: str, test: str, fp: str = "") -> bool:
+        """A repair was recorded for `fp`, or for the fingerprint a folded
+        ask was stored on (the text before `+`)."""
+        got = self.repairs.get(self._key(unit, test), {})
+        if not fp:
+            return bool(got)
+        if fp in got:
+            return True
+        bare = fp.split("+", 1)[0]
+        return bare in got or any(k.split("+", 1)[0] == bare for k in got)
+
+    def note_compile_pending(self, unit: str, test: str, fp: str) -> bool:
+        """The reply did not compile and no repair turn saw its diagnostic.
+        The reason is stored, so the next prompt for the unit carries the
+        compiler's words (`unit_notes`), and the offer is not charged.
+        Pending at most once per (unit, test, fingerprint): True the first
+        time; False after, when the caller charges the miss, because the
+        next offer carried the diagnostic or none was ever stored to carry.
+        Without that bound a route whose every reply fails to compile in one
+        call kept its function owed forever."""
+        key = self._key(unit, test)
+        self.reasons.setdefault(key, {})[fp] = "compile"
+        seen = self.pending.setdefault(key, set())
+        if fp in seen:
+            return False
+        seen.add(fp)
+        return True
+
+    def note_absent(self, unit: str, test: str, fp: str, rung: str,
+                    misses: int = DEFAULT_MISSES) -> None:
+        """`rung` cannot be built (no session slice). Spend that rung and
+        record ``route_absent`` so the test can end never-offered."""
+        key = self._key(unit, test)
+        per_r = self.rungs.setdefault(key, {}).setdefault(fp, {})
+        if per_r.get(rung, 0) >= 0:
+            per_r[rung] = max(per_r.get(rung, 0), misses if misses > 0 else 1)
+        slot = self.reasons.setdefault(key, {})
+        if slot.get(fp) in (None, "", "not_planned", "route_absent"):
+            slot[fp] = "route_absent"
+        self.absent.setdefault(key, set()).add(fp)
+
+    def route_absent(self, unit: str, test: str) -> bool:
+        return bool(self.absent.get(self._key(unit, test)))
 
     def reason(self, unit: str, test: str, fp: str) -> str:
         return self.reasons.get(self._key(unit, test), {}).get(fp, "")
+
+    def reason_on(self, unit: str, test: str, fp: str) -> str:
+        """The reason stored for `fp`, or for the fingerprint a folded ask
+        (`fp+…`) was read from: not one from an earlier evidence state."""
+        got = self.reasons.get(self._key(unit, test), {})
+        if fp in got:
+            return got[fp]
+        bare = fp.split("+", 1)[0]
+        for k, v in got.items():
+            if k.split("+", 1)[0] == bare:
+                return v
+        return ""
+
+    def reason_is(self, unit: str, test: str, reason: str) -> bool:
+        """`reason` was stored for `(unit, test)` on any fingerprint, not
+        only the one a later fold produced."""
+        return reason in self.reasons.get(self._key(unit, test), {}).values()
+
+    def reasons_for(self, unit: str, test: str) -> dict[str, str]:
+        return dict(self.reasons.get(self._key(unit, test), {}))
 
     def settle(self, test: str, tree: str, fp: str) -> str:
         """The fingerprint `test` is read under on `tree`. A different
@@ -322,7 +430,13 @@ class AskLedger:
                 "reasons": {k: dict(sorted(v.items()))
                             for k, v in sorted(self.reasons.items())},
                 "rungs": {k: {f: dict(sorted(r.items())) for f, r in sorted(v.items())}
-                          for k, v in sorted(self.rungs.items())}}
+                          for k, v in sorted(self.rungs.items())},
+                "words": {k: sorted(v) for k, v in sorted(self.words.items())},
+                "repairs": {k: dict(sorted(v.items()))
+                            for k, v in sorted(self.repairs.items())},
+                "absent": {k: sorted(v) for k, v in sorted(self.absent.items())},
+                "joint_repaired": sorted(self.joint_repaired),
+                "pending": {k: sorted(v) for k, v in sorted(self.pending.items())}}
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> AskLedger:
@@ -331,6 +445,11 @@ class AskLedger:
         last = raw.get("last") or {}
         reasons = raw.get("reasons") or {}
         rungs = raw.get("rungs") or {}
+        words = raw.get("words") or {}
+        repairs = raw.get("repairs") or {}
+        absent = raw.get("absent") or {}
+        repaired = raw.get("joint_repaired") or ()
+        pending = raw.get("pending") or {}
         return cls(oracle_fp=str(raw.get("oracle_fp", "")),
                    seen={str(k): {str(x) for x in v} for k, v in seen.items()},
                    misses={str(k): {str(f): int(n) for f, n in v.items()}
@@ -341,7 +460,13 @@ class AskLedger:
                             for k, v in reasons.items()},
                    rungs={str(k): {str(f): {str(r): int(n) for r, n in rr.items()}
                                    for f, rr in v.items()}
-                          for k, v in rungs.items()})
+                          for k, v in rungs.items()},
+                   words={str(k): {str(x) for x in v} for k, v in words.items()},
+                   repairs={str(k): {str(f): str(d) for f, d in v.items()}
+                            for k, v in repairs.items()},
+                   absent={str(k): {str(x) for x in v} for k, v in absent.items()},
+                   joint_repaired={str(x) for x in repaired},
+                   pending={str(k): {str(x) for x in v} for k, v in pending.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -462,9 +587,10 @@ def due_reading(
     test's fingerprint is owed, all of that tier's unspent functions
     together. With a `ladder` of more than one rung, a tier function stays
     owed until it is spent on every rung, and `TestTiers.rungs` names the
-    rung it is owed on (a held stub and a joint candidate are owed on the
-    first rung only). Reads the ledger; `settle` is the one write (the tree
-    each fingerprint was read on)."""
+    rung it is owed on. A held stub climbs that same ladder. A joint
+    candidate and a lesson are owed on the first rung only, once. Reads
+    the ledger; `settle` is the one write (the tree each fingerprint was
+    read on)."""
     out_ = frozenset(withdrawn)
     red = sorted(set(red_tests) - out_)
     joint_list = tuple(joint)
@@ -487,9 +613,15 @@ def due_reading(
             continue
         tiers = tiers_of(sl, reach, spread)
         if stubs:
-            owed_h = {u: fp for u in sorted(stubs)
-                      if not ledger.spent(u, t, fp, misses)}
-            by_test[t] = TestTiers(t, tiers, -1, owed_h, held_by=stubs)
+            # A held stub climbs the same ladder as a tier function. One
+            # unit-route landing does not exhaust it while a later rung
+            # remains.
+            nxt = {u: ledger.next_rung(u, t, fp, ladder, misses)
+                   for u in sorted(stubs)}
+            owed_h = {u: fp for u, r in nxt.items() if r}
+            by_test[t] = TestTiers(
+                t, tiers, -1, owed_h, held_by=stubs,
+                rungs={u: nxt[u] for u in owed_h})
             continue
         # A reverted run that turned this test green owes its units again,
         # together and before any tier, once per candidate.
@@ -587,25 +719,31 @@ def share_batch(crash: Sequence[Any], owed: Sequence[Any], cap: int, *,
     for `cap` slots: (first, after) — `first` goes before the rest of the
     frontier in this order, `after` follows it.
 
-    Crash evidence ranks first, as before, but takes at most
-    `cap - min(len(owed), ceil(cap / 2))` slots while owed functions wait;
-    an owed function the cap has cut `misses` fills in a row goes ahead of
-    the crash cohort. Owed functions are ordered oldest-cut first, then by
-    their narrowest owed tier. Run `39786-fd38e72f` fill 4 (2026-10-09):
-    13 crash units took all 12 slots and none of the 26 owed functions was
-    offered; nothing bounded how long that could last. When both fit under
-    `cap` (or either is empty) the order is crash, then owed, unchanged."""
+    An owed function that is also a crash grade stays in the owed share
+    and is not counted twice. Crash evidence takes at most
+    `cap - min(len(owed), ceil(cap / 2))` of the slots that remain after
+    starved owed functions; an owed function the cap has cut `misses`
+    fills in a row goes ahead of the crash cohort. The owed share is
+    ordered narrowest tier, then oldest cut, then name. Run
+    `39786-fd38e72f` fill 4 (2026-10-09): 13 crash units took all 12 slots
+    and none of the 26 owed functions was offered. When both fit under
+    `cap` (or owed is empty) the order is the crash units that are not
+    also owed, then owed, and an empty owed set returns the crash list
+    unchanged."""
     owed_sorted = sorted(
-        owed, key=lambda u: (-cut_streak.get(u, 0), tier_of.get(u, 0),
-                             str(u)))
-    if cap <= 0 or not crash or not owed or len(crash) + len(owed) <= cap:
-        return [*crash, *owed_sorted], []
+        owed, key=lambda u: (tier_of.get(u, 0), -cut_streak.get(u, 0), str(u)))
+    owed_set = set(owed_sorted)
+    crash_only = [u for u in crash if u not in owed_set]
+    if not owed_sorted:
+        return list(crash), []
+    if cap <= 0 or not crash_only or len(crash_only) + len(owed_sorted) <= cap:
+        return [*crash_only, *owed_sorted], []
     starved = [u for u in owed_sorted if cut_streak.get(u, 0) >= misses > 0]
-    rest_owed = [u for u in owed_sorted if u not in starved]
-    owed_share = min(len(owed), -(-cap // 2))
+    rest_owed = [u for u in owed_sorted if u not in set(starved)]
+    owed_share = min(len(owed_sorted), -(-cap // 2))
     crash_take = max(0, cap - owed_share - len(starved))
-    return ([*starved, *crash[:crash_take], *rest_owed],
-            list(crash[crash_take:]))
+    return ([*starved, *crash_only[:crash_take], *rest_owed],
+            list(crash_only[crash_take:]))
 
 
 def miss_reasons(units: Collection[str], rows: Iterable[Any]) -> dict[str, str]:
@@ -642,19 +780,94 @@ def _fold(fp: str, extra: str) -> str:
 class JointCandidate:
     """A reverted route run that turned red tests green and a sibling red:
     a right-or-better answer a gate refused. Its units are owed again,
-    together, to the tests it turned green."""
+    together, to the tests it turned green. `bodies` is the text of those
+    units as it stood before the revert, kept off the tree."""
 
     label: str
     units: frozenset[str]
     gained: frozenset[str]
     lost: frozenset[str]
+    bodies: Mapping[str, str] = field(default_factory=dict)
+    repaired: bool = False
 
     @property
     def digest(self) -> str:
-        h = hashlib.sha256("\0".join(
-            [self.label, *sorted(self.units), *sorted(self.gained),
-             *sorted(self.lost)]).encode("utf-8"))
+        parts = [self.label, *sorted(self.units), *sorted(self.gained),
+                 *sorted(self.lost)]
+        parts.extend(f"{k}={self.bodies[k]}" for k in sorted(self.bodies))
+        h = hashlib.sha256("\0".join(parts).encode("utf-8"))
         return "j" + h.hexdigest()[:_WIDTH]
+
+
+@dataclass(frozen=True, slots=True)
+class JointVerdict:
+    """Whether a joint answer may stay on the tree.
+
+    Accept only when every gained test is green after the fill and every
+    newly red test is green again. Refute only when a test the candidate
+    itself gained is red after: the joint answer lost the candidate's own
+    gain. A test outside the candidate's gained and lost sets says nothing
+    about it: the rest of the fill wrote other bodies, judged by their own
+    gates. Empty `gained` owes nothing."""
+
+    accept: bool
+    refute: bool
+    why: str
+
+
+def joint_accept(*, gained: Collection[str], lost: Collection[str],
+                 after_green: Collection[str]) -> JointVerdict:
+    """The union gate over the candidate's own tests. Bare test names."""
+    def bare(names: Collection[str]) -> frozenset[str]:
+        return frozenset(n.rsplit("::", 1)[-1] for n in names)
+
+    got = bare(gained)
+    if not got:
+        return JointVerdict(False, False, "empty gained owes nothing")
+    after = bare(after_green)
+    gain_lost = got - after
+    if gain_lost:
+        return JointVerdict(
+            False, True,
+            "lost a test the candidate had gained: "
+            + ", ".join(sorted(gain_lost)))
+    still_red = bare(lost) - after
+    if not still_red:
+        return JointVerdict(
+            True, False, "gains stayed green and the newly red tests came back")
+    return JointVerdict(
+        False, False, "gains held, still red: " + ", ".join(sorted(still_red)))
+
+
+def joint_rollback(cand: Mapping[Any, Sequence[str]],
+                   prior: Mapping[Any, Sequence[str]],
+                   now: Callable[[Any], Sequence[str]]) -> dict[Any, Sequence[str]]:
+    """The functions a rejected joint answer puts back, and to what: each
+    candidate function still holding the candidate body gets its prior
+    body. One the fill rewrote keeps the fill's body, and nothing outside
+    the candidate is touched: a file-level restore erased every other body
+    the fill landed in those files while the route rows still recorded
+    them kept."""
+    return {loc: prior[loc] for loc, body in cand.items()
+            if prior.get(loc) and tuple(now(loc)) == tuple(body)}
+
+
+def _bodies_of(row: Any) -> dict[str, str]:
+    raw = getattr(row, "candidate_bodies", None)
+    if raw is None and isinstance(row, Mapping):
+        raw = row.get("candidate_bodies")
+    out: dict[str, str] = {}
+    if isinstance(raw, Mapping):
+        for k, text in raw.items():
+            if text:
+                out[str(k)] = str(text)
+        return out
+    for item in raw or ():
+        if isinstance(item, (list, tuple)) and len(item) == 3 and item[2]:
+            out[f"{item[0]}::{item[1]}"] = str(item[2])
+        elif isinstance(item, (list, tuple)) and len(item) == 2 and item[1]:
+            out[str(item[0])] = str(item[1])
+    return out
 
 
 def joint_candidates(rows: Iterable[Any], red_tests: Collection[str],
@@ -662,7 +875,8 @@ def joint_candidates(rows: Iterable[Any], red_tests: Collection[str],
     """The route-ledger rows (this run, this oracle) whose run reverted
     units, turned at least one still-red test green, and reddened another
     test. Run `450922-661c5e9f` reverted the `src/ensure.rs` file run and the
-    Debug/Display pair this way; no record kept what they had gained."""
+    Debug/Display pair this way; the bodies they had written are kept on
+    the row (`candidate_bodies`) so the next ask can start from them."""
     red = {t.rsplit("::", 1)[-1] for t in red_tests}
     out: list[JointCandidate] = []
     for r in rows:
@@ -673,8 +887,10 @@ def joint_candidates(rows: Iterable[Any], red_tests: Collection[str],
             g.rsplit("::", 1)[-1]
             for g in (getattr(r, "newly_green", ()) or ())) & red
         if reverted and lost and gained:
-            out.append(JointCandidate(str(getattr(r, "label", "")), reverted,
-                                      gained, lost))
+            out.append(JointCandidate(
+                str(getattr(r, "label", "")), reverted, gained, lost,
+                _bodies_of(r),
+                bool(getattr(r, "joint_repaired", False))))
     return tuple(out)
 
 

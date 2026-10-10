@@ -312,7 +312,8 @@ def collect_refill_evidence(
     at_site = crash_sites or CrashSites()
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
-        tests = (tuple(sorted(frontier.tests_for(key)))[:max_tests]
+        tests = (tests_in_prompt(frontier, key, max_tests=max_tests,
+                                 observed_only=False)
                  if frontier is not None else ())
         # An observed fault outranks every verdict-derived grade, and it has
         # to be tested FIRST rather than as a fallback: a crashed binary
@@ -373,10 +374,37 @@ OBSERVED_HEAD = (
     "change what they observed:")
 
 
+def tests_in_prompt(
+    frontier: FailureFrontier | None, key: FnLocator, *,
+    max_tests: int = 6, observed_only: bool = True,
+) -> tuple[str, ...]:
+    """The tests a prompt for `key` prints, owed tests first, then the rest
+    alphabetically, capped at `max_tests`.
+
+    `observed_only` drops tests held in a stub (a stub's first fill). The
+    re-fill block passes False and keeps every attributed test. An empty
+    owed map leaves the order alphabetical."""
+    if frontier is None:
+        return ()
+    pool = (frontier.observed_tests_for(key) if observed_only
+            else set(frontier.tests_for(key)))
+    owed_raw: set[str] = set()
+    for name in (frontier.owed.get(key) or ()):
+        owed_raw.add(str(name))
+        owed_raw.add(str(name).rsplit("::", 1)[-1])
+
+    def bare(test: str) -> str:
+        return test.rsplit("::", 1)[-1]
+
+    owed_tests = sorted(t for t in pool if t in owed_raw or bare(t) in owed_raw)
+    rest = sorted(t for t in pool if t not in set(owed_tests))
+    return tuple((owed_tests + rest)[:max_tests])
+
+
 def observed_stub_excerpts(
     keys: Iterable[FnLocator], frontier: FailureFrontier | None, *,
     read_source: Callable[[str], str | None] | None = None,
-    max_tests: int = 4,
+    max_tests: int = 6,
 ) -> str:
     """For each still-stubbed function in `keys`, what its failing tests that
     are NOT held in a stub printed on the sweep (`observed_tests_for`), or ""
@@ -389,7 +417,8 @@ def observed_stub_excerpts(
         return ""
     lines: list[str] = []
     for key in keys:
-        tests = sorted(frontier.observed_tests_for(key))[:max_tests]
+        tests = list(tests_in_prompt(
+            frontier, key, max_tests=max_tests, observed_only=True))
         excerpts = sweep_excerpts(tests, frontier, read_source=read_source)
         if excerpts:
             lines.append(OBSERVED_HEAD.format(fn=key.fn_name))

@@ -106,6 +106,10 @@ class RouteRunReport:
     #: predicate that dropped it (`RouteLedgerRow.filtered`). Empty: the
     #: route names none.
     filtered: Mapping[FnLocator, str] = field(default_factory=dict)
+    #: Body text of units this run reverted after they had turned a test
+    #: green (`file::fn` -> body). Empty on every other run. Kept off the
+    #: tree so the next fill can start the joint ask from them.
+    candidate_bodies: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def opened_units(self) -> frozenset[FnLocator]:

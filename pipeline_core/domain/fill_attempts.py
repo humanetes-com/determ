@@ -195,6 +195,8 @@ class FillAttempts:
         self._calls_by_label: dict[str, int] = {}
         self._sticky = sticky_reverts
         self._run_label = run_label
+        # file::fn -> body text captured before a gained revert restored the tree.
+        self._bodies: dict[str, str] = {}
 
     def _label(self, label: str | None) -> str:
         return self._run_label() if label is None else label
@@ -241,6 +243,27 @@ class FillAttempts:
                 if self._sticky and self._last.get(u) is AttemptOutcome.REVERTED:
                     continue
                 self._mark(u, AttemptOutcome.KEPT, stamp)
+
+    def remember_bodies(self, bodies: Mapping[str, str]) -> None:
+        """Keep reverted body text off the tree, keyed `file::fn`.
+
+        The joint ask splices these back. A later revert of the same unit
+        replaces the earlier body: the latest answer is the one the joint ask
+        should start from. An empty text never replaces a kept one."""
+        with self._lock:
+            for key, text in bodies.items():
+                if text:
+                    self._bodies[str(key)] = str(text)
+
+    def remembered_bodies(self, units: Iterable[FnLocator]) -> dict[str, str]:
+        """Bodies remembered for these units, or {}."""
+        with self._lock:
+            out: dict[str, str] = {}
+            for u in units:
+                key = f"{u.file}::{u.fn_name}"
+                if key in self._bodies:
+                    out[key] = self._bodies[key]
+            return out
 
     def note_reverted(self, units: Iterable[FnLocator], *,
                       label: str | None = None,

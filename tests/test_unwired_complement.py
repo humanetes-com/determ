@@ -232,5 +232,6 @@ def test_the_live_session_opens_through_the_write_set() -> None:
     assert live, "no live session prompt build found"
     for c in live:
         assert any(k.arg == "installable" for k in c.keywords)
+        assert any(k.arg == "unit_notes" for k in c.keywords)
     assert "session_write_set(" in src
     assert "type(_sl)(tests=_sl.tests, units=" not in src

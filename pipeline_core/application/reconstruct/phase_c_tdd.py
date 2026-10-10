@@ -50,7 +50,10 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
-from pipeline_core.application.reconstruct.tree_txn import guard_tree_boundary
+from pipeline_core.application.reconstruct.tree_txn import (
+    TreeTxn,
+    guard_tree_boundary,
+)
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
 from pipeline_core.domain.assertion_position import assertion_positions
 from pipeline_core.domain.attribution import (
@@ -92,8 +95,10 @@ from pipeline_core.domain.candidate_tiers import (
     due_reading,
     evidence_text,
     feature_reach,
+    joint_accept,
     joint_candidates,
     joint_note,
+    joint_rollback,
     merge_slices,
     miss_reasons,
     render_failed,
@@ -252,7 +257,11 @@ from pipeline_core.domain.reference_floor import (
     pairs_of,
     reference_floor_close_reason,
 )
-from pipeline_core.domain.refill_evidence import compile_note, lesson_note
+from pipeline_core.domain.refill_evidence import (
+    compile_note,
+    lesson_note,
+    tests_in_prompt,
+)
 from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.refine import (
     Attempt,
@@ -2226,6 +2235,12 @@ def run_phase_c_tdd(
 
     # The last sweep's capture; read at the exit (the red ledger's words).
     output: str = ""
+    # Bound before the loop so a first-sweep floor, timeout, red build or
+    # backstop — all of which break before these are assigned inside the
+    # loop — can still recompute the owed reading, including withdrawn.
+    _stub_hold = StubHold({})
+    _session_slices: dict[str, frozenset[FnSite]] = {}
+    eligible: Frontier = {}
     while True:
         iter_n += 1
         # The coverage binding is NOT cleared here: it stands from its
@@ -4378,7 +4393,7 @@ def run_phase_c_tdd(
         # Crash evidence voids exhaustion: the prior attempts never saw a
         # localized faulting stack, so "nothing left to try" no longer holds.
         permanently_exhausted -= set(crash_texts)
-        eligible: Frontier = {}
+        eligible = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
             if key in permanently_exhausted:
@@ -5722,7 +5737,7 @@ def run_phase_c_tdd(
         # frontier, and a session that does not run leaves them to the
         # other routes); the engine drops what a session served from the
         # same call's other routes.
-        _session_slices: dict[str, frozenset[FnSite]] = {}
+        _session_slices = {}
         _session_owners: dict[str, frozenset[FnSite]] = {}
         if os.getenv("SLICE_SESSION", "1") != "0":
             # Measured owners already carry containers. Recorded locators
@@ -6010,8 +6025,9 @@ def run_phase_c_tdd(
             _head_keys = [k for k, _ in ordered if k in _crash_grades]
             _rest = [(k, ts) for k, ts in ordered
                      if k not in _crash_grades and k not in _due_units]
-            _owed_keys = sorted(_due_units - set(_crash_grades),
-                                key=lambda x: (x.file, x.fn_name))
+            # Every owed function, including one that is also a crash grade.
+            # share_batch keeps that overlap in the owed share, once.
+            _owed_keys = sorted(_due_units, key=lambda x: (x.file, x.fn_name))
             # Crash evidence first, but never every slot while owed
             # functions wait (`candidate_tiers.share_batch`).
             _tier_of: dict[FnLocator, int] = {}
@@ -6469,6 +6485,37 @@ def run_phase_c_tdd(
         # Served is whatever fill-return has already stamped — not this batch.
         _persist_floor()
         frontier_keys = set(_batch.keys)
+        # A joint ask starts from the reverted bodies, on one transaction
+        # with the functions the newly red tests fail through. The copy is
+        # local: `eligible` stays the sweep's frontier.
+        _joint_live = tuple(
+            c for c in _joint_now
+            if c.bodies and not c.repaired
+            and c.label not in _asks.joint_repaired)
+        _joint_extra: set[FnLocator] = set()
+        _elig_fill: Frontier = eligible
+        _due_fill: frozenset[FnLocator] = _due.units & frozenset(_batch.keys)
+        if _joint_live and deps.tree_writer is not None:
+            _lost_bare = {bare_test_name(n) for c in _joint_live for n in c.lost}
+            _gained_bare = {bare_test_name(n)
+                            for c in _joint_live for n in c.gained}
+            _want_tests = _lost_bare | _gained_bare
+            for _loc_j, _tests_j in eligible.items():
+                if any(bare_test_name(t) in _want_tests for t in _tests_j):
+                    _joint_extra.add(_loc_j)
+            for _c in _joint_live:
+                for _key_b in _c.bodies:
+                    if "::" not in _key_b:
+                        continue
+                    _file_b, _fn_b = _key_b.rsplit("::", 1)
+                    _joint_extra.add(FnLocator(_file_b, _fn_b))
+            frontier_keys |= _joint_extra
+            _due_fill = frozenset(_due_fill | _joint_extra)
+            _elig_fill = dict(eligible)
+            for _loc_j in _joint_extra:
+                _names_j = set(_elig_fill.get(_loc_j, ()))
+                _names_j |= _want_tests
+                _elig_fill[_loc_j] = _names_j
         _cls_bit = (f" {_prev_fill_classes.rendered()}"
                     if _saw_fill else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
@@ -6780,12 +6827,15 @@ def run_phase_c_tdd(
             _compile_missed = {
                 FnLocator(*u_.rsplit("::", 1))
                 for t_, r_ in _due.by_test.items() for u_, fp_ in r_.owed.items()
-                if _asks.reason(u_, t_, fp_) == "compile"}
+                if _asks.reason_on(u_, t_, fp_) == "compile"}
             if _compile_missed:
                 with suppress(OSError, ValueError, TypeError):
                     _errs = deps.last_compile_errors(project_dir)
                     _compile_notes = {u_: compile_note(u_.fn_name, _errs[u_])
                                       for u_ in _compile_missed if _errs.get(u_)}
+        # The owed functions whose prompt this fill carries a compile note:
+        # a compile miss among them was asked with its diagnostic (a repair).
+        _compile_noted: frozenset[FnLocator] = frozenset(_compile_notes)
         # Task 4's lessons for each owed function and the tests owing it.
         if _lesson_store is not None and _due.units:
             for _lu in _due.units:
@@ -6878,6 +6928,51 @@ def run_phase_c_tdd(
             return frozenset(found)
 
         _fill_crash: tuple[BaseException, str] | None = None
+        # The joint ask's candidate bodies go on the tree before the fill,
+        # each function's prior body remembered. A rejected or crashed joint
+        # answer puts back ONLY the functions that still hold the candidate
+        # body: a file-level restore would also erase every other body the
+        # fill landed in those files while the route rows, the body ledger
+        # and the landed set still record them as kept.
+        _joint_cand: dict[FnLocator, tuple[str, ...]] = {}
+        _joint_prior: dict[FnLocator, tuple[str, ...]] = {}
+        if _joint_live and deps.tree_writer is not None:
+            for _c in _joint_live:
+                for _key_b, _body_b in _c.bodies.items():
+                    if _body_b and "::" in _key_b:
+                        _file_b, _fn_b = _key_b.rsplit("::", 1)
+                        _joint_cand[FnLocator(_file_b, _fn_b)] = (str(_body_b),)
+            _txn_j = TreeTxn(target_src_dir)
+            try:
+                _joint_prior = {
+                    _loc_p: deps.tree_writer.bodies(_loc_p, target_src_dir)
+                    for _loc_p in _joint_cand}
+                _spliced_j, _refused_j = (
+                    deps.tree_writer.splice(_joint_cand, _txn_j)
+                    if _joint_cand else ([], []))
+            except (OSError, ValueError, TypeError):
+                _spliced_j, _refused_j = [], [(FnLocator("", ""), "splice failed")]
+            if not _spliced_j or _refused_j:
+                _txn_j.rollback()
+                _joint_live, _joint_cand, _joint_prior = (), {}, {}
+
+        def _unsplice_joint(
+                cand: dict[FnLocator, tuple[str, ...]] = _joint_cand,
+                prior: dict[FnLocator, tuple[str, ...]] = _joint_prior,
+        ) -> list[FnLocator]:
+            """Put back the prior body of every candidate function that still
+            holds the candidate body; one the fill rewrote keeps the fill's
+            body (its own gates judged it)."""
+            if not cand or deps.tree_writer is None:
+                return []
+            _tw = deps.tree_writer
+            back = joint_rollback(
+                cand, prior, lambda loc_: _tw.bodies(loc_, target_src_dir))
+            if back:
+                deps.tree_writer.splice(back, TreeTxn(target_src_dir))
+            return sorted(back, key=lambda loc_: (loc_.file, loc_.fn_name))
+
+        _frontier_built: FailureFrontier | None = None
         try:
             with collect_stream_meta() as _fill_meta:
                 sub = deps.task2_fill_fns_one_by_one(
@@ -6908,9 +7003,9 @@ def run_phase_c_tdd(
                     # join this map with the tests the hop attributed to
                     # either endpoint. Without that, the pair opens and
                     # convicting_for both members is empty.
-                    tdd_frontier_tests=FailureFrontier.build(
+                    tdd_frontier_tests=(_frontier_built := FailureFrontier.build(
                         dispatch_including_pairs(
-                            eligible, frontier_keys, _attr.pairs,
+                            _elig_fill, frontier_keys, _attr.pairs,
                             convicting),
                         convicting,
                         # The sweep's own words per failing test (panic site +
@@ -6928,7 +7023,8 @@ def run_phase_c_tdd(
                         # words are that stub's panic, so a stub's first fill
                         # shows the OTHER tests' words (`observed_tests_for`).
                         held=(bare_test_name(t_) for t_ in _stub_hold.by_test),
-                        unit_notes=_compile_notes),
+                        unit_notes=_compile_notes,
+                        owed={u_: _due.tests_for(u_) for u_ in _due.units})),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
                     ledger_entries=_ledger_entries(),
@@ -6949,9 +7045,8 @@ def run_phase_c_tdd(
                     attributed=_attributed_locs,
                     measured_owners=measured_owners_on_frontier(
                         _owner_map_units, (k for k, _ in ordered)),
-                    due=_due.units & frozenset(_batch.keys),
-                    due_rungs={u_: _due.rung_of(u_)
-                               for u_ in _due.units & frozenset(_batch.keys)},
+                    due=frozenset(_due_fill),
+                    due_rungs={u_: _due.rung_of(u_) for u_ in _due_fill},
                     unit_evidence=_unit_evidence,
                     body_rows=_body_rows,
                     # The pool starts units in the order this driver chose;
@@ -6976,6 +7071,10 @@ def run_phase_c_tdd(
         except BaseException as _fill_exc:
             # Before the restore: a restored tree no longer holds these
             # bodies, and the ledger is where a body outlives the tree.
+            if _joint_cand:
+                with suppress(OSError, ValueError, TypeError):
+                    _unsplice_joint()
+                _joint_cand = {}
             _record_landed_rows("stopped during the fill pass", frozenset())
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
@@ -7003,6 +7102,12 @@ def run_phase_c_tdd(
                 "traceback": _tb_c,
                 "pass_count": pass_count, "fail_count": fail_count,
                 "tests": tiers_event(_due)})
+            # The generator's channel, for a crash the fill swallowed here
+            # instead of letting it escape `_generate_one_cluster`.
+            deps.emit("task2a.cluster_crashed", data={
+                "cluster": cluster.name,
+                "exception": f"{type(_exc_c).__name__}: {_exc_c}",
+                "traceback": _tb_c})
             _close_kind = "crashed"
             break
         # What the engine ACTUALLY dispatched. The frontier is what the
@@ -7050,6 +7155,46 @@ def run_phase_c_tdd(
             (deps.enumerate_fns(target_src_dir) or [])
             if _bodies_before is not None and deps.enumerate_fns is not None
             else None)
+        if _joint_cand and _joint_live:
+            try:
+                _rc_j, _out_j = deps.run_cargo(
+                    test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
+            except Exception as _je:  # noqa: BLE001 — a measurement never keeps a splice
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: joint "
+                         f"measurement failed ({type(_je).__name__}: {_je}); "
+                         "the candidate bodies are taken back.")
+                with suppress(OSError, ValueError, TypeError):
+                    _unsplice_joint()
+            else:
+                _pass_a, _, _, _ = pairs_of(parse_binary_results(_out_j))
+                _after_g = {bare_test_name(n) for _l, n in _pass_a}
+                _gained_j = {bare_test_name(n)
+                             for c in _joint_live for n in c.gained}
+                _lost_j = {bare_test_name(n) for c in _joint_live for n in c.lost}
+                _jv = joint_accept(gained=_gained_j, lost=_lost_j,
+                                   after_green=_after_g)
+                _back_j: list[FnLocator] = []
+                if not _jv.accept:
+                    with suppress(OSError, ValueError, TypeError):
+                        _back_j = _unsplice_joint()
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: joint "
+                         f"{'accepted' if _jv.accept else 'not accepted'} — "
+                         f"{_jv.why}"
+                         + ("; candidate body taken back from "
+                            + ", ".join(f"{u.file}::{u.fn_name}" for u in _back_j)
+                            if _back_j else ""))
+                if not _jv.refute:
+                    for _c in _joint_live:
+                        _asks.joint_repaired.add(_c.label)
+                        for _t_j in _c.gained:
+                            _tb = bare_test_name(_t_j)
+                            _fp_j = _due.fingerprints.get(_tb, "")
+                            _folded = (f"{_fp_j}+{_c.digest}" if _fp_j
+                                       else _c.digest)
+                            for _u_j in _c.units:
+                                _asks.record(_u_j, _tb, _folded, rung="unit")
+                                if _words_now.get(_tb, ""):
+                                    _asks.note_words(_u_j, _tb, _folded)
         _landed_after_fill: frozenset[FnLocator] = (
             frozenset(changed_units(
                 _bodies_before, unit_bodies(_recs_after_fill, frontier_keys)))
@@ -7072,13 +7217,85 @@ def run_phase_c_tdd(
                 _asks.record(u_, t_, fp_, rung=(
                     "session" if u_ in _session_kept else "unit"))
                 for u_, t_, fp_ in _ans)
+
+            def _session_covers(
+                    test: str, unit: str, *,
+                    slices: dict[str, frozenset[FnSite]] = _session_slices,
+            ) -> bool:
+                bare = test.rsplit("::", 1)[-1]
+                for _key_s, _sl in slices.items():
+                    if str(_key_s).rsplit("::", 1)[-1] != bare:
+                        continue
+                    for _s in _sl:
+                        if f"{_s.file}::{_s.fn_name}" == unit:
+                            return True
+                return False
+
+            def _showed_words(
+                    unit: str, test: str, rung: str, *,
+                    frontier: FailureFrontier | None = _frontier_built,
+            ) -> bool:
+                if frontier is None or "::" not in unit:
+                    return False
+                if rung == "session":
+                    return _session_covers(test, unit)
+                _shown = tests_in_prompt(
+                    frontier, FnLocator(*unit.rsplit("::", 1)))
+                _bares = {x.rsplit("::", 1)[-1] for x in _shown}
+                return test in _bares or test in set(_shown)
+
+            def _row_keys(pairs: Iterable[Any] | None) -> set[str]:
+                return {f"{p[0]}::{p[1]}" for p in pairs or ()}
+
+            def _compile_repaired(
+                    unit: str, *,
+                    rows: list[RouteLedgerRow] = _fill_rows,
+            ) -> bool:
+                for _row in rows:
+                    if unit not in _row_keys(getattr(_row, "targets", ())):
+                        continue
+                    _cls_r = getattr(_row, "classes", None) or {}
+                    if (int(_cls_r.get("compile", 0)) > 0
+                            and int(getattr(_row, "model_calls", 0) or 0) >= 2
+                            and unit not in _row_keys(getattr(_row, "kept", ()))):
+                        return True
+                return False
+
+            for _u_w, _t_w, _fp_w in _ans:
+                _rung_w = "session" if _u_w in _session_kept else "unit"
+                if _showed_words(_u_w, _t_w, _rung_w):
+                    _asks.note_words(_u_w, _t_w, _fp_w)
             _why_missed = miss_reasons({u_ for u_, _t, _f in _mis}, _fill_rows)
             _spent_now: list[str] = []
             for u_, t_, fp_ in _mis:
                 _rung_m = _due.by_test[t_].rungs.get(u_, "") if t_ in _due.by_test else ""
-                if (_asks.miss(u_, t_, fp_, _why_missed.get(u_, ""), rung=_rung_m)
-                        == _owed_misses):
-                    _spent_now.append(f"{u_} (for {t_}, {_why_missed.get(u_, '')})")
+                _miss_why = _why_missed.get(u_, "")
+                if _showed_words(u_, t_, _rung_m):
+                    _asks.note_words(u_, t_, fp_)
+                # A session no slice can build is absent, one spend, class N.
+                # A session the route did not plan does not spend the rung.
+                if _rung_m == "session" and not _session_covers(t_, u_):
+                    _asks.note_absent(u_, t_, fp_, "session", _owed_misses)
+                    _spent_now.append(f"{u_} (for {t_}, route_absent)")
+                    continue
+                if _miss_why == "compile":
+                    # Charged when a repair saw the diagnostic: a second call
+                    # in the same run, or this offer's prompt carried the
+                    # stored compiler words. Otherwise pending once (the next
+                    # prompt carries them), then charged regardless.
+                    _repaired = (_compile_repaired(u_)
+                                 or FnLocator(*u_.rsplit("::", 1)) in _compile_noted)
+                    if _repaired:
+                        _asks.note_repair(u_, t_, fp_, "repaired")
+                    elif _asks.note_compile_pending(u_, t_, fp_):
+                        continue
+                    if (_asks.miss(u_, t_, fp_, "compile", rung=_rung_m,
+                                   misses=_owed_misses) == _owed_misses):
+                        _spent_now.append(f"{u_} (for {t_}, compile)")
+                    continue
+                if (_asks.miss(u_, t_, fp_, _miss_why, rung=_rung_m,
+                               misses=_owed_misses) == _owed_misses):
+                    _spent_now.append(f"{u_} (for {t_}, {_miss_why})")
             for t_ in sorted(_due.unread):
                 _asks.miss(UNREAD, t_, _due.fingerprints.get(t_, ""))
             if _spent_now:
@@ -7651,10 +7868,29 @@ def run_phase_c_tdd(
     # it (`domain/red_ledger`). Only with the owed reading on: without it
     # every test would read "never offered".
     if _owed_on:
+        # The exit sweep, including a first-sweep floor that broke before
+        # the loop's own reading. Withdrawn is part of that reading.
         try:
+            _sha_led = _tree_sha
+        except UnboundLocalError:
+            _sha_led = ""
+        try:
+            _due = _owed_now(_stub_hold, eligible, _session_slices, _sha_led)
+        except (KeyError, ValueError, TypeError, AttributeError, OSError,
+                UnboundLocalError) as _owed_exc:
+            deps.log(f"  HEALTH ‼ OWED_READING exit: the owed tiers could "
+                     f"not be read ({_owed_exc!r}); the ledger uses the "
+                     "last reading.")
+        try:
+            _runs_led = []
+            for _row_led in _this_fill_rows():
+                _facts_led = RunFacts.of_row(_row_led)
+                if (_facts_led.joint_repaired
+                        or _facts_led.label in _asks.joint_repaired):
+                    _facts_led = replace(_facts_led, joint_repaired=True)
+                _runs_led.append(_facts_led)
             _red_entries = red_ledger(
-                last_failed, reading=_due, ledger=_asks,
-                runs=[RunFacts.of_row(r_) for r_ in _this_fill_rows()],
+                last_failed, reading=_due, ledger=_asks, runs=_runs_led,
                 words={bare_test_name(t_): e_ for t_, e_ in
                        failure_evidence_by_test(output).items()})
             for _line in render_red_ledger(_red_entries):
@@ -7663,13 +7899,19 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "close_kind": _close_kind,
                 "entries": [e_.to_dict() for e_ in _red_entries]})
             if deps.save_red_ledger is not None:
-                deps.save_red_ledger(
-                    project_dir, cluster.name,
-                    [e_.to_dict() for e_ in _red_entries],
-                    run_id=deps.run_id or "", close_kind=_close_kind)
-        except (OSError, ValueError, TypeError, KeyError, AttributeError) as _rl_exc:
-            deps.log(f"  {tag} HEALTH ‼ RED_LEDGER: could not be written "
-                     f"({_rl_exc!r})")
+                try:
+                    deps.save_red_ledger(
+                        project_dir, cluster.name,
+                        [e_.to_dict() for e_ in _red_entries],
+                        run_id=deps.run_id or "", close_kind=_close_kind)
+                except OSError as _rl_exc:
+                    deps.log(f"  {tag} HEALTH ‼ RED_LEDGER: could not be written "
+                             f"({_rl_exc!r})")
+
+        except Exception as _rl_exc:  # noqa: BLE001 - the ledger never crashes a cluster end
+            deps.log(f"  {tag} HEALTH ‼ RED_LEDGER: could not be computed "
+                     f"({type(_rl_exc).__name__}: {_rl_exc}); this cluster "
+                     "end has no red ledger.")
 
     # Every `break` above lands here — backstop, timeout, stall exit, and the
     # green exit that `_cluster_done` excuses. One place rather than at each

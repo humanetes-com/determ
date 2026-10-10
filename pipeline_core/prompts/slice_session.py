@@ -172,6 +172,7 @@ def build_slice_session_prompt(
     installable: Mapping[FnSite, str] | None = None,
     crash_evidence: str = "",
     behaviour_must: str = "",
+    unit_notes: str = "",
 ) -> str:
     """Turn 0 of a session over `slice_`.
 
@@ -189,6 +190,11 @@ def build_slice_session_prompt(
     members are in this block. Run `118933-877c43bd` (2026-09-27): both
     sessions over a three-member recursion ran six turns without it while
     the file and per-fn prompts of the same fill carried it.
+
+    `unit_notes` is the compiler diagnostic and the task-4 lesson for the
+    units this session writes (`refill_evidence.unit_notes_text`), the same
+    channel the file, per-impl, pair and per-fn prompts print. Empty prints
+    nothing.
 
     `target_evidence` maps each failing test to its own words — the panic
     line, the quoted source line and the probe's `observed:` lines — and is
@@ -247,7 +253,7 @@ Crate: {module_name} | Cluster: {cluster_name} | Session budget: {max_turns} tur
 FAILING TESTS (the targets):
 
 {tests_part}
-{tag_block("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
+{tag_block("UNIT_NOTES", unit_notes)}{tag_block("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
 {tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", regression_body)}
 <RUST_GOTCHAS>
 {language_driver().gotchas_summary()}

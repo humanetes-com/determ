@@ -3108,7 +3108,8 @@ _P47_LEDGERS: dict[str, Any] | None = None
 
 def detect_p47(run: Run, iters: list[dict]) -> list[dict]:
     """A cluster ended with a red test in a PIPELINE class of its red ledger
-    (`scripts/red_ledger.py`): refused_gain, compile_loss or never_offered.
+    (`scripts/red_ledger.py`): refused_gain, compile_loss, never_offered or
+    evidence_missing.
     Each one is a defect of the pipeline, never an acceptable end.
     No row before the ledger existed (2026-10-09)."""
     global _P47_LEDGERS
@@ -3192,7 +3193,7 @@ CLASS_NAMES = {
     "P42": "wide-run premise refusal (a run was deferred premise_moved while some of its planned tests had not moved; pre-fix any moved test in a claim's scope refused it)",
     "P44": "schedule invariant broken (a hold named a run that did not open, a blocker stub or crash-blamed locator had no opened writer, an admitted measured owner had no writer at all, a fill opened nothing, or shares broke the budget; pre-fix a re-buy could hold a run and then be deferred itself, run 82925-203ed7b8 fills 5-6)",
     "P45": "starved slice function (a function on a red test's executed slice no opened run wrote for 3 fills after the test's failure last moved; pre-fix src/ensure.rs::render went unwritten fills 3-8 of run 14141-9a904822)",
-    "P47": "red ledger pipeline class (a cluster ended with a red test the pipeline held: a reverted run had turned it green, every offer failed to compile, or no route ever wrote its functions)",
+    "P47": "red ledger pipeline class (a cluster ended with a red test the pipeline held: a reverted run had turned it green, an offer failed to compile and no repair saw it, no route ever wrote its functions, or a real ask omitted the test's words)",
     "P46": "flat while held elsewhere (a FLAT grade whose every convicting test died first inside a different still-stubbed function; pre-fix 62 rows over ten cold runs)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 

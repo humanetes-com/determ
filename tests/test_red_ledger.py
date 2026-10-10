@@ -29,10 +29,21 @@ def _reading(ledger: AskLedger, **kw):  # type: ignore[no-untyped-def]
                        ledger=ledger, **kw)
 
 
-def _klass(ledger: AskLedger, runs=(), **kw) -> RedClass:  # type: ignore[no-untyped-def]
+def _klass(ledger: AskLedger, runs=(), words=None, **kw) -> RedClass:  # type: ignore[no-untyped-def]
     reading = _reading(ledger, **kw)
-    (entry,) = red_ledger(["t"], reading=reading, ledger=ledger, runs=runs)
+    (entry,) = red_ledger(["t"], reading=reading, ledger=ledger, runs=runs,
+                          words=words)
     return entry.klass
+
+
+def _tier_units(ledger: AskLedger) -> list[str]:
+    reading = _reading(ledger)
+    out: list[str] = []
+    for tr in reading.by_test.values():
+        for tier in tr.tiers:
+            out.extend(sorted(tier))
+        out.extend(sorted(tr.held_by))
+    return list(dict.fromkeys(out))
 
 
 def _spend(ledger: AskLedger, *, land: bool, reason: str = "") -> None:
@@ -96,7 +107,97 @@ def test_withdrawn_wins_and_open_is_what_is_still_owed() -> None:
 
 def test_the_pipeline_classes_are_named() -> None:
     assert {RedClass.REFUSED_GAIN, RedClass.COMPILE_LOSS,
-                                RedClass.NEVER_OFFERED} == PIPELINE_CLASSES
+            RedClass.NEVER_OFFERED,
+            RedClass.EVIDENCE_MISSING} == PIPELINE_CLASSES
+
+
+def test_a_repaired_compile_miss_is_the_models_when_nothing_is_left() -> None:
+    """A compile miss the repair saw is not compile loss. With the rungs
+    spent and no words supplied, the test is the model's."""
+    led = AskLedger()
+    _spend(led, land=False, reason="compile")
+    for u in _tier_units(led):
+        led.note_repair(u, "t", "fp", "saw the diagnostic")
+    assert _klass(led) is RedClass.MODEL_LIMIT
+
+
+def test_one_unrepaired_compile_miss_is_compile_loss_before_it_is_spent() -> None:
+    """One offer that did not compile, with no repair, is compile loss
+    even while a rung is still owed. The test's words do not hide it."""
+    led = AskLedger()
+    reading = _reading(led)
+    u, fp = next(iter(reading.by_test["t"].owed.items()))
+    led.miss(u, "t", fp, "compile")
+    assert _klass(led) is RedClass.COMPILE_LOSS
+    assert _klass(led, words={"t": "cannot find type `Invented`"}) \
+        is RedClass.COMPILE_LOSS
+
+
+def test_a_real_ask_that_omitted_the_tests_words_is_evidence_missing() -> None:
+    """Words the driver has, and that no ask carried, are evidence missing.
+    Carrying them, with the rungs spent, is the model's limit. Omitting the
+    words map (the caller has no evidence) stays the model's."""
+    led = AskLedger()
+    _spend(led, land=True)
+    assert _klass(led) is RedClass.MODEL_LIMIT
+    assert _klass(led, words={"t": "left: 1 right: 2"}) \
+        is RedClass.EVIDENCE_MISSING
+    fp = _reading(led).fingerprints["t"]
+    for u in _tier_units(led):
+        led.note_words(u, "t", fp)
+    assert _klass(led, words={"t": "left: 1 right: 2"}) is RedClass.MODEL_LIMIT
+
+
+def test_a_repaired_compile_that_omitted_the_words_is_evidence_missing() -> None:
+    led = AskLedger()
+    _spend(led, land=False, reason="compile")
+    for u in _tier_units(led):
+        led.note_repair(u, "t", "fp", "saw")
+    assert _klass(led, words={"t": "left: 1"}) is RedClass.EVIDENCE_MISSING
+
+
+def test_a_joint_repair_does_not_stick_as_a_refused_gain() -> None:
+    led = AskLedger()
+    _spend(led, land=True)
+    run = RunFacts(label="pair a+b", reverted=frozenset({"src/a.rs::f"}),
+                   newly_red=frozenset({"sibling"}),
+                   newly_green=frozenset({"tests/x.rs::t"}),
+                   joint_repaired=True)
+    assert _klass(led, runs=[run]) is RedClass.MODEL_LIMIT
+
+
+def test_a_session_that_cannot_be_built_is_never_offered_ahead_of_compile_and_words() -> None:
+    """``route_absent`` with no session landing is never offered, even when
+    a unit rung compiled and the test's words were not carried."""
+    led = AskLedger()
+    reading = _reading(led)
+    for u, fp in reading.by_test["t"].owed.items():
+        led.record(u, "t", fp, rung="unit")
+        led.miss(u, "t", fp, "compile", rung="unit")
+        led.note_absent(u, "t", fp, "session")
+        assert led.reason(u, "t", fp) == "compile"
+        assert led.route_absent(u, "t")
+    assert _klass(led, words={"t": "left: 1"}) is RedClass.NEVER_OFFERED
+
+
+def test_a_bare_miss_with_no_stored_reason_is_a_real_ask() -> None:
+    """A miss that stored no reason is still a run. Spent, with no words
+    map, it is the model's limit, the same as a landing."""
+    led = AskLedger()
+    _spend(led, land=False)
+    assert _klass(led) is RedClass.MODEL_LIMIT
+
+
+def test_an_unread_test_and_a_test_outside_the_reading_are_never_offered() -> None:
+    led = AskLedger()
+    reading = due_reading(["orphan"], slices={}, reach={}, evidence={},
+                          held={}, ledger=led)
+    (unread,) = red_ledger(["orphan"], reading=reading, ledger=led)
+    assert unread.klass is RedClass.NEVER_OFFERED
+    assert unread.why == "no function could be attributed to it"
+    (missing,) = red_ledger(["not-in-reading"], reading=reading, ledger=led)
+    assert missing.klass is RedClass.NEVER_OFFERED
+    assert missing.why == "no owed reading was taken for it"
 
 
 def test_a_route_row_reads_as_run_facts() -> None:
@@ -117,3 +218,18 @@ def test_task3_prints_the_stored_ledger(tmp_path: Path) -> None:
     assert any("model_limit: t" in line for line in lines)
     assert red_ledger_lines(load_red_ledger(tmp_path, "nightly")) == [
         "red ledger: none written by t2a for this cluster"]
+
+
+def test_a_test_still_held_in_a_stub_is_not_evidence_missing() -> None:
+    """Its only words are the stub's own `not implemented`: there were no
+    words about a body to carry. It read evidence_missing, a pipeline
+    defect, for every stub-held test at a cluster's end."""
+    sl = {"t": frozenset({"a::f", "a::stub"})}
+    held = {"t": frozenset({"a::stub"})}
+    led = AskLedger()
+    r = due_reading(["t"], slices=sl, reach={}, evidence={}, held=held, ledger=led)
+    led.record("a::stub", "t", r.fingerprints["t"], rung="unit")
+    r = due_reading(["t"], slices=sl, reach={}, evidence={}, held=held, ledger=led)
+    (e,) = red_ledger(["t"], reading=r, ledger=led,
+                      words={"t": "thread 't' panicked at src/a.rs:3:5: not implemented"})
+    assert e.klass is not RedClass.EVIDENCE_MISSING
