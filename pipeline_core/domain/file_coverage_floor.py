@@ -163,10 +163,18 @@ def read_file(rel: str, *, raw_covered: int, raw_coverable: int,
 
 @dataclass(frozen=True, slots=True)
 class FileFloor:
-    """Every file of one (cluster, module) reading against the floor."""
+    """Every file of one (cluster, module) reading against the floor.
+
+    `measured_covered` is the module's covered-line count in the measurement
+    the reading was taken from (-1: unknown, as in a reading written before
+    the field existed). The module stop accepts an all-accounted reading only
+    when it was read from the measurement the entry returned: an entry that
+    never measured (a harness that stopped compiling) must not end on the
+    reading an earlier entry left on disk."""
 
     floor: float
     files: tuple[FileFloorReading, ...] = ()
+    measured_covered: int = -1
 
     @property
     def held(self) -> tuple[FileFloorReading, ...]:
@@ -182,6 +190,16 @@ class FileFloor:
     def stalled(self) -> frozenset[str]:
         return frozenset(f.rel for f in self.files
                          if f.verdict == FILE_ACCOUNTED and f.reason.startswith("stalled"))
+
+    def file(self, rel: str) -> FileFloorReading | None:
+        return next((f for f in self.files if f.rel == rel), None)
+
+    def stalled_open(self) -> tuple[str, ...]:
+        """The open lines of every file the generation pass gave up on, as
+        `file:line`: what an accounted stop leaves uncovered although a test
+        could reach it."""
+        return tuple(f"{f.rel}:{ln}" for f in self.files if f.rel in self.stalled
+                     for ln in f.open_lines)
 
     def buckets(self) -> dict[str, int]:
         """Every file's uncovered lines summed by why they are not targets."""
@@ -212,7 +230,8 @@ class FileFloor:
                 + "; ".join(f.describe() for f in self.below))
 
     def to_json(self) -> str:
-        return json.dumps({"floor": self.floor, "files": [
+        return json.dumps({"floor": self.floor, "measured_covered": self.measured_covered,
+                           "files": [
             {"file": f.rel, "covered": f.covered, "coverable": f.coverable,
              "raw_covered": f.raw_covered, "raw_coverable": f.raw_coverable,
              "verdict": f.verdict, "reason": f.reason, "open": list(f.open_lines),
@@ -238,7 +257,8 @@ class FileFloor:
                 tuple(int(x) for x in f.get("open", ())),
                 {str(k): int(v) for k, v in (f.get("buckets") or {}).items()},
                 tuple(str(x) for x in f.get("spent_owners", ()))))
-        return cls(float(raw.get("floor", 0.0)), tuple(files))
+        return cls(float(raw.get("floor", 0.0)), tuple(files),
+                   int(raw.get("measured_covered", -1)))
 
     def event_data(self) -> dict[str, Any]:
         return {"floor": self.floor, "held": [f.rel for f in self.held],
@@ -250,16 +270,79 @@ class FileFloor:
 def judge_files(floor: float, files: Iterable[tuple[str, int, int, Iterable[int]]], *,
                 not_actionable: Mapping[str, Iterable[int]],
                 spent: Sequence[FnTarget], stalled: Iterable[str],
-                buckets: Mapping[str, Mapping[str, int]] | None = None) -> FileFloor:
+                buckets: Mapping[str, Mapping[str, int]] | None = None,
+                measured_covered: int = -1) -> FileFloor:
     """The floor over `files` as `(rel, raw_covered, raw_coverable, uncovered)`.
     `spent` are the unreached functions with their spans; a file in `stalled`
     was given up by the generation pass; `buckets` are each file's
-    `bucket_counts`."""
+    `bucket_counts`; `measured_covered` is the module's covered-line count in
+    the measurement `files` come from."""
     stalled_set = frozenset(stalled)
-    return FileFloor(floor, tuple(
+    return FileFloor(floor, measured_covered=measured_covered, files=tuple(
         read_file(rel, raw_covered=cov, raw_coverable=cvbl, uncovered=unc,
                   not_actionable=not_actionable.get(rel, ()),
                   spent=[t for t in spent if t.site.file == rel],
                   stalled=rel in stalled_set, floor=floor,
                   buckets=(buckets or {}).get(rel))
         for rel, cov, cvbl, unc in sorted(files, key=lambda f: f[0])))
+
+
+def reopened(prior_open: Mapping[str, Iterable[int]], current: FileFloor) -> frozenset[str]:
+    """The given-up files of an earlier entry that this reading opens again:
+    a file whose open lines are not all lines that entry gave up on. A new
+    open line (a cfg change, a tree change) is a gap no attempt was spent on,
+    so it gets a budget; the same lines do not."""
+    out: set[str] = set()
+    for rel, lines in prior_open.items():
+        f = current.file(rel)
+        if f is not None and not frozenset(f.open_lines) <= frozenset(lines):
+            out.add(rel)
+    return frozenset(out)
+
+
+def _given_up_lines(others: Iterable[FileFloor]) -> dict[str, set[int]]:
+    given_up: dict[str, set[int]] = {}
+    for other in others:
+        for rel in other.stalled:
+            f = other.file(rel)
+            if f is not None:
+                given_up.setdefault(rel, set()).update(f.open_lines)
+    return given_up
+
+
+def no_longer_carried(others: Iterable[FileFloor], current: FileFloor,
+                      files: Iterable[str]) -> frozenset[str]:
+    """Of `files` (given up on a carry), those this reading holds an open line
+    in that no other world gave up on: a gap no attempt was spent on, so the
+    carry no longer speaks for the file. A file whose open set only shrank
+    (an aim covered some other line) stays given up."""
+    given_up = _given_up_lines(others)
+    out: set[str] = set()
+    for rel in files:
+        f = current.file(rel)
+        if (f is not None and f.verdict in (FILE_HELD, FILE_ACCOUNTED)
+                and not set(f.open_lines) <= given_up.get(rel, set())):
+            out.add(rel)
+    return frozenset(out)
+
+
+def carried_stall_attempts(others: Iterable[FileFloor], current: FileFloor, *,
+                           budget: int) -> dict[str, int]:
+    """Per file, the generation attempts another world already spent on the
+    lines this world still has open: `budget - 1` when every open line of the
+    file is an open line of a file another world gave up on, else nothing.
+
+    The same rule as the function carry (`fn_execution.inherited_attempts`):
+    the carried count shortens this world's budget only once it has aimed the
+    file itself (`own >= 1 and own + carried >= budget`), because this world's
+    cfg can add a route the other world lacked. A line only this world
+    compiles is never an open line of the other world, so a file holding one
+    keeps its whole budget; so does a file with a line the other world covered
+    or held for another reason."""
+    given_up = _given_up_lines(others)
+    out: dict[str, int] = {}
+    for f in current.below:
+        lines = given_up.get(f.rel)
+        if lines and f.open_lines and set(f.open_lines) <= lines and budget > 1:
+            out[f.rel] = budget - 1
+    return out

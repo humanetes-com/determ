@@ -3117,6 +3117,7 @@ def build_app(
             COVERAGE_FILE_FLOOR=settings.coverage_file_floor,
             load_file_floor=augment_store.cluster_file_floor,
             save_file_floor=augment_store.save_cluster_file_floor,
+            other_file_floors=augment_store.other_cluster_file_floors,
             # The functions no test can execute are proved from rustc's own
             # MIR and public index for the cluster's world, not asked of a model.
             measure_reachability=functools.partial(

@@ -816,7 +816,7 @@ class AugmentVerdict:
 
     `reason` is the terminating status: "done" when the coverage target was met,
     or the crate is proc-macro and cannot be augmented; otherwise the give-up
-    ("ceiling", "hard_block", "precheck_failed"). Only "done" is a claim about
+    ("ceiling", "accounted", "hard_block", "precheck_failed"). Only "done" is a claim about
     the TREE. Every other value is a claim about the pipeline that was running,
     so it binds only while `code_id` still matches `code_identity` — the 12-hex
     digest of `pipeline.py` plus `pipeline_core/**/*.py`. That is a different
@@ -962,6 +962,11 @@ class ModuleAugmentState:
                        held under the per-file floor, or crate is proc-macro
                        (cannot augment)
         'ceiling'    — task0c reported at_ceiling (no actionable lines remain)
+        'accounted'  — the target is not met, but the pass's own per-file floor
+                       and function record account for every gap: no file is
+                       held and no function is pending. Another entry would
+                       start from the same tree with nothing left to aim at
+                       but the lines it already gave up on.
         'hard_block' — stall_passes >= stall_limit (genuinely stuck)
         'retry'      — keep going
     """
@@ -988,12 +993,18 @@ class ModuleAugmentState:
     # for (`domain.file_coverage_floor`), as of the last pass; 0 when the floor
     # is off.
     last_files_held: int = 0
+    # True when the last pass's per-file floor was read from the measurement
+    # the pass returned and its function record was measured: only then do
+    # `last_files_held == 0` and `last_fns_pending == 0` account for the gap.
+    last_fully_read: bool = False
 
     CEILING_CONFIRM: int = 2  # consecutive at_ceiling reports required before accepting ceiling
 
     def record_pass(self, pct: float, covered: int, at_ceiling: bool,
-                    fns_pending: int = 0, files_held: int = 0) -> None:
+                    fns_pending: int = 0, files_held: int = 0,
+                    fully_read: bool = False) -> None:
         self.total_passes += 1
+        self.last_fully_read = fully_read
         self.last_pct = pct
         self.last_covered = covered
         self.last_at_ceiling = at_ceiling
@@ -1022,6 +1033,14 @@ class ModuleAugmentState:
             return 'done'
         if self.ceiling_passes >= self.CEILING_CONFIRM:
             return 'ceiling'
+        # The raw percentage counts proved-unreachable and artifact lines, so it
+        # cannot speak for a gap the floor and the function record already
+        # account for; another entry would only re-aim the given-up lines.
+        # Accepted only on a pass whose floor and record were both read from
+        # the measurement it returned (`last_fully_read`): a reading left on
+        # disk by an earlier entry accounts for nothing.
+        if self.last_fully_read and self.last_files_held == 0 and self.last_fns_pending == 0:
+            return 'accounted'
         if self.stall_passes >= self.stall_limit:
             return 'hard_block'
         return 'retry'

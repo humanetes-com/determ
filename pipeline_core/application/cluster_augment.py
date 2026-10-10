@@ -129,7 +129,7 @@ class ClusterAugmentor:
                 # but only when the stop that wrote it applied the current
                 # function-execution criterion (a line-coverage "done" sealed
                 # anyhow's `nightly` over functions no test entered); a give-up
-                # ("ceiling", "hard_block", "precheck_failed") is a claim about the
+                # ("ceiling", "accounted", "hard_block", "precheck_failed") is a claim about the
                 # pipeline, so it is dropped once `code_identity` moves. That is
                 # not the crate `source_hash` pipeline_state.md records on phase
                 # lines — `phase_valid` does not compare hashes at all, and a
@@ -244,8 +244,13 @@ class ClusterAugmentor:
                 file_floor = (store.cluster_file_floor(project_dir, cluster.name, mod_name)
                               if ctx.file_floor_pct > 0 else None)
                 files_held = len(file_floor.held) if file_floor is not None else 0
+                # Both halves speak for THIS pass: the floor was read from the
+                # measurement the entry returned, and function execution was
+                # measured. Only then is `0 held, 0 pending` an account of the gap.
+                fully_read = (file_floor is not None and file_floor.measured_covered == covered
+                              and fn_record is not None and fn_record.measured)
                 state.record_pass(cov, covered, at_ceiling, fns_pending=fns_pending,
-                                  files_held=files_held)
+                                  files_held=files_held, fully_read=fully_read)
                 status = state.status(crate_type)
                 if fn_record is not None:
                     tel.log(f"  TASK 0c [{cluster.name}]: '{mod_name}' {fn_record.summary()}")
@@ -257,7 +262,7 @@ class ClusterAugmentor:
                 # files), so re-entering augmentation from the identical tree state
                 # cannot end differently. Accept and move on instead of burning
                 # stall_limit identical retries (observed live: nightly ×10 no-ops).
-                if blocked_reason and status not in ('done', 'ceiling'):
+                if blocked_reason and status not in ('done', 'ceiling', 'accounted'):
                     tel.log(
                         f"  HARD BLOCK: '{mod_name}' [{cluster.name}] augmentation "
                         f"blocked — {blocked_reason}. Retry would be a deterministic no-op; "
@@ -265,8 +270,25 @@ class ClusterAugmentor:
                     )
                     status = 'hard_block'
 
-                if status in ('done', 'ceiling', 'hard_block'):
-                    if status == 'ceiling':
+                if status in ('done', 'ceiling', 'accounted', 'hard_block'):
+                    if status == 'accounted':
+                        assert file_floor is not None
+                        stalled_open = file_floor.stalled_open()
+                        tel.log(
+                            f"  ACCOUNTED [{cluster.name}]: '{mod_name}' at {cov:.1f}% — no file "
+                            f"held under the {ctx.file_floor_pct:.0f}% floor and no function "
+                            f"pending; {file_floor.ceiling_split()}; stalled open: "
+                            f"{', '.join(stalled_open) if stalled_open else 'none'}. "
+                            f"Another entry would aim at nothing new. Accepting and moving on."
+                        )
+                        owners = file_floor.spent_owners()
+                        if owners:
+                            tel.log(
+                                f"  WARNING [{cluster.name}]: '{mod_name}' accepted with "
+                                f"{len(owners)} reachable function(s) no test executes, their "
+                                f"attempt budget spent: {', '.join(owners)}"
+                            )
+                    elif status == 'ceiling':
                         # The split, not one sentence: lines no test can reach and
                         # lines in reachable functions the pass gave up on are
                         # different results, and only the first is a ceiling.

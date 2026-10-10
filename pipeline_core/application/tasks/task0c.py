@@ -30,7 +30,16 @@ from ...domain.behaviour_pinning import (
 from ...domain.behaviour_select import drop_capture_owned
 from ...domain.cluster_plan import target_scope_rule
 from ...domain.coverage import PerFileCoverage, coverage_pass_outcome
-from ...domain.file_coverage_floor import FileFloor, UncoveredSplit, bucket_counts, judge_files, lines_in
+from ...domain.file_coverage_floor import (
+    FileFloor,
+    UncoveredSplit,
+    bucket_counts,
+    carried_stall_attempts,
+    judge_files,
+    lines_in,
+    no_longer_carried,
+    reopened,
+)
 from ...domain.fn_execution import (
     COMMITTED,
     FnCoverageRecord,
@@ -201,6 +210,10 @@ class Task0cDeps:
     COVERAGE_FILE_FLOOR: Any = 0.0
     load_file_floor: Any = None
     save_file_floor: Any = None
+    # `(project_dir, cluster, module) -> list[FileFloor]`: the other clusters'
+    # readings, from which a shared line another world gave up on carries its
+    # spent attempts here (`carried_stall_attempts`). Absent: nothing carries.
+    other_file_floors: Any = None
 
 
 def _iter_module_rs(module_dir: Path) -> list[Path]:
@@ -1312,6 +1325,16 @@ class Task0cFileHistory:
     file_failed_blocks: dict[str, list[str]] = field(default_factory=dict)
     file_giveup_counts: dict[str, int] = field(default_factory=dict)
     file_loops: dict[str, LoopState] = field(default_factory=dict)
+    # Passes that aimed a prompt at the file in this entry. Unlike the stall
+    # streak, coverage progress does not reset it: it is the own-attempt count
+    # of the cross-world carry.
+    file_aims: dict[str, int] = field(default_factory=dict)
+    # The attempts another world already spent on the lines this file still
+    # has open (`carried_stall_attempts`), refreshed at every floor reading.
+    file_carried: dict[str, int] = field(default_factory=dict)
+    # Files given up on that carry (a subset of `skipped_files`): re-offered
+    # when a reading opens a line no other world gave up on.
+    carry_given_up: set[str] = field(default_factory=set)
     # Site label -> the `tests/` files of committed blocks aimed at that
     # function. Read against the next measurement: a label still among the
     # unexecuted targets is "those files ran and it has 0 executions".
@@ -1618,7 +1641,8 @@ def _run_phase_c(
         attempt_n_within_outer += 1
 
         if rel_path in skipped_files:
-            _log(f"  [{module_name}] Skipping {rel_path} — stalled for {FILE_STALL_LIMIT} consecutive attempts.")
+            _log(f"  [{module_name}] Skipping {rel_path} — given up (its stall limit, an "
+                 f"earlier entry, or attempts carried from another cluster).")
             _pass_actionable += len(uncov_lines)
             continue
 
@@ -1678,6 +1702,23 @@ def _run_phase_c(
              + (f", {len(_file_fn_targets)} function(s) no test executes: "
                 + ", ".join(_ft.label for _ft in _file_fn_targets) if _file_fn_targets else ""))
         _pass_actionable += len(uncov_lines)
+        # This pass aims the file. With attempts carried from another world
+        # (every open line here is one that world gave up on), the file is
+        # given up once this world has aimed it too: the function carry's
+        # rule, `own >= 1 and own + carried >= budget`.
+        # A file holding a function still inside its own budget is not given
+        # up on a carry: an empty reply counts as an aim without charging the
+        # function, so the latch would hold the function out of every later
+        # pass until the outer stall hard-blocks it.
+        hist.file_aims[rel_path] = hist.file_aims.get(rel_path, 0) + 1
+        _carried = hist.file_carried.get(rel_path, 0)
+        if (_carried and not _file_fn_targets
+                and hist.file_aims[rel_path] + _carried >= FILE_STALL_LIMIT):
+            _log(f"  [{module_name}] {rel_path} — every open line is one another cluster gave "
+                 f"up on ({_carried} of {FILE_STALL_LIMIT} attempts carried); this aim is "
+                 f"this cluster's own, the file is given up after it.")
+            skipped_files.add(rel_path)
+            hist.carry_given_up.add(rel_path)
         _fn_span_lines = {_ln for _ft in _file_fn_targets
                           for _ln in range(_ft.first_line, _ft.last_line + 1)}
         _line_targets = uncov_lines - _fn_span_lines
@@ -2991,14 +3032,32 @@ def task0c_augment_module(
         _fn_record = _loaded if isinstance(_loaded, FnCoverageRecord) else None
     # The per-file line floor. A file the generation pass already gave up on
     # (its stall limit, in an earlier entry of this cluster) stays given up:
-    # re-entering must not buy it a second budget.
+    # re-entering must not buy it a second budget, in the floor's verdict nor
+    # in the queue (`_hist.skipped_files` is seeded below). Two exceptions get
+    # the budget back: a file holding a function still inside its own attempt
+    # budget (an empty reply stalls the file without charging the function, so
+    # the file can give up first), and a file a measurement opens a new line
+    # in (`reopened`).
     _file_floor_pct = _file_floor_of(deps)
     _file_floor: FileFloor | None = None
-    _floor_stalled: frozenset[str] = frozenset()
+    _seeded_stalled: dict[str, frozenset[int]] = {}
+    _other_floors: list[FileFloor] = []
     if _file_floor_pct > 0 and callable(deps.load_file_floor):
         _prior_floor = deps.load_file_floor(project_dir, _cluster_label, module_name)
         if isinstance(_prior_floor, FileFloor):
-            _floor_stalled = _prior_floor.stalled
+            _pending_files = ({_t.site.file for _t in _fn_record.targets()}
+                              if _fn_record is not None and _fn_record.measured else set())
+            for _rel in sorted(_prior_floor.stalled - _pending_files):
+                _pf = _prior_floor.file(_rel)
+                _seeded_stalled[_rel] = frozenset(_pf.open_lines if _pf is not None else ())
+            if _seeded_stalled:
+                _log(f"  [{module_name}/{_cluster_label}] given up in an earlier entry, not "
+                     "re-offered unless a new line opens: "
+                     + ", ".join(f"{r} {sorted(v)}" for r, v in _seeded_stalled.items()))
+    if _file_floor_pct > 0 and callable(deps.other_file_floors):
+        _loaded_others = deps.other_file_floors(project_dir, _cluster_label, module_name)
+        _other_floors = [f for f in (_loaded_others if isinstance(_loaded_others, list) else [])
+                         if isinstance(f, FileFloor)]
     # On resume, reload coverage from the previous run's grcov JSON + filecache
     # to avoid an expensive full re-run before the first gen attempt.
     if attempt > 0:
@@ -3030,6 +3089,7 @@ def task0c_augment_module(
     # gives the model informed, varying shots instead of one stale retro reused.
     RETRO_DEEP_AT_STALL = int(os.getenv("TASK0C_RETRO_DEEP_AT_STALL", "1"))
     _hist = Task0cFileHistory()
+    _hist.skipped_files.update(_seeded_stalled)
     # A resumed process starts with what the record kept of which test files
     # ran against each still-unexecuted function.
     if _fn_record is not None:
@@ -3106,7 +3166,27 @@ def task0c_augment_module(
         if _file_floor_pct > 0:
             _file_floor = _read_file_floor(
                 deps, project_dir, module_dir, _current_cluster, files_data, _fn_reading,
-                _fn_record, stalled=_floor_stalled | _hist.skipped_files, floor=_file_floor_pct)
+                _fn_record, stalled=_hist.skipped_files, floor=_file_floor_pct,
+                measured_covered=covered_lines)
+            _reopen = reopened(_seeded_stalled, _file_floor)
+            _uncarried = no_longer_carried(_other_floors, _file_floor, _hist.carry_given_up)
+            if _reopen or _uncarried:
+                for _rel in sorted(_reopen):
+                    _log(f"  [{module_name}/{_cluster_label}] {_rel}: a line opened that the "
+                         f"earlier entry did not give up on — re-offered with a full budget.")
+                    _hist.skipped_files.discard(_rel)
+                    del _seeded_stalled[_rel]
+                for _rel in sorted(_uncarried):
+                    _log(f"  [{module_name}/{_cluster_label}] {_rel}: a line opened that no "
+                         f"other cluster gave up on — re-offered with a full budget.")
+                    _hist.skipped_files.discard(_rel)
+                    _hist.carry_given_up.discard(_rel)
+                _file_floor = _read_file_floor(
+                    deps, project_dir, module_dir, _current_cluster, files_data, _fn_reading,
+                    _fn_record, stalled=_hist.skipped_files, floor=_file_floor_pct,
+                    measured_covered=covered_lines)
+            _hist.file_carried = carried_stall_attempts(_other_floors, _file_floor,
+                                                        budget=FILE_STALL_LIMIT)
             _log(f"  [{module_name}/{_cluster_label}] file floor: {_file_floor.summary()}")
             _emit("task0c.file_floor", data={"cluster": _cluster_label, "module": module_name,
                                              "attempt": attempt, **_file_floor.event_data()})
@@ -3192,6 +3272,7 @@ def task0c_augment_module(
         prev_covered = covered_lines
 
 
+        _skipped_before_pass = set(_hist.skipped_files)
         _pc = _run_phase_c(
             project_dir=project_dir,
             module_name=module_name,
@@ -3236,6 +3317,18 @@ def task0c_augment_module(
         if _pc.fn_attempted or _pc.fn_verdicts:
             if callable(deps.save_fn_record):
                 deps.save_fn_record(project_dir, _cluster_label, module_name, _fn_record)
+        if _file_floor is not None and _hist.skipped_files != _skipped_before_pass:
+            # The pass gave a file up after this measurement's floor was read.
+            # Written now, whatever comes next: the entry may return this
+            # measurement, or end without another (a compile that stays
+            # broken, a stop), and a give-up held only in this history reads
+            # `held` on disk, so the next entry buys the file a second budget.
+            _file_floor = _read_file_floor(
+                deps, project_dir, module_dir, _current_cluster, files_data, _fn_reading,
+                _fn_record, stalled=_hist.skipped_files, floor=_file_floor_pct,
+                measured_covered=covered_lines)
+            if callable(deps.save_file_floor):
+                deps.save_file_floor(project_dir, _cluster_label, module_name, _file_floor)
         if _pc.kind == "return":
             assert _pc.result is not None
             return _pc.result
@@ -3330,7 +3423,8 @@ def _line_filters(deps: Task0cDeps) -> dict[str, Any]:
 def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, cluster: Any,
                      files_data: Sequence[PerFileCoverage],
                      reading: FunctionExecution | str, record: FnCoverageRecord,
-                     *, stalled: Iterable[str], floor: float) -> FileFloor:
+                     *, stalled: Iterable[str], floor: float,
+                     measured_covered: int = -1) -> FileFloor:
     """The per-file floor over this measurement: the files the generation pass
     would queue (module source, not tests, not `build.rs`, not cfg-gated out
     of the cluster), each read over the lines a test can reach."""
@@ -3364,7 +3458,7 @@ def _read_file_floor(deps: Task0cDeps, project_dir: Path, module_dir: Path, clus
             buckets[rel] = bucket_counts(split)
         files.append((rel, fdata.covered, fdata.coverable, unc))
     return judge_files(floor, files, not_actionable=not_actionable, spent=spent, stalled=stalled,
-                       buckets=buckets)
+                       buckets=buckets, measured_covered=measured_covered)
 
 
 def _spent_targets(reading: FunctionExecution | str,

@@ -1,0 +1,165 @@
+{
+  "floor": 100.0,
+  "files": [
+    {
+      "file": "src/backtrace.rs",
+      "covered": 0,
+      "coverable": 0,
+      "raw_covered": 0,
+      "raw_coverable": 4,
+      "verdict": "vacuous",
+      "reason": "",
+      "open": [],
+      "buckets": {
+        "proved": 4,
+        "artifact": 0,
+        "cfg": 0,
+        "spent": 0
+      },
+      "spent_owners": []
+    },
+    {
+      "file": "src/chain.rs",
+      "covered": 49,
+      "coverable": 49,
+      "raw_covered": 49,
+      "raw_coverable": 49,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {},
+      "spent_owners": []
+    },
+    {
+      "file": "src/context.rs",
+      "covered": 65,
+      "coverable": 65,
+      "raw_covered": 65,
+      "raw_coverable": 65,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {},
+      "spent_owners": []
+    },
+    {
+      "file": "src/ensure.rs",
+      "covered": 55,
+      "coverable": 55,
+      "raw_covered": 55,
+      "raw_coverable": 56,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {
+        "proved": 0,
+        "artifact": 1,
+        "cfg": 0,
+        "spent": 0
+      },
+      "spent_owners": []
+    },
+    {
+      "file": "src/error.rs",
+      "covered": 383,
+      "coverable": 386,
+      "raw_covered": 383,
+      "raw_coverable": 387,
+      "verdict": "accounted",
+      "reason": "attempt budget spent on src/error.rs::no_backtrace",
+      "open": [
+        808,
+        809,
+        810
+      ],
+      "buckets": {
+        "proved": 0,
+        "artifact": 1,
+        "cfg": 0,
+        "spent": 3
+      },
+      "spent_owners": [
+        "src/error.rs::no_backtrace"
+      ]
+    },
+    {
+      "file": "src/fmt.rs",
+      "covered": 90,
+      "coverable": 91,
+      "raw_covered": 90,
+      "raw_coverable": 94,
+      "verdict": "accounted",
+      "reason": "stalled: the generation pass gave the file up",
+      "open": [
+        54
+      ],
+      "buckets": {
+        "proved": 0,
+        "artifact": 3,
+        "cfg": 0,
+        "spent": 0
+      },
+      "spent_owners": []
+    },
+    {
+      "file": "src/kind.rs",
+      "covered": 23,
+      "coverable": 23,
+      "raw_covered": 23,
+      "raw_coverable": 23,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {},
+      "spent_owners": []
+    },
+    {
+      "file": "src/lib.rs",
+      "covered": 19,
+      "coverable": 20,
+      "raw_covered": 19,
+      "raw_coverable": 20,
+      "verdict": "accounted",
+      "reason": "stalled: the generation pass gave the file up",
+      "open": [
+        690
+      ],
+      "buckets": {
+        "proved": 0,
+        "artifact": 0,
+        "cfg": 0,
+        "spent": 0
+      },
+      "spent_owners": []
+    },
+    {
+      "file": "src/ptr.rs",
+      "covered": 79,
+      "coverable": 79,
+      "raw_covered": 79,
+      "raw_coverable": 88,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {
+        "proved": 9,
+        "artifact": 0,
+        "cfg": 0,
+        "spent": 0
+      },
+      "spent_owners": []
+    },
+    {
+      "file": "src/wrapper.rs",
+      "covered": 21,
+      "coverable": 21,
+      "raw_covered": 21,
+      "raw_coverable": 21,
+      "verdict": "met",
+      "reason": "",
+      "open": [],
+      "buckets": {},
+      "spent_owners": []
+    }
+  ]
+}

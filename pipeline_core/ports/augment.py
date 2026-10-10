@@ -86,7 +86,7 @@ class AugmentStore(Protocol):
         file_floor: FileFloor | None = None,
     ) -> None:
         """Record the coverage, the terminating status ("done" / "ceiling" /
-        "hard_block" / "precheck_failed") and the pipeline `code_identity` it
+        "accounted" / "hard_block" / "precheck_failed") and the pipeline `code_identity` it
         was reached under. A give-up reason recorded without a code_id can
         never bind again — that is the intended reading of an unattributable
         verdict. The verdict is stamped with the function-execution criterion

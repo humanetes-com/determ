@@ -172,6 +172,13 @@ class FileAugmentStore:
                 out.append(rec)
         return out
 
+    def other_cluster_file_floors(self, project_dir: Path, cluster_name: str,
+                                  module_name: str) -> list[FileFloor]:
+        """The per-file floor readings the OTHER clusters wrote for
+        `module_name`: which shared lines another world already gave up on."""
+        return [f for c, f in self.module_file_floors(project_dir, module_name).items()
+                if c != cluster_name]
+
     def all_fn_records(self, project_dir: Path) -> list[FnCoverageRecord]:
         """Every cluster's function record in the workspace, for the gates
         that classify a stub against what augmentation measured."""

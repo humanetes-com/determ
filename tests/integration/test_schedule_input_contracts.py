@@ -78,6 +78,13 @@ CONTRACTS: dict[str, tuple[str, tuple[str, ...]]] = {
         "test_fill_scheduler.py::test_rows_are_written_and_a_flat_rebuy_is_deferred_next_fill",
         "walks/test_walk_measured_owner_admission.py",
     )),
+    "due": ("planner", (
+        "test_schedule_invariants.py::test_every_owed_function_some_candidate_writes_gets_an_opened_writer",
+        "test_owed_functions_reach_a_writer.py::test_a_pair_wait_deferred_writer_of_an_owed_function_opens",
+    )),
+    "due_rungs": ("planner", (
+        "test_owed_functions_reach_a_writer.py::test_a_function_owed_on_the_session_rung_opens_a_session_writer",
+    )),
     "budget_minutes": ("config", ("TDD_FILL_BUDGET_MINUTES",)),
     "today_order": ("config", ("the fixed route order constant",)),
     "readmit_after": ("config", ("RETRO_RESET_MAX_ATTEMPTS-style bound, read at entry",)),
