@@ -838,7 +838,7 @@ def _prior_effort_notes(project_dir: Path) -> dict[str, str]:
         return {}
     out: dict[str, str] = {}
     for cluster, ev in store.items():
-        if not isinstance(ev, dict) or ev.get("exit") != "exhausted":
+        if not isinstance(ev, dict) or ev.get("exit") not in ("exhausted", "crashed"):
             continue
         failed = ", ".join(sorted(ev.get("failed") or [])[:4])
         for ref in ev.get("exhausted_fns") or []:

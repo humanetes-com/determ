@@ -185,7 +185,10 @@ def test_a_fill_that_raises_ends_the_cluster_failed_with_its_traceback(
     assert failed[0]["tests"], "the red list of the last sweep"
     assert any("cluster_failed (crashed)" in line and "Traceback" in line
                for line in logs)
-    assert result.exhausted and result.failed_tests
+    # A crash spent no budget: it is named, not called exhausted, so the
+    # generator neither checkpoints it nor reports it as exhausted.
+    assert result.crashed.startswith("UnicodeDecodeError")
+    assert not result.exhausted and result.failed_tests
     assert len(fills) == 2, "no fill after the crash"
     crashed = [d for ev, d in events if ev == "task2a.cluster_crashed"]
     assert len(crashed) == 1

@@ -198,6 +198,7 @@ def _save_cluster_evidence(project_dir: Path, cluster: str,
                            failed: frozenset[str], ran: frozenset[str],
                            exhausted: bool = False,
                            exhausted_fns: tuple[tuple[str, str], ...] = (),
+                           crashed: bool = False,
                            ) -> None:
     store = _load_cluster_evidence(project_dir)
     # `exit` separates a cluster that FINISHED from one that ran out of ideas.
@@ -216,7 +217,9 @@ def _save_cluster_evidence(project_dir: Path, cluster: str,
     # Normalised at the write because that is where the two vocabularies meet.
     store[cluster] = {
         "failed": sorted(failed), "ran": sorted(ran),
-        "exit": "exhausted" if exhausted else "done",
+        # `crashed`: the fill loop raised; its `exhausted_fns` are still
+        # the ones whose budgets earlier iterations spent.
+        "exit": "crashed" if crashed else "exhausted" if exhausted else "done",
         "exhausted_fns": sorted(
             f"{f[4:] if f.startswith('src/') else f}::{fn}"
             for f, fn in exhausted_fns),
@@ -1576,31 +1579,47 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         _ph.close("error")
                 cluster_summaries.append(_summary)
                 _pc = _summary.get("phase_c")
+                _crash = str(getattr(_pc, "crashed", None) or "")
                 if _pc is not None and getattr(_pc, "ran_tests", None):
                     _save_cluster_evidence(
                         project_dir, cluster.name,
                         _pc.failed_tests, _pc.ran_tests,
                         exhausted=getattr(_pc, "exhausted", False),
-                        exhausted_fns=getattr(_pc, "exhausted_fns", ()))
-                    if getattr(_pc, "exhausted", False):
-                        self.tel.log(
-                            f"  [skeleton] cluster '{cluster.name}' is EXHAUSTED, "
-                            f"not done: {len(_pc.failed_tests)} test(s) still "
-                            f"failing after its budgets were spent "
-                            f"({', '.join(sorted(_pc.failed_tests)[:4])}). "
-                            f"{len(getattr(_pc, 'exhausted_fns', ()))} fn(s) were "
-                            "tried and could not be made to pass; the evidence is "
-                            "carried to whatever repairs the merged tree.")
+                        exhausted_fns=getattr(_pc, "exhausted_fns", ()),
+                        crashed=bool(_crash))
+                if _pc is not None and _crash:
+                    self.tel.log(
+                        f"  [skeleton] cluster '{cluster.name}' CRASHED, not "
+                        f"exhausted: {_crash}. {len(_pc.failed_tests)} "
+                        f"test(s) still failing "
+                        f"({', '.join(sorted(_pc.failed_tests)[:4])}); no "
+                        "budget was spent on them. Its tree enters the merge; "
+                        "it is NOT checkpointed, so the next process re-enters "
+                        "it.")
+                elif (_pc is not None and getattr(_pc, "ran_tests", None)
+                        and getattr(_pc, "exhausted", False)):
+                    self.tel.log(
+                        f"  [skeleton] cluster '{cluster.name}' is EXHAUSTED, "
+                        f"not done: {len(_pc.failed_tests)} test(s) still "
+                        f"failing after its budgets were spent "
+                        f"({', '.join(sorted(_pc.failed_tests)[:4])}). "
+                        f"{len(getattr(_pc, 'exhausted_fns', ()))} fn(s) were "
+                        "tried and could not be made to pass; the evidence is "
+                        "carried to whatever repairs the merged tree.")
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
                     # Only a cluster whose Phase A→D returned ok is checkpointed:
                     # a crash or an abort leaves no marker, so the next run
                     # re-enters it and resumes against its partial tree exactly
-                    # as it does today.
-                    self.tel.mark_phase(
-                        project_dir, _ckey, "done",
-                        detail=("validated" if _summary.get("validates")
-                                else "reconstructed"))
+                    # as it does today. A crash the fill driver caught (to keep
+                    # its traceback and red ledger) still returns ok, so it is
+                    # read here: its tree seeds and merges, its marker is not
+                    # written.
+                    if not _crash:
+                        self.tel.mark_phase(
+                            project_dir, _ckey, "done",
+                            detail=("validated" if _summary.get("validates")
+                                    else "reconstructed"))
             # Only record task2a as done when at least one cluster actually
             # produced something. Marking it done unconditionally meant a
             # total wipeout (every cluster aborted) still got treated as a
@@ -1620,13 +1639,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # and is skipped individually, so re-entering costs only the
             # unfinished one.
             _unfinished = [s.get("cluster") for s in cluster_summaries
-                           if getattr(s.get("phase_c"), "baseline_broken", False)]
+                           if getattr(s.get("phase_c"), "baseline_broken", False)
+                           or getattr(s.get("phase_c"), "crashed", "")]
             if _unfinished:
                 self.tel.log(f"  [skeleton] task2a/{module}: NOT marking done — "
                              f"cluster(s) {', '.join(str(c) for c in _unfinished)} "
-                             "stopped on a tree that does not build. The next run "
-                             "re-enters them; clusters that finished keep their "
-                             "own checkpoint and are skipped.")
+                             "stopped on a tree that does not build or crashed. "
+                             "The next run re-enters them; clusters that finished "
+                             "keep their own checkpoint and are skipped.")
             elif any(s.get("ok") for s in cluster_summaries):
                 self.tel.mark_phase(project_dir, f"task2a/{module}", "done",
                                     detail=f"{len(clusters)} cluster(s)")

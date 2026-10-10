@@ -1,0 +1,492 @@
+{
+  "agreement": [
+    "cluster",
+    "module",
+    "project_dir",
+    "stubs",
+    "tree_dir",
+    "where"
+  ],
+  "append_note_fn": [
+    "error_codes",
+    "provenance"
+  ],
+  "ask": [
+    "max_tokens",
+    "model",
+    "think"
+  ],
+  "ask_fn": [
+    "model"
+  ],
+  "ask_per_fn_body": [
+    "conversation",
+    "sig_text"
+  ],
+  "ask_per_fn_body_fn": [
+    "conversation",
+    "sig_text"
+  ],
+  "ask_turns": [
+    "followup_think",
+    "model"
+  ],
+  "attribute_failures": [
+    "cluster",
+    "cluster_name",
+    "extra_failed",
+    "recently_filled",
+    "test_reverse_map",
+    "test_texts",
+    "unrepairable_tests"
+  ],
+  "attribute_failures_fn": [
+    "test_texts",
+    "unrepairable_tests"
+  ],
+  "bound_methods_section_for": [
+    "file_rel"
+  ],
+  "build_decl_fn": [
+    "cluster_cfg_attr"
+  ],
+  "build_gen_tests_decl": [
+    "cluster_cfg_attr"
+  ],
+  "build_per_fn_fix_prompt": [
+    "cluster_name",
+    "error_excerpt",
+    "file_rel",
+    "file_text",
+    "fn_name",
+    "fr_path",
+    "kind",
+    "module_name",
+    "prev_body",
+    "sections",
+    "sig_text",
+    "test_blocks"
+  ],
+  "build_test_cmd_fn": [
+    "include_lib"
+  ],
+  "check_diag": [
+    "timeout"
+  ],
+  "classify": [
+    "cluster_name",
+    "failed_tests",
+    "filled_this_pass",
+    "test_out"
+  ],
+  "cleanup_residuals": [
+    "module_name"
+  ],
+  "collect_examples": [
+    "module_dir"
+  ],
+  "commit_and_mark": [
+    "commit_message",
+    "detail",
+    "source_hash",
+    "tag"
+  ],
+  "commit_and_mark_fn": [
+    "commit_message",
+    "detail",
+    "source_hash",
+    "tag"
+  ],
+  "condense_rust_to_signatures": [
+    "filename"
+  ],
+  "condense_to_signatures": [
+    "filename"
+  ],
+  "coverage": [
+    "hung"
+  ],
+  "diagnose_fn": [
+    "bound_methods_section",
+    "cluster_name",
+    "compiled",
+    "container",
+    "error_excerpt",
+    "file_rel",
+    "fix_attempts",
+    "fn_name",
+    "last_body",
+    "later_compile_failures",
+    "pinned_observables",
+    "prior_retrospective",
+    "sig_text"
+  ],
+  "discover_test_command": [
+    "project_dir"
+  ],
+  "emit": [
+    "attempt",
+    "captured",
+    "cargo_invocations",
+    "cluster",
+    "clusters",
+    "confirmed",
+    "data",
+    "duration_ms",
+    "file",
+    "files",
+    "held",
+    "held_out",
+    "iteration",
+    "misses",
+    "module",
+    "moved",
+    "proposed",
+    "refused",
+    "refuted",
+    "rules_asked",
+    "rules_dropped",
+    "share",
+    "task",
+    "withdrawn"
+  ],
+  "emit_fn": [
+    "data",
+    "duration_ms"
+  ],
+  "emit_tests": [
+    "cfg_attr",
+    "crate",
+    "perturb_env",
+    "recapture",
+    "verify"
+  ],
+  "enumerate_types": [
+    "cfg_false"
+  ],
+  "expand_frontier_by_calls": [
+    "cap",
+    "max_hops"
+  ],
+  "extract_and_store_rules": [
+    "failure_type",
+    "iteration",
+    "module_scope"
+  ],
+  "extract_crate_idioms": [
+    "max_idioms",
+    "target_sig_text"
+  ],
+  "extract_crate_idioms_fn": [
+    "max_idioms",
+    "target_sig_text"
+  ],
+  "extract_skeleton": [
+    "cluster"
+  ],
+  "fill_groups": [
+    "cluster",
+    "cluster_name",
+    "functional_req",
+    "genesis",
+    "module_name"
+  ],
+  "filter_notes": [
+    "current_error",
+    "file_rel",
+    "file_text",
+    "fn_name",
+    "hidden_symbols"
+  ],
+  "filter_test_targets": [
+    "cluster"
+  ],
+  "filter_test_targets_fn": [
+    "cluster"
+  ],
+  "find_tests_for_fn": [
+    "container",
+    "file_rel",
+    "src_dir"
+  ],
+  "find_tests_for_fn_fn": [
+    "container",
+    "file_rel",
+    "src_dir"
+  ],
+  "fix_loop_fn": [
+    "genesis_path",
+    "module_dir_rel"
+  ],
+  "fn_belongs_to_cluster_fn": [
+    "fn_cfg_predicates"
+  ],
+  "focus_errors_fn": [
+    "max_chars"
+  ],
+  "gather_fix_context": [
+    "body_text",
+    "container",
+    "error_excerpt",
+    "file_rel",
+    "file_text",
+    "fn_name",
+    "fr_path",
+    "sig_text",
+    "type_records"
+  ],
+  "gather_fn": [
+    "body_text",
+    "container",
+    "error_excerpt",
+    "file_rel",
+    "file_text",
+    "fn_name",
+    "fr_path",
+    "sig_text",
+    "type_records"
+  ],
+  "generate_fix_loop": [
+    "allowed_dir_prefix",
+    "check_cmd",
+    "check_fn",
+    "existing_test_files",
+    "extra_context",
+    "fr_path",
+    "functional_req",
+    "max_fix_attempts",
+    "model",
+    "project_dir",
+    "source_paths",
+    "timeout"
+  ],
+  "genesis_rules_read_fn": [
+    "module_scope"
+  ],
+  "group_tests": [
+    "cluster_name",
+    "module_name"
+  ],
+  "harvest": [
+    "cfg_cluster",
+    "default_cluster",
+    "test_sources"
+  ],
+  "init_events": [
+    "product"
+  ],
+  "init_log": [
+    "nolog",
+    "progress_mode"
+  ],
+  "inner_loop_fn": [
+    "api_surface",
+    "coverage_strategy",
+    "current_module",
+    "locked_dep_context",
+    "module_dir_rel",
+    "prev_source_context",
+    "whole_project_context"
+  ],
+  "mark_phase": [
+    "detail",
+    "source_hash"
+  ],
+  "mark_phase_fn": [
+    "detail"
+  ],
+  "measure_coverage_slice": [
+    "cluster_env",
+    "failing_binaries",
+    "failing_tests",
+    "hung",
+    "timeout"
+  ],
+  "open_conversation": [
+    "max_pulls",
+    "route",
+    "sources"
+  ],
+  "open_conversation_fn": [
+    "max_pulls",
+    "route",
+    "sources"
+  ],
+  "phase": [
+    "attempt",
+    "data",
+    "task"
+  ],
+  "prune_clusters": [
+    "cargo_toml_path"
+  ],
+  "repo_spec_block_fn": [
+    "container",
+    "file_rel",
+    "fn_name"
+  ],
+  "repo_spec_section": [
+    "char_budget",
+    "container",
+    "file_rel",
+    "fn_name"
+  ],
+  "restart_from_pre_augment": [
+    "reharvest"
+  ],
+  "retire_unblocked_convictions": [
+    "cfg_dead"
+  ],
+  "retrigger_layout": [
+    "best_pass",
+    "compile_evidence",
+    "crash_evidence"
+  ],
+  "run": [
+    "coverage_strategy",
+    "crate_type",
+    "ctx",
+    "env",
+    "failure_log_path",
+    "from_spec",
+    "genesis_path",
+    "iteration",
+    "module_name",
+    "module_req_path",
+    "prev_pass_count",
+    "prev_test_output",
+    "project_context",
+    "project_profile",
+    "readme_text",
+    "src_hash",
+    "t1_input",
+    "timeout",
+    "total_iters"
+  ],
+  "run_cargo": [
+    "timeout"
+  ],
+  "run_generate_fix": [
+    "deps",
+    "do_retro",
+    "log",
+    "max_stalls",
+    "on_iter",
+    "run_check",
+    "session",
+    "strategy",
+    "unit"
+  ],
+  "run_probe": [
+    "extra_env"
+  ],
+  "save_red_ledger": [
+    "close_kind",
+    "run_id"
+  ],
+  "setup_workspace": [
+    "force_fresh"
+  ],
+  "splice": [
+    "allow_nonstub",
+    "sig_text"
+  ],
+  "splice_body_fn": [
+    "allow_nonstub"
+  ],
+  "splice_body_scoped": [
+    "allow_nonstub",
+    "allow_stub_body",
+    "cfg_predicates"
+  ],
+  "splice_body_scoped_fn": [
+    "allow_nonstub"
+  ],
+  "splice_fn_body": [
+    "allow_nonstub",
+    "allow_stub_body"
+  ],
+  "splice_fn_body_at_fn": [
+    "allow_nonstub",
+    "allow_stub_body",
+    "fn_name"
+  ],
+  "splice_fn_body_fn": [
+    "allow_nonstub",
+    "allow_stub_body"
+  ],
+  "splice_fn_fn": [
+    "allow_nonstub",
+    "where_clause"
+  ],
+  "strip_and_bake_module": [
+    "crate_type",
+    "deps",
+    "from_spec",
+    "src_hash"
+  ],
+  "task0b_discovery": [
+    "clusters"
+  ],
+  "task3_inline_retry": [
+    "all_clusters",
+    "cluster",
+    "initial_test_output",
+    "iteration",
+    "project_dir",
+    "test_command"
+  ],
+  "task4_fn": [
+    "api_surface",
+    "failure_log",
+    "failure_type",
+    "prev_pass_count",
+    "prev_test_output",
+    "source_context"
+  ],
+  "test_regression_gate": [
+    "hollow_before",
+    "stub_free"
+  ],
+  "test_regression_gate_fn": [
+    "hollow_before",
+    "introduced_stubs",
+    "stub_free"
+  ],
+  "types_section_for_fix": [
+    "file_rel",
+    "file_text"
+  ],
+  "u2_test_gate_fn": [
+    "baseline"
+  ],
+  "validate_output_fn": [
+    "req_path"
+  ],
+  "whole_tree_retrospective": [
+    "error_excerpt",
+    "history",
+    "name"
+  ],
+  "wl_save_gen_tests_siblings": [
+    "gen_tests_siblings",
+    "is_gen_tests_file"
+  ],
+  "wl_wipe_module_sources": [
+    "regenerating_phase_done",
+    "write_stub"
+  ],
+  "write_test_fix_log_fn": [
+    "best_fail_count",
+    "cluster_name",
+    "cur_fail_count",
+    "failed_tests",
+    "fix_iter",
+    "fns_retried",
+    "new_fail_count",
+    "pass_n",
+    "project_dir",
+    "stall",
+    "test_out"
+  ]
+}

@@ -448,6 +448,45 @@ def test_aborted_cluster_is_not_checkpointed(tmp_path: Path) -> None:
     assert "task2a/crate/default" not in [k for k, _s, _d in fake.marks]
 
 
+def test_a_cluster_whose_fill_crashed_is_not_checkpointed_or_called_exhausted(
+        tmp_path: Path) -> None:
+    """Run `486681-a304b30a` (2026-10-10): the TDD driver caught a TypeError
+    at both clusters' first fill and returned ok, so each was logged
+    `EXHAUSTED ... after its budgets were spent` and checkpointed done; a
+    resume would never have re-entered them. The crash is named, the tree
+    still merges, and no marker is written."""
+    import json
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+
+    def _fill(**kw: Any) -> ClusterFillResult:
+        if kw.get("cluster") is not None and kw["cluster"].name == "default":
+            return ClusterFillResult(
+                failed_tests=frozenset({"t"}), ran_tests=frozenset({"t"}),
+                crashed="TypeError: run() got an unexpected keyword argument 'x'")
+        return ClusterFillResult(ran_tests=frozenset({"t"}))
+    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+    merged: list[str] = []
+
+    def _merge(**kw: Any) -> dict[str, Any]:
+        merged.extend(str(s.get("cluster")) for s in kw["successes"])
+        return {"files_written": 1, "cfg_gated_fns": 0}
+    fake.merge_cluster_outputs = _merge  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    done = [k for k, status, _ in fake.marks if status == "done"]
+    assert "task2a/crate/default" not in done
+    assert "task2a/crate/nightly" in done, "the cluster that ended keeps its marker"
+    assert "task2a/crate" not in done, "the outer marker would skip the re-entry"
+    assert any("'default' CRASHED, not exhausted: TypeError" in m for m in fake.logs)
+    assert not any("'default' is EXHAUSTED" in m for m in fake.logs)
+    evidence = json.loads(
+        (pd / ".skeleton" / "_cluster_evidence.json").read_text())
+    assert evidence["default"]["exit"] == "crashed"
+    assert "default" in merged, "its tree still enters the merge"
+
+
 def test_checkpointed_cluster_is_skipped_but_still_seeds_the_next(
         tmp_path: Path) -> None:
     # The resume the whole change exists for: cluster 1 is done and its tree is

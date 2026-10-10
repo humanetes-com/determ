@@ -322,6 +322,7 @@ from pipeline_core.domain.zero_payoff import (
     unpaid_streak,
     zero_payoff_streak,
 )
+from pipeline_core.ports.fill_engine import FillPassPort
 
 
 class FilterTestTargets(Protocol):
@@ -376,7 +377,9 @@ class PhaseCTddDeps:
     # is what the cluster-entry re-seed iterated on 2026-09-04.
     scan_unimplemented_for_cluster: Callable[..., StubInventory]
     scan_unimplemented_functions: Callable[..., StubInventory]
-    task2_fill_fns_one_by_one: Callable[..., ClusterFillResult]
+    # Typed, not `Callable[..., ...]`: mypy reads the fill call's fifty-odd
+    # keywords against it (`ports.fill_engine.FillPassPort`).
+    task2_fill_fns_one_by_one: FillPassPort
     # Futility escalation: (src_dir, test, futile_units,
     # futile_containers) -> Frontier additions. None disables escalation.
     escalate_to_producers: Callable[..., Frontier] | None = None
@@ -1902,6 +1905,7 @@ def run_phase_c_tdd(
     # re-fill window's bet unsettled, and the two are not the same thing.
     _cluster_done = False
     _close_kind = ""
+    _crashed = ""
     _bet_restored = False
 
     def _restore_abandoned_bet(how: str) -> None:
@@ -7109,6 +7113,7 @@ def run_phase_c_tdd(
                 "exception": f"{type(_exc_c).__name__}: {_exc_c}",
                 "traceback": _tb_c})
             _close_kind = "crashed"
+            _crashed = f"{type(_exc_c).__name__}: {_exc_c}"
             break
         # What the engine ACTUALLY dispatched. The frontier is what the
         # driver asked for; the engine narrows it (the impl route defers
@@ -7942,7 +7947,9 @@ def run_phase_c_tdd(
         # crate's leftover) but is the same success as rc==0. The checkpoint
         # marker is the same either way and a cluster is never re-opened, so
         # without this the distinction is lost at the boundary and whatever
-        # repairs the merged tree starts from a bare failing-test name.
-        exhausted=bool(last_failed) and not _cluster_done,
+        # repairs the merged tree starts from a bare failing-test name. A
+        # crash is neither: it spent no budget (`crashed`).
+        exhausted=bool(last_failed) and not _cluster_done and not _crashed,
         exhausted_fns=tuple(sorted(permanently_exhausted)),
+        crashed=_crashed,
     )

@@ -101,6 +101,7 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.ports.fill_engine import (
     Cargo,
     EngineTelemetry,
+    FillPassPort,
     ImplFillPath,
     Mutator,
     PromptContext,
@@ -388,6 +389,10 @@ class PhaseCFillEngine:
         # What the red tests owe this fill (`candidate_tiers.due_reading`):
         # each gets an opened writer whatever deferred it.
         due: Collection[FnLocator] = (),
+        # Each owed function's ladder rung (`candidate_tiers.LADDER`): one
+        # owed on the session rung is covered only by an opened session run.
+        # None: every owed function is owed on the unit rung.
+        due_rungs: Mapping[FnLocator, str] | None = None,
         # The body ledger's per-unit verdicts, built by the TDD driver at
         # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
         # schedule's route-row reading.
@@ -440,7 +445,7 @@ class PhaseCFillEngine:
         # The driver's unit-ledger writer, called by the fill executor after
         # every wave (and on the wave a stop cuts) with the units the wave
         # kept, so a fill that never returns still leaves its `landed` rows.
-        on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None,
+        on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = None,
         # The ground this fill's plan was made from and a reader of the
         # ground now (`test_outcome.premise_of`); both set, the fill ends at
         # the first claim after a keep that moved it (`fill_scheduler`).
@@ -588,6 +593,7 @@ class PhaseCFillEngine:
                 attributed=frozenset(attributed),
                 measured_owners=frozenset(measured_owners),
                 due=frozenset(due),
+                due_rungs=dict(due_rungs or {}),
                 unit_evidence=unit_evidence,
                 body_rows=body_rows,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}
@@ -1666,3 +1672,11 @@ class _PerFnRoute:
             filtered={FnLocator(f, n): why
                       for f, n, why in res.unclaimed_fns
                       if FnLocator(f, n) not in disp})
+
+
+def engine_run_is_the_fill_pass(engine: PhaseCFillEngine) -> FillPassPort:
+    """The engine's `run`, as the TDD driver's fill port. Never called for its
+    value: mypy checks the return, so a keyword the port declares and `run`
+    does not take (or one `run` requires and the port omits) fails the type
+    gate instead of the first fill of a live run."""
+    return engine.run

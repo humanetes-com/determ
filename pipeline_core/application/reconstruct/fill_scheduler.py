@@ -144,7 +144,7 @@ class FillExecutionDeps:
     #: 2026-09-08, about sixty bodies, zero rows). The route ledger is
     #: flushed per wave for the same reason; this is the unit ledger's
     #: turn. None (the default) keeps the post-fill write alone.
-    on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = None
+    on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = None
     #: The ground the plan was made from (`test_outcome.premise_of` of the
     #: sweep's capture) and a reader of the ground the tree stands on now
     #: (one suite run → the same function). With both set, a claim planned

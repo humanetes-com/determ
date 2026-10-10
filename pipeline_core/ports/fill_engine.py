@@ -16,13 +16,15 @@ import directly. Only I/O, the LLM call, the extractor, the retro store, and
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+from pipeline_core.domain.crash_site import CrashSites
+from pipeline_core.domain.fill_schedule import UnitEvidence
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -34,6 +36,7 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.stub_inventory import StubInventory
+from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 
@@ -298,7 +301,75 @@ class ImplFillPath(Protocol):
         dispatch_ranks: dict[FnLocator, int] | None = ...,
         session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
         session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
-        on_wave_kept: Callable[[frozenset[FnLocator]], None] | None = ...,
+        on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = ...,
         fill_premise: Mapping[str, Any] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
+    ) -> ClusterFillResult: ...
+
+
+class FillPassPort(Protocol):
+    """One fill pass of one cluster — what the TDD driver calls once per
+    iteration (`PhaseCTddDeps.task2_fill_fns_one_by_one`).
+
+    The driver passes some fifty keywords and grows them with every schedule
+    input. While the port was `Callable[..., ClusterFillResult]` and the
+    composition bound it through `lambda *a, **k`, no checker saw a keyword
+    the engine does not take: run `486681-a304b30a` (2026-10-10) passed
+    `due_rungs=` to an engine without it, and both clusters ended at their
+    first fill with a TypeError, before any model call. Typed here, mypy reads
+    every driver call against this signature, and
+    `phase_c_engine.engine_run_is_the_fill_pass` binds the engine's `run` to
+    it, so a keyword missing on either side fails the gate. Keyword-only: the
+    driver names every argument."""
+
+    def __call__(
+        self,
+        *,
+        project_dir: Path,
+        target_src_dir: Path,
+        tests_dir_files: list[Path],
+        module_name: str,
+        cluster_name: str,
+        cluster: BuildCluster | None = ...,
+        check_cmd: str = ...,
+        cluster_env: dict[str, str] | None = ...,
+        max_passes: int = ...,
+        leaf_name_counts: dict[str, int] | None = ...,
+        fr_path: Path | None = ...,
+        tdd_frontier_keys: set[FnLocator] | None = ...,
+        skip_end_pass_test: bool = ...,
+        tdd_frontier_tests: FailureFrontier | None = ...,
+        escalated_keys: frozenset[FnLocator] = ...,
+        escalated_measured: frozenset[FnLocator] = ...,
+        ledger_entries: Sequence[Any] = ...,
+        oracle_fp: str = ...,
+        tdd_test_cmd: str | None = ...,
+        crash_evidence: dict[FnLocator, str] | None = ...,
+        crash_blamed: frozenset[FnLocator] | None = ...,
+        crash_memory_blamed: frozenset[FnLocator] | None = ...,
+        crash_sites: CrashSites | None = ...,
+        crash_blocked: dict[str, str] | None = ...,
+        culprits_of: Callable[[str], Collection[FnLocator]] | None = ...,
+        unmeasurable_tests: frozenset[str] = ...,
+        attributed: Collection[FnLocator] = ...,
+        measured_owners: Collection[FnLocator] = ...,
+        due: Collection[FnLocator] = ...,
+        due_rungs: Mapping[FnLocator, str] | None = ...,
+        unit_evidence: UnitEvidence | None = ...,
+        body_rows: int | None = ...,
+        dispatch_ranks: dict[FnLocator, int] | None = ...,
+        session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
+        session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
+        stub_hold_blockers: frozenset[FnLocator] = ...,
+        stub_hold_hollow: Mapping[str, frozenset[FnLocator]] | None = ...,
+        fill_budget_minutes: float = ...,
+        fill_iteration: int = ...,
+        run_id: str = ...,
+        max_sessions_per_fill: int = ...,
+        session_min_turns: int = ...,
+        unit_share_multiple: float = ...,
+        heal_file: Callable[[str], bool] | None = ...,
+        on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = ...,
+        fill_premise: Mapping[str, PremiseEntry] | None = ...,
+        fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = ...,
     ) -> ClusterFillResult: ...

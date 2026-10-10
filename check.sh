@@ -46,6 +46,11 @@ PID_LOC=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/check_no_tmp_literals.py \
     > "$GATE_TMP/tmp_literals.out" 2>&1 &
 PID_TMP_LITERALS=$!
+# A keyword new at a `Callable[..., X]` port's call site is invisible to mypy;
+# twice it was the first fill of a live run (2026-08-30, 2026-10-10).
+"$SCRIPT_DIR/.venv/bin/python" tools/check_untyped_port_keywords.py \
+    > "$GATE_TMP/port_keywords.out" 2>&1 &
+PID_PORT_KEYWORDS=$!
 # The extractor's own unit tests ran in NO gate before — a rendering regression
 # there (e.g. definitions the t1.5 splice can never locate) only surfaced live.
 #
@@ -92,7 +97,7 @@ gate() {  # gate <name> <pid> <outfile>
     fi
 }
 
-echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, fixture ambiguity, identity contract, tree writes, LOC, /tmp literals, rust)..."
+echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, fixture ambiguity, identity contract, tree writes, LOC, /tmp literals, port keywords, rust)..."
 gate "mypy" "$PID_MYPY" "$GATE_TMP/mypy.out"
 gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
@@ -102,6 +107,7 @@ gate "identity contract" "$PID_IDENTITY" "$GATE_TMP/identity.out"
 gate "tree writes (every write into a fill tree goes through tree_txn)" "$PID_TREE_WRITES" "$GATE_TMP/tree_writes.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
 gate "no /tmp path outside runtime_paths (tests share /tmp with live runs)" "$PID_TMP_LITERALS" "$GATE_TMP/tmp_literals.out"
+gate "untyped-port keywords (no new keyword through a Callable[..., X] port)" "$PID_PORT_KEYWORDS" "$GATE_TMP/port_keywords.out"
 gate "skeleton-extractor cargo fmt --check (rust $RUST_GATE_TOOLCHAIN)" "$PID_RUSTFMT" "$GATE_TMP/rustfmt.out"
 gate "skeleton-extractor cargo clippy + test + doc (rust $RUST_GATE_TOOLCHAIN)" "$PID_CARGO" "$GATE_TMP/cargo.out"
 [ "$FAILED" -eq 0 ] || exit 1

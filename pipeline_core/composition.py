@@ -886,6 +886,7 @@ from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
+from pipeline_core.ports.fill_engine import FillPassPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
@@ -1031,7 +1032,7 @@ class Helpers:
     count_relevant_notes: Callable[..., Any]
     effective_stalls: Callable[..., Any]
     run_cargo: Callable[..., Any]
-    task2_fill_fns_one_by_one: Callable[..., Any]
+    task2_fill_fns_one_by_one: FillPassPort
     # Reconstruction-cluster collaborators:
     load_model_notes: Callable[..., list[str]]
     genesis_rules_count: Callable[..., int]

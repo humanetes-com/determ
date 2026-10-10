@@ -1145,6 +1145,13 @@ class ClusterFillResult:
     # its plateau exit: the fns it tried and could not make pass.
     exhausted: bool = False
     exhausted_fns: tuple[tuple[str, str], ...] = ()
+    # The exception that ended the fill loop (`"TypeError: ..."`), empty when
+    # the cluster ended any other way. A crash is not exhaustion: no budget
+    # was spent, so the cluster is not checkpointed and the next process
+    # re-enters it. Run `486681-a304b30a` (2026-10-10) read both clusters
+    # `EXHAUSTED ... after its budgets were spent` and checkpointed them done
+    # after a TypeError at their first fill, before any model call.
+    crashed: str = ""
     # The fns a fill route ACTUALLY attempted this call (a model attempt was
     # made, or a body landed) — as opposed to the frontier the caller asked
     # for. The two differ whenever a route stands down: the impl route defers
