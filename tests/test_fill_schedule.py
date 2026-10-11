@@ -28,7 +28,6 @@ from pipeline_core.domain.fill_schedule import (
     bodies_sha_of,
     call_price,
     consecutive_unpaid,
-    hollow_by_test,
     rebuy_identity,
     row_paid_test,
     run_blocks,
@@ -37,6 +36,21 @@ from pipeline_core.domain.fill_schedule import (
     unpaid_tries_for_test,
 )
 from pipeline_core.domain.models import FnLocator, FnSite
+
+
+def hollow_by_test(slices: dict[str, set[FnSite]],
+                   stubs: set[FnLocator]) -> dict[str, frozenset[FnLocator]]:
+    """A hollow map for the schedule's input: test -> the stubs on its slice.
+    The schedule reads whatever map it is handed (in the pipeline, the held
+    view `held_stubs.HeldStubs.hollow`); these fixtures build one by hand."""
+    out: dict[str, frozenset[FnLocator]] = {}
+    for t, sites in slices.items():
+        hit = frozenset(FnLocator(x.file, x.fn_name) for x in sites
+                        if FnLocator(x.file, x.fn_name) in stubs)
+        if hit:
+            out[t] = hit
+    return out
+
 
 _STUB = FnLocator("src/x.rs", "drop_rest")
 _FMT = FnLocator("src/x.rs", "fmt")
@@ -68,11 +82,6 @@ def _hollow() -> dict[str, frozenset[FnLocator]]:
         "t_fmt": {FnSite("src/x.rs", "fmt", "impl Debug for X")},
     }
     return hollow_by_test(slices, {_STUB})
-
-
-def test_hollow_by_test_names_the_blocking_stubs() -> None:
-    h = _hollow()
-    assert h == {"t_hollow": frozenset({_STUB})}
 
 
 def test_a_stub_run_that_hollows_a_leftover_test_goes_before_a_stub_free_session() -> None:

@@ -90,8 +90,9 @@ from typing import Any
 
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.fill_class import FillOutcomeClass
+from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.impl_routing import norm_src_rel
-from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
+from pipeline_core.domain.models import FnLocator, FnRecord
 
 __all__ = [
     "DEFAULT_UNPAID_GRACE",
@@ -113,7 +114,6 @@ __all__ = [
     "condensed_order",
     "unit_evidence_from",
     "consecutive_unpaid",
-    "hollow_by_test",
     "rebuy_identity",
     "run_blocks",
     "schedule",
@@ -269,27 +269,6 @@ def rebuy_identity(kind: RouteKind, targets: Collection[FnLocator],
     if kind is RouteKind.SESSION:
         ident = f"{ident}|{','.join(sorted(target_tests))}"
     return ident
-
-
-def hollow_by_test(
-    slices: Mapping[str, Collection[FnSite]],
-    stubs: Collection[FnLocator],
-) -> dict[str, frozenset[FnLocator]]:
-    """For every leftover test, the still-hollow units on its executed path.
-
-    A test is HOLLOW when any site of its slice shares a dispatch name with a
-    stub — the same predicate the session planner drops hollow tests on
-    (`slice_session._stub_blocks`), restated here so the schedule and the
-    planner cannot disagree about which tests are blocked."""
-    stub_set = frozenset(stubs)
-    out: dict[str, frozenset[FnLocator]] = {}
-    for test, sites in slices.items():
-        blocking = frozenset(
-            FnLocator(s.file, s.fn_name) for s in sites
-            if FnLocator(s.file, s.fn_name) in stub_set)
-        if blocking:
-            out[test] = blocking
-    return out
 
 
 def _blocking_stubs(run: RouteRun,
@@ -2418,29 +2397,33 @@ def _cover_blockers(
 ) -> tuple[list[ScheduledRun], list[ScheduledRun]]:
     """Open, in schedule order, the first deferred writer of every blocker
     no opened run writes (stage 3 of :func:`admit_ranked`). A blocker is a
-    stub some leftover test is hollow on, or a crash-blamed locator. The
-    promoted run keeps the reason it was ranked with, takes weight at least
-    1, and names the blockers it opened for (`blocker_writer`)."""
-    blocking: set[FnLocator] = set(blamed)
-    for locs in hollow.values():
-        blocking |= locs
-    written: set[FnLocator] = set()
-    for s in opened:
-        written |= s.run.targets
-    candidates: set[FnLocator] = set()
-    for s in deferred:
-        candidates |= s.run.targets
-    uncovered = (blocking & candidates) - written
+    stub a leftover test's first failure sits in (`hollow`, the held view),
+    or a crash-blamed locator. A run WRITES a held stub only when it aims at
+    it (`HeldStubs.writes`): a session that has the stub in its editable set
+    as a passenger of another test's slice is not asked for that body. The
+    promoted run keeps the reason it
+    was ranked with, takes weight at least 1, and names the blockers it
+    opened for (`blocker_writer`). A blocker no candidate writes at all is
+    left for `schedule_invariants` to name."""
+    held = HeldStubs.of_map(hollow)
+    blocking: set[FnLocator] = set(blamed) | held.units
+
+    def _writes(s: ScheduledRun, u: FnLocator) -> bool:
+        return held.writes(u, targets=s.run.targets,
+                           aimed_tests=s.run.target_tests,
+                           session=s.run.kind is RouteKind.SESSION)
+
+    uncovered = {u for u in blocking if not any(_writes(s, u) for s in opened)}
     if not uncovered:
         return opened, deferred
     promoted: list[ScheduledRun] = []
     still: list[ScheduledRun] = []
     for s in sorted(deferred, key=lambda d: d.position):
-        hit = s.run.targets & uncovered
+        hit = frozenset(u for u in uncovered if _writes(s, u))
         if not hit:
             still.append(s)
             continue
-        uncovered -= s.run.targets
+        uncovered -= hit
         promoted.append(replace(
             s, deferred=False, share_minutes=None, held_by=(),
             reason=s.prior_reason or s.reason, prior_reason="",

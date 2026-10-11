@@ -217,6 +217,14 @@ class TddFloor:
     escalation_products: tuple[tuple[str, tuple[str, ...],
                                      tuple[tuple[str, tuple[str, ...]], ...],
                                      tuple[str, ...]], ...] = ()
+    # The dispatch rank's unclaimed streak (`dispatch_rank.next_streak`): per
+    # frontier unit, the sweeps since a run last claimed it. The rank's first
+    # key in every class, so a resume that dropped it would rank the units
+    # the last process kept cutting as if they had just been served. It
+    # describes this cluster's dispatches, so it rides the service record's
+    # identity rule (the cluster), not the tree or the code. Defaulted so a
+    # floor written before the field parses as "no streak".
+    unclaimed: tuple[tuple[str, int], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -233,6 +241,8 @@ class TddFloor:
                     "additions": {k: list(ts) for k, ts in adds},
                     "producers": list(prods)}
                 for t, earned, adds, prods in self.escalation_products}}
+        if self.unclaimed:
+            d["unclaimed"] = dict(self.unclaimed)
         if self.served is not None:
             d["served"] = list(self.served)
         if self.served_verified is not None:
@@ -275,9 +285,24 @@ class TddFloor:
                     for t, units in _fut.items()
                     if isinstance(units, list))
                     if isinstance(_fut, dict) else ()),
-                escalation_products=_parse_products(_prod))
+                escalation_products=_parse_products(_prod),
+                unclaimed=_parse_unclaimed(raw.get("unclaimed")))
         except (KeyError, TypeError, ValueError):
             return None
+
+
+def _parse_unclaimed(raw: Any) -> tuple[tuple[str, int], ...]:
+    """The persisted streak, or empty when absent or malformed: a bad entry
+    costs that unit its streak, never the resume."""
+    if not isinstance(raw, dict):
+        return ()
+    out: list[tuple[str, int]] = []
+    for k, n in raw.items():
+        try:
+            out.append((str(k), max(0, int(n))))
+        except (TypeError, ValueError):
+            continue
+    return tuple(sorted(out))
 
 
 def _parse_products(raw: Any) -> tuple[tuple[str, tuple[str, ...],
@@ -365,6 +390,9 @@ class FloorResume:
     products: tuple[tuple[str, tuple[str, ...],
                           tuple[tuple[str, tuple[str, ...]], ...],
                           tuple[str, ...]], ...] | None = None
+    # The dispatch rank's unclaimed streak (`TddFloor.unclaimed`), resumed
+    # on the cluster identity as the service record is.
+    unclaimed: tuple[tuple[str, int], ...] = ()
 
 
 def resume_mismatch(
@@ -420,7 +448,7 @@ def cursor_mismatch(saved: TddFloor, *, cluster: str) -> str | None:
     consecutive sweep pairs change `oracle_size`**, so roughly one stop in
     fifteen landed in the lock the cursor exists to remove.
 
-    A stale key cannot survive being carried: `take_batch` intersects the cursor
+    A stale key cannot survive being carried: `dispatch_rank.take` intersects the cursor
     with the LIVE frontier, so a unit that no longer exists is dropped and a
     unit that still does is one the previous process demonstrably already tried.
     That intersection is the same argument that lets the cursor ignore
@@ -605,6 +633,7 @@ def resume_floor(
             served=saved.served if _ok else None,
             served_verified=saved.served_verified if _ok else None,
             products=(saved.escalation_products or None) if _ok else None,
+            unclaimed=saved.unclaimed if _ok else (),
             note=why + " changed"
             + (f"; {_carry.note} resumed anyway — a cursor answers to the "
                "cluster, not to the oracle or the code"
@@ -618,7 +647,7 @@ def resume_floor(
     # `tree_sha`. It is not a claim about a score — it is the list of units
     # this pass already spent a model call on, and its safety condition is
     # only that the frontier is drawn from the same cluster by the same code.
-    # A changed tree cannot invalidate it: `take_batch` intersects the cursor
+    # A changed tree cannot invalidate it: `dispatch_rank.take` intersects the cursor
     # with the LIVE frontier, so a unit that no longer exists is dropped and a
     # unit that still does is one the previous process already tried. Gating
     # it on `tree_sha` would void it in exactly the case it is for — the
@@ -634,6 +663,7 @@ def resume_floor(
             served=saved.served,
             served_verified=saved.served_verified,
             products=saved.escalation_products or None,
+            unclaimed=saved.unclaimed,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
                   "changed, so nothing here can restore that peak"
@@ -650,6 +680,7 @@ def resume_floor(
         served=saved.served,
         served_verified=saved.served_verified,
         products=saved.escalation_products or None,
+        unclaimed=saved.unclaimed,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" {carry.note}" if carry.attempted else "")
               + (f" futility evidence={len(saved.futile_units)} test(s)"

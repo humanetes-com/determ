@@ -14,7 +14,7 @@ of the cluster loop):
     aim        `deps.attribute_failures(...)`, the crash localizer, the
                futility escalation — which units the failing tests implicate
     frontier   eligible set, re-admission, deferral, the flat-score/no-verdict
-               stops, ranking, and `take_batch` — ends at the
+               stops, ranking, and the batch `take` — ends at the
                `iter N: cargo test rc=… dispatching X of Y` line
     fill       `task2_fill_fns_one_by_one` — file-first, impl, per-fn
 
@@ -104,7 +104,7 @@ _EVENT_STEP: dict[str, str] = {
     "phase_c.tdd.stall_not_charged_midpass": "grade",
     "phase_c.tdd.stub_progress": "grade",
     "phase_c.checkpoint": "grade",
-    # frontier — the eligible build through `take_batch`
+    # frontier — the eligible build through the rank and `take`
     "phase_c.tdd.compile_blocked_frontier": "frontier",
     "phase_c.dispatch.deferred": "frontier",
     "phase_c.dispatch.refills_deferred": "frontier",

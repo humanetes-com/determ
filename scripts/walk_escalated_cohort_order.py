@@ -2,7 +2,8 @@
 """Compute the escalated cohort's dispatch order — before and after the
 producer promotion — on the LIVE cluster tree, exactly as the TDD loop would.
 
-WHY. The producer ordering (`domain/dispatch_batch.promote_producers` fed by
+WHY. The producer ordering (now the rank's `escalated` / `builder` / `callee`
+facts in `domain/dispatch_rank`, fed by
 `domain/installable_fns.producer_dispatch_ranks`) shipped on 2026-08-25 with
 a tracker note "validated on the live cohort (builders = …)" that was the
 function's own output read as confirmation: it was MISSING the two wrong
@@ -51,7 +52,10 @@ HOW TO INTERPRET THE OUTPUT.
                    regressed to token matching.
     BEFORE       — the first `cap` units in `order_frontier`'s order = what
                    the loop would have dispatched without the promotion.
-    AFTER        — the first `cap` units the loop WILL dispatch.
+    AFTER        — the first `cap` units the loop WILL dispatch: the
+                   escalated cohort as `dispatch_rank.rank` orders it from
+                   the same facts the driver builds (a fresh cohort: no
+                   held stub, no unclaimed streak, never served).
     fixture      — the six constructors present/missing from AFTER's batch.
                    MISSING non-empty = the ordering does not do its job on
                    this tree; do not launch expecting the constructor
@@ -71,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline_core.adapters.artifacts import load_baked_leaf_order  # noqa: E402
 from pipeline_core.adapters.extractor import CliExtractor  # noqa: E402
 from pipeline_core.application.reconstruct.scheduling import order_frontier  # noqa: E402
-from pipeline_core.domain.dispatch_batch import promote_producers  # noqa: E402
+from pipeline_core.domain.dispatch_rank import UnitFacts, rank  # noqa: E402
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks  # noqa: E402
 from pipeline_core.domain.models import FnLocator  # noqa: E402
 
@@ -164,7 +168,10 @@ def main() -> int:
 
     ordered = order_frontier(frontier, load_baked_leaf_order(root, a.cluster))
     builders, callees = producer_dispatch_ranks(esc, fns, types)
-    after = [k for k, _ in promote_producers(ordered, esc, builders, callees)]
+    after = rank({
+        k: UnitFacts(static_index=i, escalated=k in esc,
+                     builder=k in builders, callee=k in callees)
+        for i, (k, _) in enumerate(ordered)})
     before = [k for k, _ in ordered]
     cap = a.cap or len(after)
 

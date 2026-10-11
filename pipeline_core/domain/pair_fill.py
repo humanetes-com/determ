@@ -393,7 +393,7 @@ def pairs_to_dispatch(
 ) -> list[FormatterPair]:
     """Every cross-file pair the hop resolved, deduped, in a deterministic
     order. The pair is its own dispatch unit: it does not wait for a
-    member to survive ``take_batch`` or standing-flat. Run
+    member to survive the batch cut or standing-flat. Run
     ``19980-f9ea6adb`` (2026-09-10): the hop named the pair, standing-flat
     excluded the dispatcher from the 12-cap batch, coverage dropped the
     implementer as unentered, ``pairs_to_dispatch`` of that batch was

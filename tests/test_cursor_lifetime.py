@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from pipeline_core.domain.dispatch_batch import take_batch
+from pipeline_core.domain.dispatch_batch import DispatchBatch
+from pipeline_core.domain.dispatch_rank import UnitFacts, next_streak, rank, take
 from pipeline_core.domain.tdd_floor import (
     TddFloor,
     cursor_carry,
@@ -95,47 +96,52 @@ def test_the_carry_survives_the_round_trip_through_disk() -> None:
         "b::y",)
 
 
-def test_negative_control_the_old_rule_re_sends_the_identical_first_batch() -> None:
-    """The lock this change removes, reproduced on the old rule and absent on
-    the new one.
+def _batch(frontier: tuple[str, ...], streak: dict[str, int],
+           traversed: tuple[str, ...], cap: int) -> DispatchBatch[str]:
+    ranked = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+                   for i, k in enumerate(frontier)})
+    return take(ranked, (), cap, cohort=frontier, traversed=traversed)
 
-    `order_frontier` is deterministic, so a relaunch that starts with an EMPTY
-    cursor re-sends the same prefix, reads the same score and stops again —
-    units 13..43 unreachable without a human editing the env. The two
-    assertions below are the same dispatch decision under the two rules, so
-    the test fails on the pre-fix code by construction: with the cursor
-    dropped, batch 2 IS batch 1."""
+
+def test_negative_control_the_old_rule_re_sends_the_identical_first_batch() -> None:
+    """The lock a relaunch must not hit, on the rank.
+
+    `order_frontier` is deterministic, so a relaunch that knows nothing of the
+    last process re-sends the same prefix, reads the same score and stops
+    again — units 13..43 unreachable without a human editing the env. What
+    carries the last process's work into the order now is the unclaimed
+    streak, persisted with the floor; the cursor is pass accounting only."""
     frontier = tuple(f"src/f{i:02d}.rs::fn{i:02d}" for i in range(43))
     cap = 12
-    first = take_batch(frontier, (), cap)
+    first = _batch(frontier, {}, (), cap)
     assert len(first.keys) == cap
 
     # The stopped process landed 6 of its 12 and declined 2; the other 4 came
-    # back with nothing. Then a fix ships and `code_id` moves.
+    # back with nothing. Every one of the 12 was opened by a route (claimed).
     landed = first.keys[:6]
     declined = first.keys[6:8]
-    saved = _floor(tuple(first.keys), landed=tuple(landed),
-                   declined=tuple(declined))
+    streak = next_streak({}, frontier, first.keys)
+    saved = replace(_floor(tuple(first.keys), landed=tuple(landed),
+                           declined=tuple(declined)),
+                    unclaimed=tuple(sorted((k, n) for k, n in streak.items()
+                                           if n > 0)))
+    back = TddFloor.from_dict(saved.to_dict())
+    assert back is not None
 
-    # OLD RULE: the whole cursor dies with the code identity.
-    old_rule_cursor: tuple[str, ...] = ()
-    replayed = take_batch(frontier, old_rule_cursor, cap)
-    assert replayed.keys == first.keys, (
-        "negative control: under the old rule the relaunch re-sends the "
-        "identical first batch — this is the lock")
+    # Negative control: a resume that drops the streak re-sends the
+    # identical first batch — this is the lock.
+    replayed = _batch(frontier, {}, (), cap)
+    assert replayed.keys == first.keys
 
-    # NEW RULE: the 8 that produced something are carried, the 4 that produced
-    # nothing are released, and the batch is the next slice PLUS those four.
-    carry = cursor_carry(saved, cluster="stable", code_id="MOVED")
-    resumed = take_batch(frontier, carry.attempted, cap)
-    assert resumed.keys != first.keys
-    assert set(carry.attempted).isdisjoint(resumed.keys), (
-        "a unit that was genuinely tried must not be re-dispatched inside the "
-        "same pass")
-    for released in carry.released:
-        assert released in resumed.keys, (
-            "a unit whose attempt produced nothing must be offered again "
-            "immediately, not deferred to the next pass")
+    # The resume: the streak comes back from disk and the batch is the next
+    # slice; the pass accounting carries the traversal across the code move.
+    resumed_streak = dict(resume_floor(back, **{**_KEY, "code_id": "MOVED"})
+                          .unclaimed)
+    carry = cursor_carry(back, cluster="stable", code_id="MOVED")
+    resumed = _batch(frontier, resumed_streak, carry.attempted, cap)
+    assert set(resumed.keys).isdisjoint(first.keys), (
+        "a unit a route already claimed must not lead the next batch while "
+        "units the pass has not claimed wait")
     assert resumed.attempted_before == len(carry.attempted)
 
 

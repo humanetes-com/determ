@@ -98,12 +98,6 @@ def slice_for_run(
     return None
 
 
-def _stub_blocks(units: Collection[FnSite], hollow: Collection[FnLocator]) -> bool:
-    """True when any slice site shares a dispatch name with a still-hollow body."""
-    hollow_names = frozenset(hollow)
-    return any(locator_of(u) in hollow_names for u in units)
-
-
 def _bare_test(name: object) -> str:
     return str(name).rsplit("::", 1)[-1]
 
@@ -188,8 +182,14 @@ def recorded_locator_sites(
 
 def _pending_after_filters(
     slices: Mapping[str, Collection[FnSite]],
-    hollow: Collection[FnLocator],
+    held_tests: Collection[str],
 ) -> tuple[dict[str, frozenset[FnSite]], int, int]:
+    """The tests a session may take. A HELD test (`held_stubs`: its first
+    failure sits in a still-stubbed unit) is left to the unit routes: a
+    verdict behind a stub is not a behaviour verdict. A test whose slice
+    merely passes through a stub, after its first failure (a drop run during
+    unwinding), is not held and may open a session."""
+    held = {_bare_test(t) for t in held_tests}
     pending: dict[str, frozenset[FnSite]] = {}
     n_empty = n_hollow = 0
     for test in sorted(slices):
@@ -197,7 +197,7 @@ def _pending_after_filters(
         if not units:
             n_empty += 1
             continue
-        if _stub_blocks(units, hollow):
+        if _bare_test(test) in held:
             n_hollow += 1
             continue
         pending[test] = units
@@ -475,13 +475,13 @@ def _group_needs_packing(
 def slice_plan_gaps(
     slices: Mapping[str, Collection[FnSite]],
     *,
-    stubs: Collection[FnLocator] = (),
+    held_tests: Collection[str] = (),
     max_units: int = 32,
     costs: SliceCosts | None = None,
 ) -> SlicePlanGaps:
     """The drop reasons ``plan_slices`` applies and the packing it did,
     counted separately."""
-    pending, n_empty, n_hollow = _pending_after_filters(slices, frozenset(stubs))
+    pending, n_empty, n_hollow = _pending_after_filters(slices, held_tests)
     n_over = 0
     over_units = 0
     n_fitted = 0
@@ -568,14 +568,18 @@ def locator_only_expansions(
 def plan_slices(
     slices: Mapping[str, Collection[FnSite]],
     *,
-    stubs: Collection[FnLocator] = (),
+    held_tests: Collection[str] = (),
+    held_units: Collection[FnLocator] = (),
     max_units: int = 32,
     costs: SliceCosts | None = None,
 ) -> list[SessionSlice]:
     """Group the failing tests into sessions: tests whose unit sets overlap
-    share one session (the union). A test whose slice touches a still-hollow
-    body is left to the stub routes — a session rewrites behaviour, and a
-    verdict behind a stub is not a behaviour verdict. A single test whose
+    share one session (the union). A HELD test (`held_tests`, from
+    `held_stubs.HeldStubs`: its first failure sits in a still-stubbed unit)
+    is left to the unit routes — a session rewrites behaviour, and a verdict
+    behind a stub is not a behaviour verdict. A session's units list the
+    held units (`held_units`) first, so the prompt names the stubs other
+    tests stop in before anything it may rewrite at leisure. A single test whose
     slice is over `max_units` is dropped rather than truncated: a session
     that may only write half the executed path cannot be judged as one
     transaction.
@@ -605,7 +609,8 @@ def plan_slices(
 
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
-    pending, _, _ = _pending_after_filters(slices, frozenset(stubs))
+    pending, _, _ = _pending_after_filters(slices, held_tests)
+    held_locs = frozenset(held_units)
     out: list[SessionSlice] = []
     for names, members in _merge_pending(pending):
         if not names:
@@ -620,8 +625,9 @@ def plan_slices(
         for gnames, gmembers in groups:
             out.append(SessionSlice(
                 tests=tuple(sorted(dict.fromkeys(gnames))),
-                units=tuple(sorted(gmembers,
-                                   key=lambda u: (u.file, u.fn_name, u.container))),
+                units=tuple(sorted(gmembers, key=lambda u: (
+                    locator_of(u) not in held_locs,
+                    u.file, u.fn_name, u.container))),
                 file_chars=(0 if costs is None
                             else costs.fit_threshold(gnames, gmembers) or 0)))
     return out

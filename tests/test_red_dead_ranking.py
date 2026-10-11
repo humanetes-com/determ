@@ -31,7 +31,7 @@ from pipeline_core.domain.coverage_slice import (
     instruction_for,
     red_dead_units,
 )
-from pipeline_core.domain.dispatch_batch import promote_by_service, take_batch
+from pipeline_core.domain.dispatch_rank import UnitFacts, rank, service_of, take
 from pipeline_core.domain.models import FnLocator, FnSite
 
 _FIXTURE = (
@@ -111,6 +111,18 @@ def test_without_the_exemption_the_rule_sinks_the_escalated_cohort() -> None:
     assert len(live_escalated_sunk & never_served) == 5
 
 
+def _service_batch(ranked: list[tuple[FnLocator, frozenset[str]]],
+                   served: set[FnLocator], flat: set[FnLocator],
+                   dead: set[FnLocator], red_dead: frozenset[FnLocator],
+                   cap: int) -> set[FnLocator]:
+    """The batch the rank takes when service is the only fact that differs."""
+    keys = [k for k, _ in ranked]
+    order = rank({k: UnitFacts(static_index=i, service=service_of(
+        k, served=served, flat=flat, dead=dead, red_dead=red_dead))
+        for i, k in enumerate(keys)})
+    return set(take(order, (), cap, cohort=None, traversed=()).keys)
+
+
 def test_ok_leaves_the_cap_and_the_pre_fix_ranking_keeps_it() -> None:
     data = _load()
     ranked = _ranked(data)
@@ -119,15 +131,14 @@ def test_ok_leaves_the_cap_and_the_pre_fix_ranking_keeps_it() -> None:
     served = {k for k, _ in ranked} - {_loc(s) for s in data["never_served"]}
     cap = data["dispatch_cap"]
 
-    before = promote_by_service(ranked, served, flat, dead)
-    before_batch = take_batch([k for k, _ in before], set(), cap).keys
-    assert _OK in set(before_batch), "negative control: the live run bought it"
+    before_batch = _service_batch(ranked, served, flat, dead, frozenset(), cap)
+    assert _OK in before_batch, "negative control: the live run bought it"
 
     demoted = red_dead_units(
         (k for k, _ in ranked), data["failing"], _owners(data),
         exempt={_loc(s) for s in data["escalated"]})
-    after = promote_by_service(ranked, served, flat, dead, demoted)
-    after_batch = set(take_batch([k for k, _ in after], set(), cap).keys)
+    after_batch = _service_batch(ranked, served, flat, dead,
+                                 frozenset(demoted), cap)
     assert _OK not in after_batch
     # The demotion must not cost the batch its earned never-served units.
     for name in ("src/lib.rs::format_err", "src/lib.rs::must_use",

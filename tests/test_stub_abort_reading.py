@@ -19,11 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.attribution import locator_of
-from pipeline_core.domain.dispatch_batch import (
-    CrashCohort,
-    promote_crash_evidence,
-    take_batch,
-)
+from pipeline_core.domain.dispatch_rank import UnitFacts, rank, take
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteRun,
@@ -144,17 +140,17 @@ def _loc(s: str) -> FnLocator:
     return FnLocator(f, fn)
 
 
-def _batch(sited: frozenset[FnLocator], blockers: frozenset[FnLocator]) -> list[FnLocator]:
+def _batch(held: frozenset[FnLocator], blockers: frozenset[FnLocator]) -> list[FnLocator]:
     # The recorded batch first, the rest of the 75-unit frontier behind it, the
     # blockers LAST — the worst position the order could have left them in.
-    ordered = ([(_loc(k), set()) for k in _LOGGED_BATCH]
-               + [(FnLocator("src/rest.rs", f"f{i}"), set()) for i in range(59)]
-               + [(b, set()) for b in sorted(blockers)])
-    cohort = CrashCohort(blamed=frozenset(), sited=sited, chain=frozenset())
-    o = promote_crash_evidence(ordered, cohort.grades)
-    return list(take_batch([k for k, _ in o], set(), 12,
-                           cohort=tuple(k for k, _ in o),
-                           exempt=cohort.cursor_exempt).keys)
+    # `held` is what the sweep's StubHold reports for the aborted binaries'
+    # tests (its shared-process fallback is this reading).
+    static = ([_loc(k) for k in _LOGGED_BATCH]
+              + [FnLocator("src/rest.rs", f"f{i}") for i in range(59)]
+              + sorted(blockers))
+    ranked = rank({k: UnitFacts(static_index=i, held_tests=1 if k in held else 0)
+                   for i, k in enumerate(static)})
+    return list(take(ranked, held, 12, cohort=None, traversed=()).keys)
 
 
 def test_the_blockers_make_the_first_batch_and_today_they_do_not() -> None:

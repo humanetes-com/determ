@@ -83,7 +83,6 @@ __all__ = [
     "joint_candidates",
     "joint_note",
     "miss_reasons",
-    "share_batch",
     "UNREAD",
     "AskLedger",
     "DueReading",
@@ -710,40 +709,6 @@ def merge_slices(primary: Mapping[str, frozenset[str]],
         if sl:
             out[t] = sl
     return out
-
-
-def share_batch(crash: Sequence[Any], owed: Sequence[Any], cap: int, *,
-                cut_streak: Mapping[Any, int], tier_of: Mapping[Any, int],
-                misses: int = DEFAULT_MISSES) -> tuple[list[Any], list[Any]]:
-    """The head of the batch when crash evidence and owed functions compete
-    for `cap` slots: (first, after) — `first` goes before the rest of the
-    frontier in this order, `after` follows it.
-
-    An owed function that is also a crash grade stays in the owed share
-    and is not counted twice. Crash evidence takes at most
-    `cap - min(len(owed), ceil(cap / 2))` of the slots that remain after
-    starved owed functions; an owed function the cap has cut `misses`
-    fills in a row goes ahead of the crash cohort. The owed share is
-    ordered narrowest tier, then oldest cut, then name. Run
-    `39786-fd38e72f` fill 4 (2026-10-09): 13 crash units took all 12 slots
-    and none of the 26 owed functions was offered. When both fit under
-    `cap` (or owed is empty) the order is the crash units that are not
-    also owed, then owed, and an empty owed set returns the crash list
-    unchanged."""
-    owed_sorted = sorted(
-        owed, key=lambda u: (tier_of.get(u, 0), -cut_streak.get(u, 0), str(u)))
-    owed_set = set(owed_sorted)
-    crash_only = [u for u in crash if u not in owed_set]
-    if not owed_sorted:
-        return list(crash), []
-    if cap <= 0 or not crash_only or len(crash_only) + len(owed_sorted) <= cap:
-        return [*crash_only, *owed_sorted], []
-    starved = [u for u in owed_sorted if cut_streak.get(u, 0) >= misses > 0]
-    rest_owed = [u for u in owed_sorted if u not in set(starved)]
-    owed_share = min(len(owed_sorted), -(-cap // 2))
-    crash_take = max(0, cap - owed_share - len(starved))
-    return ([*starved, *crash_only[:crash_take], *rest_owed],
-            list(crash_only[crash_take:]))
 
 
 def miss_reasons(units: Collection[str], rows: Iterable[Any]) -> dict[str, str]:

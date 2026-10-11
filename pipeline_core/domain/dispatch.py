@@ -1,71 +1,15 @@
-"""Core-first dispatch partition (pure domain).
+"""Dispatch partitions that are not the rank (pure domain).
 
-Complements the blame partition at the FRONTIER level: a unit whose every
-failing test panics inside a DIFFERENT still-`unimplemented!()` producer cannot
-be helped by filling it — the test never reaches the unit's own code. Dispatch
-it and you burn an LLM call ahead of the producer the test actually blocks on.
-:func:`defer_blocked_consumers` moves such pure consumers to DEFERRED; because
-it is recomputed each iter from the CURRENT stub set, a consumer is re-admitted
-automatically the moment its blocking producer fills (leaves the stub set).
+The frontier-level deferral of a unit whose every red test stops in another
+stub is `held_stubs.HeldStubs.consumer_deferrals`, read off the sweep's
+observed first failures. What stays here: the per-fn fix loop's prediction
+for one unit's failed attempt (:func:`sibling_blocked_u2_failures`), the
+compile-red narrowing, and which route covers a block.
 """
 
 from __future__ import annotations
 
-from enum import Enum, auto
-
 from pipeline_core.domain.models import FnLocator, Frontier, ImplBlock
-
-
-class DispatchClass(Enum):
-    ACTIVE = auto()    # fill this iter
-    DEFERRED = auto()  # blocked by a still-stubbed producer; re-admitted when it fills
-
-
-def defer_blocked_consumers(
-    frontier: Frontier, stub_keys: frozenset[FnLocator],
-) -> tuple[Frontier, dict[FnLocator, frozenset[FnLocator]]]:
-    """Split `frontier` into (active, {deferred_unit: blocking_producers}).
-
-    A unit is DEFERRED iff it is NOT itself a stub AND every test attributed to
-    it is also attributed to a still-stubbed producer that is NOT this unit —
-    i.e. all its failures are blocked externally. Stub units (the producers) are
-    always ACTIVE; a unit with an unblocked test stays ACTIVE (it has real work
-    the model can do now)."""
-    blocked_by: dict[str, set[FnLocator]] = {}
-    for k, tests in frontier.items():
-        if k in stub_keys:
-            for t in tests:
-                blocked_by.setdefault(t, set()).add(k)
-    active: Frontier = {}
-    deferred: dict[FnLocator, frozenset[FnLocator]] = {}
-    for key, tests in frontier.items():
-        if (key not in stub_keys and tests
-                and all(key not in blocked_by.get(t, set()) and t in blocked_by
-                        for t in tests)):
-            blk: set[FnLocator] = set()
-            for t in tests:
-                blk |= blocked_by[t]
-            deferred[key] = frozenset(blk)
-        else:
-            active[key] = tests
-    return active, deferred
-
-
-def blocker_histogram(
-    deferred: dict[FnLocator, frozenset[FnLocator]],
-) -> dict[FnLocator, int]:
-    """How many deferred consumers name each still-stubbed producer.
-
-    The pre-dispatch counterpart of `PassPayoff.locator_counts`. Run
-    `155810-cbb3b9fc` iter 2 (2026-08-28): `error.rs::construct` held 27 of
-    30 deferred consumers, available from `phase_c.dispatch.deferred` with
-    no escalation fire. First-fill already admits those producers into the
-    batch; this count is what ranks them to the head."""
-    counts: dict[FnLocator, int] = {}
-    for blockers in deferred.values():
-        for b in blockers:
-            counts[b] = counts.get(b, 0) + 1
-    return counts
 
 
 def sibling_blocked_u2_failures(
@@ -75,10 +19,15 @@ def sibling_blocked_u2_failures(
     """The still-stubbed producers holding EVERY test in `failing_tests`, or
     None when at least one failure is this unit's own to fix.
 
-    The post-fill counterpart of :func:`defer_blocked_consumers`. That check
-    runs at dispatch, where a stub unit is always ACTIVE (producers must be
-    filled), so a hub fn is dispatched while the rest of its producer chain
-    is still hollow. Its first body then fails the per-unit test gate — the
+    A PREDICTION from attribution, not an observation, and deliberately not
+    the held view (`held_stubs`): the U2 gate has already classified every
+    failure whose first panic sits in another unit's stub as external
+    (`partition_blame`), so what reaches here failed on its own terms, often
+    an assertion, after a body that avoided calling the sibling. The
+    question is whether a correct body would need a still-stubbed sibling
+    the test's attribution also names. A hub fn is dispatched while the
+    rest of its producer chain is still hollow, and its first body then
+    fails the per-unit test gate — the
     attributed tests also need the still-stubbed siblings — and that failure
     is attempt-invariant: a correct body panics inside the sibling's
     ``unimplemented!()``, and a body that avoids calling the sibling fails

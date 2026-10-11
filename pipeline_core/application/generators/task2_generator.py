@@ -50,7 +50,8 @@ from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
-from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH, take_batch
+from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH
+from ...domain.dispatch_rank import UnitFacts, next_streak, rank, take
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -3102,6 +3103,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
                                       str(DEFAULT_MAX_DISPATCH)))
         _pass_attempted: set[FnLocator] = set()
         _pass_cohort: tuple[FnLocator, ...] | None = None
+        # Sweeps since a run last claimed each frontier unit: the rank's
+        # first key (`dispatch_rank`), so the units this loop's cap left out
+        # lead the next batch.
+        _unclaimed: dict[FnLocator, int] = {}
         _prev_pass_completed = True
         _dispatched_ever: set[FnLocator] = set()
         _just_restored = False
@@ -3444,11 +3449,16 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 })
                 continue
 
-            _ordered = list(eligible.keys())
+            # The one rank (`domain/dispatch_rank`): this loop has no held,
+            # crash or owed facts, so its frontier ranks on the unclaimed
+            # streak over the frontier's own order.
+            _ordered = rank({
+                k: UnitFacts(static_index=i, unclaimed=_unclaimed.get(k, 0))
+                for i, k in enumerate(eligible)})
             if _pass_cohort is None:
                 _pass_cohort = tuple(_ordered)
-            _batch = take_batch(_ordered, _pass_attempted, _dispatch_cap,
-                                cohort=_pass_cohort)
+            _batch = take(_ordered, (), _dispatch_cap,
+                          cohort=_pass_cohort, traversed=_pass_attempted)
             _batch_keys = set(_batch.keys)
             _batch_eligible = {k: eligible[k] for k in _batch.keys}
             self.tel.log(f"  {tag} post-merge iter {iter_n}: cargo test rc={rc} "
@@ -3495,6 +3505,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _pass_cohort = None
             _prev_pass_completed = _batch.completes_pass
             _dispatched_ever |= _batch_keys
+            _unclaimed = next_streak(
+                _unclaimed, _ordered,
+                (set(_batch_keys) if sub.dispatched_fns is None
+                 else {FnLocator(*t) for t in sub.dispatched_fns}))
             cur_stubs = self.fill.scan_unimplemented_functions(project_dir / "src").units
             # Both loops below are scoped to the BATCH: a unit the cap
             # withheld this iteration was neither filled nor refused.

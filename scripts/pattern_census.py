@@ -1978,7 +1978,8 @@ def detect_p20(run: Run, iters: list[dict]) -> list[dict]:
 RE_CRASH_BATCH_PREFIX = "carry crash evidence this sweep"
 RE_CRASH_BATCH_K = re.compile(r"(?P<k>\d+) unit\(s\) carry crash evidence this sweep")
 RE_CRASH_BATCH_M = re.compile(r"(?P<m>\d+) of them are in this batch")
-RE_CRASH_BATCH_NAMES = re.compile(r"of them are in this batch: (?P<names>src/.+?)\s*$")
+RE_CRASH_BATCH_NAMES = re.compile(
+    r"of them are in this batch: (?P<names>src/[^;]+?)\s*(?:;|$)")
 RE_CRASH_BATCH_ITER = re.compile(r"\[phase-c/tdd\] iter (?P<iter>\d+):")
 RE_CHAIN_DERIVED = re.compile(
     r"\[phase-c/crash\] iter (?P<iter>\d+):.*?synthesized CHAIN-DERIVED blame"
@@ -2377,6 +2378,11 @@ def detect_p28(run: Run, iters: list[dict]) -> list[dict]:
 
 RE_HISTOGRAM = re.compile(
     r"\[phase-c/dispatch\] blocker histogram: (?P<head>\S+) \((?P<n>\d+)\)")
+# The same reading since the one rank (`dispatch_rank`): the rank line names
+# how many held stubs lead the batch and the batch head.
+RE_HELD_RANK = re.compile(
+    r"\[phase-c/dispatch\] iter \d+: rank — (?P<n>[1-9]\d*) held stub\(s\)"
+    r".*?batch head: (?P<head>[^,;]+)")
 RE_TDD_ITER = re.compile(r"\[phase-c/tdd\] iter (?P<iter>\d+): cargo test")
 RE_FILL_PLAN = re.compile(r"\[phase-c/schedule\] fill \d+: \d+ run\(s\)")
 # Anchored on an ORDERED run's head (`N. per-fn …`). Unanchored, the
@@ -2398,9 +2404,9 @@ def detect_p29(run: Run, iters: list[dict]) -> list[dict]:
         if m:
             it = m["iter"]
             continue
-        m = RE_HISTOGRAM.search(text)
+        m = RE_HISTOGRAM.search(text) or RE_HELD_RANK.search(text)
         if m:
-            head = m["head"]
+            head = m["head"].strip()
             continue
         if head and RE_FILL_PLAN.search(text):
             ordered = text.split(" — deferred:", 1)[0]
@@ -2991,7 +2997,7 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
         blamed_from_event,
         decided_from_event,
         due_from_event,
-        hollow_stubs_from_event,
+        hollow_from_event,
         measured_owners_from_event,
         violations,
     )
@@ -3000,7 +3006,7 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
         if not sc.get("scheduled", True):
             continue
         for v in violations(
-                decided_from_event(sc), hollow_stubs=hollow_stubs_from_event(sc),
+                decided_from_event(sc), hollow=hollow_from_event(sc),
                 crash_blamed=blamed_from_event(sc),
                 budget_minutes=float(sc.get("budget_minutes") or 0.0),
                 measured_owners=measured_owners_from_event(sc),

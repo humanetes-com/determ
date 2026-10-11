@@ -9,7 +9,10 @@ routes replaced by fakes that record the order they were opened in and
 what the clock let them claim.
 
 What it MODELS rather than replays, named here so the list is extended
-deliberately: the candidate runs of the unit routes (one file run per file
+deliberately: the held view (`hollow_of`): recorded fills carry no
+first-failure holds, so a test is taken as held by every stub on its
+recorded slice, which is the wider reading the pipeline no longer uses and
+the only one these records allow; the candidate runs of the unit routes (one file run per file
 that held a stub, targets = that file's sites in the recorded slices; one
 per-fn run over the stubs) — pre-fix events carry no route plan, so this
 is `distill_fill.py`'s derivation, not a record; the stub inventory of
@@ -47,7 +50,6 @@ from pipeline_core.domain.fill_schedule import (
     RouteLedgerRow,
     RouteRun,
     RunClock,
-    hollow_by_test,
 )
 from pipeline_core.domain.models import FnLocator, FnSite
 
@@ -74,7 +76,15 @@ def stubs_of(fix: Mapping[str, Any]) -> frozenset[FnLocator]:
 
 
 def hollow_of(fix: Mapping[str, Any]) -> dict[str, frozenset[FnLocator]]:
-    return hollow_by_test(slices_of(fix), stubs_of(fix))
+    """The modeled held view: test -> the stubs on its recorded slice."""
+    stubs = stubs_of(fix)
+    out: dict[str, frozenset[FnLocator]] = {}
+    for t, sites in slices_of(fix).items():
+        hit = frozenset(FnLocator(x.file, x.fn_name) for x in sites
+                        if FnLocator(x.file, x.fn_name) in stubs)
+        if hit:
+            out[t] = hit
+    return out
 
 
 def _loc(label: str) -> FnLocator:

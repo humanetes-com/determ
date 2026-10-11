@@ -85,15 +85,15 @@ def test_a_pair_wait_deferred_writer_of_an_owed_function_opens() -> None:
 def test_an_owed_function_with_no_opened_writer_is_slice_unit_starved() -> None:
     runs = [_file(), _pair()]
     today = schedule(runs, _rows(), oracle_fp="o", hollow={})
-    found = violations(decided_from_schedule(today), hollow_stubs=frozenset(),
+    found = violations(decided_from_schedule(today), hollow={},
                        due={_RENDER})
     assert [v.kind for v in found] == ["slice_unit_starved"]
     assert "file src/ensure.rs (pair_wait)" in found[0].detail
     owed = schedule(runs, _rows(), oracle_fp="o", hollow={}, due={_RENDER})
-    assert not violations(decided_from_schedule(owed), hollow_stubs=frozenset(),
+    assert not violations(decided_from_schedule(owed), hollow={},
                           due={_RENDER})
     nobody = schedule([_pair()], _rows(), oracle_fp="o", hollow={})
-    lone = violations(decided_from_schedule(nobody), hollow_stubs=frozenset(),
+    lone = violations(decided_from_schedule(nobody), hollow={},
                       due={_RENDER})
     assert lone and "no candidate run writes it" in lone[0].detail
 

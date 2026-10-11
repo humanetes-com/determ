@@ -32,11 +32,10 @@ from pipeline_core.domain.fill_schedule import (
     RunClock,
     RunOutcome,
     ScheduledRun,
-    hollow_by_test,
     release_held,
     schedule,
 )
-from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.models import FnLocator
 
 _STUB = FnLocator("src/a.rs", "hold")
 _FMT = FnLocator("src/a.rs", "show")
@@ -62,8 +61,8 @@ def _runs() -> tuple[RouteRun, RouteRun, RouteRun]:
 
 
 def _hollow() -> dict[str, frozenset[FnLocator]]:
-    return hollow_by_test({"t_hollow": {FnSite("src/a.rs", "hold", "")}},
-                          {_STUB})
+    # The held view: `t_hollow`'s first failure sits in the stub.
+    return {"t_hollow": frozenset({_STUB})}
 
 
 def test_the_schedule_records_who_holds_a_run_and_its_rank_before_the_hold() -> None:

@@ -2,7 +2,7 @@
 
 A body no test executes cannot move a verdict, and a branch no test reaches
 cannot be the fill that was missing. The ranking consumes the dead set and
-the red-dead set (`dispatch_batch.promote_by_service`); the prompt consumes
+the red-dead set (`dispatch_rank.Service`); the prompt consumes
 the sentences below, on the instruction slot (`_plan_line` / the per-fn
 opener), not as another evidence section — a fill can carry the evidence and
 still wrap.

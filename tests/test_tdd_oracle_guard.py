@@ -1144,11 +1144,11 @@ def test_crash_subjects_are_dispatched_in_the_sweep_that_named_them(
         "the producer was eligible and still did not make the batch"
     # NEGATIVE CONTROL, the pre-fix behaviour on the same frontier: ranked
     # after 30 attributed units, neither is inside a batch of 12.
-    from pipeline_core.domain.dispatch_batch import take_batch
+    from pipeline_core.domain.dispatch_rank import take
     unpromoted = [*wide, FnLocator("src/error.rs", "downcast_ref"),
                   FnLocator("src/error.rs", "object_downcast")]
     assert FnLocator("src/error.rs", "object_downcast") not in \
-        take_batch(unpromoted, set(), 12).keys
+        take(unpromoted, (), 12, cohort=None, traversed=()).keys
 
 
 def test_a_best_tree_restore_inside_a_refill_window_closes_the_window(

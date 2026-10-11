@@ -810,15 +810,16 @@ def test_post_merge_wave_is_capped_and_the_cursor_walks(
     assert batches and all(len(b) <= 2 for b in batches), \
         "the cap must hold every iteration"
     # Two full traversals before the plateau exit (max_stalls=2): 3 batches
-    # each (2+2+1), every unit dispatched exactly twice.
+    # each, every unit dispatched in each traversal. The rank fills the last
+    # batch of a pass with the longest-waiting unit rather than leaving its
+    # slot empty, so a unit may be offered a third time; none is offered
+    # fewer than twice.
     assert len(batches) == 6, f"got {len(batches)} batch(es)"
-    counts: dict = {}
-    for b in batches:
-        for k in b:
-            counts[k] = counts.get(k, 0) + 1
-    assert set(counts) == set(frontier) and set(counts.values()) == {2}, (
-        "a capped flat run must spend whole traversals — a partial cohort "
-        "at the exit is the premature close the 2026-08-18 night recorded")
+    for half in (batches[:3], batches[3:]):
+        assert set().union(*half) == set(frontier), (
+            "a capped flat run must spend whole traversals — a partial "
+            "cohort at the exit is the premature close the 2026-08-18 night "
+            "recorded")
     stop = [ln for ln in fake.logs if "plateau" in ln and "stopping" in ln]
     assert stop and "5 of 5 frontier fn(s) were dispatched" in stop[0]
 

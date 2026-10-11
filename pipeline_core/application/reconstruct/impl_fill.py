@@ -158,8 +158,8 @@ from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_group
 from pipeline_core.domain.fill_schedule import (
     RunClock,
     bodies_sha_on_tree,
-    hollow_by_test,
 )
+from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
@@ -734,6 +734,10 @@ def prepare_impl_fill(
     # (the owner map alone, without attributed additions): the session's
     # per-unit executed marks. None leaves the marks off.
     session_owners: Mapping[str, frozenset[FnSite]] | None = None,
+    # Held test -> the still-stubbed units its first failure sits in
+    # (`held_stubs.HeldStubs.hollow`): the only hollow relation this fill's
+    # schedule and session planner read. None is "nothing held".
+    held: Mapping[str, frozenset[FnLocator]] | None = None,
 ) -> PreparedFill:
     """Per-impl-block Phase C fill — alternative to `_task2_fill_fns_one_by_one`.
 
@@ -5838,7 +5842,7 @@ def prepare_impl_fill(
         _coverage_fn = deps.measure_coverage_slice
         _coverage_on = (_coverage_fn is not None
                         and os.getenv("SLICE_SESSION_COVERAGE", "1") != "0")
-        _stubs_now = _scan_unimplemented_for_cluster(target_src_dir, cluster).units
+        _held_now = HeldStubs.of_map(held)
 
         def _coverage(names: Sequence[str], hung: Sequence[str] = ()
                       ) -> Mapping[str, frozenset[FnSite]]:
@@ -6006,8 +6010,9 @@ def prepare_impl_fill(
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
         _costs = _session_costs(_slices)
-        _plans = list(plan_slices(_slices, stubs=_stubs_now, max_units=_max_units,
-                                  costs=_costs))
+        _plans = list(plan_slices(_slices, held_tests=_held_now.by_test.keys(),
+                                  held_units=_held_now.units,
+                                  max_units=_max_units, costs=_costs))
         # The plan is a record on every fill, refusal included: the union
         # the engine actually handed `plan_slices` (owners plus hops plus
         # locator expansion) was in no event before, so the over-union
@@ -6018,8 +6023,8 @@ def prepare_impl_fill(
         # run `334902-2774708c`'s 05:23 session was the only run of the night
         # that moved a verdict, and a count-gated withhold would have skipped
         # it while leaving the routes that burned the night untouched.
-        _gaps = slice_plan_gaps(_slices, stubs=_stubs_now, max_units=_max_units,
-                                costs=_costs)
+        _gaps = slice_plan_gaps(_slices, held_tests=_held_now.by_test.keys(),
+                                max_units=_max_units, costs=_costs)
         if session_slices:
             _emit("phase_c.session.plan", data={
                 "cluster": cluster_name,
@@ -6462,7 +6467,7 @@ def prepare_impl_fill(
         _pair_jobs.append(_quoted)
     _stubs_all: frozenset[FnLocator] = frozenset(
         _scan_unimplemented_for_cluster(target_src_dir, cluster).units)
-    _hollow = hollow_by_test(session_slices or {}, _stubs_all)
+    _hollow = HeldStubs.of_map(held).hollow()
     _pair_trim_logged = [False]
     _ff_trim_logged = [False]
 

@@ -1319,7 +1319,7 @@ class FillOneFn:
                     # still-stubbed sibling, no rewrite of THIS fn alone can
                     # pass it — a correct body panics inside the sibling's
                     # stub, an avoiding body fails the assertion. The loop
-                    # already knows this before (`defer_blocked_consumers`)
+                    # already knows this before (`HeldStubs.consumer_deferrals`)
                     # and after (`_salvage_compiling_body`) the burn; this is
                     # the during. Keep the compiling body and defer — the
                     # regression gate below still runs, so a body that

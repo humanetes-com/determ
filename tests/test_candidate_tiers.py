@@ -323,57 +323,6 @@ def test_the_ledger_round_trips_misses_and_tree_readings() -> None:
     assert back.joint_repaired == {"pair a"}
 
 
-def test_a_crash_cohort_no_longer_takes_every_slot_from_the_owed_set() -> None:
-    """Run `39786-fd38e72f` fill 4: 13 crash units, 26 owed, cap 12; all 12
-    slots went to crash evidence. Now half the cap goes to the owed set,
-    narrowest tier first, and the use-after-free culprits (the first crash
-    units) keep their slots."""
-    from pipeline_core.domain.candidate_tiers import share_batch
-    crash = [f"crash{i:02d}" for i in range(13)]
-    owed = [f"owed{i:02d}" for i in range(26)]
-    tier = {u: (0 if u == "owed25" else 1) for u in owed}
-    first, after = share_batch(crash, owed, 12, cut_streak={}, tier_of=tier)
-    batch = first[:12]
-    assert sum(u.startswith("crash") for u in batch) == 6
-    assert sum(u.startswith("owed") for u in batch) == 6
-    assert batch[6] == "owed25", "the narrowest tier leads the owed share"
-    assert {"crash00", "crash01"} <= set(batch)
-    assert after == crash[6:]
-
-
-def test_control_when_both_fit_the_order_is_unchanged() -> None:
-    from pipeline_core.domain.candidate_tiers import share_batch
-    crash, owed = ["c1", "c2", "c3", "c4"], ["o1", "o2"]
-    assert share_batch(crash, owed, 12, cut_streak={}, tier_of={}) == (
-        crash + owed, [])
-    assert share_batch(crash, [], 2, cut_streak={}, tier_of={}) == (crash, [])
-
-
-def test_an_owed_function_cut_for_its_misses_goes_ahead_of_the_crash_cohort() -> None:
-    from pipeline_core.domain.candidate_tiers import share_batch
-    crash = [f"c{i}" for i in range(13)]
-    owed = [f"o{i}" for i in range(20)]
-    first, _ = share_batch(crash, owed, 12, cut_streak={"o7": 3}, tier_of={},
-                           misses=3)
-    assert first[0] == "o7"
-    assert len(first[:12]) == 12
-
-
-def test_an_owed_function_crash_ranked_past_the_take_stays_in_the_batch() -> None:
-    """Overlap is the owed share, once. A wider function cut once does not
-    take the narrowest tier's slot."""
-    from pipeline_core.domain.candidate_tiers import share_batch
-    crash = [f"c{i:02d}" for i in range(12)] + ["narrow"]
-    owed = ["narrow", "wide", *[f"o{i:02d}" for i in range(24)]]
-    tier = {"narrow": 0, "wide": 5, **{f"o{i:02d}": 3 for i in range(24)}}
-    first, after = share_batch(crash, owed, 12, cut_streak={"wide": 1},
-                               tier_of=tier, misses=3)
-    batch = first[:12]
-    assert batch.count("narrow") == 1
-    assert "narrow" not in after and "wide" not in batch
-    assert sum(u.startswith("c") for u in batch) == 6
-
-
 def _row(label: str, reverted, newly_red, newly_green):  # type: ignore[no-untyped-def]
     from types import SimpleNamespace
     return SimpleNamespace(label=label, reverted=reverted, newly_red=newly_red,

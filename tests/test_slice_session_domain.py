@@ -46,10 +46,12 @@ def test_tests_with_overlapping_slices_share_one_session() -> None:
     assert plans[0].files == ("src/lib.rs", "src/render.rs")
 
 
-def test_a_slice_touching_a_stub_is_left_to_the_stub_routes() -> None:
-    plans = plan_slices({"t_a": {_DISP, _RENDER}},
-                        stubs={locator_of(_RENDER)})
-    assert plans == []
+def test_a_held_test_is_left_to_the_stub_routes() -> None:
+    """A test whose first failure sits in a still-stubbed unit (the held
+    view) gets no session; the same slice for a test that is not held is
+    planned."""
+    assert plan_slices({"t_a": {_DISP, _RENDER}}, held_tests={"t_a"}) == []
+    assert len(plan_slices({"t_a": {_DISP, _RENDER}}, held_tests={"t_b"})) == 1
 
 
 def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
@@ -66,7 +68,7 @@ def test_a_slice_over_the_unit_cap_is_dropped_not_truncated() -> None:
 def test_slice_plan_gaps_names_hollow_apart_from_over_cap() -> None:
     gaps = slice_plan_gaps(
         {"t_stub": {_DISP}, "t_ok": {_RENDER}},
-        stubs={locator_of(_DISP)}, max_units=32)
+        held_tests={"t_stub"}, max_units=32)
     assert (gaps.empty, gaps.hollow, gaps.over_cap) == (0, 1, 0)
     assert gaps.log_clause() == "1 hollow"
     empty_only = slice_plan_gaps({"ui": frozenset()})

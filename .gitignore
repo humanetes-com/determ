@@ -28,6 +28,9 @@ tools/skeleton_extractor/target/
 !README.md
 !CONTRIBUTING.md
 !docs/*.md
+# The repo conventions every agent reads. Untracked, they vanished from disk
+# on 2026-10-02 and fixes ran without them for nine days.
+!AGENTS.md
 .grok
 # Coverage data (xdist workers leave .coverage.<host>.<pid>.* shards).
 # The ratchet BASELINE is committed — it is the coverage floor, not data.

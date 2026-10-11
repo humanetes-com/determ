@@ -1,326 +1,43 @@
-"""Domain pins for the TDD dispatch batch.
+"""Domain pins for what `dispatch_batch` still holds: the batch record, the
+crash cohort's provenance, the claim-order map handed to the routes, the
+standing-flat exclusion, and the producer facts the rank reads.
 
-The batch exists because the sweep is the loop's only measurement of the tree
-and it was being taken once every 3-4 hours — one or two readings per run, so
-every sweep-boundary lever (batch ratchet, re-admission, crash retrigger,
-plateau exit) got one or two chances to fire. See
-`pipeline_core/domain/dispatch_batch.py` for the measurement.
-
-Two invariants carry the weight here and each has its own case below: the batch
-is a PREFIX of the ranked frontier (so capping changes when the loop looks, not
-what it fills or in what order), and the cursor is a SET (so a frontier that
-churns between iterations cannot re-serve its head and starve its tail).
+The order of the frontier, the batch itself and the pass accounting are
+`dispatch_rank`'s, pinned in `tests/test_dispatch_rank.py`.
 """
 from __future__ import annotations
 
 from pipeline_core.domain.dispatch_batch import (
-    DEFAULT_MAX_DISPATCH,
     CrashCohort,
+    dispatch_ranks_of,
     drop_standing_flat,
-    promote_crash_evidence,
-    take_batch,
 )
+from pipeline_core.domain.dispatch_rank import take
 from pipeline_core.domain.models import FnLocator
-
-
-def test_batch_is_a_prefix_of_the_ranking_and_does_not_complete_the_pass():
-    """The cap withholds work without reordering it: `order_frontier` ranks
-    leaf-first and the batch must take that ranking's head, or the cap would
-    silently become a scheduling change."""
-    ordered = [f"u{i}" for i in range(30)]
-    b = take_batch(ordered, set(), 12)
-    assert b.keys == tuple(ordered[:12])
-    assert not b.completes_pass
-    assert b.capped
-    assert b.attempted_before == 0
-    assert b.frontier_size == 30
-
-
-def test_successive_batches_traverse_the_whole_frontier_then_close_the_pass():
-    """Three batches of 12 cover 30 units, and only the LAST reports a
-    completed pass — that flag is what lets the stall budget charge, so a
-    mid-pass batch claiming it would restore the premature-exit bug."""
-    ordered = [f"u{i}" for i in range(30)]
-    attempted: set[str] = set()
-    seen: list[str] = []
-    completions: list[bool] = []
-    for _ in range(3):
-        b = take_batch(ordered, attempted, 12)
-        seen.extend(b.keys)
-        completions.append(b.completes_pass)
-        attempted = set() if b.completes_pass else attempted | set(b.keys)
-    assert seen == ordered            # every unit dispatched exactly once
-    assert completions == [False, False, True]
-    # The pass closed, so the cursor is empty and the next pass reopens whole.
-    assert take_batch(ordered, attempted, 12).attempted_before == 0
-
-
-def test_the_cursor_is_a_set_so_a_churning_frontier_cannot_starve_its_tail():
-    """The frontier is rebuilt every iteration and shrinks as fills land. A
-    POSITIONAL cursor would re-serve the head each time the list changed; the
-    attempted-set survives the churn and the tail still gets its turn."""
-    first = [f"u{i}" for i in range(20)]
-    b1 = take_batch(first, set(), 5)
-    attempted = set(b1.keys)
-    # Two of the dispatched units filled and left the frontier; one new unit
-    # arrived from the freshly attributed failures.
-    second = [k for k in first if k not in {"u0", "u1"}] + ["new"]
-    b2 = take_batch(second, attempted, 5)
-    assert not set(b2.keys) & attempted        # nothing re-served
-    assert b2.keys == ("u5", "u6", "u7", "u8", "u9")
-    # The unit that arrived mid-pass is still reachable before the pass closes.
-    rest: set[str] = set(attempted) | set(b2.keys)
-    later: list[str] = []
-    for _ in range(4):
-        b = take_batch(second, rest, 5)
-        later.extend(b.keys)
-        if b.completes_pass:
-            break
-        rest |= set(b.keys)
-    assert "new" in later
-
-
-def test_a_frontier_under_the_cap_completes_in_one_batch():
-    """A small crate must not pay for the machinery: when the whole pending
-    set fits, the batch is the frontier and the pass closes immediately —
-    which is exactly the uncapped loop's behaviour."""
-    b = take_batch(["a", "b", "c"], set(), DEFAULT_MAX_DISPATCH)
-    assert b.keys == ("a", "b", "c")
-    assert b.completes_pass
-    assert not b.capped
-
-
-def test_cap_of_zero_disables_batching():
-    """`PHASE_C_TDD_MAX_DISPATCH=0` is the escape hatch back to pre-cap
-    behaviour, and it must dispatch the WHOLE frontier in one completed pass —
-    otherwise the escape hatch would still charge the stall differently."""
-    ordered = [f"u{i}" for i in range(50)]
-    b = take_batch(ordered, set(), 0)
-    assert b.keys == tuple(ordered)
-    assert b.completes_pass
-
-
-def test_a_frontier_that_shrank_below_the_cursor_reopens_the_pass():
-    """Every pending unit filled and left. There is nothing left to traverse,
-    so the pass has closed: reopen on the frontier as it stands NOW rather
-    than returning an empty batch forever (which would dispatch nothing and
-    look like a plateau)."""
-    b = take_batch(["a", "b"], {"a", "b", "gone"}, 12)
-    assert b.keys == ("a", "b")
-    assert b.completes_pass
-    assert b.attempted_before == 0
-
-
-def test_a_growing_frontier_never_closes_a_pass_without_a_cohort():
-    """THE NEGATIVE CONTROL for the cohort, and the whole of run
-    `1692702-94e6163a`'s failure to terminate.
-
-    Its frontier grew 35 -> 57 -> 63 while the cursor advanced 12 -> 21 -> 36,
-    because futility escalation adds a crashed test's producers and crash
-    evidence adds its subjects. With closure judged against the frontier AS IT
-    STANDS, the pending set never empties: `completes_pass` is False forever,
-    `_traversals` stays 0, and BOTH terminators denominated in traversals — the
-    flat-score guard and the plateau budget — are disabled by arithmetic."""
-    sizes = [35, 57, 63, 69, 75]
-    attempted: set[str] = set()
-    completions: list[bool] = []
-    for n in sizes:
-        ordered = [f"u{i}" for i in range(n)]
-        b = take_batch(ordered, attempted, 12)
-        completions.append(b.completes_pass)
-        attempted = set() if b.completes_pass else attempted | set(b.keys)
-    assert completions == [False] * len(sizes)
-
-
-def test_the_cohort_closes_the_pass_even_while_the_frontier_grows():
-    """The same growth, judged against the cohort the pass OPENED over: 35
-    units at 12 a sweep closes on the third batch, and the units that arrived
-    while it ran belong to the NEXT cohort rather than extending this one."""
-    cohort = [f"u{i}" for i in range(35)]
-    attempted: set[str] = set()
-    completions: list[bool] = []
-    for n in (35, 57, 63):
-        ordered = [f"u{i}" for i in range(n)]
-        b = take_batch(ordered, attempted, 12, cohort=cohort)
-        completions.append(b.completes_pass)
-        attempted = set() if b.completes_pass else attempted | set(b.keys)
-    assert completions == [False, False, True]
-
-
-def test_a_cohort_unit_that_left_the_frontier_does_not_block_closure():
-    """A cohort member that filled and left can never be attempted again, so
-    waiting for it would be the same unsatisfiable condition in a smaller
-    disguise: closure asks about cohort units STILL in the frontier."""
-    cohort = ["a", "b", "c"]
-    b = take_batch(["a", "c"], {"a"}, 12, cohort=cohort)
-    assert b.keys == ("c",)
-    assert b.completes_pass
-
-
-def test_cohort_none_is_exactly_the_pre_cohort_behaviour():
-    """The default must not change for a caller that does not track passes —
-    the cohort is then the frontier as it stands, which is what every existing
-    case above asserts."""
-    ordered = [f"u{i}" for i in range(30)]
-    for attempted in (set(), {"u0", "u1"}, set(ordered[:29])):
-        a = take_batch(ordered, attempted, 12)
-        b = take_batch(ordered, attempted, 12, cohort=ordered)
-        assert (a.keys, a.completes_pass) == (b.keys, b.completes_pass)
-
-
-def test_crash_evidence_is_promoted_ahead_of_the_static_ranking():
-    """The defect (run `1692702-94e6163a`): the evidence pack granted eligibility and the ranking
-    decided WHEN, so the five fns a double drop named waited for their
-    alphabetical turn. Promotion puts every graded unit ahead of the frontier,
-    best grade first — an observed frame above an inference above a synthesized
-    subject — and leaves the rest in the order `order_frontier` chose."""
-    ordered = [(f"u{i}", {"t"}) for i in range(6)]
-    out = promote_crash_evidence(ordered, {"u4": 1, "u5": 0, "u2": 2})
-    assert [k for k, _ in out] == ["u5", "u4", "u2", "u0", "u1", "u3"]
-
-
-def test_promotion_is_stable_so_one_fault_s_family_dispatches_together():
-    """Within a grade the ranking is untouched, so the five subjects of one
-    fault occupy consecutive slots of the batch that found them instead of
-    arriving one iteration apart in name order — which is how
-    `object_drop_front`, last of its family on the `(file, fn)` tiebreak, went
-    undispatched while `object_drop` (correct on disk) took the slot."""
-    fam = ["context_chain_drop_rest", "context_drop_rest", "drop",
-           "object_drop", "object_drop_front"]
-    # The frontier as run `1692702-94e6163a` had it: the family ranked behind
-    # the units attribution had already collected, on a frontier well over the
-    # cap of 12.
-    ordered = [(f"u{i}", {"t"}) for i in range(20)] + [(k, {"t"}) for k in fam]
-    grades = dict.fromkeys(fam, 1)
-    # NEGATIVE CONTROL — the pre-fix ordering. Every one of the five is
-    # eligible and none of them is dispatched: iteration 2 of that run took 12
-    # of 57 and logged `0 skipped — free fns` while four of the five are free
-    # fns.
-    before = take_batch([k for k, _ in ordered], set(), 12).keys
-    assert not set(before) & set(fam)
-    out = promote_crash_evidence(ordered, grades)
-    assert [k for k, _ in out][:5] == fam
-    assert take_batch([k for k, _ in out], set(), 12).keys[:5] == tuple(fam)
-
-
-def test_promotion_without_evidence_changes_nothing():
-    """No crash this sweep must mean no reordering at all: the static ranking
-    is correct for an attribution-built frontier and this function must not
-    become a second opinion about it."""
-    ordered = [(f"u{i}", {"t"}) for i in range(5)]
-    assert promote_crash_evidence(ordered, {}) == ordered
-    assert promote_crash_evidence(ordered, {"absent": 0}) == ordered
 
 
 def test_rendered_marks_a_mid_pass_batch_for_the_iteration_line():
     """The iteration line is the one place a live run's cadence is visible, and
     the census keys its reaction marker on the mid-pass text."""
     ordered = [f"u{i}" for i in range(30)]
-    assert "mid-pass" in take_batch(ordered, set(), 12).rendered
-    assert "mid-pass" not in take_batch(ordered, set(), 0).rendered
+    assert "mid-pass" in take(ordered, (), 12, cohort=None,
+                              traversed=()).rendered
+    assert "mid-pass" not in take(ordered, (), 0, cohort=None,
+                                  traversed=()).rendered
 
-
-# --- promote_producers: the constructors before the delegators ---------------
 
 def _k(file, fn):
-    from pipeline_core.domain.models import FnLocator
     return FnLocator(file, fn)
-
-
-def test_promote_producers_puts_builders_first_in_the_escalated_cohort():
-    from pipeline_core.domain.dispatch_batch import promote_producers
-    # order_frontier's name-frequency ranking put the delegators first.
-    msg, frm, new = _k("e.rs", "msg"), _k("e.rs", "from"), _k("e.rs", "new")
-    cfa, cfs, construct = (_k("e.rs", "construct_from_adhoc"),
-                           _k("e.rs", "construct_from_std"),
-                           _k("e.rs", "construct"))
-    ordered = [(msg, {"t"}), (frm, {"t"}), (new, {"t"}),
-               (cfa, {"t"}), (cfs, {"t"}), (construct, {"t"})]
-    escalated = frozenset({msg, frm, new, cfa, cfs, construct})
-    builders = frozenset({cfa, cfs, construct})
-    callees = frozenset({cfa, cfs, construct})  # msg/from/new call them
-    out = [k for k, _ in promote_producers(ordered, escalated, builders, callees)]
-    # builders lead, delegators follow — same set, reordered.
-    assert set(out[:3]) == {cfa, cfs, construct}
-    assert set(out[3:]) == {msg, frm, new}
-
-
-def test_promote_producers_leaves_non_escalated_units_in_place():
-    from pipeline_core.domain.dispatch_batch import promote_producers
-    crash = _k("x.rs", "crash_fn")      # a non-escalated, higher-ranked unit
-    deleg = _k("e.rs", "msg")
-    build = _k("e.rs", "construct_from_adhoc")
-    ordered = [(crash, {"t"}), (deleg, {"t"}), (build, {"t"})]
-    escalated = frozenset({deleg, build})
-    out = [k for k, _ in promote_producers(
-        ordered, escalated, frozenset({build}), frozenset({build}))]
-    # crash stays at its slot (position 0); only the two escalated slots swap.
-    assert out[0] == crash
-    assert out[1] == build and out[2] == deleg
-
-
-def test_promote_producers_noop_without_escalation():
-    from pipeline_core.domain.dispatch_batch import promote_producers
-    ordered = [(_k("a.rs", "f"), {"t"}), (_k("a.rs", "g"), {"t"})]
-    assert promote_producers(
-        ordered, frozenset(), frozenset(), frozenset()) == ordered
-
-
-def test_promote_by_blocker_counts_puts_the_hottest_blocker_first():
-    """Whole-list reorder, not an escalated-subsequence shuffle: take_batch
-    takes a prefix, so a producer ranked last never makes the cap=12 slice."""
-    from pipeline_core.domain.dispatch_batch import promote_by_blocker_counts
-    fmt = _k("src/wrapper.rs", "fmt")
-    construct = _k("src/error.rs", "construct")
-    from_fn = _k("src/error.rs", "from")
-    ordered = [(fmt, {"t"}), (from_fn, {"t"}), (construct, {"t"})]
-    counts = {construct: 27, from_fn: 3, fmt: 1}
-    out = [k for k, _ in promote_by_blocker_counts(ordered, counts)]
-    assert out[0] == construct
-    assert promote_by_blocker_counts(ordered, {}) == ordered
 
 
 def test_dispatch_ranks_of_is_the_order_it_is_given():
     """The engine's pool ranks are the driver's order, head highest; a key
     outside the order has no rank, and a repeat keeps its first slot."""
-    from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
     a, b, c = _k("src/z.rs", "a"), _k("src/a.rs", "b"), _k("src/m.rs", "c")
     out = dispatch_ranks_of([a, b, c, a])
     assert out[a] > out[b] > out[c] > 0
     assert _k("src/a.rs", "absent") not in out
     assert dispatch_ranks_of([]) == {}
-
-
-def test_promote_product_ahead_lifts_producers_over_new_accessors():
-    """The attribution-shift re-buy: order_frontier ranks the new accessor
-    first; persist keeps the producer in the cohort; without this lift
-    cap=1 dispatches the accessor and parks the producer."""
-    from pipeline_core.domain.dispatch_batch import (
-        promote_crash_evidence,
-        promote_producers,
-        promote_product_ahead,
-    )
-    acc = _k("a.rs", "other_accessor")
-    deleg = _k("e.rs", "msg")
-    build = _k("e.rs", "construct_from_adhoc")
-    crash = _k("x.rs", "crash_fn")
-    ordered = [(acc, {"t"}), (deleg, {"t"}), (crash, {"t"}), (build, {"t"})]
-    product = frozenset({deleg, build})
-    ahead = promote_product_ahead(ordered, product)
-    assert [k for k, _ in ahead] == [deleg, build, acc, crash]
-    # Constructors first inside the product block; crash still wins after.
-    mid = promote_producers(
-        ahead, product, frozenset({build}), frozenset({build}))
-    assert [k for k, _ in mid] == [build, deleg, acc, crash]
-    final = promote_crash_evidence(mid, {crash: 0})
-    assert [k for k, _ in final] == [crash, build, deleg, acc]
-    assert promote_product_ahead(ordered, frozenset()) == ordered
-    # Escalated keys that are not in `ordered` leave it untouched.
-    assert promote_producers(
-        ordered, frozenset({_k("z.rs", "absent")}),
-        frozenset(), frozenset()) == list(ordered)
-    assert promote_product_ahead(
-        ordered, frozenset({_k("z.rs", "absent")})) == list(ordered)
 
 
 def _types():
@@ -415,114 +132,6 @@ def test_calls_unit_resolves_on_call_shape_not_token_presence():
                           callee_is_free=False, callee_is_method=True)
 
 
-# The stable cluster's escalated cohort as run `95878-aaf5bf1d` iter 1 ordered
-# it (`order_frontier` on the baked leaf counts; the `attempted` batch on the
-# floor was the first twelve). Bodies are the live tree's, abbreviated to the
-# construction and call facts the ranking reads.
-_COHORT_ORDER = [
-    ("src/context.rs", "context"), ("src/error.rs", "context"),
-    ("src/error.rs", "msg"), ("src/error.rs", "new"), ("src/kind.rs", "new"),
-    ("src/error.rs", "downcast"), ("src/error.rs", "from"),
-    ("src/lib.rs", "must_use"), ("src/error.rs", "from_boxed"),
-    ("src/context.rs", "with_context"), ("src/ensure.rs", "__dispatch_ensure"),
-    ("src/error.rs", "deref"), ("src/lib.rs", "format_err"),
-    ("src/context.rs", "ext_context"), ("src/error.rs", "deref_mut"),
-    ("src/ensure.rs", "render"), ("src/error.rs", "construct"),
-    ("src/error.rs", "construct_from_adhoc"), ("src/error.rs", "construct_from_boxed"),
-    ("src/error.rs", "construct_from_context"), ("src/error.rs", "construct_from_display"),
-    ("src/error.rs", "construct_from_std"), ("src/lib.rs", "Ok"),
-    ("src/error.rs", "error"), ("src/error.rs", "is"),
-    ("src/error.rs", "downcast_ref"), ("src/error.rs", "erase"),
-]
-_NOT_ESCALATED = {("src/lib.rs", "Ok"), ("src/error.rs", "error"),
-                  ("src/error.rs", "is"), ("src/error.rs", "downcast_ref")}
-def _table(t: str) -> str:
-    return ("let vtable = Box::leak(Box::new(ErrorVTable { object_drop: object_drop::<T>, "
-            "object_downcast: object_downcast::<T> }));").replace("T>", t + ">")
-_COHORT_RECS = [
-    ("src/context.rs", "context", "impl<T, E> Context<T, E> for Result<T, E>",
-     "match self { Ok(v) => Ok(v), Err(e) => Err(e.ext_context(context)) }"),
-    ("src/context.rs", "context", "impl<T> Context<T, Infallible> for Option<T>",
-     "match self { Some(v) => Ok(v), None => Err(crate::Error::construct_from_display(context, backtrace!())) }"),
-    ("src/error.rs", "context", "impl Error",
-     _table("ContextError<C, Error>") + " unsafe { Self::construct(ContextError { context, error: self }, vtable, backtrace) }"),
-    ("src/error.rs", "msg", "impl Error", "Self::construct_from_adhoc(message, backtrace!())"),
-    ("src/error.rs", "new", "impl Error", "let bt = backtrace_if_absent!(&error); Self::construct_from_std(error, bt)"),
-    ("src/kind.rs", "new", "impl Adhoc", "crate::Error::msg(message)"),
-    ("src/kind.rs", "new", "impl Trait", "error.into()"),
-    ("src/kind.rs", "new", "impl Boxed", "crate::Error::from_boxed(error)"),
-    ("src/error.rs", "downcast", "impl Error", "let target = TypeId::of::<E>(); unsafe { let inner = self.inner.by_mut(); (vtable(inner.ptr).object_downcast)(inner.by_ref(), target) }"),
-    ("src/error.rs", "from", "impl<E> From<E> for Error", "let bt = backtrace_if_absent!(&error); Self::construct_from_std(error, bt)"),
-    ("src/lib.rs", "must_use", "", "error"),
-    ("src/error.rs", "from_boxed", "impl Error", "let bt = backtrace_if_absent!(&*boxed_error); Self::construct_from_boxed(boxed_error, bt)"),
-    ("src/context.rs", "with_context", "impl<T, E> Context<T, E> for Result<T, E>",
-     "match self { Ok(v) => Ok(v), Err(e) => Err(e.ext_context(context())) }"),
-    ("src/ensure.rs", "__dispatch_ensure", "impl<A, B> BothDebug for (A, B)",
-     "let mut sb = SmallBuf { buf: [0; 128], pos: 0 }; let owned = alloc::string::String::from(s); crate::Error::msg(owned)"),
-    ("src/ensure.rs", "__dispatch_ensure", "impl<A, B> NotBothDebug for &(A, B)", "crate::Error::msg(msg)"),
-    ("src/error.rs", "deref", "impl Deref for Error", "unsafe { ErrorImpl::error(self.inner.by_ref()) }"),
-    ("src/lib.rs", "format_err", "", "if let Some(s) = args.as_str() { crate::Error::msg(s) } else { crate::Error::msg(s) }"),
-    ("src/context.rs", "ext_context", "impl<E> StdError for E", "let bt = backtrace_if_absent!(self); crate::Error::construct_from_context(context, self, bt)"),
-    ("src/context.rs", "ext_context", "impl StdError for Error", "self.context(context)"),
-    ("src/error.rs", "deref_mut", "impl DerefMut for Error", "unsafe { ErrorImpl::error_mut(self.inner.by_mut()) }"),
-    ("src/ensure.rs", "render", "", "let mut buf = Buf::new(); let owned = alloc::string::String::from(s); crate::Error::msg(owned)"),
-    ("src/error.rs", "construct", "impl Error",
-     "let err_impl = ErrorImpl { vtable, backtrace, value: error }; let boxed = Box::new(err_impl); let inner = Own::new(boxed).cast::<ErrorImpl>(); Self { inner, ptr: PhantomData }"),
-    ("src/error.rs", "construct_from_adhoc", "impl Error", "Self::construct_from_std(crate::wrapper::MessageError(message), backtrace)"),
-    ("src/error.rs", "construct_from_boxed", "impl Error",
-     _table("BoxedError") + " unsafe { Self::construct(crate::error::BoxedError(error), vtable, backtrace) }"),
-    ("src/error.rs", "construct_from_context", "impl Error",
-     _table("ContextError<C, E>") + " unsafe { Self::construct(ContextError { context, error }, vtable, backtrace) }"),
-    ("src/error.rs", "construct_from_display", "impl Error", "Self::construct_from_std(crate::wrapper::DisplayError(message), backtrace)"),
-    ("src/error.rs", "construct_from_std", "impl Error", _table("E") + " unsafe { Self::construct(error, vtable, backtrace) }"),
-    ("src/lib.rs", "Ok", "", "Result::Ok(value)"),
-    ("src/error.rs", "error", "impl ErrorImpl", "unsafe { &*(vtable(this.ptr).object_ref)(this).ptr }"),
-    ("src/error.rs", "is", "impl Error", "self.downcast_ref::<E>().is_some()"),
-    ("src/error.rs", "downcast_ref", "impl Error", "unsafe { let addr = (vtable(self.inner.ptr).object_downcast)(self.inner.by_ref(), target)?; Some(&*addr.cast::<E>().ptr.as_ptr()) }"),
-    ("src/error.rs", "erase", "impl ErrorImpl", "Ref::new(self).cast::<ErrorImpl>()"),
-]
-_SIX = {("src/error.rs", n) for n in (
-    "construct", "construct_from_adhoc", "construct_from_boxed",
-    "construct_from_context", "construct_from_display", "construct_from_std")}
-
-
-def test_recorded_95878_cohort_dispatches_the_constructors_in_batch_one():
-    from pipeline_core.domain.dispatch_batch import promote_producers
-    from pipeline_core.domain.installable_fns import producer_dispatch_ranks
-    from pipeline_core.domain.models import FnLocator
-    recs = [{"file": f, "fn_name": n, "container": c, "body_text": b}
-            for f, n, c, b in _COHORT_RECS]
-    ordered = [(FnLocator(f, n), {"t"}) for f, n in _COHORT_ORDER]
-    esc = frozenset(FnLocator(f, n) for f, n in _COHORT_ORDER
-                    if (f, n) not in _NOT_ESCALATED)
-    builders, callees = producer_dispatch_ranks(esc, recs, _types())
-    # The constructor ROLE — every unit that constructs a crate type — and
-    # nothing else: the six `construct*` plus `Error::context` (its own table).
-    assert {(k.file, k.fn_name) for k in builders} == _SIX | {("src/error.rs", "context")}
-    # The token-pollution control: `Box::new(` / `String::from(` in the bodies
-    # do not make the crate's `new` / `from` callees; the resolved ones are.
-    assert FnLocator("src/error.rs", "new") not in callees
-    assert FnLocator("src/kind.rs", "new") not in callees
-    assert FnLocator("src/error.rs", "from") not in callees
-    assert {FnLocator("src/error.rs", "msg"), FnLocator("src/error.rs", "from_boxed"),
-            FnLocator("src/context.rs", "ext_context"),
-            FnLocator("src/error.rs", "construct_from_display")} <= callees  # noqa: SIM300
-    after = [k for k, _ in promote_producers(ordered, esc, builders, callees)]
-    first = {(k.file, k.fn_name) for k in after[:12]}
-    assert first >= _SIX, sorted(first)
-    # NEGATIVE CONTROL: the recorded order (what the floor's `attempted` batch
-    # was) carried none of the six in its first twelve.
-    before = {(k.file, k.fn_name) for k, _ in ordered[:12]}
-    assert not (_SIX & before)
-    # Non-escalated units keep their slots; the ensure pair (`render`, its
-    # intended caller `__dispatch_ensure`) moves to the NEXT batch together,
-    # where one ensure.rs file-first prompt carries both.
-    for i, (k, _) in enumerate(ordered):
-        if (k.file, k.fn_name) in _NOT_ESCALATED:
-            assert after[i] == k
-    second = {(k.file, k.fn_name) for k in after[12:24]}
-    assert second >= {("src/ensure.rs", "render"), ("src/ensure.rs", "__dispatch_ensure")}
-
 
 def test_drop_standing_flat_removes_flats_and_keeps_exempt() -> None:
     """Cap 12 over a 30-unit frontier whose last 10 are flat still spends
@@ -534,7 +143,7 @@ def test_drop_standing_flat_removes_flats_and_keeps_exempt() -> None:
     kept = drop_standing_flat(ordered, flat, exempt={"u29"})
     assert "u29" in {k for k, _ in kept}
     assert drop_standing_flat(ordered, set()) == ordered
-    batch = take_batch([k for k, _ in dropped], set(), 12)
+    batch = take([k for k, _ in dropped], (), 12, cohort=None, traversed=())
     assert batch.keys == tuple(f"u{i}" for i in range(12))
     assert "u20" not in batch.keys
 
@@ -553,94 +162,12 @@ def test_a_still_hollow_body_is_never_excluded_by_a_standing_grade() -> None:
     assert "u4" not in {k for k, _ in drop_standing_flat(ordered, flat)}
 
 
-# --- crash-evidence provenance and the pass cursor ---------------------------
-#
-# THE MEASUREMENT. Run `1577437-c93d5c26` (2026-09-06, cluster stable): the
-# frame-blind `AddressSanitizer: SEGV` in `tests/error_gen_3.rs` synthesized
-# 63 chain-derived fns at iter 3 (`phase_c.crash.chain_blame`, blamed capped
-# at 50 in the event, `chain_count: 63`). Every crash-graded key was exempt
-# from the pass cursor, so iter 4 read `attempted_before=0` under the cohort
-# fingerprint iter 2 had opened and dispatched the 12-unit head of the
-# cohort; the next sweep would have dispatched the same 12. The fixture is the
-# recorded event, read from the snapshot the retrigger tests share.
 
-def _recorded_chain_1577437() -> list[FnLocator]:
-    import json
-    from pathlib import Path
-    path = (Path(__file__).resolve().parent / "fixtures" / "crash"
-            / "chain_blame_1577437-c93d5c26_2026-09-06_iter3.json")
-    data = json.loads(path.read_text(encoding="utf-8"))["event"]["data"]
-    assert data["provenance"] == "chain_derived" and data["chain_count"] == 63
-    return [FnLocator(*n.split("::", 1)) for n in data["blamed"]]
-
-
-def _traverse(ordered, exempt, cap):
-    """Successive batches of one pass, feeding `attempted` back each time,
-    until the pass completes or a batch repeats a unit — whichever first."""
-    attempted: set = set()
-    batches = []
-    cohort = tuple(ordered)
-    for _ in range(len(ordered) + 1):
-        b = take_batch(ordered, attempted, cap, cohort=cohort, exempt=exempt)
-        batches.append(b)
-        attempted |= set(b.keys)
-        if b.completes_pass:
-            break
-    return batches
-
-
-def test_recorded_1577437_chain_cohort_is_offered_once_each_before_any_twice():
-    """The plan's sentence, on the recorded cohort under the live cap of 12:
-    over successive batches every chain unit is offered before any is
-    offered twice, and the pass completes in ceil(50/12) = 5 batches."""
-    chain = _recorded_chain_1577437()
-    assert len(chain) == 50
-    cohort = CrashCohort(blamed=frozenset(), sited=frozenset(),
-                         chain=frozenset(chain))
-    assert cohort.cursor_exempt == frozenset()
-    assert cohort.chain_only == frozenset(chain)
-    assert set(cohort.grades.values()) == {1}
-    batches = _traverse(chain, cohort.cursor_exempt, DEFAULT_MAX_DISPATCH)
-    offered = [k for b in batches for k in b.keys]
-    assert len(offered) == len(set(offered)) == 50
-    assert [len(b.keys) for b in batches] == [12, 12, 12, 12, 2]
-    assert [b.attempted_before for b in batches] == [0, 12, 24, 36, 48]
-    assert batches[-1].completes_pass and not batches[0].completes_pass
-    # The second batch is disjoint from the first: the cursor advanced past
-    # the head the recorded run re-bought.
-    assert not (set(batches[1].keys) & set(batches[0].keys))
-
-
-def test_negative_control_the_old_exemption_re_buys_the_cohort_head_forever():
-    """The recorded behaviour: `exempt=_crash_grades.keys()` — every crash
-    key, chain included. The same 12 come back on every batch,
-    `attempted_before` stays 0, the pass never completes, and the 38 units
-    below the head are never offered."""
-    chain = _recorded_chain_1577437()
-    cohort = CrashCohort(chain=frozenset(chain))
-    old_exempt = cohort.keys
-    batches = []
-    attempted: set = set()
-    for _ in range(6):
-        b = take_batch(chain, attempted, DEFAULT_MAX_DISPATCH,
-                       cohort=tuple(chain), exempt=old_exempt)
-        batches.append(b)
-        attempted |= set(b.keys)
-    assert all(b.keys == batches[0].keys for b in batches)
-    assert all(b.attempted_before == 0 for b in batches)
-    assert not any(b.completes_pass for b in batches)
-    assert len({k for b in batches for k in b.keys}) == 12
-    # (The event lists the chain sorted; the live iter-4 head began with the
-    # constructors because `promote_by_service` had sunk the dead units
-    # first. The re-buy is the same whichever 12 lead.)
-
-
-def test_site_evidence_stays_exempt_and_a_chain_key_that_is_also_a_frame_keeps_it():
-    """The split is by provenance, not by grade: a blamed frame and the
-    report's other frames are re-offered within the pass; a chain key no
-    site names is cursor-bounded; a key that is both a chain member and a
-    frame keeps its site standing (exempt) while ranking as the chain does
-    (grade 1, the pre-split rule)."""
+def test_the_crash_cohort_keeps_its_provenance_apart():
+    """The split is by provenance, not by grade: a blamed frame, the report's
+    other frames and the producer aims are SITED; a chain key no site names is
+    the inference proper; a key that is both a chain member and a frame grades
+    as the chain does (1, the pre-split rule) and is not chain-only."""
     drop = FnLocator("src/error.rs", "drop")
     caller = FnLocator("src/context.rs", "source")
     producer = FnLocator("src/error.rs", "object_drop")
@@ -650,23 +177,7 @@ def test_site_evidence_stays_exempt_and_a_chain_key_that_is_also_a_frame_keeps_i
                          sited=frozenset({drop, caller, producer, both}),
                          chain=frozenset({chain_only, both}))
     assert cohort.keys == frozenset({drop, caller, producer, both, chain_only})
-    assert cohort.cursor_exempt == frozenset({drop, caller, producer, both})
     assert cohort.chain_only == frozenset({chain_only})
     assert cohort.grades == {drop: 0, caller: 2, producer: 2, both: 1,
                              chain_only: 1}
-    # The grades are byte-for-byte what the driver composed before the
-    # split (`crash_texts` 2, chain 1, blamed 0, later keys overriding).
-    texts = {drop, caller, producer, both, chain_only}
-    assert cohort.grades == {**dict.fromkeys(texts, 2),
-                             **dict.fromkeys({chain_only, both}, 1),
-                             **dict.fromkeys({drop}, 0)}
-    # Under a cap of 2 with all five already attempted: the site keys are
-    # re-offered, the chain-only key waits for the next pass.
-    ordered = [drop, both, chain_only, caller, producer]
-    b = take_batch(ordered, ordered, 2, cohort=tuple(ordered),
-                   exempt=cohort.cursor_exempt)
-    assert b.keys == (drop, both)
-    later = take_batch(ordered, ordered, 5, cohort=tuple(ordered),
-                       exempt=cohort.cursor_exempt)
-    assert chain_only not in later.keys
     assert CrashCohort().keys == frozenset() and CrashCohort().grades == {}

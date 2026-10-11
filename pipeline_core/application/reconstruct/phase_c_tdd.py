@@ -102,7 +102,6 @@ from pipeline_core.domain.candidate_tiers import (
     merge_slices,
     miss_reasons,
     render_failed,
-    share_batch,
     slices_by_key,
     tiers_event,
     unit_key,
@@ -146,22 +145,24 @@ from pipeline_core.domain.destruction_epoch import (
     EpochedBaseline,
     readmission_boundary,
 )
-from pipeline_core.domain.dispatch import (
-    blocker_histogram,
-    defer_blocked_consumers,
-    restrict_to_compile_blockers,
-)
+from pipeline_core.domain.dispatch import restrict_to_compile_blockers
 from pipeline_core.domain.dispatch_batch import (
     DEFAULT_MAX_DISPATCH,
     CrashCohort,
     dispatch_ranks_of,
     drop_standing_flat,
-    promote_by_blocker_counts,
-    promote_by_service,
-    promote_crash_evidence,
-    promote_producers,
-    promote_product_ahead,
-    take_batch,
+)
+from pipeline_core.domain.dispatch_rank import (
+    Crash,
+    RankClass,
+    Service,
+    UnitFacts,
+    Withheld,
+    next_streak,
+    off_batch_reasons,
+    rank,
+    service_of,
+    take,
 )
 from pipeline_core.domain.escalation_lifetime import (
     FiredProduct,
@@ -192,6 +193,7 @@ from pipeline_core.domain.flat_score import (
 )
 from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.graceful_stop import request_graceful_stop
+from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
@@ -678,6 +680,7 @@ def _floor_snapshot(
     futility: dict[str, frozenset[FnLocator]],
     products: Mapping[str, FiredProduct] | None = None,
     producers: Mapping[str, frozenset[FnLocator]] | None = None,
+    unclaimed: Mapping[FnLocator, int] | None = None,
 ) -> dict[str, Any]:
     """The floor as the loop persists it — ONE spelling for both saves.
 
@@ -730,6 +733,9 @@ def _floor_snapshot(
             (_t, tuple(sorted(f"{_l.file}::{_l.fn_name}" for _l in _us)))
             for _t, _us in futility.items())),
         escalation_products=tuple(sorted(_encoded)),
+        unclaimed=tuple(sorted(
+            (f"{_l.file}::{_l.fn_name}", _n)
+            for _l, _n in (unclaimed or {}).items() if _n > 0)),
     ).to_dict()
 
 
@@ -1119,7 +1125,7 @@ def run_phase_c_tdd(
     # (`escalated_tests: set`, merged only on the firing sweep) shrank the
     # pass denominator on every later sweep of the same process: run
     # `2953362-63d4b47e` (2026-08-18) escalated 43 units at iter 1 and read
-    # a 16-unit frontier at iter 2, so `take_batch` counted the 19 vanished
+    # a 16-unit frontier at iter 2, so the batch's pass accounting counted the 19 vanished
     # producers as "left the frontier", was one dispatch from closing the
     # pass over a third of it, and would have wiped the cursor and credited
     # a traversal that never touched the escalated slice. Only the
@@ -1425,7 +1431,11 @@ def run_phase_c_tdd(
     # landing spends it, and a function no route writes holds the cluster
     # open until the backstop.
     _owed_misses = int(os.getenv("TDD_OWED_MISSES", str(DEFAULT_MISSES)))
-    _owed_cut: dict[FnLocator, int] = {}
+    # Sweeps each frontier unit has spent on the frontier since a run last
+    # claimed it (`dispatch_rank.next_streak`): the first key of the rank in
+    # every class. Persisted with the floor, so a resumed process ranks the
+    # units the last one kept cutting first.
+    _unclaimed: dict[FnLocator, int] = {}
     # The rungs an owed function climbs before its test is spent: a unit
     # route, then the slice session when sessions run (`candidate_tiers`).
     _ladder: tuple[str, ...] = (
@@ -2219,7 +2229,8 @@ def run_phase_c_tdd(
             landed=_pass_landed, declined=_pass_declined,
             served=_served_at, served_verified=_served_verified,
             futility=prev_test_units,
-            products=escalation_products, producers=escalation_producers))
+            products=escalation_products, producers=escalation_producers,
+            unclaimed=_unclaimed))
 
     # The cluster's function record, read once: what it proved unreachable
     # (from rustc's MIR and the public index, at task0c) is a static fact of
@@ -2243,6 +2254,7 @@ def run_phase_c_tdd(
     # backstop — all of which break before these are assigned inside the
     # loop — can still recompute the owed reading, including withdrawn.
     _stub_hold = StubHold({})
+    _holds = HeldStubs()
     _session_slices: dict[str, frozenset[FnSite]] = {}
     eligible: Frontier = {}
     while True:
@@ -3367,6 +3379,10 @@ def run_phase_c_tdd(
                 _sv_file, _, _sv_fn = _sv_key.partition("::")
                 if _sv_fn:
                     _served_verified.add(FnLocator(_sv_file, _sv_fn))
+            for _uc_key, _uc_n in _resume.unclaimed:
+                _uc_file, _, _uc_fn = _uc_key.partition("::")
+                if _uc_fn:
+                    _unclaimed[FnLocator(_uc_file, _uc_fn)] = _uc_n
             if _resume.futility:
                 for _fut_test, _fut_units in _resume.futility:
                     _seeded = frozenset(
@@ -4076,6 +4092,12 @@ def run_phase_c_tdd(
                     target_src_dir),
                 is_stub=_is_stub,
                 vanished=_oracle.vanished, test_files=_test_files)
+        # The one dispatch-keyed answer to "which stub stops this test"
+        # (`domain/held_stubs`): the deferral, the rank's HELD class, the
+        # schedule's hollow map and the session planner all read it.
+        _holds = HeldStubs.of(_stub_hold)
+        # Why each unit that reached the frontier is not ranked this sweep.
+        _not_ranked: Withheld[FnLocator] = Withheld()
         if _stub_hold.by_test:
             for _site in sorted(_stub_hold.blockers):
                 _held_tests = _stub_hold.held_by(_site)
@@ -4396,7 +4418,9 @@ def run_phase_c_tdd(
         # with no new context).
         # Crash evidence voids exhaustion: the prior attempts never saw a
         # localized faulting stack, so "nothing left to try" no longer holds.
-        permanently_exhausted -= set(crash_texts)
+        # A held stub is never exhausted: its tests stop at it whatever else
+        # is written, so "nothing left to try" cannot hold while it is a stub.
+        permanently_exhausted -= set(crash_texts) | _holds.units
         eligible = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
@@ -4405,6 +4429,7 @@ def run_phase_c_tdd(
                 if total_filled == last_total_filled and \
                    notes_now <= last_notes_count.get(key, 0):
                     skipped_perm += 1
+                    _not_ranked.note((key,), "exhausted")
                     continue
                 permanently_exhausted.discard(key)
             eligible[key] = tests
@@ -4426,6 +4451,7 @@ def run_phase_c_tdd(
                 deps.implicated_fns(_build.build_output, target_src_dir))
             eligible, _unaimed = restrict_to_compile_blockers(
                 eligible, _blockers)
+            _not_ranked.note(_unaimed, "compile_red")
             # The narrowing ADDS keys, so it lands them behind the test-oracle
             # filter applied above — and a red build's diagnostics point at the
             # test binaries, i.e. straight at gen_tests fns. Re-apply the filter
@@ -4468,7 +4494,8 @@ def run_phase_c_tdd(
                 })
                 _baseline_broken = True
                 break
-        eligible, _deferred = defer_blocked_consumers(eligible, _stub_keys)
+        eligible, _deferred = _holds.consumer_deferrals(eligible)
+        _not_ranked.note(_deferred, "deferred_behind_held_stub")
         if _deferred:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: deferred "
                      f"{len(_deferred)} consumer(s) blocked by still-stubbed "
@@ -4668,7 +4695,7 @@ def run_phase_c_tdd(
         _chain_keys: frozenset[FnLocator] = frozenset()
         # The chain keys NO fault site names — the inferred cohort proper.
         # Recorded beside `_chain_keys` because the batch cursor treats the
-        # two provenances differently (`CrashCohort.cursor_exempt`), and a
+        # two provenances differently (`dispatch_rank.Crash`), and a
         # key that is both a chain member and a frame of a localized report
         # keeps its site standing.
         _chain_only: frozenset[FnLocator] = frozenset()
@@ -5040,30 +5067,19 @@ def run_phase_c_tdd(
         # what it declined to spend (`len(eligible)` is the frontier, and under
         # the cap the next dispatch is at most `PHASE_C_TDD_MAX_DISPATCH` of
         # it), and the traversal cursor must not advance on an iteration that
-        # never dispatched. `take_batch` is pure, so computing it early costs
+        # never dispatched. `take` is pure, so computing it early costs
         # nothing and changes nothing.
-        ordered = deps.order_frontier(eligible, leaf_counts)
-        # CRASH EVIDENCE OUTRANKS EVERYTHING, and until now it outranked
-        # nothing. `order_frontier` ranks on static shape — panic depth, how
-        # many failing tests attribute a unit, how many callers reference it —
-        # which is the right question for an attribution-built frontier and the
-        # wrong scale for "this fn is named by a fault the tree produced on THIS
-        # sweep". The pack gave its subjects a prompt, a frontier entry, an
-        # exhaustion void and eligibility, and then let them queue behind units
-        # chosen on a different question: run `1692702-94e6163a` (2026-08-16)
-        # named the five-fn destruction family on iterations 2 and 3 and
-        # dispatched a batch of 12 out of 57 with `0 skipped — free fns` while
-        # four of the five are free fns. Grades keep an observed frame above an
-        # inference: blamed frames first, then chain-derived, then any other
-        # evidence key (producer aim, synthesized subject).
         #
-        # PROVENANCE IS DATA, not a grade integer read back in three places.
-        # `sited` is every evidence key a fault SITE produced — the keys
-        # `crash_texts` held before the chain merge (all frames, producer aim,
-        # synthesized subject); `chain` is the inference. The cohort's
-        # `grades` are the ranking above; its `cursor_exempt` is what the
-        # pass cursor may re-offer, and that is the site keys ONLY — see
-        # `CrashCohort.cursor_exempt` for the 63-unit measurement.
+        # `ordered` holds the STATIC order (`order_frontier`: panic depth,
+        # attributing tests, callers) until the one rank below
+        # (`domain/dispatch_rank`) replaces it; the steps in between read it
+        # as the frontier's membership and may only remove from it.
+        ordered = deps.order_frontier(eligible, leaf_counts)
+        # PROVENANCE IS DATA. `sited` is every evidence key a fault SITE
+        # produced — the keys `crash_texts` held before the chain merge (all
+        # frames, producer aim, synthesized subject); `chain` is the
+        # inference, bounded by the crate rather than by the fault, which is
+        # why the rank puts it in OTHER and the sited keys in EVIDENCED.
         _crash_cohort: CrashCohort[FnLocator] = CrashCohort(
             blamed=crash_blamed,
             sited=frozenset(crash_texts) - _chain_only,
@@ -5089,91 +5105,32 @@ def run_phase_c_tdd(
                 "unchanged as instructed' is no longer what happened: "
                 + ", ".join(sorted(f"{k.file}::{k.fn_name}"
                                    for k in _crash_retracted)[:8]))
-        # BLOCKER-HISTOGRAM ORDERING. First-fill already admits the live-stub
-        # producers into the batch; constructor-first ranking used to wait on
-        # `_esc_keys`, which is empty on the first pass because escalation
-        # is deferred until those units have been dispatched (run
-        # `155810-cbb3b9fc`). The histogram does not need a fire: post-fill
-        # counts from the previous iter's payoff when bodies landed blocked,
-        # else the pre-dispatch deferral map. Crash still outranks this.
-        _ranks: dict[FnLocator, int] = {}
-        if _prev_payoff is not None and _prev_payoff.landed_blocked:
-            _ranks = _prev_payoff.locator_counts()
-        if not _ranks:
-            _ranks = blocker_histogram(_deferred)
-        # A stub's measured hold is the direct count of what the histogram
-        # infers from attribution: on run `3453127-045b05b1` iter 3 the
-        # histogram gave `vtable` 7 deferred consumers while 82 failing tests
-        # stopped inside it.
-        for _site in _stub_hold.blockers:
-            _loc = locator_of(_site)
-            _ranks[_loc] = max(_ranks.get(_loc, 0),
-                               len(_stub_hold.held_by(_site)))
-        if _ranks:
-            _before_blk = [k for k, _ in ordered]
-            ordered = promote_by_blocker_counts(ordered, _ranks)
-            if [k for k, _ in ordered] != _before_blk:
-                _top = sorted(_ranks.items(), key=lambda kn: (-kn[1], kn[0]))[:4]
-                deps.log(
-                    f"  {tag} [phase-c/dispatch] blocker histogram: "
-                    + ", ".join(f"{k.file}::{k.fn_name} ({n})"
-                                for k, n in _top)
-                    + " rank first (crash evidence still outranks)")
-        # ESCALATED-PRODUCER ORDERING. Two steps, then crash still wins.
-        # (1) The product as a block ranks ahead of attributed accessors —
-        # `promote_producers` only shuffles the product's own slots, so a
-        # newly attributed accessor kept the head of the batch and persist
-        # still spent iter 1 on the re-buy (runs `4911`/`2932`; cap=1
-        # replay: accessor at slot 0, producer parked). (2) Inside that
-        # block, constructors before delegators, so the constructor reading
-        # arrives in the FIRST batch of a producer pass instead of one ~3h
-        # sweep later (`40938-f4e8e94b`, `4911-9ab8852e`, `95878-aaf5bf1d`).
-        # Crash promotion runs AFTER both, so an observed fault keeps the
-        # very front.
+        # The escalation's producer order, as facts for the rank: the product
+        # (its producers and measured owners) ahead of attributed accessors,
+        # and inside it the table builders, then callees before their callers,
+        # so a producer pass's first batch carries the constructors
+        # (`40938-f4e8e94b`, `4911-9ab8852e`, `95878-aaf5bf1d`).
         _esc_keys = frozenset(
             k for ks in escalation_producers.values() for k in ks)
         # Rank the cached additions, not the prompt-grade producer subset.
         # `escalation_producers` is filled through `producers_out`; a fire
         # that returned extras without that side channel (and a resume of
-        # an empty persisted producer tuple) would skip this lift and
-        # spend cap=1 on the new accessor.
+        # an empty persisted producer tuple) would otherwise lose the lift.
         _product_keys = product_addition_keys(escalation_products)
-        if _product_keys:
-            _before_prod = [k for k, _ in ordered]
-            ordered = promote_product_ahead(ordered, _product_keys)
-            if [k for k, _ in ordered] != _before_prod:
-                deps.log(
-                    f"  {tag} [phase-c/dispatch] product ahead: "
-                    f"{len(_product_keys)} escalated addition(s) rank before "
-                    "attributed accessors (crash evidence still outranks)")
         # The tree as the extractor sees it, read ONCE for this dispatch: the
-        # producer ranking below and the evidence premise further down both
-        # want it, and two reads of one tree in one iteration are two chances
-        # to disagree about it.
+        # producer facts and the evidence premise further down both want it,
+        # and two reads of one tree in one iteration are two chances to
+        # disagree about it.
         _disp_recs: list[dict[str, Any]] = (
             (deps.enumerate_fns(target_src_dir) or [])
             if deps.enumerate_fns is not None else [])
+        _builders: frozenset[FnLocator] = frozenset()
+        _callees: frozenset[FnLocator] = frozenset()
         if (_esc_keys and deps.enumerate_fns is not None
                 and deps.enumerate_types is not None):
             _pr_types = deps.enumerate_types(target_src_dir) or []
             _builders, _callees = producer_dispatch_ranks(
                 _esc_keys, _disp_recs, _pr_types)
-            _before = [k for k, _ in ordered]
-            ordered = promote_producers(ordered, _esc_keys, _builders, _callees)
-            if [k for k, _ in ordered] != _before and _builders:
-                deps.log(
-                    f"  {tag} [phase-c/dispatch] producer order: "
-                    f"{len(_builders)} constructor(s) promoted ahead of the "
-                    f"delegators in the escalated cohort ({len(_callees)} "
-                    "resolved callee(s) next): " + ", ".join(
-                        sorted(f"{k.file}::{k.fn_name}" for k in _builders)[:8]))
-        # SERVICE / DEAD ranking. Constructor-first above puts the table-
-        # builders at the head of the product; the ones the ledger already
-        # graded `flat` then occupy the whole cap, and a never-served owner
-        # (`src/lib.rs::format_err` at rank 21 on run `2220347-7fa9b90f`)
-        # never reaches a batch. This sits AFTER that promotion so the
-        # never-served / not-flat / flat / dead buckets actually decide
-        # take_batch. Crash still runs after and still wins.
         # STANDING CLAIM ABOUT THE TREE, not the re-seed view. `latest_by_unit`
         # lets an off-tree `proven` mask a later `flat` about the body that is
         # actually on disk (run `9872-51b20f30`: 10 FLAT vs 18 on-tree). Dispatch
@@ -5730,7 +5687,7 @@ def run_phase_c_tdd(
         # rather than about whether anything was dispatched — and the loop's
         # own refusals (the flat exclusion, the pass cursor, a route cap) can
         # empty the BATCH while the frontier still holds units. It is cleared
-        # where a unit is actually dispatched, below `take_batch`.
+        # where a unit is actually dispatched, below the batch `take`.
         # RED-SLICE SESSIONS. The failing set is the unit of evidence, not
         # the coverage-key subset: iterating owners.items() planned no
         # session for cfg-gated tests an instrumented run omitted (run
@@ -5778,64 +5735,18 @@ def run_phase_c_tdd(
                 paired_tests=_paired_tests)
             _session_slices = {t: _admission.admit_sites(sl)
                                for t, sl in _session_slices.items()}
-        _before_svc = [k for k, _ in ordered]
-        # The ranking reads the VERIFIED service view, not the fire's
-        # inclusive `_served_at`: a floor stamp the route-scoped rule never
-        # earned kept `never_served` at [] on 24 of 25 rankings after the
-        # decode fix shipped, so never-attempted units could not rank first.
-        # A still-stubbed unit is never-served whatever its stamp says: the
-        # stamp is about a body that is no longer on disk (`service_bucket`).
-        ordered = promote_by_service(
-            ordered, set(_served_verified), _flat_keys, _dead_keys, _red_dead,
-            hollow=_stub_keys)
-        _ranked = [k for k, _ in ordered]
-        _never = [k for k in _ranked
-                  if (k in _stub_keys or k not in _served_verified)
-                  and k not in _dead_keys and k not in _red_dead]
-        _flat_n = sum(1 for k in _ranked if k in _flat_keys
-                      and k not in _dead_keys and k not in _red_dead)
         _rd_only = _red_dead - _dead_keys
-        # RE-BUY DETECTOR, on the ranked frontier, BEFORE the cut.
-        # Run `9933-efe68f37` computed this after `take_batch`, so the
-        # reading named only units already inside the cap. A ranking
-        # bucket that would sink a unit a failing test enters while an
-        # unentered unit occupies the cap is refused (computed on that
-        # run's service-order prefix: sinking `context`/`msg` leaves the
-        # nine never-served and pulls `downcast`/`render`). Detector
-        # only: nothing is demoted, removed, or exhausted.
+        # RE-BUY DETECTOR, on the whole frontier, BEFORE the cut.
+        # Run `9933-efe68f37` computed this after the batch cut, so the
+        # reading named only units already inside the cap. Detector only:
+        # nothing is demoted, removed, or exhausted.
         _rebuy: tuple[tuple[FnLocator, LedgerEntry], ...] = ()
         if not _code_moved:
             _rebuy = rebuy_hits(
-                _ranked, latest_by_unit(_ledger_entries()),
+                [k for k, _ in ordered], latest_by_unit(_ledger_entries()),
                 project=project_dir.name, cluster=cluster.name,
                 run_id=deps.run_id, oracle_fp=_oracle_fp(iter_n))
         _rebuy_names = [f"{u.file}::{u.fn_name}" for u, _ in _rebuy]
-        _order_moved = _ranked != _before_svc
-        if _order_moved:
-            deps.log(
-                f"  {tag} [phase-c/dispatch] service order: "
-                f"{len(_never)} never-served unit(s) rank before served; "
-                f"{_flat_n} last-graded flat sink"
-                + (f"; {len(_dead_keys)} dead body(ies) demoted — "
-                   "executed by no test: "
-                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
-                                      for k in _dead_keys)[:6])
-                   if _dead_keys else "")
-                + (f"; {len(_rd_only)} red-dead body(ies) demoted — "
-                   "alive, but executed by no FAILING test: "
-                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
-                                      for k in _rd_only)[:6])
-                   if _rd_only else ""))
-        if _order_moved or _rebuy:
-            deps.emit("phase_c.dispatch.service_order", data={
-                "cluster": cluster.name, "iter": iter_n,
-                "never_served": [f"{k.file}::{k.fn_name}" for k in _never],
-                "flat": sorted(f"{k.file}::{k.fn_name}" for k in _flat_keys),
-                "dead": sorted(f"{k.file}::{k.fn_name}" for k in _dead_keys),
-                "red_dead": sorted(f"{k.file}::{k.fn_name}"
-                                   for k in _rd_only),
-                "rebuy": _rebuy_names,
-            })
         if _rebuy:
             # Split by the standing grade, not FLAT vs everything else: an
             # UNMEASURED row says the tests did not run; a PROVEN empty-delta
@@ -5873,10 +5784,8 @@ def run_phase_c_tdd(
                 "unmeasured": _names(_rb_unm),
                 "grades": {st: _names(locs) for st, locs in _by_grade.items()},
                 "prior_run_id": _rebuy[0][1].run_id})
-        # Crash evidence outranks everything, including the producer order above.
-        ordered = promote_crash_evidence(ordered, _crash_grades)
         # FLAT-UNDER-UNCHANGED-EVIDENCE IS EXCLUSION, not a sink rank.
-        # `promote_by_service` parks flats last; the cap still spends on
+        # The service bucket only sinks flats; the cap still spends on
         # them once never-served is empty. `rebuy_hits` cannot close that:
         # it is off after a code move and skips this run_id, so the
         # same-process re-buy (the `9872` spend) is invisible to it.
@@ -5888,9 +5797,11 @@ def run_phase_c_tdd(
         # claim about bytes that are not the body the batch would write.
         _before_excl = [key for key, _ in ordered]
         ordered = drop_standing_flat(
-            ordered, _flat_keys, exempt=_crash_grades.keys() | _stub_keys)
+            ordered, _flat_keys,
+            exempt=_crash_grades.keys() | _stub_keys | _holds.units)
         _kept_after_excl = {key for key, _ in ordered}
         _excluded = [k for k in _before_excl if k not in _kept_after_excl]
+        _not_ranked.note(_excluded, "standing_flat")
         if _excluded:
             # The exclusion is a spend decision and has to be readable as
             # one: without this line the only trace was a smaller `flat`
@@ -5925,7 +5836,9 @@ def run_phase_c_tdd(
         # be dispatched on, and a unit carrying only such tests leaves the
         # batch for this sweep.
         _scope = scope_to_crash_culprits(
-            ordered, crash_culprits_by_test(_sites, cur_failed))
+            ordered, crash_culprits_by_test(_sites, cur_failed),
+            exempt=_holds.units)
+        _not_ranked.note(_scope.dropped, "crash_scoped")
         if _scope.blocked:
             ordered = list(_scope.ordered)
             for _loc, _ts in ordered:
@@ -5950,15 +5863,6 @@ def run_phase_c_tdd(
                             for t, us in _scope.blocked.items()},
                 "dropped": sorted(f"{u.file}::{u.fn_name}"
                                   for u in _scope.dropped)})
-        if _pass_cohort is None:
-            _pass_cohort = tuple(key for key, _ in ordered)
-        # The promotion above is worthless unless the cursor is told to let
-        # these through: `take_batch` subtracts `attempted` FIRST, so a graded
-        # unit offered once earlier in the pass is dropped before its rank is
-        # ever consulted (see `take_batch`'s `exempt`). SITE evidence only:
-        # the chain-only cohort keeps its rank at the head of `ordered` but
-        # walks the cursor, so a 63-unit inference is traversed across
-        # batches instead of its first 12 being re-bought every sweep.
         # WHAT THE RED TESTS OWE. A red test held in a stub owes the stub;
         # otherwise its executed slice, in tiers by reach, and the first tier
         # with a function not yet spent under the test's fingerprint (its
@@ -6023,74 +5927,141 @@ def run_phase_c_tdd(
             })
             _close_kind = "cluster_failed"
             break
-        if _due.units:
-            _due_units = _due.units
-            _known = dict(ordered)
-            _head_keys = [k for k, _ in ordered if k in _crash_grades]
-            _rest = [(k, ts) for k, ts in ordered
-                     if k not in _crash_grades and k not in _due_units]
-            # Every owed function, including one that is also a crash grade.
-            # share_batch keeps that overlap in the owed share, once.
-            _owed_keys = sorted(_due_units, key=lambda x: (x.file, x.fn_name))
-            # Crash evidence first, but never every slot while owed
-            # functions wait (`candidate_tiers.share_batch`).
-            _tier_of: dict[FnLocator, int] = {}
-            for _r in _due.by_test.values():
-                for _u_key in _r.owed:
-                    _loc_t = FnLocator(*_u_key.rsplit("::", 1))
-                    _tier_of[_loc_t] = min(_tier_of.get(_loc_t, 1 << 30),
-                                           max(_r.owed_tier, 0))
-            _first, _after = share_batch(
-                _head_keys, _owed_keys, _dispatch_cap,
-                cut_streak=_owed_cut, tier_of=_tier_of, misses=_owed_misses)
-            _items_of = {u: (u, set(_known.get(u, set()))
-                             | set(_due.tests_for(u))) for u in _owed_keys}
-            ordered = ([_items_of.get(k) or (k, _known.get(k, set()))
-                        for k in _first]
-                       + [(k, _known.get(k, set())) for k in _after]
-                       + _rest)
-            _owed_items = [_items_of[u] for u in _owed_keys]
-            for _u, _ts in _owed_items:
-                eligible.setdefault(_u, set()).update(_ts)
+        # The owed functions join the frontier with the tests that owe them,
+        # and their narrowest tier is a fact for the rank.
+        _tier_of: dict[FnLocator, int] = {}
+        for _r in _due.by_test.values():
+            for _u_key in _r.owed:
+                _loc_t = FnLocator(*_u_key.rsplit("::", 1))
+                _tier_of[_loc_t] = min(_tier_of.get(_loc_t, 1 << 30),
+                                       max(_r.owed_tier, 0))
+        _static = [k for k, _ in ordered]
+        for _u in sorted(_due.units, key=lambda x: (x.file, x.fn_name)):
+            eligible.setdefault(_u, set()).update(_due.tests_for(_u))
+            if _u not in _static:
+                _static.append(_u)
+        # THE ONE RANK (`domain/dispatch_rank`). Every fact the steps above
+        # computed is handed to it, and nothing after it reorders: held stubs
+        # first and all of them in the batch, then the evidenced units (owed,
+        # or named by a fault site), then the rest; inside each class the
+        # units the last sweeps did not claim lead.
+        _chain_set = _crash_cohort.chain_only
+        _facts: dict[FnLocator, UnitFacts] = {}
+        for _i, _k in enumerate(_static):
+            _held_n = len(_holds.tests_held_by(_k))
+            _crash_k = (Crash.BLAMED if _k in crash_blamed
+                        else Crash.CHAIN if _k in _chain_set
+                        else Crash.SITED if _k in _crash_grades else None)
+            _facts[_k] = UnitFacts(
+                static_index=_i, held_tests=_held_n, crash=_crash_k,
+                owed_tier=_tier_of.get(_k) if _k in _due.units else None,
+                escalated=_k in _esc_keys or _k in _product_keys,
+                builder=_k in _builders, callee=_k in _callees,
+                service=service_of(
+                    _k, served=_served_verified, flat=_flat_keys,
+                    dead=_dead_keys, red_dead=_red_dead, hollow=_stub_keys),
+                unclaimed=_unclaimed.get(_k, 0))
+        _ranked = rank(_facts)
+        ordered = [(k, eligible.get(k, set())) for k in _ranked]
+        _held_in = _holds.units & frozenset(_ranked)
+        _held_off = _not_ranked.held_violations(_holds.units)
+        if _held_off:
             deps.log(
-                f"  {tag} [phase-c/dispatch] iter {iter_n}: "
-                f"{len(_due_units)} owed function(s) of "
-                f"{sum(1 for r in _due.by_test.values() if r.owed)} red "
-                "test(s) lead the batch (a tier not yet asked under its "
-                "evidence): " + ", ".join(
-                    f"{u.file}::{u.fn_name}" for u in sorted(
-                        _due_units, key=lambda x: (x.file, x.fn_name))[:10]))
-        _batch = take_batch([key for key, _ in ordered], _pass_attempted,
-                            _dispatch_cap, cohort=_pass_cohort,
-                            exempt=_crash_cohort.cursor_exempt | _due.units)
-        # Fills in a row each owed function has been cut by the cap.
-        _owed_cut = {u: (0 if u in _batch.keys else _owed_cut.get(u, 0) + 1)
-                     for u in _due.units}
+                f"  HEALTH ‼ HELD_WITHHELD iter {iter_n}: "
+                f"{len(_held_off)} held stub(s) left the frontier for a "
+                "reason other than cfg: " + ", ".join(
+                    f"{u.file}::{u.fn_name} ({r})"
+                    for u, r in sorted(_held_off.items())[:8]))
+            deps.emit("phase_c.dispatch.held_withheld", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "units": {f"{u.file}::{u.fn_name}": r
+                          for u, r in sorted(_held_off.items())}})
+        if _pass_cohort is None:
+            _pass_cohort = tuple(_ranked)
+        _batch = take(_ranked, _held_in, _dispatch_cap,
+                      cohort=_pass_cohort, traversed=_pass_attempted)
+        _by_class: dict[RankClass, int] = {}
+        for _k in _ranked:
+            _cls = _facts[_k].rank_class
+            _by_class[_cls] = _by_class.get(_cls, 0) + 1
+        _watch = sorted(_holds.units | _crash_grades.keys() | _due.units,
+                        key=lambda x: (x.file, x.fn_name))
+        _off = off_batch_reasons(_watch, _ranked, _batch.keys, _not_ranked,
+                                 _dispatch_cap)
+        deps.log(
+            f"  {tag} [phase-c/dispatch] iter {iter_n}: rank — "
+            f"{_by_class.get(RankClass.HELD, 0)} held stub(s), "
+            f"{_by_class.get(RankClass.EVIDENCED, 0)} evidenced "
+            f"({len(_due.units)} owed, {len(_crash_grades)} crash-graded), "
+            f"{_by_class.get(RankClass.OTHER, 0)} other; batch head: "
+            + ", ".join(f"{k.file}::{k.fn_name}" for k in _batch.keys[:6])
+            + ("; NOT in the batch: " + ", ".join(
+                f"{k.file}::{k.fn_name} ({why})"
+                for k, why in list(_off.items())[:8])
+               + (f" (+{len(_off) - 8} more)" if len(_off) > 8 else "")
+               if _off else ""))
+        deps.emit("phase_c.dispatch.rank", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "batch": [f"{k.file}::{k.fn_name}" for k in _batch.keys],
+            "held": {f"{k.file}::{k.fn_name}": _facts[k].held_tests
+                     for k in sorted(_held_in, key=lambda x: (x.file, x.fn_name))},
+            "classes": {c.name.lower(): n for c, n in _by_class.items()},
+            "unclaimed": {f"{k.file}::{k.fn_name}": _facts[k].unclaimed
+                          for k in _ranked if _facts[k].unclaimed},
+            "off_batch": {f"{k.file}::{k.fn_name}": why
+                          for k, why in _off.items()},
+            "withheld": {f"{k.file}::{k.fn_name}": why
+                         for k, why in sorted(_not_ranked.reasons.items())},
+        })
         if _crash_grades:
-            _aimed = [k for k in _batch.keys if k in _crash_grades]
-            _n_site = len(_crash_cohort.cursor_exempt)
-            _n_chain = len(_crash_cohort.chain_only)
-            # When none are aimed the reason can no longer be rank — crash
-            # promotion runs last and outranks everything above it, so there is
-            # no such thing as "higher-graded evidence". Saying there was is
-            # how this survived five processes unread: the line named a cause
-            # that cannot exist, and every session that read it moved on. The
-            # only remaining explanation is that the graded units are not in
-            # this sweep's frontier at all.
-            _off = [k for k in _crash_grades if k not in set(_batch.keys)]
+            # The crash cohort's own line, with its cause computed: for every
+            # crash unit not in the batch, the filter that withheld it or its
+            # rank position. The line it replaces said "absent from this
+            # sweep's frontier" on run `857717-812ee44c` iter 5 while both
+            # units were on the frontier, ranked past the cap by name.
+            _in_batch = set(_batch.keys)
+            _aimed = [k for k in _ranked if k in _crash_grades
+                      and k in _in_batch]
+            _crash_off = off_batch_reasons(
+                sorted(_crash_grades, key=lambda x: (x.file, x.fn_name)),
+                _ranked, _batch.keys, _not_ranked, _dispatch_cap)
             deps.log(
                 f"  {tag} [phase-c/tdd] iter {iter_n}: "
                 f"{len(_crash_grades)} unit(s) carry crash evidence this "
-                f"sweep ({_n_site} frame-sited, re-offered within the pass; "
-                f"{_n_chain} chain-inferred, cursor-bounded) and rank ahead "
-                f"of the frontier; {len(_aimed)} of them "
-                "are in this batch"
+                f"sweep ({len(_crash_cohort.blamed | (_crash_cohort.sited - _chain_set))} "
+                f"frame-sited, {len(_chain_set)} chain-inferred); "
+                f"{len(_aimed)} of them are in this batch"
                 + (": " + ", ".join(f"{k.file}::{k.fn_name}"
-                                    for k in _aimed[:8]) if _aimed else
-                   " — NONE, and not because anything outranks them: they are "
-                   "absent from this sweep's frontier (withheld as exhausted, "
-                   "or no longer a fill target): " + ", ".join(
-                       f"{k.file}::{k.fn_name}" for k in _off[:8])))
+                                    for k in _aimed[:8]) if _aimed else "")
+                + ("; not in it: " + ", ".join(
+                    f"{k.file}::{k.fn_name} ({why})"
+                    for k, why in list(_crash_off.items())[:8])
+                   if _crash_off else ""))
+        _never = [k for k in _ranked if _facts[k].service is Service.NEVER]
+        _flat_n = sum(1 for k in _ranked if _facts[k].service is Service.FLAT)
+        if _never or _flat_n or _dead_keys or _rd_only:
+            deps.log(
+                f"  {tag} [phase-c/dispatch] service order: "
+                f"{len(_never)} never-served unit(s) rank before served; "
+                f"{_flat_n} last-graded flat sink"
+                + (f"; {len(_dead_keys)} dead body(ies) demoted — "
+                   "executed by no test: "
+                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                      for k in _dead_keys)[:6])
+                   if _dead_keys else "")
+                + (f"; {len(_rd_only)} red-dead body(ies) demoted — "
+                   "alive, but executed by no FAILING test: "
+                   + ", ".join(sorted(f"{k.file}::{k.fn_name}"
+                                      for k in _rd_only)[:6])
+                   if _rd_only else ""))
+        deps.emit("phase_c.dispatch.service_order", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "never_served": [f"{k.file}::{k.fn_name}" for k in _never],
+            "flat": sorted(f"{k.file}::{k.fn_name}" for k in _flat_keys),
+            "dead": sorted(f"{k.file}::{k.fn_name}" for k in _dead_keys),
+            "red_dead": sorted(f"{k.file}::{k.fn_name}" for k in _rd_only),
+            "rebuy": _rebuy_names,
+        })
 
         # UNDISPATCHABLE IS A PROPERTY OF THE BATCH, NOT OF THE FRONTIER —
         # and the terminator above could only see the frontier. Every one of
@@ -7059,15 +7030,12 @@ def run_phase_c_tdd(
                         dispatch_ranks_of([k for k, _ in ordered]) or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
-                    # The stub hold, for the schedule: its blockers are the
-                    # locators whose bodies the held tests need first, and its
-                    # hollow relation is the one coverage cannot give for a
-                    # run that stopped at the stub.
-                    stub_hold_blockers=frozenset(
-                        locator_of(s_) for s_ in _stub_hold.blockers),
-                    stub_hold_hollow={
-                        t_: frozenset(locator_of(s_) for s_ in ss_)
-                        for t_, ss_ in _stub_hold.by_test.items()},
+                    # The held view (`domain/held_stubs`), for the schedule
+                    # and the session planner: its units are the bodies the
+                    # held tests need first, and its map is the only hollow
+                    # relation they read.
+                    stub_hold_blockers=_holds.units,
+                    stub_hold_hollow=_holds.hollow(),
                     on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
                     fill_premise=_plan_premise,
                     fill_ground_now=_ground_now,
@@ -7363,6 +7331,15 @@ def run_phase_c_tdd(
         # never-served rank instead of silently dropping to bucket 1.
         _served_at.update(dict.fromkeys(_attempted, iter_n))
         _served_verified.update(_attempted)
+        # CLAIMED is what a run opened or landed a body on; a unit the cap
+        # left out, a share ran out before, or a premise refusal skipped was
+        # not claimed and leads its class at the next sweep
+        # (`dispatch_rank.next_streak`). Batch membership is not a claim: on
+        # run `857717-812ee44c` fill 4 the per-fn run's share ran out before
+        # `src/error.rs::object_drop_front`, and the owed share's streak,
+        # counted on the batch, reset to 0 all the same.
+        _unclaimed = next_streak(_unclaimed, _ranked,
+                                 _attempted | _landed_after_fill)
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
         # The forced followup's own outcome, folded beside the main-stream

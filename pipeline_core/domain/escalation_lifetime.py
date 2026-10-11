@@ -108,7 +108,7 @@ def product_addition_keys(
 ) -> frozenset[FnLocator]:
     """Units the fired products cache as frontier additions.
 
-    This is the set `promote_product_ahead` ranks, not `escalation_producers`.
+    This is the set the rank's `escalated` fact reads, not `escalation_producers`.
     The producers dict is a prompt-grade split (constructors vs traversal
     steps) filled through `producers_out`; the harness stubs that return the
     extras dict without writing that side channel would otherwise leave

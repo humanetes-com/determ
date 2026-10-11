@@ -211,7 +211,7 @@ def reoffer_unopened(
     routes refuse again stays on the cursor and the pass closes as before —
     otherwise a unit whose runs are always deferred would hold the pass
     open forever, and every stop denominated in completed passes would go
-    dead with it (`take_batch`'s traversal accounting names that lock).
+    dead with it (`dispatch_rank.take`'s pass accounting names that lock).
     A passenger — landed without being opened — had its body written and is
     not re-offered.
     """

@@ -23,13 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.attribution import locator_of
-from pipeline_core.domain.dispatch_batch import (
-    CrashCohort,
-    promote_by_blocker_counts,
-    promote_by_service,
-    promote_crash_evidence,
-    take_batch,
-)
+from pipeline_core.domain.dispatch_rank import UnitFacts, rank, service_of, take
+from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.test_outcome import StubHold, outcomes_of, stub_hold_of
 from pipeline_core.domain.test_report import stub_abort_reading
@@ -129,31 +124,20 @@ def _loc(s: str) -> FnLocator:
     return FnLocator(f, fn)
 
 
-# `[phase-c/dispatch] blocker histogram: src/error.rs::vtable (7) rank first`
-# on the same iteration: the rank attribution gave the stub.
-_HISTOGRAM_ITER3 = {FnLocator("src/error.rs", "vtable"): 7}
-
-
 def _batch(hold: StubHold, hollow: frozenset[FnLocator]) -> list[FnLocator]:
+    """The batch the rank takes on the recorded iteration's frontier."""
     stub = locator_of(_VTABLE)
     served_rest = [FnLocator("src/rest.rs", f"f{i}") for i in range(30)]
     # Frontier order before ranking: the stub LAST, the worst position.
-    ordered = ([(_loc(k), set()) for k in _NEVER_SERVED_ITER3]
-               + [(k, set()) for k in served_rest] + [(stub, set())])
-    ranks = dict(_HISTOGRAM_ITER3)
-    for s in hold.blockers:
-        ranks[locator_of(s)] = max(ranks.get(locator_of(s), 0),
-                                   len(hold.held_by(s)))
-    ordered = promote_by_blocker_counts(ordered, ranks)
+    static = [_loc(k) for k in _NEVER_SERVED_ITER3] + served_rest + [stub]
+    held = HeldStubs.of(hold)
     served = {stub, *served_rest}  # the stale stamp the floor carried
-    ordered = promote_by_service(ordered, served, set(), hollow=hollow)
-    cohort = CrashCohort(blamed=frozenset(),
-                         sited=frozenset(locator_of(s) for s in hold.blockers),
-                         chain=frozenset())
-    ordered = promote_crash_evidence(ordered, cohort.grades)
-    return list(take_batch([k for k, _ in ordered], set(), 12,
-                           cohort=tuple(k for k, _ in ordered),
-                           exempt=cohort.cursor_exempt).keys)
+    facts = {k: UnitFacts(
+        static_index=i, held_tests=len(held.tests_held_by(k)),
+        service=service_of(k, served=served, flat=(), hollow=hollow))
+        for i, k in enumerate(static)}
+    ranked = rank(facts)
+    return list(take(ranked, held.units, 12, cohort=None, traversed=()).keys)
 
 
 def test_the_held_stub_opens_the_batch() -> None:
@@ -162,10 +146,12 @@ def test_the_held_stub_opens_the_batch() -> None:
     assert batch[0] == locator_of(_VTABLE)
 
 
-def test_a_stub_is_never_served_even_without_the_hold() -> None:
-    # The service rule alone: no site evidence, the stub still makes the cut.
-    batch = _batch(StubHold({}), frozenset({locator_of(_VTABLE)}))
-    assert locator_of(_VTABLE) in batch
+def test_the_hold_opens_the_batch_whatever_the_stale_stamp_says() -> None:
+    # The observed hold alone: the floor's stale service stamp reads the stub
+    # as served and nothing marks it hollow, and it still leads the batch.
+    hold = stub_hold_of(_ISOLATED, _locate, _is_stub)
+    batch = _batch(hold, frozenset())
+    assert batch[0] == locator_of(_VTABLE)
 
 
 def test_negative_control_the_recorded_cut() -> None:

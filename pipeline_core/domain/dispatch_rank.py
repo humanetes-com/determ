@@ -1,0 +1,265 @@
+"""The one ordering of the TDD frontier, the batch it yields, and the count
+that keeps it fair.
+
+WHY THIS EXISTS. The frontier used to reach the batch through about ten
+reorderings and filters, each written for one run and each able to undo the
+one before it: `order_frontier`, then blocker counts, then the escalation
+product ahead, then producers before their callers, then the service buckets,
+then crash evidence, then the owed share, then the pass cursor with its
+exemption. Several of them said "crash promotion runs after this, so an
+observed fault keeps the very front"; the owed share, added later, ran after
+crash promotion and moved a crash-graded owed unit into the owed half, where
+it was sorted by `(tier, -cut streak, name)`. Every owed row read tier -1 and
+streak 0 on the sweep a unit first became owed, so the name decided. Run
+`857717-812ee44c` (2026-10-10, cluster `stable`, iter 5): 20 owed units
+against a cap of 12, and the two stubs a red test's first failure sat in,
+`src/error.rs::object_drop_front` and `src/wrapper.rs::source`, sorted 15th
+and 20th, out of the batch. `scripts/held_stub_batch_fixture.py` recomputes
+that batch from the run's events and reproduces the recorded one on all five
+sweeps. A unit the batch did admit and a run then left unclaimed when its
+share ran out (fill 4, `object_drop_front`) counted as served for the owed
+share's starvation guard, so that guard never fired either.
+
+THE RANK. One key per unit, built from typed evidence:
+
+- class `HELD`: a still-stubbed unit some red test's first failure sits in
+  (`held_stubs.HeldStubs`). Every one is in the batch, whatever the cap.
+- class `EVIDENCED`: owed under evidence no prompt has asked yet
+  (`candidate_tiers`), or named by a crash's fault site (a localized frame,
+  a producer one call from it, a synthesized subject).
+- class `OTHER`: everything else; a crash's chain-derived inference leads it.
+
+Within each class the first key is the unclaimed streak, the number of
+sweeps the unit has been on the frontier since a run last claimed it. A unit
+the cap cut, a run's share cut or a premise refusal skipped leads the next
+sweep. That bound is what the pass cursor and the owed share's half split
+each tried to give and neither did for every unit. After the streak: tests
+held (`HELD`); crash provenance, owed tier and service bucket (`EVIDENCED`);
+the chain inference, then the service bucket (`OTHER`: never served, served,
+served and last graded flat, red-dead, dead). Then the escalation's producer order: product units first,
+table builders, then callees before their callers. Then the static order
+(`order_frontier`: panic depth, callers, leaf-name frequency). The name
+decides only an exact tie.
+
+WHAT A PASS STILL MEANS. The terminators count completed traversals
+(`flat_score`, the plateau budget), so the pass survives as accounting
+(:func:`take`): it opens over the frontier as it stands (its cohort) and
+closes when every cohort member has been traversed or has left the frontier.
+It no longer decides the order.
+"""
+from __future__ import annotations
+
+from collections.abc import Collection, Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from enum import IntEnum
+
+from pipeline_core.domain.dispatch_batch import DispatchBatch
+
+__all__ = [
+    "Crash",
+    "RankClass",
+    "Service",
+    "UnitFacts",
+    "Withheld",
+    "next_streak",
+    "off_batch_reasons",
+    "rank",
+    "service_of",
+    "take",
+]
+
+
+class RankClass(IntEnum):
+    HELD = 0
+    EVIDENCED = 1
+    OTHER = 2
+
+
+class Service(IntEnum):
+    """How the unit's current body has been served (`service_of`)."""
+
+    NEVER = 0
+    SERVED = 1
+    FLAT = 2
+    RED_DEAD = 3
+    DEAD = 4
+
+
+class Crash(IntEnum):
+    """A crash's provenance for the unit. `BLAMED` and `SITED` are anchored
+    on a fault the sweep produced; `CHAIN` is the inference drawn when no
+    frame was in the crate, bounded by the crate rather than by the fault
+    (63 units on run `1577437-c93d5c26` iter 3), so it ranks in `OTHER`."""
+
+    BLAMED = 0
+    SITED = 1
+    CHAIN = 2
+
+
+def service_of[K: Hashable](
+    key: K, *, served: Collection[K], flat: Collection[K],
+    dead: Collection[K] = (), red_dead: Collection[K] = (),
+    hollow: Collection[K] = (),
+) -> Service:
+    """The unit's service bucket.
+
+    Dead first: a body no test executes cannot move a verdict. Red-dead next:
+    no failing test executes it, so a rewrite cannot move a red verdict this
+    sweep (`src/lib.rs::Ok`, generic and `#[inline]`, is absent from the
+    profile and can never be dead). A still-stubbed unit is never served
+    whatever its stamp says: the stamp is about a body no longer on disk
+    (run `3453127-045b05b1`: `vtable` carried an earlier process's stamp, was
+    a stub again, and 82 of 141 failing tests stopped inside it)."""
+    if key in dead:
+        return Service.DEAD
+    if key in red_dead:
+        return Service.RED_DEAD
+    if key in hollow or key not in served:
+        return Service.NEVER
+    if key in flat:
+        return Service.FLAT
+    return Service.SERVED
+
+
+@dataclass(frozen=True, slots=True)
+class UnitFacts:
+    """Everything the rank reads about one frontier unit."""
+
+    #: Position in the static order (`order_frontier`). Unique per unit.
+    static_index: int
+    #: Red tests whose first failure sits in this still-stubbed unit.
+    held_tests: int = 0
+    crash: Crash | None = None
+    #: The narrowest tier this unit is owed on; None when nothing owes it.
+    owed_tier: int | None = None
+    #: Member of the escalation's product (its producers or measured owners).
+    escalated: bool = False
+    #: Constructs a crate nominal type (`installable_fns.producer_dispatch_ranks`).
+    builder: bool = False
+    #: Called by another escalated unit through a resolved call.
+    callee: bool = False
+    service: Service = Service.NEVER
+    #: Sweeps on the frontier since a run last claimed it.
+    unclaimed: int = 0
+
+    @property
+    def rank_class(self) -> RankClass:
+        if self.held_tests > 0:
+            return RankClass.HELD
+        if self.owed_tier is not None or self.crash in (Crash.BLAMED,
+                                                        Crash.SITED):
+            return RankClass.EVIDENCED
+        return RankClass.OTHER
+
+    def _producer(self) -> tuple[int, int, int]:
+        return (0 if self.escalated else 1, 0 if self.builder else 1,
+                0 if self.callee else 1)
+
+    def key(self) -> tuple[int, ...]:
+        cls = self.rank_class
+        if cls is RankClass.HELD:
+            return (int(cls), -self.unclaimed, -self.held_tests,
+                    self.static_index)
+        if cls is RankClass.EVIDENCED:
+            crash = int(self.crash) if self.crash is not None else len(Crash)
+            return (int(cls), -self.unclaimed, crash,
+                    self.owed_tier if self.owed_tier is not None else 0,
+                    int(self.service), *self._producer(), self.static_index)
+        return (int(cls), -self.unclaimed,
+                0 if self.crash is Crash.CHAIN else 1,
+                int(self.service), *self._producer(), self.static_index)
+
+
+def rank[K: Hashable](facts: Mapping[K, UnitFacts]) -> list[K]:
+    """Every unit of `facts`, best first."""
+    return sorted(facts, key=lambda k: (facts[k].key(), str(k)))
+
+
+def take[K: Hashable](
+    ranked: Sequence[K], held: Collection[K], cap: int, *,
+    cohort: Collection[K] | None, traversed: Collection[K],
+) -> DispatchBatch[K]:
+    """The batch for this sweep, and where it leaves the open pass.
+
+    Every held unit is taken; the cap bounds the rest, which always keep at
+    least one slot so a frontier that holds more stubs than the cap still
+    offers one other unit a sweep. A cap of 0 or less takes everything.
+
+    `cohort` is the frontier the open pass was opened over (None: open one
+    over `ranked`), `traversed` what it has already traversed. The pass
+    completes when this batch covers every cohort member still on the
+    frontier that it has not traversed, which includes the case where
+    nothing of the cohort is left to traverse: the caller then opens the
+    next pass at the next sweep. A unit re-offered on live evidence after it
+    was traversed does not hold the pass open, so a fault blaming more units
+    than the cap cannot leave the terminators that count completed passes
+    with nothing to count."""
+    held_set = set(held)
+    held_in = [k for k in ranked if k in held_set]
+    rest = [k for k in ranked if k not in held_set]
+    if cap <= 0:
+        keys = tuple(ranked)
+    else:
+        room = max(cap - len(held_in), 1 if rest else 0)
+        keys = (*held_in, *rest[:room])
+    live = set(ranked)
+    cohort_live = live if cohort is None else live & set(cohort)
+    seen = set(traversed) & cohort_live
+    pending = cohort_live - seen
+    return DispatchBatch(keys=keys,
+                         completes_pass=not (pending - set(keys)),
+                         attempted_before=len(seen),
+                         frontier_size=len(ranked))
+
+
+def next_streak[K: Hashable](
+    streak: Mapping[K, int], frontier: Iterable[K], claimed: Collection[K],
+) -> dict[K, int]:
+    """The unclaimed streak after a fill: 0 for a unit a run claimed (opened
+    it, or landed a body on it), one more for every other unit still on the
+    frontier. Units that left the frontier are dropped."""
+    claimed_set = set(claimed)
+    return {k: (0 if k in claimed_set else streak.get(k, 0) + 1)
+            for k in frontier}
+
+
+@dataclass(slots=True)
+class Withheld[K: Hashable]:
+    """Why each unit that reached the frontier is not ranked this sweep.
+
+    The membership filters (exhaustion, consumer deferral, compile-red
+    narrowing, standing flat, crash scope, cfg) each note what they removed.
+    A held unit may only be withheld as cfg-inactive: every filter is handed
+    the held set as exempt, and :meth:`held_violations` reports any that was
+    removed anyway, for a HEALTH line rather than a silent drop."""
+
+    reasons: dict[K, str] = field(default_factory=dict)
+
+    def note(self, units: Iterable[K], reason: str) -> None:
+        for u in units:
+            self.reasons.setdefault(u, reason)
+
+    def held_violations(self, held: Collection[K]) -> dict[K, str]:
+        return {u: r for u, r in self.reasons.items()
+                if u in held and r != "cfg_inactive"}
+
+
+def off_batch_reasons[K: Hashable](
+    units: Iterable[K], ranked: Sequence[K], batch: Collection[K],
+    withheld: Withheld[K], cap: int,
+) -> dict[K, str]:
+    """For each of `units` not in the batch: its withheld reason, or its
+    rank position past the cap, or that it is not on the frontier at all."""
+    pos = {k: i for i, k in enumerate(ranked, 1)}
+    batch_set = set(batch)
+    out: dict[K, str] = {}
+    for u in units:
+        if u in batch_set:
+            continue
+        if u in withheld.reasons:
+            out[u] = f"withheld: {withheld.reasons[u]}"
+        elif u in pos:
+            out[u] = f"rank {pos[u]} past the cap of {cap}"
+        else:
+            out[u] = "not on the frontier"
+    return out

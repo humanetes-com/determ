@@ -20,8 +20,8 @@ blame and printed its refusal in five consecutive processes (log lines 1556,
 frontier with its crash report instead." All three parts of that fallback were
 closed:
 
-* dispatch — `promote_crash_evidence` put the three at ranks 0-2 and
-  `take_batch` dropped them again, because the pass cursor had offered them
+* dispatch — the crash promotion put the three at ranks 0-2 and the pass
+  cursor's cut dropped them again, because the cursor had offered them
   once. The log said `0 of them are in this batch — the batch is full of
   higher-graded evidence`, which cannot be true: crash promotion runs last.
 * the record — `drop` and `as_ptr` were written to the floor's `declined`,
@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.domain.attribution import FailureFrontier
-from pipeline_core.domain.dispatch_batch import promote_crash_evidence, take_batch
+from pipeline_core.domain.dispatch_rank import Crash, UnitFacts, rank, take
 from pipeline_core.domain.landed_change import declined_unchanged
 from pipeline_core.domain.language_driver import GenericLanguageDriver, using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
@@ -96,11 +96,22 @@ def _live_frontier() -> tuple[list[FnLocator], list[FnLocator], dict[FnLocator, 
     attempted = _locators(rec["attempted"])
     grades = {DROP: 0, OBJECT_DROP: 2, AS_PTR: 2}
     others = [FnLocator("src/other.rs", f"pending_{i}") for i in range(10)]
-    frontier = list(dict.fromkeys([*grades, *attempted, *others]))
+    # The crash units placed AFTER the cursor's units in the static order, so
+    # only the rank can bring them forward.
+    frontier = list(dict.fromkeys([*attempted, *others, *grades]))
     assert len(frontier) == rec["frontier_size"]
-    ordered = [k for k, _ in promote_crash_evidence(
-        [(k, 0) for k in frontier], grades)]
+    crash = {DROP: Crash.BLAMED, OBJECT_DROP: Crash.SITED, AS_PTR: Crash.SITED}
+    ordered = rank({k: UnitFacts(static_index=i, crash=crash.get(k))
+                    for i, k in enumerate(frontier)})
     return ordered, attempted, grades
+
+
+def _pre_fix_cursor_cut(ordered: list[FnLocator], attempted: list[FnLocator],
+                        cap: int) -> list[FnLocator]:
+    """The deleted cursor's cut without an exemption: what this pass had
+    already offered was subtracted before the cap. The negative control."""
+    seen = set(attempted)
+    return [k for k in ordered if k not in seen][:cap]
 
 
 def test_the_recorded_floor_is_the_one_the_run_wrote() -> None:
@@ -126,24 +137,28 @@ def test_crash_blamed_units_are_dispatched_though_the_pass_already_spent_them() 
     assert [f"{k.file}::{k.fn_name}" for k in ordered[:3]] == [
         "src/error.rs::drop", "src/error.rs::object_drop", "src/ptr.rs::as_ptr"]
 
-    before = take_batch(ordered, attempted, cap, cohort=tuple(ordered))
-    assert [k for k in before.keys if k in grades] == [], (
+    before = _pre_fix_cursor_cut(ordered, attempted, cap)
+    assert [k for k in before if k in grades] == [], (
         "negative control: the recorded sweep logged `0 of them are in this "
-        "batch` and the pre-fix call must still reproduce it")
+        "batch` and the pre-fix cut must still reproduce it")
 
-    after = take_batch(ordered, attempted, cap, cohort=tuple(ordered),
-                       exempt=grades.keys())
+    after = take(ordered, (), cap, cohort=tuple(ordered), traversed=attempted)
     assert [k for k in after.keys if k in grades] == [DROP, OBJECT_DROP, AS_PTR]
 
 
-def test_the_exemption_ends_with_the_fault_and_not_on_a_budget() -> None:
-    """No crash this sweep is the whole off switch — the exemption is recomputed
-    from evidence the sweep re-derives, so a fixed body stops being re-offered
-    without anything having to remember that it was."""
-    ordered, attempted, _ = _live_frontier()
-    healed = take_batch(ordered, attempted, 12, cohort=tuple(ordered),
-                        exempt=frozenset())
-    assert [k for k in healed.keys if k in (DROP, OBJECT_DROP, AS_PTR)] == []
+def test_the_promotion_ends_with_the_fault_and_not_on_a_budget() -> None:
+    """No crash this sweep is the whole off switch: the crash fact is
+    recomputed from evidence the sweep re-derives, so a fixed body carries
+    none and ranks behind every unit the pass has not claimed yet."""
+    _ordered, attempted, _ = _live_frontier()
+    pending = [FnLocator("src/other.rs", f"pending_{i}") for i in range(10)]
+    frontier = list(dict.fromkeys([DROP, OBJECT_DROP, AS_PTR, *attempted,
+                                   *pending]))
+    streak = dict.fromkeys(pending, 1)
+    healed = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+                   for i, k in enumerate(frontier)})
+    assert healed[:10] == pending
+    assert healed.index(DROP) >= 10
 
 
 def test_a_unit_the_fault_names_is_not_recorded_as_correctly_standing_pat() -> None:
@@ -420,10 +435,9 @@ def test_a_re_offered_unit_does_not_hold_the_traversal_open() -> None:
     denominated in completed passes would go quietly dead while the loop kept
     spending GPU."""
     ordered, attempted, _ = _live_frontier()
-    # Every unit already served, and more blamed frames than one batch can hold.
-    wide = dict.fromkeys(ordered[:20], 0)
-    batch = take_batch(ordered, ordered, 12, cohort=tuple(ordered),
-                       exempt=wide.keys())
+    # Every unit already traversed, and more blamed frames than one batch can
+    # hold: the rank re-offers them, the pass still closes.
+    batch = take(ordered, (), 12, cohort=tuple(ordered), traversed=ordered)
     assert len(batch.keys) == 12
     assert batch.completes_pass, (
         "a pass whose cohort is fully served closes even when the exemption "

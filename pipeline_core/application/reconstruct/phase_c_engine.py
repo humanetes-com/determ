@@ -404,7 +404,7 @@ class PhaseCFillEngine:
         # The TDD driver's final dispatch order as ranks (head highest,
         # `dispatch_batch.dispatch_ranks_of`). When set, stubs are ordered and
         # grouped by these ranks instead of leaf-name frequency, so a
-        # constructor that `take_batch` placed in the slice actually OPENS
+        # constructor the rank placed in the slice actually OPENS
         # the pass — leaf-first otherwise puts `fmt`/`new` in an earlier
         # barriered level (run `155810-cbb3b9fc` iter 1: constructors in
         # the batch, dispatched last).
@@ -541,6 +541,7 @@ class PhaseCFillEngine:
                 dispatch_ranks=dispatch_ranks,
                 session_slices=session_slices,
                 session_owners=session_owners,
+                held=stub_hold_hollow,
             )
             if _prepared_fill.crash_callees:
                 crash_blamed = (crash_blamed or frozenset()) | (
@@ -571,10 +572,10 @@ class PhaseCFillEngine:
         if _prepared_fill is not None:
             routes.extend(_prepared_fill.routes)
         routes.append(_per_fn_route)
-        _hollow: dict[str, frozenset[FnLocator]] = dict(
-            _prepared_fill.hollow if _prepared_fill is not None else {})
-        for _t, _locs in (stub_hold_hollow or {}).items():
-            _hollow[_t] = _hollow.get(_t, frozenset()) | _locs
+        # The held view (`held_stubs`) is the only hollow relation: a test is
+        # hollow when its first failure sits in a still-stubbed unit, never
+        # because its coverage slice passes through one.
+        _hollow: dict[str, frozenset[FnLocator]] = dict(stub_hold_hollow or {})
         _execution = execute_fill(
             routes,
             hollow=_hollow,
@@ -881,7 +882,7 @@ class PhaseCFillEngine:
             # whose 33-unit batch was all re-fills).
             # When the TDD driver passed a blocker histogram, that rank
             # replaces leaf-first: otherwise the engine re-sorts the batch
-            # and a constructor `take_batch` placed at the head is dispatched
+            # and a constructor the rank placed at the head is dispatched
             # last because `fmt`/`new` are high-frequency names (run
             # `155810-cbb3b9fc` iter 1). The histogram does not re-open
             # count-change barriers — unique blocker counts serialised the

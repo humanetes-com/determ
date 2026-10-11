@@ -23,11 +23,17 @@ reason (and, for a hold, the runs it waited on). On that:
 - ``holder_not_opened`` — a hold names a run that did not open. Waiting for a
   run that never opens is waiting for nothing: a deferred run writes no
   graded row, so no grace clock can release it.
-- ``blocker_unwritten`` — some candidate writes a BLOCKER (a stub a failing
-  test is hollow on, or a locator the sweep's crash evidence blames) and no
-  opened run writes it. A hollow test cannot be judged by any route until its
-  stub has a body, so a fill that opens none of the blocker's writers spends
-  its budget on tests that cannot move.
+- ``blocker_unwritten`` — a BLOCKER has no opened run that writes it. A
+  blocker is a stub a failing test's first failure sits in (the held view,
+  `held_stubs`), or a locator the sweep's crash evidence blames that some
+  candidate writes. A held test cannot be judged by any route until its stub
+  has a body, so a fill that opens no writer of it spends its budget on
+  tests that cannot move. A held stub counts as written only by a run that
+  aims at it (`HeldStubs.writes`), and it is reported even when no candidate
+  targets it at all: on run `857717-812ee44c` fills 3-5,
+  `src/wrapper.rs::source` held three red tests and was in no candidate
+  run's targets, and the old intersection of the blockers with the
+  candidates' targets kept the check silent.
 - ``nothing_opened`` — candidates exist that aim at something and none opened.
 - ``deferred_share`` / ``over_budget`` — a deferred run carries a positive
   share, or the opened shares exceed the budget.
@@ -57,21 +63,21 @@ measures it before any rule is written for it.
 """
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.models import FnLocator
 
 __all__ = [
     "Decided",
     "ScheduleViolation",
-    "all_blocking",
     "blamed_from_event",
     "decided_from_event",
     "due_from_event",
     "decided_from_schedule",
-    "hollow_stubs_from_event",
+    "hollow_from_event",
     "measured_owners_from_event",
     "violations",
 ]
@@ -88,6 +94,10 @@ class Decided:
     reason: str = ""
     held_by: tuple[str, ...] = ()
     share_minutes: float | None = None
+    #: The run is a session: its targets are its editable set.
+    session: bool = False
+    #: The bare names of the tests the run aims at.
+    aimed_tests: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,16 +110,16 @@ class ScheduleViolation:
 
 
 def violations(decided: Sequence[Decided], *,
-               hollow_stubs: Collection[FnLocator] | None,
+               hollow: Mapping[str, Collection[FnLocator]] | None,
                crash_blamed: Collection[FnLocator] = (),
                budget_minutes: float = 0.0,
                measured_owners: Collection[FnLocator] = (),
                due: Collection[FnLocator] = (),
                ) -> tuple[ScheduleViolation, ...]:
-    """Every invariant the decision set breaks. ``hollow_stubs`` None means
-    the caller does not know which stubs hold hollow tests (a recorded event
-    that predates `inputs`); the blocker check then reads blamed locators
-    only."""
+    """Every invariant the decision set breaks. ``hollow`` is the held view
+    (held test -> the stubs its first failure sits in); None means the caller
+    does not know it (a recorded event that predates `inputs`), and the
+    blocker check then reads blamed locators only."""
     out: list[ScheduleViolation] = []
     opened = [d for d in decided if d.opened]
     deferred = [d for d in decided if not d.opened]
@@ -128,20 +138,28 @@ def violations(decided: Sequence[Decided], *,
     candidates_write: set[FnLocator] = set()
     for d in decided:
         candidates_write |= d.targets
-    blockers = set(frozenset(crash_blamed) & candidates_write)
-    if hollow_stubs is not None:
-        blockers |= frozenset(hollow_stubs) & candidates_write
+    held = HeldStubs.of_map(hollow)
+
+    def _writes(d: Decided, u: FnLocator) -> bool:
+        return held.writes(u, targets=d.targets, aimed_tests=d.aimed_tests,
+                           session=d.session)
+
+    blockers = set(frozenset(crash_blamed) & candidates_write) | held.units
     written: set[FnLocator] = set()
     for d in opened:
         written |= d.targets
-    for b in sorted(blockers - written, key=lambda u: (u.file, u.fn_name)):
-        writers = [d for d in deferred if b in d.targets]
+    for b in sorted(blockers, key=lambda u: (u.file, u.fn_name)):
+        if any(_writes(d, b) for d in opened):
+            continue
+        writers = [d for d in deferred if _writes(d, b)]
         out.append(ScheduleViolation(
             "blocker_unwritten",
-            f"{b.file}::{b.fn_name} is written by no opened run; its "
-            "writers were deferred: "
-            + ", ".join(f"{d.label} ({d.reason or 'deferred'})"
-                        for d in writers)))
+            f"{b.file}::{b.fn_name} is written by no opened run"
+            + ("; its writers were deferred: "
+               + ", ".join(f"{d.label} ({d.reason or 'deferred'})"
+                           for d in writers)
+               if writers else
+               "; no candidate run aims at it")))
 
     for u in sorted(frozenset(due) - written, key=lambda x: (x.file, x.fn_name)):
         writers = [d for d in deferred if u in d.targets]
@@ -191,7 +209,9 @@ def decided_from_schedule(sched: Any) -> list[Decided]:
         out.append(Decided(
             key=s.run.key, label=s.run.label, targets=s.run.targets,
             opened=opened, reason=s.reason, held_by=tuple(s.held_by),
-            share_minutes=s.share_minutes))
+            share_minutes=s.share_minutes,
+            session=str(getattr(s.run.kind, "value", s.run.kind)) == "session",
+            aimed_tests=frozenset(s.run.target_tests)))
     return out
 
 
@@ -220,21 +240,22 @@ def decided_from_event(data: Mapping[str, Any]) -> list[Decided]:
             targets=frozenset(_loc(t) for t in raw.get("targets") or ()),
             opened=opened, reason=str(raw.get("reason", "")),
             held_by=tuple(str(h) for h in raw.get("held_by") or ()),
-            share_minutes=float(share) if share is not None else None))
+            share_minutes=float(share) if share is not None else None,
+            session=str(raw.get("kind", "")) == "session",
+            aimed_tests=frozenset(
+                str(t) for t in raw.get("target_tests") or ())))
     return out
 
 
-def hollow_stubs_from_event(data: Mapping[str, Any]
-                            ) -> frozenset[FnLocator] | None:
-    """The stubs the event's recorded hollow map names, or None when the
-    event predates recorded inputs."""
+def hollow_from_event(data: Mapping[str, Any]
+                      ) -> dict[str, frozenset[FnLocator]] | None:
+    """The hollow map the event's inputs recorded (held test -> stubs), or
+    None when the event predates recorded inputs."""
     inputs = data.get("inputs")
     if not isinstance(inputs, Mapping) or "hollow" not in inputs:
         return None
-    stubs: set[FnLocator] = set()
-    for locs in dict(inputs.get("hollow") or {}).values():
-        stubs.update(_loc(x) for x in locs or ())
-    return frozenset(stubs)
+    return {str(t): frozenset(_loc(x) for x in locs or ())
+            for t, locs in dict(inputs.get("hollow") or {}).items()}
 
 
 def due_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
@@ -262,10 +283,3 @@ def blamed_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
     return frozenset(_loc(x) for x in inputs.get("crash_blamed") or ())
 
 
-def all_blocking(hollow: Mapping[str, Iterable[FnLocator]]
-                 ) -> frozenset[FnLocator]:
-    """The stubs any leftover test is hollow on."""
-    out: set[FnLocator] = set()
-    for locs in hollow.values():
-        out.update(locs)
-    return frozenset(out)

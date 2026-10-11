@@ -763,7 +763,7 @@ def producer_dispatch_ranks(
     type_records: Iterable[TypeRecord],
 ) -> tuple[frozenset[FnLocator], frozenset[FnLocator]]:
     """`(builders, callees)` over the escalated set, for the ordering of the
-    escalated cohort (`dispatch_batch.promote_producers`) — pure over records,
+    escalated cohort (`dispatch_rank.UnitFacts.builder` / `.callee`) — pure over records,
     no LLM.
 
     `builders` are the escalated units whose body CONSTRUCTS a crate nominal

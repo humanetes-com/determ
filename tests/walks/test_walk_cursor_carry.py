@@ -116,39 +116,43 @@ def test_a_code_move_carries_the_tried_units_and_re_offers_the_rest(
         "sanity: the released unit really was on the persisted cursor")
 
 
-def test_negative_control_the_old_rule_re_sends_the_identical_batch(
-        monkeypatch, tmp_path: Path) -> None:
-    """The pre-fix rule injected into the same replay: `code_id` moved, so the
-    cursor is dropped whole, `order_frontier` is deterministic, and the
-    relaunch re-sends the batch the stopped process had already sent. This is
-    the lock the fix removes, and it must reproduce here or the test above has
-    proved nothing."""
-    import pipeline_core.domain.tdd_floor as _floor_mod
-    from pipeline_core.domain.tdd_floor import CursorCarry
+def _service_blind(monkeypatch) -> None:
+    """Never-served-first would itself skip `f` (it is in the floor's served
+    record), so the first batch would be `g` whatever carried the last
+    process's work. Every unit reads never-served here, which leaves the
+    persisted streak as the only carrier."""
+    from pipeline_core.domain.dispatch_rank import Service
 
-    floor = _stopped_process(monkeypatch, tmp_path)
-
-    def _pre_fix_carry(saved, *, cluster: str, code_id: str) -> CursorCarry:
-        if saved.cluster != cluster or saved.code_id != code_id:
-            return CursorCarry(carried_all=False)
-        return CursorCarry(attempted=saved.attempted, landed=saved.landed,
-                           declined=saved.declined)
-
-    monkeypatch.setattr(_floor_mod, "cursor_carry", _pre_fix_carry)
-    # Service ranking is a different lock: never-served-first would itself
-    # skip `f` (it is in the floor's served record) and the first batch
-    # would be `g` under BOTH the old cursor rule and the new one — so this
-    # control could not fail. Identity-ranking restores the isolation the
-    # cursor rule needs.
-    def _identity(ordered, served, flat, dead=(), red_dead=(), hollow=()):  # noqa: ARG001
-        return list(ordered)
+    def _never(key, **_kw):  # noqa: ARG001
+        return Service.NEVER
 
     monkeypatch.setattr(
-        "pipeline_core.application.reconstruct.phase_c_tdd.promote_by_service",
-        _identity,
-    )
-    logs, batches = _process(monkeypatch, tmp_path, floor)
+        "pipeline_core.application.reconstruct.phase_c_tdd.service_of", _never)
+
+
+def test_the_persisted_streak_alone_keeps_the_resume_off_the_last_batch(
+        monkeypatch, tmp_path: Path) -> None:
+    """With service blind, the streak the stopped process persisted is what
+    ranks the units it never claimed ahead of the one it did."""
+    floor = _stopped_process(monkeypatch, tmp_path)
+    assert floor["row"].get("unclaimed"), (
+        "the stopped process must persist its unclaimed streak")
+    _service_blind(monkeypatch)
+    _logs, batches = _process(monkeypatch, tmp_path, floor)
+    assert batches and batches[0] != (_U1,), batches[:1]
+
+
+def test_negative_control_the_old_rule_re_sends_the_identical_batch(
+        monkeypatch, tmp_path: Path) -> None:
+    """The lock, reproduced: service blind and the streak dropped from the
+    floor (what a resume that persisted nothing about the last process's
+    claims reads). The static order is deterministic, so the relaunch
+    re-sends the batch the stopped process had already sent. It must
+    reproduce here or the two tests above have proved nothing."""
+    floor = _stopped_process(monkeypatch, tmp_path)
+    floor["row"].pop("unclaimed", None)
+    _service_blind(monkeypatch)
+    _logs, batches = _process(monkeypatch, tmp_path, floor)
     assert batches and batches[0] == (_U1,), (
-        f"negative control: the old rule re-sends the identical first batch, "
-        f"got {batches[0] if batches else None}")
-    assert not any("released" in ln and "for retry" in ln for ln in logs)
+        f"negative control: without the streak the relaunch re-sends the "
+        f"identical first batch, got {batches[0] if batches else None}")

@@ -70,8 +70,11 @@ def test_unopened_units_reopen_the_pass_once_and_are_audited_as_unopened(
     assert set(reoffers[0]["units"]) == {"src/b.rs::g", "src/c.rs::h"}
     assert len(batches) >= 2
     assert _names(batches[0]) == _names(_FRONTIER)
-    assert _names(batches[1]) == {"src/b.rs::g", "src/c.rs::h"}, (
-        "the reopened pass must offer exactly the units no route opened")
+    # The cap covers the whole frontier, so the rank offers all three again,
+    # in class order (an owed unit leads one that is not); the two no route
+    # opened are in it.
+    assert {"src/b.rs::g", "src/c.rs::h"} <= _names(batches[1]), (
+        "the units no route opened must be offered again at the next batch")
     # Once per pass: the second refusal (iter 2) does not re-offer again,
     # and the pass closes there. A later re-offer belongs to the NEXT pass.
     assert not [d for d in reoffers if d["iter"] == 2]

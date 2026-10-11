@@ -25,7 +25,8 @@ from pipeline_core.domain.body_ledger import (
     flat_standing_unchanged,
     judgment_attributed,
 )
-from pipeline_core.domain.dispatch_batch import drop_standing_flat, take_batch
+from pipeline_core.domain.dispatch_batch import drop_standing_flat
+from pipeline_core.domain.dispatch_rank import take
 from pipeline_core.domain.models import FnLocator
 
 _FIXTURE = (Path(__file__).resolve().parent / "fixtures" / "body_ledger"
@@ -119,7 +120,8 @@ def test_the_flat_row_then_excludes_the_unit_while_its_convictors_are_in_the_pre
     ordered = [(FnLocator(k.file, k.fn_name), frozenset()) for k in standing]
     ordered += [(FnLocator("src/other.rs", f"u{i}"), frozenset()) for i in range(12)]
     flat = {FnLocator(k.file, k.fn_name) for k in excluded}
-    batch = take_batch([k for k, _ in drop_standing_flat(ordered, flat)], set(), 12)
+    batch = take([k for k, _ in drop_standing_flat(ordered, flat)], (), 12,
+                 cohort=None, traversed=())
     assert not (set(batch.keys) & flat)
     # NEGATIVE CONTROL — the erased-premise rows (UNMEASURED, convicting=())
     # exclude nothing, and the four occupy the head of the batch.
@@ -128,5 +130,5 @@ def test_the_flat_row_then_excludes_the_unit_while_its_convictors_are_in_the_pre
     assert flat_standing_unchanged(erased, oracle_fp_now=oracle,
                                    convicting_now=convict_now,
                                    evidence_now=evidence_now) == set()
-    control = take_batch([k for k, _ in ordered], set(), 12)
+    control = take([k for k, _ in ordered], (), 12, cohort=None, traversed=())
     assert set(control.keys) >= flat

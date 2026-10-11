@@ -57,11 +57,10 @@ from pipeline_core.domain.fill_schedule import (
 )
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.schedule_invariants import (
-    all_blocking,
     blamed_from_event,
     decided_from_event,
     decided_from_schedule,
-    hollow_stubs_from_event,
+    hollow_from_event,
     violations,
 )
 
@@ -147,6 +146,27 @@ def _case(seed: int) -> dict[str, Any]:
             hollow[t] = _pick(rng, tuple(sorted(
                 stubs, key=lambda u: (u.file, u.fn_name))), 1, 2)
     runs = [_run(rng, i, stubs, hollow) for i in range(rng.randint(2, 9))]
+    # The driver's guarantee, which the schedule is entitled to: every held
+    # stub is in the batch (`dispatch_rank.take`), and the per-fn route plans
+    # every stub of the batch. A held stub no unit route targets is the
+    # driver's failure, not the schedule's.
+    held_units = frozenset().union(*hollow.values()) if hollow else frozenset()
+    unit_written = frozenset().union(*(
+        r.targets for r in runs if r.kind is not RouteKind.SESSION))
+    orphans = held_units - unit_written
+    if orphans:
+        seq = len(runs)
+        runs.append(RouteRun(
+            kind=RouteKind.PER_FN, label=f"per-fn #{seq}",
+            targets=frozenset(orphans),
+            target_tests=frozenset(
+                t for t, locs in hollow.items() if locs & orphans),
+            stubs_in_targets=frozenset(orphans),
+            files=tuple(sorted({u.file for u in orphans})), seq=seq,
+            bodies_sha="b",
+            unit_tests=tuple(
+                (u, frozenset(t for t, locs in hollow.items() if u in locs))
+                for u in sorted(orphans, key=lambda x: (x.file, x.fn_name)))))
     blamed = _pick(rng, FNS, 0, 2) if rng.random() < 0.4 else frozenset()
     attributed = _pick(rng, FNS, 0, 6) if rng.random() < 0.6 else frozenset()
     return {
@@ -334,7 +354,7 @@ def test_every_generated_schedule_satisfies_the_invariants() -> None:
         sched = _schedule(case)
         found = violations(
             decided_from_schedule(sched),
-            hollow_stubs=all_blocking(case["hollow"]),
+            hollow=case["hollow"],
             crash_blamed=case["blamed"], budget_minutes=case["budget"])
         broken.extend(f"seed {seed}: {v.render()}" for v in found)
     assert not broken, f"{len(broken)} violation(s):\n" + "\n".join(broken[:20])
@@ -349,7 +369,7 @@ def test_the_generator_reaches_the_pre_change_defect() -> None:
         case = _case(seed)
         kinds.update(v.kind for v in violations(
             decided_from_schedule(_prechange_schedule(case)),
-            hollow_stubs=all_blocking(case["hollow"]),
+            hollow=case["hollow"],
             crash_blamed=case["blamed"], budget_minutes=case["budget"]))
     assert {"holder_not_opened", "blocker_unwritten"} <= kinds
 
@@ -401,7 +421,7 @@ def test_a_rebuy_that_holds_and_is_then_deferred_breaks_both() -> None:
     old = _prechange_schedule(case)
     found = violations(
         decided_from_schedule(old),
-        hollow_stubs=all_blocking(case["hollow"]),
+        hollow=case["hollow"],
         crash_blamed=case["blamed"], budget_minutes=case["budget"])
     kinds = {v.kind for v in found}
     assert kinds == {"holder_not_opened", "blocker_unwritten"}
@@ -414,7 +434,7 @@ def test_a_rebuy_that_holds_and_is_then_deferred_breaks_both() -> None:
     now = _schedule(case)
     assert not violations(
         decided_from_schedule(now),
-        hollow_stubs=all_blocking(case["hollow"]),
+        hollow=case["hollow"],
         crash_blamed=case["blamed"], budget_minutes=case["budget"])
     assert [s.run.label for s in now.ordered][0] == "per-fn"
     assert ("file src/a.rs", "rebuy_flat", ()) in [
@@ -456,7 +476,7 @@ def test_the_checker_names_a_hold_on_a_run_that_did_not_open() -> None:
         Decided(key="o", label="other", targets=frozenset(), opened=True),
     ]
     kinds = {v.kind for v in violations(
-        decided, hollow_stubs=frozenset({u}), budget_minutes=0.0)}
+        decided, hollow={"t_held": frozenset({u})}, budget_minutes=0.0)}
     assert kinds == {"holder_not_opened", "blocker_unwritten"}
 
 
@@ -477,7 +497,7 @@ def test_the_recorded_decision_breaks_both_invariants() -> None:
     the stub every failing test's first failure sat on with no writer."""
     ev = _recorded()["event"]
     found = violations(
-        decided_from_event(ev), hollow_stubs=hollow_stubs_from_event(ev),
+        decided_from_event(ev), hollow=hollow_from_event(ev),
         crash_blamed=blamed_from_event(ev),
         budget_minutes=float(ev["budget_minutes"]))
     kinds = {v.kind for v in found}
@@ -494,13 +514,13 @@ def test_todays_admission_on_the_recorded_ranking_keeps_both() -> None:
     sched = admit_ranked(**_ranked_inputs(rec))
     decided = decided_from_schedule(sched)
     found = violations(
-        decided, hollow_stubs=hollow_stubs_from_event(ev),
+        decided, hollow=hollow_from_event(ev),
         crash_blamed=blamed_from_event(ev),
         budget_minutes=float(ev["budget_minutes"]))
     assert not found, [v.render() for v in found]
     opened = list(sched.ordered)
     assert opened[0].run.label == "per-fn 1 stub(s), 18 re-fill(s)"
-    stubs = hollow_stubs_from_event(ev) or frozenset()
+    stubs = frozenset().union(*(hollow_from_event(ev) or {}).values())
     assert opened[0].run.targets & stubs
     rebuys = [s for s in sched.deferred if s.reason == "rebuy_reverted"]
     assert [s.run.label for s in rebuys] == [
@@ -653,21 +673,21 @@ def test_an_admitted_owner_no_candidate_writes_is_named() -> None:
     buf = FnLocator("src/ensure.rs", "new")
     file_run = Decided(key="f", label="file src/ensure.rs",
                        targets=frozenset({buf}), opened=True, share_minutes=5.0)
-    got = violations([file_run], hollow_stubs=None, measured_owners={render})
+    got = violations([file_run], hollow=None, measured_owners={render})
     assert [v.kind for v in got] == ["owner_unrouted"]
     assert "src/ensure.rs::render" in got[0].detail
 
     parked = Decided(key="s", label="session[1 test(s), 3 unit(s)] #8",
                      targets=frozenset({render}), opened=False,
                      reason="pair_wait")
-    assert violations([file_run, parked], hollow_stubs=None,
+    assert violations([file_run, parked], hollow=None,
                       measured_owners={render}) == ()
     opened = Decided(key="f2", label="file src/ensure.rs",
                      targets=frozenset({render, buf}), opened=True,
                      share_minutes=5.0)
-    assert violations([opened], hollow_stubs=None,
+    assert violations([opened], hollow=None,
                       measured_owners={render}) == ()
-    assert violations([file_run], hollow_stubs=None) == ()
+    assert violations([file_run], hollow=None) == ()
 
 
 def test_an_owner_admitted_on_an_earlier_sweep_is_still_checked() -> None:
@@ -694,12 +714,12 @@ def test_an_owner_admitted_on_an_earlier_sweep_is_still_checked() -> None:
     assert owners == {render}
     file_run = Decided(key="f", label="file src/ensure.rs",
                        targets=frozenset({buf}), opened=True, share_minutes=5.0)
-    got = violations([file_run], hollow_stubs=None, measured_owners=owners)
+    got = violations([file_run], hollow=None, measured_owners=owners)
     assert [v.kind for v in got] == ["owner_unrouted"]
     assert "src/ensure.rs::render" in got[0].detail
     hollow = Decided(key="h", label="pair hollow", targets=frozenset({render}),
                      opened=False, reason="hollow")
-    assert violations([file_run, hollow], hollow_stubs=None,
+    assert violations([file_run, hollow], hollow=None,
                       measured_owners=owners) == ()
 
 
@@ -746,12 +766,12 @@ def test_every_owed_function_some_candidate_writes_gets_an_opened_writer() -> No
             unpaid_grace=case["unpaid_grace"], bodies_sha=lambda _t: "b",
             due=due)
         found = [v for v in violations(
-            decided_from_schedule(with_due), hollow_stubs=None, due=due)
+            decided_from_schedule(with_due), hollow=None, due=due)
             if v.kind == "slice_unit_starved"]
         broken.extend(f"seed {seed}: {v.render()}" for v in found)
         starved_before += any(
             v.kind == "slice_unit_starved" for v in violations(
-                decided_from_schedule(_schedule(case)), hollow_stubs=None,
+                decided_from_schedule(_schedule(case)), hollow=None,
                 due=due))
     assert not broken, f"{len(broken)} violation(s):\n" + "\n".join(broken[:20])
     assert starved_before > 0, "the generator never starves an owed function"

@@ -1,10 +1,14 @@
-"""C: blocker-histogram ranking on the live `155810-cbb3b9fc` deferred maps.
+"""Blocker ranking on the live `155810-cbb3b9fc` deferred maps, through the
+one rank (`domain/dispatch_rank`).
 
 The plan's fixture, computed from `logs/events.jsonl` (`phase_c.dispatch.deferred`
-and `phase_c.fn.fill.start`), not a hand-made constructor list. Negative control
+and `phase_c.fn.fill.start`), not a hand-made constructor list. The blocker
+step that ranked it then (`promote_by_blocker_counts`) is gone; its content is
+the rank's HELD class, whose key is the number of red tests a stub holds. The
+replay hands each blocker its recorded count as that number. Negative control
 is the recorded iter-1 start order: `src/context.rs::fmt` first,
 `construct_from_adhoc` near last, because the engine re-sorted leaf-first after
-`take_batch`.
+the batch cut.
 """
 from __future__ import annotations
 
@@ -15,11 +19,8 @@ from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels,
     rank_stubs_by_blocker_counts,
 )
-from pipeline_core.domain.dispatch import blocker_histogram
-from pipeline_core.domain.dispatch_batch import (
-    promote_by_blocker_counts,
-    take_batch,
-)
+from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
+from pipeline_core.domain.dispatch_rank import Crash, UnitFacts, rank, take
 from pipeline_core.domain.models import FnLocator, Stub
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "dispatch" / "155810-cbb3b9fc_deferred.json"
@@ -35,11 +36,12 @@ def _load() -> dict:
 
 
 def _hist(deferred_raw: dict[str, list[str]]) -> dict[FnLocator, int]:
-    deferred = {
-        _loc(c): frozenset(_loc(b) for b in blks)
-        for c, blks in deferred_raw.items()
-    }
-    return blocker_histogram(deferred)
+    """How many recorded deferred consumers name each blocker."""
+    out: dict[FnLocator, int] = {}
+    for blks in deferred_raw.values():
+        for b in blks:
+            out[_loc(b)] = out.get(_loc(b), 0) + 1
+    return out
 
 
 def test_iter2_histogram_names_construct_as_the_top_blocker() -> None:
@@ -54,13 +56,13 @@ def test_iter2_histogram_names_construct_as_the_top_blocker() -> None:
 
 
 def test_iter2_batch_opens_on_construct() -> None:
-    """After `promote_by_blocker_counts` + `take_batch(12)`, construct is slot 0.
-    The pre-fix order_frontier ranking left it outside the first batch."""
+    """Under the rank, construct (27) is slot 0 of the batch; the pre-fix
+    `order_frontier` ranking left it outside the first batch."""
     data = _load()
     iter2 = next(d for d in data["deferred"] if d["iter"] == 2)
     hist = _hist(iter2["deferred"])
-    # Frontier as a bag of the histogram keys plus a few accessors that
-    # order_frontier would have put first (high leaf-name frequency).
+    # Frontier: a few accessors `order_frontier` would have put first (high
+    # leaf-name frequency), then the blockers.
     accessors = [
         FnLocator("src/wrapper.rs", "fmt"),
         FnLocator("src/context.rs", "fmt"),
@@ -68,12 +70,14 @@ def test_iter2_batch_opens_on_construct() -> None:
         FnLocator("src/error.rs", "new"),
         FnLocator("src/kind.rs", "new"),
     ]
-    producers = list(hist)
-    ordered = [(k, frozenset()) for k in accessors + producers]
-    ranked = promote_by_blocker_counts(ordered, hist)
-    assert ranked[0][0] == FnLocator("src/error.rs", "construct")
-    batch = take_batch([k for k, _ in ranked], set(), 12)
+    static = accessors + list(hist)
+    facts = {k: UnitFacts(static_index=i, held_tests=hist.get(k, 0))
+             for i, k in enumerate(static)}
+    ranked = rank(facts)
+    assert ranked[0] == FnLocator("src/error.rs", "construct")
+    batch = take(ranked, set(hist), 12, cohort=None, traversed=())
     assert batch.keys[0] == FnLocator("src/error.rs", "construct")
+    assert set(hist) <= set(batch.keys)
 
 
 def test_iter1_recorded_start_order_is_the_negative_control() -> None:
@@ -121,13 +125,14 @@ def test_iter1_ranking_puts_high_count_ahead_of_fmt_in_the_pool() -> None:
 
 
 def _driver_order(hist: dict[FnLocator, int],
-                  grades: dict[FnLocator, int]) -> list[FnLocator]:
-    """The driver's two ranking steps the pool must follow: blocker counts,
-    then crash evidence moved to the front, stable within a grade."""
-    from pipeline_core.domain.dispatch_batch import promote_crash_evidence
-    ordered = [(k, None) for k in sorted(hist, key=lambda k: (k.file, k.fn_name))]
-    ordered = promote_by_blocker_counts(ordered, hist)
-    return [k for k, _ in promote_crash_evidence(ordered, grades)]
+                  crash: dict[FnLocator, Crash] | None = None) -> list[FnLocator]:
+    """The driver's order the pool must follow: the one rank over these facts,
+    with a static order by file name (the tie the bug was about)."""
+    crash = crash or {}
+    keys = sorted(set(hist) | set(crash), key=lambda k: (k.file, k.fn_name))
+    return rank({k: UnitFacts(static_index=i, held_tests=hist.get(k, 0),
+                              crash=crash.get(k))
+                 for i, k in enumerate(keys)})
 
 
 def _old_overlay(ranks: dict[FnLocator, int],
@@ -148,13 +153,12 @@ def test_pool_starts_the_largest_hold_first_when_every_unit_shares_a_crash_grade
     head — the largest hold — not the alphabetically first files (run
     `311306-c8624d12`, 2026-09-22: 12 units tied at rank 46, the 45-test
     holder started fourth in iter 2 and not at all in iter 1)."""
-    from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
     holds = {"src/aa.rs": 3, "src/bb.rs": 5, "src/cc.rs": 7,
              "src/xx.rs": 20, "src/yy.rs": 30, "src/zz.rs": 40}
     stubs = [Stub(file=f, fn_name="unit") for f in holds]
     hist = {s.key: n for s, n in zip(stubs, holds.values(), strict=True)}
     grades = dict.fromkeys(hist, 1)
-    order = _driver_order(hist, grades)
+    order = _driver_order(hist, dict.fromkeys(hist, Crash.SITED))
     assert [k.file for k in order[:3]] == ["src/zz.rs", "src/yy.rs", "src/xx.rs"]
 
     ranks = dispatch_ranks_of(order)
@@ -169,15 +173,15 @@ def test_pool_starts_the_largest_hold_first_when_every_unit_shares_a_crash_grade
     assert [s.file for s in old[:3]] == ["src/aa.rs", "src/bb.rs", "src/cc.rs"]
 
 
-def test_pool_keeps_an_observed_frame_above_a_larger_uncrashed_hold() -> None:
-    """Crash-outranks survives: a blamed frame with a small hold still starts
-    ahead of an uncrashed unit with a large one, because the driver put it
-    there and the pool reads the driver."""
-    from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
+def test_every_held_stub_starts_before_a_crash_blamed_unit_that_holds_nothing() -> None:
+    """A stub holding red tests is the strongest need a sweep states, and the
+    rank's first class; a crash-blamed unit that holds no test (a frame of a
+    native fault in a filled body) leads the next class. Among held stubs the
+    larger hold starts first."""
     big = Stub(file="src/a.rs", fn_name="builder")
     blamed = Stub(file="src/z.rs", fn_name="dropper")
     mid = Stub(file="src/m.rs", fn_name="accessor")
-    hist = {big.key: 27, mid.key: 14, blamed.key: 3}
-    ranks = dispatch_ranks_of(_driver_order(hist, {blamed.key: 0}))
+    hist = {big.key: 27, mid.key: 14}
+    ranks = dispatch_ranks_of(_driver_order(hist, {blamed.key: Crash.BLAMED}))
     names = [s.fn_name for s in rank_stubs_by_blocker_counts([mid, big, blamed], ranks)]
-    assert names == ["dropper", "builder", "accessor"]
+    assert names == ["builder", "accessor", "dropper"]

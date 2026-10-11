@@ -56,7 +56,6 @@ from pipeline_core.domain.fill_schedule import (
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 from pipeline_core.domain.schedule_invariants import (
-    all_blocking,
     decided_from_schedule,
     violations,
 )
@@ -445,7 +444,7 @@ def _check_schedule(sched: FillSchedule,
     if not deps.scheduled:
         return
     found = violations(
-        decided_from_schedule(sched), hollow_stubs=all_blocking(hollow),
+        decided_from_schedule(sched), hollow=hollow,
         crash_blamed=deps.crash_blamed,
         budget_minutes=sched.budget_minutes,
         measured_owners=deps.measured_owners,

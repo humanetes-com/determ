@@ -39,7 +39,7 @@ def group_priority_levels(
     free worker takes the next without waiting for the slowest peer.
     Ranking still decides start ORDER; it does not decide who waits.
 
-    Without `unit_ranks` the engine re-sorts leaf-first after `take_batch`,
+    Without `unit_ranks` the engine re-sorts leaf-first after the batch cut,
     which undoes constructor-first ranking: run `155810-cbb3b9fc` iter 1
     dispatched `fmt` first and `construct_from_adhoc` last even though both
     were in the batch, because `fmt` is a high-frequency name. Pure: no

@@ -24,7 +24,6 @@ from pipeline_core.application.reconstruct.scheduling import (
     group_priority_levels,
     rank_stubs_by_blocker_counts,
 )
-from pipeline_core.domain.dispatch import blocker_histogram
 from pipeline_core.domain.models import FnLocator, Stub
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "dispatch" / "346231-54bc1489_deferred.json"
@@ -40,11 +39,13 @@ def _load() -> dict:
 
 
 def _hist(deferred_raw: dict[str, list[str]]) -> dict[FnLocator, int]:
-    deferred = {
-        _loc(c): frozenset(_loc(b) for b in blks)
-        for c, blks in deferred_raw.items()
-    }
-    return blocker_histogram(deferred)
+    """How many recorded deferred consumers name each blocker: the rank map
+    the driver handed the pool on this run."""
+    out: dict[FnLocator, int] = {}
+    for blks in deferred_raw.values():
+        for b in blks:
+            out[_loc(b)] = out.get(_loc(b), 0) + 1
+    return out
 
 
 def _pre_fix_split_on_rank_change(
