@@ -158,10 +158,10 @@ from pipeline_core.domain.dispatch_rank import (
     Service,
     UnitFacts,
     Withheld,
-    next_streak,
     off_batch_reasons,
     rank,
     service_of,
+    streak_after_turn,
     take,
 )
 from pipeline_core.domain.escalation_lifetime import (
@@ -1431,11 +1431,15 @@ def run_phase_c_tdd(
     # landing spends it, and a function no route writes holds the cluster
     # open until the backstop.
     _owed_misses = int(os.getenv("TDD_OWED_MISSES", str(DEFAULT_MISSES)))
-    # Sweeps each frontier unit has spent on the frontier since a run last
-    # claimed it (`dispatch_rank.next_streak`): the first key of the rank in
-    # every class. Persisted with the floor, so a resumed process ranks the
-    # units the last one kept cutting first.
+    # Sweeps each frontier unit has spent on the frontier since a turn last
+    # counted (`dispatch_rank.streak_after_turn`): the first key of the rank
+    # in every class. Persisted with the floor, so a resumed process ranks
+    # the units the last one kept cutting first. `_fault_retried` is the
+    # fault sites already given the one stay after a peel that landed
+    # nothing; it is not persisted, so a new process may grant that stay
+    # once more.
     _unclaimed: dict[FnLocator, int] = {}
+    _fault_retried: frozenset[FnLocator] = frozenset()
     # The rungs an owed function climbs before its test is spent: a unit
     # route, then the slice session when sessions run (`candidate_tiers`).
     _ladder: tuple[str, ...] = (
@@ -5965,6 +5969,11 @@ def run_phase_c_tdd(
                     dead=_dead_keys, red_dead=_red_dead, hollow=_stub_keys),
                 unclaimed=_unclaimed.get(_k, 0))
         _ranked = rank(_facts)
+        # Fault sites only: a chain inference is the OTHER class and must
+        # rotate with it. The stay in `streak_after_turn` reads this set.
+        _fault_sites = frozenset(
+            k for k, fact in _facts.items()
+            if fact.crash in (Crash.BLAMED, Crash.SITED))
         ordered = [(k, eligible.get(k, set())) for k in _ranked]
         _held_in = _holds.units & frozenset(_ranked)
         _held_off = _not_ranked.held_violations(_holds.units)
@@ -7334,15 +7343,16 @@ def run_phase_c_tdd(
         # never-served rank instead of silently dropping to bucket 1.
         _served_at.update(dict.fromkeys(_attempted, iter_n))
         _served_verified.update(_attempted)
-        # CLAIMED is what a run opened or landed a body on; a unit the cap
-        # left out, a share ran out before, or a premise refusal skipped was
-        # not claimed and leads its class at the next sweep
-        # (`dispatch_rank.next_streak`). Batch membership is not a claim: on
-        # run `857717-812ee44c` fill 4 the per-fn run's share ran out before
-        # `src/error.rs::object_drop_front`, and the owed share's streak,
-        # counted on the batch, reset to 0 all the same.
-        _unclaimed = next_streak(_unclaimed, _ranked,
-                                 _attempted | _landed_after_fill)
+        # A turn resets the streak, so the frontier rotates when no body
+        # changed. A fault site whose body did not land stays hungry once
+        # (`_fault_retried`), then a later peel resets it: counting the open
+        # zeroed the two fault-site units on run `2157238-210637e6` after
+        # the file route peeled them, and they sat past the cap. A share
+        # cut, a premise refusal and a lost answer are already outside
+        # `_attempted`.
+        _unclaimed, _fault_retried = streak_after_turn(
+            _unclaimed, _ranked, _attempted, _landed_after_fill,
+            _fault_sites, _fault_retried)
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
         # The forced followup's own outcome, folded beside the main-stream

@@ -19,7 +19,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 from pipeline_core.domain.dispatch_batch import DispatchBatch
-from pipeline_core.domain.dispatch_rank import UnitFacts, next_streak, rank, take
+from pipeline_core.domain.dispatch_rank import (
+    UnitFacts,
+    rank,
+    streak_after_turn,
+    take,
+)
 from pipeline_core.domain.tdd_floor import (
     TddFloor,
     cursor_carry,
@@ -117,10 +122,12 @@ def test_negative_control_the_old_rule_re_sends_the_identical_first_batch() -> N
     assert len(first.keys) == cap
 
     # The stopped process landed 6 of its 12 and declined 2; the other 4 came
-    # back with nothing. Every one of the 12 was opened by a route (claimed).
+    # back with nothing. Every one of the 12 was opened by a route, and none
+    # of them is a fault site, so every open counted as a turn.
     landed = first.keys[:6]
     declined = first.keys[6:8]
-    streak = next_streak({}, frontier, first.keys)
+    streak, _retried = streak_after_turn(
+        {}, frontier, first.keys, landed, (), ())
     saved = replace(_floor(tuple(first.keys), landed=tuple(landed),
                            declined=tuple(declined)),
                     unclaimed=tuple(sorted((k, n) for k, n in streak.items()
@@ -140,8 +147,8 @@ def test_negative_control_the_old_rule_re_sends_the_identical_first_batch() -> N
     carry = cursor_carry(back, cluster="stable", code_id="MOVED")
     resumed = _batch(frontier, resumed_streak, carry.attempted, cap)
     assert set(resumed.keys).isdisjoint(first.keys), (
-        "a unit a route already claimed must not lead the next batch while "
-        "units the pass has not claimed wait")
+        "a unit a route already gave a turn must not lead the next batch "
+        "while units the pass has not offered wait")
     assert resumed.attempted_before == len(carry.attempted)
 
 

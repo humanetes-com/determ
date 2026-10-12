@@ -27,8 +27,8 @@ from dataclasses import dataclass
 
 from .rust_lex import code_mask
 
-__all__ = ["UseItem", "use_items", "missing_use_items", "insert_use_items",
-           "divergent_item_names"]
+__all__ = ["UseItem", "bound_names", "insert_use_items", "missing_use_items",
+           "names_bound", "use_items", "divergent_item_names"]
 
 # The item kinds whose SHAPE a body can depend on. `fn` is excluded on purpose:
 # a differing fn is a differing body, which is the thing being moved.
@@ -117,9 +117,13 @@ class UseItem:
 
 def _binding_name(use_line: str) -> str:
     """The name a single-path `use` binds: its alias, else its last segment.
-    Brace groups and globs return `*` — deliberately never matched as a name, so
-    a grouped import is copied only when its exact text is absent."""
+
+    Brace groups and globs return `*` so a grouped import is copied only when
+    its exact text is absent. Whether any name it binds is already taken is
+    :func:`names_bound`, which sees the members."""
     body = use_line.rstrip().rstrip(";").strip()
+    if body.startswith("pub "):
+        body = body[4:].strip()
     if body.startswith("use "):
         body = body[4:].strip()
     if "{" in body or body.endswith("*"):
@@ -127,6 +131,68 @@ def _binding_name(use_line: str) -> str:
     if " as " in body:
         return body.rsplit(" as ", 1)[1].strip()
     return body.rsplit("::", 1)[-1].strip()
+
+
+def _use_statement(item_text: str) -> str:
+    """The `use` line of one item, attributes stripped."""
+    for line in item_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("use ") or stripped.startswith("pub use "):
+            return stripped
+    return ""
+
+
+def names_bound(use_line: str) -> frozenset[str]:
+    """Every simple name one `use` statement binds.
+
+    A glob binds nothing nameable. A brace group binds each member, an alias
+    instead of the member, and `self` as the last segment before the brace.
+    A single path binds its alias or its last segment."""
+    body = use_line.strip()
+    if body.startswith("pub "):
+        body = body[4:].strip()
+    if body.startswith("use "):
+        body = body[4:].strip()
+    if body.endswith(";"):
+        body = body[:-1].strip()
+    brace = body.find("{")
+    if brace >= 0 and "}" in body[brace:]:
+        head = body[:brace].strip().rstrip(":")
+        prefix = head.rsplit("::", 1)[-1].strip() if head else ""
+        inner = body[brace + 1:body.find("}", brace)]
+        names: set[str] = set()
+        for part in inner.split(","):
+            part = part.strip()
+            if not part or part == "*":
+                continue
+            if part == "self":
+                if prefix:
+                    names.add(prefix)
+                continue
+            if " as " in part:
+                alias = part.rsplit(" as ", 1)[1].strip()
+                if alias:
+                    names.add(alias)
+                continue
+            name = part.rsplit("::", 1)[-1].strip()
+            if name:
+                names.add(name)
+        return frozenset(names)
+    if body.endswith("*"):
+        return frozenset()
+    if " as " in body:
+        alias = body.rsplit(" as ", 1)[1].strip()
+        return frozenset({alias}) if alias else frozenset()
+    name = body.rsplit("::", 1)[-1].strip()
+    return frozenset({name}) if name else frozenset()
+
+
+def bound_names(text: str) -> frozenset[str]:
+    """Every simple name a top-level `use` in `text` binds."""
+    out: set[str] = set()
+    for item in use_items(text):
+        out |= names_bound(_use_statement(item.text))
+    return frozenset(out)
 
 
 def use_items(text: str) -> list[UseItem]:
@@ -167,21 +233,23 @@ def use_items(text: str) -> list[UseItem]:
 
 
 def missing_use_items(target_text: str, donor_text: str) -> list[UseItem]:
-    """Donor imports the target lacks — by exact text, and by bound NAME for the
-    single-path ones.
+    """Donor imports the target lacks — by exact text, and by bound NAME.
 
     Name matching is what makes this idempotent across formatting: the target
     may already import the same item as part of a brace group, or under the
     other of `crate::`/`super::`. Re-adding it would be an E0252 duplicate, and
     a same-name import of a DIFFERENT path is a real conflict this must not
-    create — either way, "the name is already bound here" means leave it."""
+    create — either way, "the name is already bound here" means leave it. A
+    glob binds no name, so it is copied only when its exact text is absent.
+    One member of a brace group already bound refuses the whole item: inserting
+    it would define that member twice."""
     have_text = {u.text.strip() for u in use_items(target_text)}
-    have_names = {u.imported for u in use_items(target_text) if not u.is_glob}
+    have_names = bound_names(target_text)
     out: list[UseItem] = []
     for u in use_items(donor_text):
         if u.text.strip() in have_text:
             continue
-        if not u.is_glob and u.imported in have_names:
+        if names_bound(_use_statement(u.text)) & have_names:
             continue
         out.append(u)
     return out

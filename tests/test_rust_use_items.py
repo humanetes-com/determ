@@ -65,6 +65,17 @@ def test_a_name_already_bound_is_never_re_added() -> None:
     assert missing_use_items(target, donor) == []
 
 
+def test_a_name_bound_inside_a_brace_group_is_never_re_added() -> None:
+    donor = "use crate::b::Widget;\n"
+    target = "use crate::a::{Widget, Other};\n"
+    assert missing_use_items(target, donor) == []
+    # One member already bound refuses the whole group.
+    grouped = "use crate::b::{Widget, Fresh};\n"
+    assert missing_use_items(target, grouped) == []
+    assert [i.imported for i in missing_use_items(
+        target, "use crate::b::Fresh;\n")] == ["Fresh"]
+
+
 def test_trait_import_needed_only_for_method_resolution_is_carried() -> None:
     # The case a reference-scan filter would miss: nothing NAMES `Context` as a
     # path head, but `.context(…)` does not resolve without the trait in scope.

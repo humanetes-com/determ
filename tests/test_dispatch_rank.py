@@ -29,6 +29,7 @@ from pipeline_core.domain.dispatch_rank import (
     off_batch_reasons,
     rank,
     service_of,
+    streak_after_turn,
     take,
 )
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks
@@ -279,17 +280,128 @@ def test_the_narrowest_owed_tier_leads_the_evidenced_class():
     assert rank(facts)[0] == "wide"
 
 
+def _batch_of(frontier: Sequence[str], streak: dict[str, int], cap: int, *,
+              facts):
+    ranked = rank({k: facts(k, i, streak) for i, k in enumerate(frontier)})
+    return ranked, take(ranked, (), cap, cohort=None, traversed=())
+
+
+def test_a_fault_site_whose_body_did_not_land_leads_the_next_batch():
+    """The file route opened two fault sites and peeled them, so nothing
+    landed. Fourteen other evidenced units were not opened. The next batch
+    contains the fault sites. A second peel of the same two resets them, so
+    they do not hold the cap.
+
+    Negative control: counting that open as a turn zeros the fault sites,
+    the fourteen climb, and a cap of 12 leaves the fault sites at ranks 14
+    and 15. That is the batch run `2157238-210637e6` iter 3 dispatched."""
+    fault = ["f0", "f1"]
+    others = [f"d{i:02d}" for i in range(14)]
+    frontier = fault + others
+    opened = set(fault)
+
+    def facts(k: str, i: int, streak: dict[str, int]) -> UnitFacts:
+        return UnitFacts(static_index=i,
+                         crash=Crash.BLAMED if k in fault else None,
+                         owed_tier=0, unclaimed=streak.get(k, 0))
+
+    streak, retried = streak_after_turn({}, frontier, opened, (), fault, ())
+    ranked, batch = _batch_of(frontier, streak, 12, facts=facts)
+    assert set(fault) <= set(batch.keys)
+    assert ranked[:2] == fault
+    assert set(fault) <= retried
+
+    again, _ = streak_after_turn(streak, frontier, opened, (), fault, retried)
+    _ranked_again, batch_again = _batch_of(frontier, again, 12, facts=facts)
+    assert set(fault).isdisjoint(batch_again.keys)
+
+    opened_as_turn = next_streak({}, frontier, opened)
+    ranked_old, old = _batch_of(frontier, opened_as_turn, 12, facts=facts)
+    assert set(fault).isdisjoint(old.keys)
+    assert ranked_old.index("f0") == 14 and ranked_old.index("f1") == 15
+
+
+def test_an_unlanded_batch_still_rotates_the_frontier():
+    """Nothing landed and no unit is a fault site. Three sweeps of 12 still
+    offer all 30, and only the third closes the pass. Resetting nobody
+    would re-send the first 12."""
+    frontier = [f"u{i:02d}" for i in range(30)]
+    streak: dict[str, int] = {}
+    retried: frozenset[str] = frozenset()
+    traversed: set[str] = set()
+    cohort: tuple[str, ...] | None = None
+    batches = []
+    for _ in range(3):
+        ranked = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+                       for i, k in enumerate(frontier)})
+        if cohort is None:
+            cohort = tuple(ranked)
+        batch = take(ranked, (), 12, cohort=cohort, traversed=traversed)
+        batches.append(batch)
+        if batch.completes_pass:
+            traversed, cohort = set(), None
+        else:
+            traversed |= set(batch.keys)
+        streak, retried = streak_after_turn(
+            streak, ranked, batch.keys, (), (), retried)
+    offered = {k for b in batches for k in b.keys}
+    assert offered == set(frontier)
+    assert [b.completes_pass for b in batches] == [False, False, True]
+    assert batches[1].keys != batches[0].keys
+    stuck = next_streak({}, frontier, ())
+    stuck_rank = rank({k: UnitFacts(static_index=i, unclaimed=stuck.get(k, 0))
+                       for i, k in enumerate(frontier)})
+    assert take(stuck_rank, (), 12, cohort=None, traversed=()).keys == batches[0].keys
+
+
+def test_sited_units_that_never_land_yield_the_batch_within_one_extra_sweep():
+    """Thirteen sited units and twenty-six owed ones, and nothing lands.
+    The sited prefix is offered twice (the stay, then the reset). Every
+    unit is still offered within ceil(39/12)+1 sweeps. Claiming each batch
+    in full, the bound without the stay, stays ceil(39/12)
+    (`test_39786_fill4_shape_every_owed_unit_is_offered_within_the_bound`)."""
+    crash = [f"c{i:02d}" for i in range(13)]
+    owed = [f"o{i:02d}" for i in range(26)]
+    frontier = crash + owed
+
+    def facts(k: str, i: int, streak: dict[str, int]) -> UnitFacts:
+        return UnitFacts(static_index=i,
+                         crash=Crash.SITED if k in crash else None,
+                         owed_tier=0 if k in owed else None,
+                         unclaimed=streak.get(k, 0))
+
+    streak: dict[str, int] = {}
+    retried: frozenset[str] = frozenset()
+    traversed: set[str] = set()
+    cohort: tuple[str, ...] | None = None
+    offered: set[str] = set()
+    bound = math.ceil(39 / 12) + 1
+    for _ in range(bound):
+        ranked = rank({k: facts(k, i, streak) for i, k in enumerate(frontier)})
+        if cohort is None:
+            cohort = tuple(ranked)
+        batch = take(ranked, (), 12, cohort=cohort, traversed=traversed)
+        offered |= set(batch.keys)
+        if batch.completes_pass:
+            traversed, cohort = set(), None
+        else:
+            traversed |= set(batch.keys)
+        streak, retried = streak_after_turn(
+            streak, ranked, batch.keys, (), crash, retried)
+    assert set(crash) <= offered and set(owed) <= offered
+
+
 def test_a_share_cut_counts_as_unclaimed():
     """Batch membership is not a claim. A unit the batch admitted and the
     run's share ran out before leads the next sweep. Control: the owed
     share's streak, counted on the batch, gave it 0 (run `857717-812ee44c`
     fill 4, `src/error.rs::object_drop_front`)."""
-    streak = next_streak({}, ["a", "b", "c"], claimed={"a"})
+    streak = next_streak({}, ["a", "b", "c"], {"a"})
     assert streak == {"a": 0, "b": 1, "c": 1}
     batch = ("a", "b")
     pre_fix = {u: (0 if u in batch else 1) for u in ("a", "b", "c")}
     assert pre_fix["b"] == 0 and streak["b"] == 1
-    assert next_streak(streak, ["a", "b"], claimed={"b"}) == {"a": 1, "b": 0}
+    assert next_streak(streak, ["a", "b"], {"b"}) == {"a": 1, "b": 0}
 
 
 # --- the content of the deleted reorderings ---------------------------------

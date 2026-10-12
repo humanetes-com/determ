@@ -51,7 +51,7 @@ from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
 from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH
-from ...domain.dispatch_rank import UnitFacts, next_streak, rank, take
+from ...domain.dispatch_rank import UnitFacts, rank, streak_after_turn, take
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -3505,10 +3505,16 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 _pass_cohort = None
             _prev_pass_completed = _batch.completes_pass
             _dispatched_ever |= _batch_keys
-            _unclaimed = next_streak(
-                _unclaimed, _ordered,
-                (set(_batch_keys) if sub.dispatched_fns is None
-                 else {FnLocator(*t) for t in sub.dispatched_fns}))
+            # This loop has no crash-anchored fault sites, so an open resets
+            # and the frontier rotates even when the body is peeled back. A
+            # lost answer is not a turn. A legacy engine that reports no
+            # dispatch set counts the batch, minus the answers it lost.
+            _opened_pm = (
+                set(_batch_keys) if sub.dispatched_fns is None
+                else {FnLocator(*t) for t in sub.dispatched_fns})
+            _lost_pm = {FnLocator(*t) for t in sub.answer_lost_fns}
+            _unclaimed, _ = streak_after_turn(
+                _unclaimed, _ordered, _opened_pm - _lost_pm, (), (), ())
             cur_stubs = self.fill.scan_unimplemented_functions(project_dir / "src").units
             # Both loops below are scoped to the BATCH: a unit the cap
             # withheld this iteration was neither filled nor refused.

@@ -30,9 +30,17 @@ THE RANK. One key per unit, built from typed evidence:
 - class `OTHER`: everything else; a crash's chain-derived inference leads it.
 
 Within each class the first key is the unclaimed streak, the number of
-sweeps the unit has been on the frontier since a run last claimed it. A unit
-the cap cut, a run's share cut or a premise refusal skipped leads the next
-sweep. That bound is what the pass cursor and the owed share's half split
+sweeps the unit has been on the frontier since a turn last counted
+(`streak_after_turn`). A unit the cap cut, a run's share cut or a premise
+refusal skipped had no turn and leads the next sweep. An offered unit
+resets, so the frontier rotates and a pass can complete when no body
+changed. A fault site whose body did not land does not reset the first
+time — the open was taken back — which is what keeps it at the head of
+its class. Counting that open reset the two fault-site units on run
+`2157238-210637e6` (iter 3) to zero after the file route peeled them, and
+they sat 15th and 16th, past the cap, behind units no route had opened.
+A later peel does reset it, so a fault that never lands cannot hold the
+batch. That bound is what the pass cursor and the owed share's half split
 each tried to give and neither did for every unit. After the streak: tests
 held (`HELD`); crash provenance, owed tier and service bucket (`EVIDENCED`);
 the chain inference, then the service bucket (`OTHER`: never served, served,
@@ -63,6 +71,7 @@ __all__ = [
     "Withheld",
     "next_streak",
     "off_batch_reasons",
+    "streak_after_turn",
     "rank",
     "service_of",
     "take",
@@ -139,7 +148,7 @@ class UnitFacts:
     #: Called by another escalated unit through a resolved call.
     callee: bool = False
     service: Service = Service.NEVER
-    #: Sweeps on the frontier since a run last claimed it.
+    #: Sweeps on the frontier since a turn last counted (`streak_after_turn`).
     unclaimed: int = 0
 
     @property
@@ -213,14 +222,51 @@ def take[K: Hashable](
 
 
 def next_streak[K: Hashable](
-    streak: Mapping[K, int], frontier: Iterable[K], claimed: Collection[K],
+    streak: Mapping[K, int], frontier: Iterable[K], reset: Collection[K],
 ) -> dict[K, int]:
-    """The unclaimed streak after a fill: 0 for a unit a run claimed (opened
-    it, or landed a body on it), one more for every other unit still on the
-    frontier. Units that left the frontier are dropped."""
-    claimed_set = set(claimed)
-    return {k: (0 if k in claimed_set else streak.get(k, 0) + 1)
+    """The unclaimed streak after a fill.
+
+    `reset` is the units whose turn counted. Each of those goes to 0.
+    Every other unit still on the frontier climbs by one. Units that left
+    the frontier are dropped. Which turns count is :func:`streak_after_turn`."""
+    reset_set = set(reset)
+    return {k: (0 if k in reset_set else streak.get(k, 0) + 1)
             for k in frontier}
+
+
+def streak_after_turn[K: Hashable](
+    streak: Mapping[K, int],
+    frontier: Iterable[K],
+    offered: Collection[K],
+    landed: Collection[K],
+    fault_sites: Collection[K],
+    retried: Collection[K],
+) -> tuple[dict[K, int], frozenset[K]]:
+    """The streak after one fill, and the fault sites already given a stay.
+
+    An offered unit resets, so the frontier rotates when a batch changes
+    no bytes and a pass can still complete. A share cut, a premise refusal
+    and a lost answer are not in `offered`: they had no turn and climb.
+
+    A fault site (`Crash.BLAMED` or `Crash.SITED`, never a chain inference)
+    whose body did not land had its turn taken back. The first time, it is
+    left out of the reset and climbs with the units no route opened, so
+    crash provenance still puts it at the head of the class. `retried`
+    records that stay. The next peel resets it like any other offered unit,
+    so a fault that never lands cannot hold the cap. A landing forgets the
+    stay: the next peel of a body that did land earns one more.
+
+    A body that landed resets even when no route opened the unit (a
+    passenger of a wider write). The returned set is the stays still
+    remembered for units on this frontier."""
+    front = list(frontier)
+    front_set = set(front)
+    offered_set = set(offered) & front_set
+    landed_set = set(landed) & front_set
+    stay = (offered_set & set(fault_sites)) - landed_set - set(retried)
+    reset = (offered_set - stay) | landed_set
+    remembered = ((set(retried) - landed_set) | stay) & front_set
+    return next_streak(streak, front, reset), frozenset(remembered)
 
 
 @dataclass(slots=True)
