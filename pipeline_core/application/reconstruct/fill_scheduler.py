@@ -39,6 +39,7 @@ from pipeline_core.domain import unit_clock
 from pipeline_core.domain.body_ledger import ReportKeep, WaveKept
 from pipeline_core.domain.fill_context import route_scope
 from pipeline_core.domain.fill_schedule import (
+    CrashBlame,
     FillBudget,
     FillSchedule,
     RouteKind,
@@ -53,6 +54,7 @@ from pipeline_core.domain.fill_schedule import (
     schedule,
     withhold_landed,
 )
+from pipeline_core.domain.held_stubs import Blockers, HeldStubs
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 from pipeline_core.domain.schedule_invariants import (
@@ -93,7 +95,10 @@ class FillExecutionDeps:
     #: ``crash_blamed``, ranks as a flat re-buy. Empty (the default)
     #: leaves every rank as the ledger would.
     unmeasurable_tests: frozenset[str] = frozenset()
-    crash_blamed: frozenset[FnLocator] = frozenset()
+    #: Crash culprit -> the tests whose crash convicted it
+    #: (`CrashSites.blame_map`); the schedule's blocker predicate asks a
+    #: session for a culprit only when it aims at one of those tests.
+    crash_blamed: CrashBlame = field(default_factory=dict)
     #: How many runs of a route kind one fill opens (`schedule`'s
     #: ``max_per_kind``); the rest are deferred to the next fill. Empty =
     #: unbounded. The session cap is `SLICE_SESSION_MAX_PER_FILL`.
@@ -477,6 +482,11 @@ def _schedule_inputs(deps: FillExecutionDeps,
         "crash_blamed": (
             sorted(f"{u.file}::{u.fn_name}" for u in deps.crash_blamed)
             if scheduled else []),
+        "crash_blamed_tests": (
+            {f"{u.file}::{u.fn_name}": sorted(ts)
+             for u, ts in sorted(Blockers.of({}, deps.crash_blamed)
+                                 .blamed.items()) if ts}
+            if scheduled else {}),
         "attributed": (
             sorted(f"{u.file}::{u.fn_name}" for u in deps.attributed)
             if scheduled else []),
@@ -637,6 +647,10 @@ def execute_fill(
     stopped = False
     ordered = list(sched.ordered)
     gate = _GroundGate(deps)
+    # The held stubs of this fill: a run's share never skips one it was
+    # given to write (`RunClock.owed`).
+    held_units = (HeldStubs.of_map(hollow).units if deps.scheduled
+                  else frozenset[FnLocator]())
     # Units a run of this fill kept a body for; no later run of the fill
     # rewrites them before the sweep grades them (`withhold_landed`).
     landed_fill: set[FnLocator] = set()
@@ -733,7 +747,8 @@ def execute_fill(
                 now=deps.now, ground_moved=gate,
                 scope=w.run.target_tests or None, units=w.run.targets,
                 unit_multiple=deps.unit_share_multiple,
-                call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp))
+                call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp),
+                owed=held_units & w.run.targets)
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}

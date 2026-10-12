@@ -90,7 +90,7 @@ from typing import Any
 
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.fill_class import FillOutcomeClass
-from pipeline_core.domain.held_stubs import HeldStubs
+from pipeline_core.domain.held_stubs import Blockers
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnRecord
 
@@ -129,6 +129,12 @@ class RouteKind(StrEnum):
     FILE = "file"
     IMPL = "impl"
     PER_FN = "per-fn"
+
+
+#: The sweep's crash blame as the schedule takes it: culprit -> the tests
+#: whose crash convicted it (`crash_site.blamed_tests`). A bare collection
+#: of culprits is accepted and knows no crashed test (`Blockers.of`).
+CrashBlame = Mapping[FnLocator, Collection[str]] | Collection[FnLocator]
 
 
 #: The order the fill walked before the schedule existed. It is the tie-break
@@ -1662,12 +1668,23 @@ def condensed_order(keys: Sequence[str],
     return out
 
 
-def _level(run: RouteRun, hollow: Mapping[str, frozenset[FnLocator]],
-           blamed: frozenset[FnLocator]) -> int:
+def _writes_any(run: RouteRun, blockers: Blockers,
+                units: Collection[FnLocator]) -> bool:
+    """Whether `run` writes any of `units`, by the one blocker predicate
+    (`Blockers.writes`)."""
+    session = run.kind is RouteKind.SESSION
+    return any(blockers.writes(u, targets=run.targets,
+                               aimed_tests=run.target_tests, session=session)
+               for u in units)
+
+
+def _level(run: RouteRun, blockers: Blockers) -> int:
     """The blockers-first tier. 0: the run writes a locator the sweep's
     crash evidence names (a frame-sited crash, or the stub failing tests
-    first panic in); 1: it fills a stub some leftover test is hollow on;
-    2: the rest.
+    first panic in); 1: it writes a stub some leftover test is held on;
+    2: the rest. "Writes" is :meth:`Blockers.writes`: a session that only
+    carries the blocker in its editable set, for another test's slice, does
+    not write it.
 
     One tier for 0 and 1 said nothing about WHICH blocker: on a stub-heavy
     tree every run holds some stub a hollow test runs through, so the tier
@@ -1676,10 +1693,16 @@ def _level(run: RouteRun, hollow: Mapping[str, frozenset[FnLocator]],
     `src/error.rs::construct` as the first panic of 128 of 141 failing
     tests, and the per-fn run holding it opened at slot 8 of 9, behind
     seven file and impl runs of 22 minutes each, none holding it — with the
-    fill ending at its first premise move."""
-    if run.targets & blamed:
+    fill ending at its first premise move.
+
+    Target membership was the test until 2026-10-11. Run
+    `2157238-210637e6` fills 2 and 3: every session carried a held stub or
+    a crash culprit as a passenger, every run read tier 0, and the route
+    order opened four sessions (110 minutes, net +1) ahead of the file,
+    impl and per-fn runs that aimed at those blockers."""
+    if _writes_any(run, blockers, blockers.culprits):
         return 0
-    if _blocking_stubs(run, hollow):
+    if _writes_any(run, blockers, blockers.held.units):
         return 1
     return 2
 
@@ -1687,10 +1710,12 @@ def _level(run: RouteRun, hollow: Mapping[str, frozenset[FnLocator]],
 def _run_is_unmeasurable(
     run: RouteRun,
     unmeasurable_tests: Collection[str],
-    crash_blamed: Collection[FnLocator],
+    crash_blamed: Mapping[FnLocator, Collection[str]] | Collection[FnLocator],
 ) -> bool:
     """True when every aimed test is one whose binary did not complete,
-    and no target is the crash-blamed locator that can complete it.
+    and the run writes no crash-blamed locator that can complete it
+    (:meth:`Blockers.writes`: a session carrying a culprit for another
+    test's slice is not its writer).
 
     Empty ``target_tests`` is not this class: the run named no test, so it
     cannot be "every name is unmeasurable." Empty ``unmeasurable_tests``
@@ -1700,8 +1725,10 @@ def _run_is_unmeasurable(
     """
     if not run.target_tests or not unmeasurable_tests:
         return False
-    if crash_blamed and run.targets & frozenset(crash_blamed):
-        return False
+    if crash_blamed:
+        blockers = Blockers.of({}, crash_blamed)
+        if _writes_any(run, blockers, blockers.culprits):
+            return False
     return run.target_tests <= frozenset(unmeasurable_tests)
 
 
@@ -1936,7 +1963,7 @@ def schedule(
     today_order: Sequence[RouteKind] = TODAY_ORDER,
     readmit_after: int = 2,
     unmeasurable_tests: Collection[str] = (),
-    crash_blamed: Collection[FnLocator] = (),
+    crash_blamed: CrashBlame = (),
     max_per_kind: Mapping[RouteKind, int] | None = None,
     attributed: Collection[FnLocator] = (),
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
@@ -2071,7 +2098,7 @@ def schedule(
     units = UnitService(rows_list, oracle_fp,
                         session_min_turns=session_min_turns,
                         evidence=unit_evidence)
-    blamed = frozenset(crash_blamed)
+    blockers = Blockers.of(hollow, crash_blamed)
 
     # Routes whose schedule exemptions have lapsed: graded `unpaid_grace`
     # times in a row, same targets, same oracle, never paying. They keep
@@ -2097,12 +2124,12 @@ def schedule(
             grace_left=_served_key(run) not in spent)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
             rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
-        ranked.append((run, rank, reason, _level(run, hollow, blamed)))
+        ranked.append((run, rank, reason, _level(run, blockers)))
 
     return admit_ranked(
         ranked, rows_list, oracle_fp=oracle_fp, hollow=hollow,
         budget_minutes=budget_minutes, today_order=today_order,
-        crash_blamed=blamed, max_per_kind=max_per_kind,
+        crash_blamed=crash_blamed, max_per_kind=max_per_kind,
         attributed=attributed, unpaid_grace=unpaid_grace,
         session_min_turns=session_min_turns, due=due, due_rungs=due_rungs)
 
@@ -2120,7 +2147,7 @@ def admit_ranked(
     hollow: Mapping[str, frozenset[FnLocator]],
     budget_minutes: float = 0.0,
     today_order: Sequence[RouteKind] = TODAY_ORDER,
-    crash_blamed: Collection[FnLocator] = (),
+    crash_blamed: CrashBlame = (),
     max_per_kind: Mapping[RouteKind, int] | None = None,
     attributed: Collection[FnLocator] = (),
     unpaid_grace: int = DEFAULT_UNPAID_GRACE,
@@ -2356,7 +2383,8 @@ def admit_ranked(
 
     # STAGE 3 — every blocker a candidate writes has an opened writer, and
     # so has every function a red test owes this fill.
-    kept, waiting = _cover_blockers(kept, waiting, hollow, blamed)
+    kept, waiting = _cover_blockers(
+        kept, waiting, Blockers.of(hollow, crash_blamed))
     kept, waiting = _cover_due(kept, waiting, frozenset(due), due_rungs or {})
     scheduled = kept
 
@@ -2392,26 +2420,24 @@ def admit_ranked(
 
 def _cover_blockers(
     opened: list[ScheduledRun], deferred: list[ScheduledRun],
-    hollow: Mapping[str, frozenset[FnLocator]],
-    blamed: frozenset[FnLocator],
+    blockers: Blockers,
 ) -> tuple[list[ScheduledRun], list[ScheduledRun]]:
     """Open, in schedule order, the first deferred writer of every blocker
     no opened run writes (stage 3 of :func:`admit_ranked`). A blocker is a
-    stub a leftover test's first failure sits in (`hollow`, the held view),
-    or a crash-blamed locator. A run WRITES a held stub only when it aims at
-    it (`HeldStubs.writes`): a session that has the stub in its editable set
-    as a passenger of another test's slice is not asked for that body. The
+    stub a leftover test's first failure sits in (the held view), or a
+    crash-blamed locator. A run WRITES a blocker only when it aims at it
+    (`Blockers.writes`): a session that has it in its editable set as a
+    passenger of another test's slice is not asked for that body. The
     promoted run keeps the reason it
     was ranked with, takes weight at least 1, and names the blockers it
     opened for (`blocker_writer`). A blocker no candidate writes at all is
     left for `schedule_invariants` to name."""
-    held = HeldStubs.of_map(hollow)
-    blocking: set[FnLocator] = set(blamed) | held.units
+    blocking: set[FnLocator] = set(blockers.units)
 
     def _writes(s: ScheduledRun, u: FnLocator) -> bool:
-        return held.writes(u, targets=s.run.targets,
-                           aimed_tests=s.run.target_tests,
-                           session=s.run.kind is RouteKind.SESSION)
+        return blockers.writes(u, targets=s.run.targets,
+                               aimed_tests=s.run.target_tests,
+                               session=s.run.kind is RouteKind.SESSION)
 
     uncovered = {u for u in blocking if not any(_writes(s, u) for s in opened)}
     if not uncovered:
@@ -2539,6 +2565,12 @@ class FillBudget:
         return allot_opening(ahead, rem)
 
 
+#: Real seconds a claim waiting on a reserved share sleeps between re-reads
+#: of the clock when no sibling returns: the wait ends on a release, or on
+#: the share's own minutes, whichever comes first.
+_RESERVED_WAIT_POLL_S = 5.0
+
+
 class RunClock:
     """One run's claim gate. It never interrupts: a unit, a turn or a session
     already claimed runs to completion; the clock only answers whether the
@@ -2567,7 +2599,31 @@ class RunClock:
     that thread's unit returns (:meth:`release`) or replaced by the thread's
     next claim, since its unit is over by then — so a serial route's turns
     and blocks see exactly the old rule. With no price (no graded row of the
-    kind) a grant reserves the rest of the share: one call, no sibling."""
+    kind) a grant reserves the rest of the share: one call, no sibling.
+
+    A share that is RESERVED is not a share that is SPENT. When the only
+    reason not to grant is other threads' calls in flight, and elapsed is
+    still below the share, the claim waits for one of them to return
+    (:meth:`release` notifies) and is asked again, premise included. It
+    ends granted, refused on premise, or refused ``share`` once elapsed
+    reaches the share. Run `2157238-210637e6` (2026-10-11) is the drop this
+    replaces: fill 1's per-fn workers each got ``share`` from the first
+    worker's no-price reservation and emptied the queue in a millisecond,
+    one call in 2.2 of 13.3 minutes and 18 units dropped as "the run's share
+    is spent". A thread never waits on itself (asking again ends its own
+    reservation), so a serial route cannot wait.
+
+    ``owed`` is the held stubs this run was given to write (the fill's held
+    view intersected with the run's targets). A claim that names units, all
+    of them owed, is granted once the share is SPENT and the fill still has
+    budget left: the share bounds the targets a run may skip, and a held
+    stub stops red tests whatever else is written. The exemption is not a
+    reservation. While elapsed is still below the share and another thread
+    holds one, an owed claim waits with every other claim and is asked
+    again, premise included. Same run, fill 2: the share spent on four
+    `From` impls left `src/context.rs::context` and `with_context`, holding
+    ten red tests, unclaimed. A claim with no units, or with any unit not
+    owed, stays on the share."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
@@ -2578,12 +2634,18 @@ class RunClock:
                  scope: frozenset[str] | None = None,
                  units: frozenset[FnLocator] = frozenset(),
                  unit_multiple: float = 0.0,
-                 call_price: float | None = None) -> None:
+                 call_price: float | None = None,
+                 owed: frozenset[FnLocator] = frozenset()) -> None:
         self.share_minutes = share_minutes
         #: Minutes one call of this run's kind takes (:func:`call_price`);
         #: what a granted claim reserves while its unit is in flight.
         self.call_price = call_price
+        #: The held stubs this run was given to write (see the class doc).
+        self.owed = frozenset(owed)
         self._lock = threading.Lock()
+        #: Notified on every release, so a claim waiting on a reserved share
+        #: re-asks as soon as a sibling's call returns.
+        self._returned = threading.Condition(self._lock)
         self._reserved: dict[int, float] = {}
         #: Each claimed unit's own bound, as a multiple of the share
         #: (`FILL_UNIT_SHARE_MULTIPLE`; :mod:`unit_clock`). 0 = unbounded.
@@ -2622,6 +2684,7 @@ class RunClock:
         and its minutes are in `elapsed()` from here on."""
         with self._lock:
             self._reserved.pop(threading.get_ident(), None)
+            self._returned.notify_all()
 
     def may_claim(self, tests: Iterable[str] | None = None,
                   units: Iterable[FnLocator] | None = None) -> bool:
@@ -2633,8 +2696,11 @@ class RunClock:
         """Make the next claim, or say why not: ``""`` when claimed,
         ``"premise"`` when the ground this claim was planned on has moved,
         ``"share"`` when the share is spent and the last claim bought
-        nothing. Budget follows payoff: within the share, always; past it
-        only while the last claim cashed and the fill has budget left.
+        nothing. Budget follows payoff: within the share, always; past a
+        spent share while the last claim cashed, or while the claim names
+        only owed units, and the fill has budget left. An owed claim does
+        not skip the wait: a share another thread has only reserved is not
+        spent.
         Never once the ground this claim was planned on has moved:
         ``tests`` when the route names the unit's own tests (a pooled
         per-fn unit), else the run's scope; with neither, any move refuses.
@@ -2646,31 +2712,55 @@ class RunClock:
         keep had just moved its tests onto it, or because the share ran out."""
         scope = frozenset(tests) if tests is not None else self.scope
         claimed = frozenset(units) if units is not None else self.units
+        owed_claim = (units is not None and bool(claimed)
+                      and claimed <= self.owed)
         me = threading.get_ident()
         with self._lock:
             # This thread asking again means its previous unit is over.
-            self._reserved.pop(me, None)
-        if (self._ground_moved is not None
-                and self._ground_moved(scope, claimed)):
+            if self._reserved.pop(me, None) is not None:
+                self._returned.notify_all()
+        while True:
+            if (self._ground_moved is not None
+                    and self._ground_moved(scope, claimed)):
+                with self._lock:
+                    self.refused += 1
+                return "premise"
             with self._lock:
+                if self.share_minutes is None:
+                    return self._claimed(scope, claimed)
+                elapsed = self.elapsed()
+                outstanding = sum(self._reserved.values())
+                if elapsed + outstanding < self.share_minutes:
+                    self._reserved[me] = (
+                        self.call_price if self.call_price is not None
+                        else max(0.0, self.share_minutes - elapsed))
+                    return self._claimed(scope, claimed)
+                fill_left = self._fill_remaining()
+                fill_open = fill_left is None or fill_left > 0
+                if fill_open and self.last_delta > 0:
+                    # Budget follows payoff past the share. An owed claim
+                    # is not this branch: a reservation is not a spent share.
+                    self._reserved[me] = self.call_price or 0.0
+                    return self._claimed(scope, claimed)
+                if elapsed < self.share_minutes and outstanding > 0:
+                    # Reserved, not spent: wait for a sibling's call to
+                    # return, then ask again from the premise. An owed
+                    # claim waits here too. Bounded by the share's own
+                    # minutes; the poll re-reads `now` for a clock that
+                    # advances without a release.
+                    self._returned.wait(timeout=min(
+                        _RESERVED_WAIT_POLL_S,
+                        (self.share_minutes - elapsed) * 60.0))
+                    continue
+                if (fill_open and owed_claim
+                        and elapsed >= self.share_minutes):
+                    # The share is spent and the fill still has time. A
+                    # no-price grant reserves nothing, so the owed units of
+                    # one wave start together once the share is actually spent.
+                    self._reserved[me] = self.call_price or 0.0
+                    return self._claimed(scope, claimed)
                 self.refused += 1
-            return "premise"
-        with self._lock:
-            if self.share_minutes is None:
-                return self._claimed(scope, claimed)
-            elapsed = self.elapsed()
-            if elapsed + sum(self._reserved.values()) < self.share_minutes:
-                self._reserved[me] = (
-                    self.call_price if self.call_price is not None
-                    else max(0.0, self.share_minutes - elapsed))
-                return self._claimed(scope, claimed)
-            fill_left = self._fill_remaining()
-            if self.last_delta > 0 and (fill_left is None or fill_left > 0):
-                # Budget follows payoff past the share, as before.
-                self._reserved[me] = self.call_price or 0.0
-                return self._claimed(scope, claimed)
-            self.refused += 1
-            return "share"
+                return "share"
 
     def _claimed(self, scope: frozenset[str] | None,
                  claimed: frozenset[FnLocator]) -> str:

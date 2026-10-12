@@ -748,6 +748,12 @@ class SweepView:
     #: it, so it does not judge that body (`classify`). Empty = no reading,
     #: and every test that ran judges as before.
     held: Mapping[str, frozenset[FnLocator]] = field(default_factory=dict)
+    #: Tests whose own isolated process died in this sweep
+    #: (`TestStateReading.aborted_names`), and the ones among them that
+    #: printed no panic (`aborted_silent_names`): what `outcomes_of` needs to
+    #: tell a body that made a test's process die from one that left it red.
+    aborted: frozenset[str] = frozenset()
+    aborted_silent: frozenset[str] = frozenset()
 
     @property
     def ran(self) -> frozenset[str]:
@@ -765,6 +771,7 @@ class SweepView:
         cls, *, passed: Iterable[str], failed: Iterable[str],
         vanished: Iterable[str], intact: bool, epoch: int,
         positions: Mapping[TestKey, int],
+        aborted: Iterable[str], aborted_silent: Iterable[str],
         held: Mapping[str, frozenset[FnLocator]] | None = None,
     ) -> SweepView:
         """The ledger's view of a sweep whose failed set the score has already
@@ -787,7 +794,9 @@ class SweepView:
         return cls(passed=frozenset(passed),
                    failed=frozenset(t for t in failed if t not in gone),
                    intact=intact, epoch=epoch, positions=positions,
-                   held=dict(held or {}))
+                   held=dict(held or {}),
+                   aborted=frozenset(aborted),
+                   aborted_silent=frozenset(aborted_silent))
 
 
 def judgment_attributed(
@@ -905,7 +914,11 @@ def classify(
             convicting, before_passed=before.passed,
             before_failed=before.failed, after_passed=after.passed,
             after_failed=after.failed, before_positions=before.positions,
-            after_positions=after.positions)
+            after_positions=after.positions, before_aborted=before.aborted,
+            after_aborted_silent=after.aborted_silent)
+        if outcomes.aborted:
+            return BodyState.REFUTED, delta + tuple(
+                (t, "aborted") for t in sorted(outcomes.aborted))
         # The decided rule: an earlier position refuses only when no
         # convicting test gained (`lost` already returned above). Run
         # `24951-a72c4642` (2026-09-29) is the all-red case this grade

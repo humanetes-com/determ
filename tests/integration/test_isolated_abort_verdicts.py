@@ -399,3 +399,93 @@ def test_the_localizer_blames_both_members_of_the_recursion(
     blamed = blamed_locators(sites)
     assert {FnLocator("src/lib.rs", "ping"),
             FnLocator("src/lib.rs", "pong")} <= blamed, (blamed, logs)
+
+
+# ---- a body that overflows the stack is a destroyed verdict (2026-10-11) ----
+#
+# Run `2157238-210637e6` kept five `construct_from_*` bodies that called
+# themselves: the attributed tests were red at baseline (stub panic) and red
+# after (stack overflow), and the keep read that as non-regression. The fix
+# rests on two facts about the real tools: a stack overflow under isolation
+# is rebuilt as a FAILED entry (never a missing verdict), and its block
+# prints no panic (`aborted_silent`). The invented crate's `build` is the
+# fill: a stub, then a body that calls itself.
+
+_REC_LIB = """pub fn build(n: u32) -> u32 {
+    BODY
+}
+"""
+
+_REC_TESTS = """#[test]
+fn builds() {
+    assert_eq!(handles::build(3), 3);
+}
+"""
+
+
+def _rec_crate(root: Path, body: str) -> Path:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(
+        "#![allow(unconditional_recursion)]\n" + _REC_LIB.replace("BODY", body))
+    (root / "tests" / "builds.rs").write_text(_REC_TESTS)
+    return root
+
+
+class _NoRecords:
+    def enumerate_fns(self, _src: Path) -> list[dict[str, object]]:
+        return []
+
+
+def _scoped(root: Path, monkeypatch: pytest.MonkeyPatch, tag: str,
+            baseline: TestStateReading | None):
+    from pipeline_core.application.reconstruct.cargo_runner import u2_test_gate
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / tag)
+    env["RUST_BACKTRACE"] = "0"
+
+    def _run(cmd: str, cwd: Path, env_: dict[str, str], timeout: int = 600):
+        return run_cargo(CargoCli(), cmd, cwd, env_, timeout=timeout)
+    return u2_test_gate(
+        _run, {"builds"}, frozenset(), _CMD, root, env,
+        structure=_NoRecords(), enabled=True, timeout=600, err_cap=2000,
+        guard=lambda *_: None, baseline=baseline)
+
+
+def test_premise_a_stack_overflow_under_isolation_is_a_silent_failed_entry(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _rec_crate(tmp_path / "rec", "build(n)")
+    r = _reading(root, "1", monkeypatch, "rec")
+    (b,) = [b for b in r.binaries if b.label.endswith("builds.rs")]
+    assert b.completed and b.failed == {"builds"}, (
+        "isolation no longer rebuilds a stack overflow as a FAILED entry; "
+        "the gate's destroyed-verdict reading must be re-derived")
+    assert b.aborted_silent == {"builds"}, (
+        "a stack overflow now prints a panic line; it would no longer read "
+        "as a native fault")
+
+
+def test_a_self_calling_fill_is_refused_by_the_gate_and_the_keep(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_report import (
+        U2Decision,
+        judge_refill,
+        parse_test_output,
+        self_aborted_tests,
+    )
+    base = _reading(_rec_crate(tmp_path / "stub", "unimplemented!()"), "1",
+                    monkeypatch, "rec-stub")
+    assert "builds" in base.failed_names and not base.aborted_names
+    v = _scoped(_rec_crate(tmp_path / "rec", "build(n)"), monkeypatch,
+                "rec", base)
+    assert v.decision is U2Decision.REJECT and v.aborted == {"builds"}
+    assert not judge_refill({"builds"}, base, v).non_regression
+
+    # NEGATIVE CONTROL: the destroyed set read as before — missing names
+    # only — is empty on the same real capture.
+    report = parse_test_output(v.capture)
+    missing = frozenset({"builds"} - (report.passed
+                                      | {f.test_name for f in report.failures}))
+    assert self_aborted_tests(missing, base.judged_names) == frozenset()

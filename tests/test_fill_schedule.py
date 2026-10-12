@@ -1425,40 +1425,53 @@ class _Wall:
         self.t += m * 60.0
 
 
-def _wave(clock: RunClock, n: int, *, release_at: _Wall | None = None,
-          after: float = 0.0) -> list[str]:
-    """`n` workers claim before any time passes, each on its own live
-    thread (as the per-fn pass's workers are). With `release_at`, the wave's
-    calls then take `after` minutes and every unit releases."""
+def _wave(clock: RunClock, n: int, *, wall: _Wall, after: float,
+          settle: float = 0.3) -> list[str]:
+    """`n` workers claim at wall 0, each on its own live thread (as the
+    per-fn pass's workers are). A granted worker's call takes `after`
+    minutes and then returns (`release`); a worker the clock makes wait is
+    answered once a call returns. Returns every worker's answer."""
     import threading
-    answers: list[str] = [""] * n
-    claimed = threading.Barrier(n + 1)
+    import time as _t
+    answers: list[str | None] = [None] * n
     finish = threading.Event()
 
     def _worker(i: int) -> None:
         answers[i] = clock.refusal()
-        claimed.wait()
-        finish.wait()
-        if release_at is not None:
+        if answers[i] == "":
+            finish.wait()
             clock.release()
 
-    threads = [threading.Thread(target=_worker, args=(i,)) for i in range(n)]
+    threads = [threading.Thread(target=_worker, args=(i,), daemon=True)
+               for i in range(n)]
     for t in threads:
         t.start()
-    claimed.wait()
-    if release_at is not None:
-        release_at.minutes(after)
+    _t.sleep(settle)            # the grants answer at once; the rest wait
+    wall.minutes(after)
     finish.set()
     for t in threads:
-        t.join()
-    return answers
+        t.join(timeout=10)
+    assert not any(t.is_alive() for t in threads), "a claim never returned"
+    return [a or "" for a in answers]
+
+
+def _prefix_refusal(clock: RunClock) -> str:
+    """The pre-2026-10-11 reading of one claim (frozen here as the negative
+    control): any claim the reservations fill is refused `share`, spent or
+    not."""
+    elapsed = clock.elapsed()
+    assert clock.share_minutes is not None
+    if elapsed + clock.outstanding() < clock.share_minutes:
+        return ""
+    return "share"
 
 
 def test_fill_11s_per_fn_share_grants_one_claim_not_four() -> None:
     """Fill 11 of run `450922-661c5e9f`: per-fn share 0.28 min, four
     workers, 4 calls in 31.9 min. The kind's recorded price before that
-    fill is above the share, so one claim is granted and the three siblings
-    are refused `share` before any call is sent."""
+    fill is above the share, so one claim is granted. The three siblings
+    wait for it and are refused `share` once it returns past the share:
+    one call, not four."""
     raw = json.loads(_PER_FN_ROWS.read_text(encoding="utf-8"))["rows"]
     rows = [r for r in (RouteLedgerRow.from_dict(x) for x in raw) if r is not None]
     fill_11 = next(r for r in rows if r.iteration == 11 and r.model_calls)
@@ -1469,49 +1482,68 @@ def test_fill_11s_per_fn_share_grants_one_claim_not_four() -> None:
     wall = _Wall()
     clock = RunClock(share_minutes=fill_11.share_minutes, fill_remaining=lambda: 100.0,
                      now=wall, call_price=price)
-    answers = _wave(clock, 4)
-    assert sorted(answers) == ["", "share", "share", "share"]
-
-    # NEGATIVE CONTROL: every sibling's unit already returned (nothing
-    # outstanding) — the old `elapsed < share` reading — grants each one.
-    control = RunClock(share_minutes=fill_11.share_minutes,
-                       fill_remaining=lambda: 100.0, now=wall, call_price=price)
-    for _ in range(4):
-        assert control.refusal() == ""
-        control.release()
+    assert sorted(_wave(clock, 4, wall=wall, after=8.0)) == [
+        "", "share", "share", "share"]
+    assert clock.claims == 1
 
 
-def test_a_share_that_pays_four_calls_grants_four() -> None:
+def test_a_reserved_share_is_waited_for_not_dropped() -> None:
+    """Run `2157238-210637e6` fill 1 (2026-10-11): no per-fn price, share
+    13.3 min, the first grant reserved the rest of the share and the other
+    workers dropped 18 units as "the run's share is spent" — one call in
+    2.2 minutes. A waiting claim is granted once that call returns with
+    share left."""
+    wall = _Wall()
+    clock = RunClock(share_minutes=13.33, fill_remaining=lambda: 100.0,
+                     now=wall, call_price=None)
+    first = _wave(clock, 1, wall=wall, after=2.2)
+    assert first == [""]
+    assert clock.refusal() == "", "share left after the first call returns"
+
+    # NEGATIVE CONTROL: the pre-fix reading of a sibling claimed while the
+    # first call is in flight drops it with 11 minutes unspent.
+    held = _Wall()
+    control = RunClock(share_minutes=13.33, fill_remaining=lambda: 100.0,
+                       now=held, call_price=None)
+    import threading
+    t = threading.Thread(target=control.refusal)
+    t.start()
+    t.join()
+    assert _prefix_refusal(control) == "share"
+
+
+def test_a_sixth_worker_waits_and_is_granted_when_a_call_returns() -> None:
+    """Share 40, price 8: five calls fit (5 x 8 = 40 reserves are granted
+    while the sum stays below 40), the sixth waits. The calls return at
+    wall 8; with two released, 8 + 24 < 40 and the sixth is granted."""
+    wall = _Wall()
     clock = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
-                     now=_Wall(), call_price=8.0)
-    assert _wave(clock, 4) == ["", "", "", ""]
-    assert clock.outstanding() == 32.0
+                     now=wall, call_price=8.0)
+    assert _wave(clock, 6, wall=wall, after=8.0) == [""] * 6
+    assert clock.claims == 6
+    control = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
+                       now=_Wall(), call_price=8.0)
+    control._reserved.update(dict.fromkeys(range(5), 8.0))  # five in flight
+    assert _prefix_refusal(control) == "share", "pre-fix: dropped at wall 0"
 
 
 def test_a_returned_flat_call_is_not_counted_twice() -> None:
     """The correction of 2026-10-06: four flat 8-minute calls return at wall
     8 on a share of 40. Their minutes are in `elapsed`; their reservations
-    end with them, so the next claim is granted (8 + 0 < 40). Control: had
-    the units not released, 8 + 32 = 40 refuses it with 32 minutes unspent."""
+    end with them, so the next claim is granted (8 + 0 < 40)."""
     wall = _Wall()
     clock = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
                      now=wall, call_price=8.0)
-    assert _wave(clock, 4, release_at=wall, after=8.0) == ["", "", "", ""]
+    assert _wave(clock, 4, wall=wall, after=8.0) == ["", "", "", ""]
     assert clock.outstanding() == 0.0
     assert clock.refusal() == ""
-
-    held = _Wall()
-    control = RunClock(share_minutes=40.0, fill_remaining=lambda: 100.0,
-                       now=held, call_price=8.0)
-    assert _wave(control, 4) == ["", "", "", ""]
-    held.minutes(8.0)
-    assert control.refusal() == "share"
 
 
 def test_a_session_floor_grants_three_turns_and_refuses_the_fourth() -> None:
     """A session's turns are serial claims on one thread: each turn's claim
-    ends the last turn's reservation, so the reading is the old one. Share
-    16 + 2 x 2: turns at 0, 16 and 18 minutes; the fourth at 20 is refused."""
+    ends the last turn's reservation, so the reading is the old one and no
+    turn ever waits. Share 16 + 2 x 2: turns at 0, 16 and 18 minutes; the
+    fourth at 20 is refused."""
     wall = _Wall()
     clock = RunClock(share_minutes=20.0, fill_remaining=lambda: 100.0,
                      now=wall, call_price=2.0)
@@ -1524,13 +1556,169 @@ def test_a_session_floor_grants_three_turns_and_refuses_the_fourth() -> None:
     assert clock.refusal() == "share"
 
 
-def test_a_kind_with_no_price_reserves_the_rest_and_payoff_still_extends() -> None:
+def test_a_kind_with_no_price_runs_one_call_at_a_time_and_payoff_extends() -> None:
+    wall = _Wall()
     clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 100.0,
-                     now=_Wall(), call_price=None)
-    assert sorted(_wave(clock, 3)) == ["", "share", "share"]
+                     now=wall, call_price=None)
+    # Three workers, no price: one call at a time. The first returns at 4,
+    # the second is granted the rest of the share; the third waits for it.
+    assert _wave(clock, 3, wall=wall, after=4.0) == ["", "", ""]
     paying = RunClock(share_minutes=10.0, fill_remaining=lambda: 100.0,
                       now=_Wall(), call_price=None)
     assert paying.refusal() == ""
     paying.note_delta(2)
     assert paying.refusal() == "", "a claim that cashed extends past the share"
     assert call_price([], RouteKind.PER_FN, "o") is None
+
+
+# --- the share does not skip a held stub the run was given to write ----------
+
+_OWED = FnLocator("src/a.rs", "held")
+_OTHER = FnLocator("src/a.rs", "other")
+
+
+def _spent(owed: frozenset[FnLocator], *,
+           ground: object = None) -> tuple[RunClock, _Wall]:
+    wall = _Wall()
+    clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 50.0,
+                     now=wall, call_price=4.0, owed=owed,
+                     ground_moved=ground)  # type: ignore[arg-type]
+    wall.minutes(12.0)
+    clock.note_delta(0)
+    return clock, wall
+
+
+def test_a_spent_share_still_claims_an_owed_held_stub() -> None:
+    """Run `2157238-210637e6` fill 2: the share was spent on four `From`
+    impls, the last landing bought nothing, and `context` / `with_context`
+    (ten red tests held in them) were refused `share`."""
+    control, _ = _spent(frozenset())
+    assert control.refusal(units={_OWED}) == "share", "today's outcome"
+
+    clock, _ = _spent(frozenset({_OWED}))
+    assert clock.refusal(units={_OWED}) == ""
+    assert clock.refusal(units={_OTHER}) == "share"
+    assert clock.refusal(units={_OWED, _OTHER}) == "share", "a mixed set"
+    assert clock.refusal() == "share", "a claim naming no unit"
+
+
+def _pre_fix_owed_grant(*, elapsed: float, share: float, outstanding: float,
+                        fill_open: bool, owed: bool) -> str:
+    """The branch this test replaces: an owed claim was granted on the
+    payoff line as soon as reservations filled the share, before any wait."""
+    if elapsed + outstanding < share:
+        return ""
+    if fill_open and owed:
+        return ""
+    if elapsed < share and outstanding > 0:
+        return "wait"
+    return "share"
+
+
+def test_an_owed_claim_waits_while_a_sibling_holds_the_share() -> None:
+    """A sibling with no price reserved the whole share. An owed claim
+    waits, then is granted when that sibling returns with share left.
+    Once the injected clock shows the share spent while a reservation is
+    still outstanding, the owed claim is granted and a claim that is not
+    owed is refused.
+
+    NEGATIVE CONTROL: the pre-fix branch granted the owed claim at wall 0
+    while the sibling still held the reservation."""
+    import threading
+    import time as _t
+    wall = _Wall()
+    clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 50.0,
+                     now=wall, call_price=None, owed=frozenset({_OWED}))
+    finish = threading.Event()
+    held: dict[str, str] = {}
+
+    def _holder() -> None:
+        held["answer"] = clock.refusal()
+        finish.wait()
+        clock.release()
+
+    holder = threading.Thread(target=_holder)
+    holder.start()
+    _t.sleep(0.2)
+    assert held.get("answer") == ""
+    assert clock.outstanding() == 10.0
+    assert _pre_fix_owed_grant(
+        elapsed=0.0, share=10.0, outstanding=10.0,
+        fill_open=True, owed=True) == ""
+    answered: dict[str, str] = {}
+
+    def _owed() -> None:
+        answered["answer"] = clock.refusal(units={_OWED})
+
+    waiter = threading.Thread(target=_owed)
+    waiter.start()
+    _t.sleep(0.3)
+    assert waiter.is_alive() and "answer" not in answered
+    finish.set()
+    waiter.join(timeout=2)
+    holder.join(timeout=2)
+    assert not waiter.is_alive() and not holder.is_alive()
+    assert answered["answer"] == ""
+
+    wall2 = _Wall()
+    clock2 = RunClock(share_minutes=10.0, fill_remaining=lambda: 50.0,
+                      now=wall2, call_price=None, owed=frozenset({_OWED}))
+    finish2 = threading.Event()
+
+    def _holder2() -> None:
+        clock2.refusal()
+        finish2.wait()
+        clock2.release()
+
+    holder2 = threading.Thread(target=_holder2)
+    holder2.start()
+    _t.sleep(0.2)
+    wall2.minutes(10.0)
+    assert clock2.elapsed() >= 10.0 and clock2.outstanding() == 10.0
+    assert clock2.refusal(units={_OWED}) == ""
+    assert clock2.refusal(units={_OTHER}) == "share"
+    finish2.set()
+    holder2.join(timeout=2)
+    assert not holder2.is_alive()
+
+
+def test_an_owed_claim_still_refuses_on_a_moved_premise() -> None:
+    clock, _ = _spent(frozenset({_OWED}), ground=lambda _s, _u: True)
+    assert clock.refusal(units={_OWED}) == "premise"
+
+
+def test_an_owed_claim_stops_when_the_fill_budget_is_gone() -> None:
+    wall = _Wall()
+    clock = RunClock(share_minutes=10.0, fill_remaining=lambda: 0.0,
+                     now=wall, call_price=4.0, owed=frozenset({_OWED}))
+    wall.minutes(12.0)
+    assert clock.refusal(units={_OWED}) == "share"
+
+
+# --- a session carrying a crash culprit is not its writer --------------------
+
+def test_a_passenger_culprit_does_not_exempt_a_session_from_the_unmeasurable_demotion() -> None:
+    """Run `2157238-210637e6` fill 2: `session #2` aimed at three tests whose
+    binaries did not complete and carried `src/context.rs::context`, a crash
+    culprit, for another slice; target membership exempted it from the
+    `rebuy_flat` demotion. Through `Blockers.writes` it is demoted unless an
+    aimed test crashed on that culprit; a unit run targeting the culprit
+    keeps its rank.
+
+    NEGATIVE CONTROL: the shipped exemption (target membership) exempts it."""
+    from pipeline_core.domain.fill_schedule import run_is_unmeasurable
+    culprit = FnLocator("src/c.rs", "culprit")
+    other = FnLocator("src/c.rs", "other")
+    aimed = frozenset({"t1", "t2"})
+    session = RouteRun(kind=RouteKind.SESSION, label="session p",
+                       targets=frozenset({culprit, other}), target_tests=aimed,
+                       files=("src/c.rs",))
+    unit = RouteRun(kind=RouteKind.PER_FN, label="per-fn c",
+                    targets=frozenset({culprit}), target_tests=aimed,
+                    files=("src/c.rs",))
+    blame = {culprit: frozenset({"crashed_elsewhere"})}
+    assert run_is_unmeasurable(session, aimed, blame)
+    assert not run_is_unmeasurable(unit, aimed, blame)
+    assert not run_is_unmeasurable(
+        session, aimed, {culprit: frozenset({"t1"})}), "an aimed test crashed there"
+    assert bool(session.targets & frozenset(blame)), "pre-fix exemption"

@@ -590,7 +590,8 @@ class PhaseCFillEngine:
                 scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
                 parallelism=self.config.parallelism,
                 unmeasurable_tests=unmeasurable_tests,
-                crash_blamed=(crash_blamed or frozenset()) | stub_hold_blockers,
+                crash_blamed=(crash_sites or CrashSites()).blame_map(
+                    (crash_blamed or frozenset()) | stub_hold_blockers),
                 attributed=frozenset(attributed),
                 measured_owners=frozenset(measured_owners),
                 due=frozenset(due),

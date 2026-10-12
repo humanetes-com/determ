@@ -29,6 +29,8 @@ from pipeline_core.domain.assertion_position import (
     TestSource,
     assertion_positions,
     compare_positions,
+    leaf,
+    outcomes_of,
     positions_for,
 )
 from pipeline_core.domain.models import FnSite
@@ -885,10 +887,13 @@ class JointImprovement:
     its own test is simply wrong — but where one prompt rewrites a coupled
     family, the only REACHABLE step may be FEWER self-failures, and an
     absolute gate discards exactly the improvements the iter-level ratchet
-    exists to bank. Vanished/aborted tests count by PRIOR state: a test that
-    was failing and now aborts is still failing, not newly broken; a
-    previously-passing test lost to an abort is caught by the global
-    regression gate, which still runs unchanged.
+    exists to bank. A vanished test counts by PRIOR state. A test the
+    baseline ran to its own verdict whose own process the attempt killed
+    without a panic is `aborted`, and refuses (`TestOutcomes.refuses`)
+    whatever its prior state: until 2026-10-11 this read "a test that was
+    failing and now aborts is still failing, not newly broken", and run
+    `2157238-210637e6` kept five self-recursive `construct_from_*` bodies on
+    it, after which 26 binaries died of stack exhaustion every sweep.
 
     ``baseline_failing`` — the unit's attributed tests not observed passing
     (and not cfg-ignored) at the fresh in-lock baseline. ``resolved`` — the
@@ -907,6 +912,9 @@ class JointImprovement:
     #: in `src/`, a helper or a closure has no position and is in neither.
     regressed_sites: tuple[PositionMove, ...] = ()
     advanced_sites: tuple[PositionMove, ...] = ()
+    #: Attributed tests the baseline ran to their own verdict whose own
+    #: process this attempt killed without a panic (`TestOutcomes.aborted`).
+    aborted: frozenset[str] = frozenset()
 
     @property
     def unresolved(self) -> frozenset[str]:
@@ -917,7 +925,7 @@ class JointImprovement:
         """This attempt in the one outcome model every keep reads."""
         return TestOutcomes(gained=self.resolved, lost=self.new_failures,
                             earlier=self.regressed_sites,
-                            later=self.advanced_sites)
+                            later=self.advanced_sites, aborted=self.aborted)
 
     @property
     def banks(self) -> bool:
@@ -973,6 +981,7 @@ def assess_joint_improvement(
     baseline_ignored: frozenset[str],
     verdict: U2Verdict,
     baseline_positions: Positions | None = None,
+    aborted: frozenset[str] = frozenset(),
 ) -> JointImprovement:
     """Build the :class:`JointImprovement` for a joint fill judged REJECT by
     the absolute U2 gate. ``attributed − passed − ignored`` (rather than the
@@ -997,7 +1006,8 @@ def assess_joint_improvement(
         # and the per-fn keep did not; one rule for both since 2026-09-29.
         new_failures=frozenset(
             verdict.self_failures & (baseline_passed | baseline_ignored)),
-        regressed_sites=regressed, advanced_sites=advanced)
+        regressed_sites=regressed, advanced_sites=advanced,
+        aborted=frozenset(aborted & attributed))
 
 
 def judge_refill(
@@ -1014,10 +1024,24 @@ def judge_refill(
     (`TestStateReading.positions`, filled by `reading_of_capture`). Before
     this function the four keep sites each built "non-regression" from their
     own flags, and three of them (impl, pair, per-fn) omitted the site
-    clause the file route had carried since 2026-08-20."""
+    clause the file route had carried since 2026-08-20.
+
+    The abort clause reads the same two readings: the baseline's own
+    process deaths, and the verdict's (the gate's destroyed verdicts plus
+    every silent death its capture shows), through `outcomes_of`'s rule."""
+    names = frozenset(attributed)
+    after_silent = frozenset(verdict.aborted) | TestStateReading(
+        parse_binary_results(verdict.capture or "")).aborted_silent_names
+    aborted = outcomes_of(
+        names, before_passed=baseline.passed_names,
+        before_failed=baseline.failed_names, after_passed=frozenset(),
+        after_failed=frozenset(), before_positions={}, after_positions={},
+        before_aborted=baseline.aborted_names,
+        after_aborted_silent=after_silent).aborted
     return assess_joint_improvement(
-        frozenset(attributed), baseline.passed_names,
-        baseline.ignored_names, verdict, baseline.positions)
+        names, baseline.passed_names,
+        baseline.ignored_names, verdict, baseline.positions,
+        aborted=frozenset(t for t in names if leaf(t) in aborted))
 
 
 def turned_green(

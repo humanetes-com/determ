@@ -2633,7 +2633,10 @@ def run_phase_c_tdd(
             sweep's reconciled failing set (crash-vanished names included,
             which `of_sweep` takes back out)."""
             _report_v = parse_test_output(output_)
+            _reading_v = TestStateReading(parse_binary_results(output_))
             return SweepView.of_sweep(
+                aborted=_reading_v.aborted_names,
+                aborted_silent=_reading_v.aborted_silent_names,
                 passed=(bare_test_name(t_) for t_ in _report_v.passed),
                 failed=(bare_test_name(t_) for t_ in failed_),
                 vanished=vanished_,

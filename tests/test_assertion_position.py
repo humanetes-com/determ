@@ -220,7 +220,8 @@ def test_the_decided_rule_on_mixed_outcomes() -> None:
         base: dict[str, object] = {
             "before_passed": (), "before_failed": ("g", "e", "l"),
             "after_passed": (), "after_failed": ("g", "e", "l"),
-            "before_positions": {k: 10}, "after_positions": {k: 10}}
+            "before_positions": {k: 10}, "after_positions": {k: 10},
+            "before_aborted": (), "after_aborted_silent": ()}
         base.update(kw)
         return outcomes_of(("g", "e"), **base)  # type: ignore[arg-type]
 
@@ -230,8 +231,29 @@ def test_the_decided_rule_on_mixed_outcomes() -> None:
                   after_failed=("e",)).refuses                      # gained + earlier
     lost = outcomes_of(("g",), before_passed=("g",), before_failed=(),
                        after_passed=(), after_failed=("g",),
-                       before_positions={}, after_positions={})
+                       before_positions={}, after_positions={},
+                       before_aborted=(), after_aborted_silent=())
     assert lost.refuses and lost.lost == frozenset({"g"})
+
+
+def test_a_silent_death_refuses_whatever_was_gained() -> None:
+    """A test that ran to its own verdict before and whose own process died
+    with no panic after refuses, even beside a gain. A death already present
+    before, or one that printed a panic (not in `after_aborted_silent`), is
+    not an abort of this attempt. Negative control: the model without the
+    abort clause (`aborted` empty) does not refuse the same outcome."""
+    o = outcomes_of(("g", "d"), before_passed=(), before_failed=("g", "d"),
+                    after_passed=("g",), after_failed=("d",),
+                    before_positions={}, after_positions={},
+                    before_aborted=(), after_aborted_silent=("d",))
+    assert o.aborted == frozenset({"d"}) and o.gained == frozenset({"g"})
+    assert o.refuses
+    assert not TestOutcomes(gained=o.gained, lost=o.lost).refuses
+    again = outcomes_of(("d",), before_passed=(), before_failed=("d",),
+                        after_passed=(), after_failed=("d",),
+                        before_positions={}, after_positions={},
+                        before_aborted=("d",), after_aborted_silent=("d",))
+    assert not again.aborted and not again.refuses
 
 
 # --- localization ------------------------------------------------------------

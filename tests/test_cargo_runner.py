@@ -994,3 +994,154 @@ def test_u2_gate_rejects_a_scoped_run_that_hangs_inside_its_own_test() -> None:
         frozenset(), "cargo test", Path("."), {}, structure=None, enabled=True,
         timeout=120, err_cap=4000, guard=lambda *_: None)
     assert build_cut.decision is U2Decision.ACCEPT
+
+
+# --- a silent death under test isolation is a destroyed verdict -------------
+
+def _isolated(name: str, block: list[str], *, completed: bool = True) -> str:
+    """A scoped capture after test isolation: `name` failed and its block is
+    `block` (the isolation rewrite of an aborted test opens with
+    ABORT_MARK)."""
+    return "\n".join([
+        "running 1 test", f"test {name} ... FAILED", "", "failures:", "",
+        f"---- {name} stdout ----", *block, "",
+        "failures:", f"    {name}", "",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; "
+        "0 filtered out"])
+
+
+def _iso_reading(capture: str):
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    return TestStateReading(parse_binary_results(capture))
+
+
+_STUB_RED = ["thread 'rec' panicked at src/a.rs:3:5:", "not implemented"]
+
+
+def test_u2_gate_charges_a_silent_isolated_abort_of_a_test_judged_red() -> None:
+    """Run `2157238-210637e6` (2026-10-11): a file-route reply wrote
+    `construct_from_*` as calls to themselves. The attributed tests were red
+    at baseline (stub panic) and, after the splice, died of stack overflow
+    with no panic. Test isolation rebuilds that death as a FAILED entry, so
+    nothing is missing and the abort branch never fired; the overflow read
+    as an ordinary self failure and the keep took it as non-regression.
+
+    NEGATIVE CONTROL: the destroyed set as read before (missing names only)
+    is empty on the same capture, and the outcome model without the abort
+    clause does not refuse."""
+    from pipeline_core.domain.test_report import judge_refill
+    from pipeline_core.domain.test_results import ABORT_MARK
+    baseline = _iso_reading(_isolated("rec", _STUB_RED))
+    assert "rec" in baseline.failed_names and not baseline.aborted_names
+    after = _isolated("rec", [ABORT_MARK, "",
+                              "thread 'rec' has overflowed its stack",
+                              "fatal runtime error: stack overflow"])
+    assert _iso_reading(after).aborted_silent_names == {"rec"}
+    v = _gate(_const_run_cargo(101, after), {"rec"}, baseline=baseline)
+    assert v.decision is U2Decision.REJECT
+    assert v.aborted == frozenset({"rec"})
+    ji = judge_refill({"rec"}, baseline, v)
+    assert ji.aborted == frozenset({"rec"}) and not ji.non_regression
+
+    from pipeline_core.domain.test_report import (
+        parse_test_output,
+        self_aborted_tests,
+    )
+    report = parse_test_output(after)
+    missing = frozenset({"rec"} - (report.passed
+                                   | {f.test_name for f in report.failures}))
+    assert self_aborted_tests(missing, baseline.judged_names) == frozenset(), (
+        "pre-fix: the isolated death is reported, so nothing is missing")
+    from pipeline_core.domain.assertion_position import TestOutcomes
+    assert not TestOutcomes(lost=ji.new_failures).refuses, (
+        "pre-fix: red before and after is non-regression")
+
+
+def test_judge_refill_refuses_a_silent_death_even_from_an_accept_capture() -> None:
+    """The keep reads the capture itself, not only what the gate named: a
+    verdict whose capture shows a silent death of an attributed test that
+    the baseline ran to its own verdict refuses."""
+    from pipeline_core.domain.test_report import U2Verdict, judge_refill
+    from pipeline_core.domain.test_results import ABORT_MARK
+    baseline = _iso_reading(_isolated("rec", _STUB_RED))
+    after = _isolated("rec", [ABORT_MARK, "", "fatal runtime error: stack overflow"])
+    v = U2Verdict(U2Decision.REJECT, self_failures=frozenset({"rec"}),
+                  capture=after)
+    assert not judge_refill({"rec"}, baseline, v).non_regression
+
+
+def test_an_abort_that_prints_a_stub_panic_is_not_a_native_fault() -> None:
+    """A test whose process died after a stub's `unimplemented!()` fired
+    while unwinding printed that panic: not silent, not `aborted`, and the
+    keep judges it as before (red both sides: non-regression)."""
+    from pipeline_core.domain.test_report import U2Verdict, judge_refill
+    from pipeline_core.domain.test_results import ABORT_MARK
+    baseline = _iso_reading(_isolated("rec", _STUB_RED))
+    after = _isolated("rec", [ABORT_MARK,
+                              "thread 'rec' panicked at src/a.rs:9:5:",
+                              "not implemented",
+                              "thread 'rec' panicked at src/a.rs:12:5:",
+                              "not implemented"])
+    assert not _iso_reading(after).aborted_silent_names
+    v = U2Verdict(U2Decision.REJECT, self_failures=frozenset({"rec"}),
+                  capture=after)
+    ji = judge_refill({"rec"}, baseline, v)
+    assert not ji.aborted and ji.non_regression
+
+
+def test_a_silent_death_is_not_cleared_by_a_stub_panic_in_another_section(
+        tmp_path: Path) -> None:
+    """One capture holds both shapes isolation can leave side by side: a
+    completed silent death of a test the baseline judged, and an incomplete
+    section whose only panic is another unit's stub. The silent death stays
+    a reject. Negative control: the same stub section with no silent death
+    is still the external-stub keep."""
+    from pipeline_core.domain.test_results import ABORT_MARK
+    structure, src = _vtable_tree(tmp_path)
+    stub = ("running 1 test\n"
+            "test other ... \n"
+            "thread 'other' panicked at src/error.rs:2:5:\n"
+            "not implemented\n")
+    silent = ("running 1 test\n"
+              "test rec ... FAILED\n\n"
+              "failures:\n\n"
+              "---- rec stdout ----\n"
+              f"{ABORT_MARK}\n\n"
+              "thread 'rec' has overflowed its stack\n"
+              "fatal runtime error: stack overflow\n\n"
+              "failures:\n"
+              "    rec\n\n"
+              "test result: FAILED. 0 passed; 1 failed; 0 ignored; "
+              "0 measured; 0 filtered out\n")
+    stderr = ("\n--- stderr ---\n"
+              "     Running tests/stub.rs (t/stub-1)\n"
+              "     Running tests/rec.rs (t/rec-1)\n")
+    mixed = stub + silent + stderr
+    unit = frozenset({FnSite("src/ptr.rs", "new", "impl Own<T>")})
+    baseline = _judged(["rec", "other"])
+    v = _gate(_const_run_cargo(101, mixed), {"rec", "other"},
+              baseline=baseline, unit_fns=unit,
+              structure=structure, src_dir=src)
+    assert v.decision is U2Decision.REJECT
+    assert "rec" in v.aborted
+    assert v.decision is not U2Decision.ACCEPT_EXTERNAL_ONLY
+    only_stub = (stub
+                 + "\n--- stderr ---\n"
+                 + "     Running tests/stub.rs (t/stub-1)\n")
+    kept = _gate(_const_run_cargo(101, only_stub), {"other"},
+                 baseline=_judged(["other"]), unit_fns=unit,
+                 structure=structure, src_dir=src)
+    assert kept.decision is U2Decision.ACCEPT_EXTERNAL_ONLY
+
+
+def test_a_test_already_dead_at_baseline_is_not_charged_again() -> None:
+    from pipeline_core.domain.test_report import U2Verdict, judge_refill
+    from pipeline_core.domain.test_results import ABORT_MARK
+    dead = _isolated("rec", [ABORT_MARK, "", "fatal runtime error: stack overflow"])
+    baseline = _iso_reading(dead)
+    v = U2Verdict(U2Decision.REJECT, self_failures=frozenset({"rec"}),
+                  capture=dead)
+    assert judge_refill({"rec"}, baseline, v).non_regression

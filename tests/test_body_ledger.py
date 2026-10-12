@@ -259,11 +259,13 @@ def test_a_test_lost_to_an_aborted_binary_is_unmeasured_not_refuted() -> None:
     e = _entry(state=BodyState.LANDED)
     before = SweepView.of_sweep(passed={"test_new", "test_conv"},
                                 failed=set(), vanished=(), intact=True,
-                                epoch=0, positions={})
+                                epoch=0, positions={},
+                                aborted=(), aborted_silent=())
     # What the sweep hands over: both names counted failing, both vanished.
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_conv"},
                                vanished={"test_new", "test_conv"}, intact=True,
-                               epoch=0, positions={})
+                               epoch=0, positions={},
+                                aborted=(), aborted_silent=())
     state, delta = classify(e, attributed={"test_new"}, before=before,
                             after=after, body_now_sha=e.body_sha)
     assert state is BodyState.UNMEASURED and delta == ()
@@ -280,7 +282,7 @@ def test_a_test_that_really_failed_beside_an_aborted_binary_still_refutes() -> N
     before, _ = _views(({"test_new"}, set()), (set(), set()))
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_gone"},
                                vanished={"test_gone"}, intact=True, epoch=0,
-                               positions={})
+                               positions={}, aborted=(), aborted_silent=())
     state, _ = classify(e, attributed={"test_new"}, before=before, after=after,
                         body_now_sha=e.body_sha)
     assert state is BodyState.REFUTED

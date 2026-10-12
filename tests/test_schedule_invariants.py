@@ -55,6 +55,7 @@ from pipeline_core.domain.fill_schedule import (
     rebuy_identity,
     schedule,
 )
+from pipeline_core.domain.held_stubs import Blockers
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.schedule_invariants import (
     blamed_from_event,
@@ -222,7 +223,7 @@ def _prechange_schedule(case: dict[str, Any]) -> Any:
         rank, reason, _deferrals = fs._rank_of(
             run, oracle_fp, history, units, readmit_after=readmit_after,
             grace_left=fs._served_key(run) not in spent)
-        level = fs._level(run, hollow, blamed)
+        level = fs._level(run, Blockers.of(hollow, blamed))
         split_of[run.key] = fs._is_coverage_split(run, attr)
         ranked.append((run, rank, reason, level))
 

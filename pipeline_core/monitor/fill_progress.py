@@ -51,13 +51,32 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["ROUTES", "FillRoute", "FillUnit", "FillProgress", "fold_fill"]
+__all__ = ["ROUTES", "EXTRA_ROUTES", "FillRoute", "FillUnit", "FillProgress", "fold_fill"]
 
 # Display order for routes NOT yet observed this iteration. Observed routes are
 # reported in the order the events put them in, so a `PHASE_C_ROUTE_ORDER`
 # change (or a route the iteration skips) can never draw a ✓ for a route that
 # has not run.
 ROUTES: tuple[str, ...] = ("file", "impl", "per-fn")
+
+# Extra routes the schedule may run in the same fill (slice sessions, pair
+# fills). They publish no `route_plan`, so they are shown as closed-of-seen
+# and drawn in the order the events opened them, not ahead of the unit
+# routes. They stay out of ROUTES so an iteration that never opens one does
+# not grow a "not yet run" placeholder.
+EXTRA_ROUTES: tuple[str, ...] = ("session", "pair")
+
+# Stage of the attempt in flight, read from the newest event the unit's own
+# thread emitted. Exact names only: an event not listed here leaves the stage
+# unchanged, so a new event can never silently move it.
+_STAGE_OF_EVENT: dict[str, str] = {
+    "llm.request": "model",
+    "llm.response": "parse+splice",
+    "llm.stream_meta": "parse+splice",
+    "cargo.spawn": "cargo",
+    "phase_c.verdict": "keep/revert",
+    "phase_c.test_fix.iter": "tests",
+}
 
 # `phase_c.<x>.fill.*` -> route id. The per-fn route's own events are
 # `phase_c.fn.fill.*`; its plan arrives on `phase_c.pass.start`.
@@ -108,6 +127,7 @@ class _Unit:
     stalled: int = 0
     improving: bool | None = None
     live: bool = True
+    turns: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +153,7 @@ class FillUnit:
     floor: str
     stalled: int
     improving: bool | None
+    stage: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +194,8 @@ def fold_fill(events: list[dict[str, Any]]) -> FillProgress:
     units: dict[str, _Unit] = {}
     current: str | None = None
     batch: int | None = None
+    stage_by_thread: dict[str, str] = {}
+    n_session = 0
 
     def _open(route: str, key: str, unit: _Unit) -> None:
         nonlocal current
@@ -209,6 +232,70 @@ def fold_fill(events: list[dict[str, Any]]) -> FillProgress:
             continue
         if name == "loop.iter":
             _apply_loop_iter(units, d)
+            continue
+        _stg = _STAGE_OF_EVENT.get(name)
+        if _stg is not None and e.get("thread"):
+            stage_by_thread[str(e["thread"])] = _stg
+        if name == "phase_c.session.start":
+            n_session += 1
+            _t = d.get("tests") or []
+            _open("session", f"session:{n_session}", _Unit(
+                route="session",
+                label=f"{len(d.get('units') or [])} unit(s) / "
+                      f"{(_t[0] if _t else '?')}",
+                file="", members=1, refill=False,
+                thread=str(e.get("thread") or ""), since_iso=str(e.get("ts") or ""),
+                max_attempts=d.get("max_turns") if isinstance(
+                    d.get("max_turns"), int) else None))
+            continue
+        if name in ("phase_c.session.turn", "phase_c.session.end"):
+            u = units.get(f"session:{n_session}")
+            if u is not None:
+                current = "session"
+                if name == "phase_c.session.end":
+                    u.live = False
+                elif isinstance(d.get("turn"), int):
+                    u.attempt = d["turn"]
+            continue
+        if name == "phase_c.pair.fill.start":
+            _disp = _site(d.get("dispatcher"))
+            _impl = _site(d.get("implementer"))
+            _open("pair", _pair_key(d), _Unit(
+                route="pair",
+                label=f"{_disp.get('fn') or '?'} + {_impl.get('fn') or '?'}",
+                file=str(_disp.get("file") or ""), members=2, refill=False,
+                thread=str(e.get("thread") or ""), since_iso=str(e.get("ts") or "")))
+            continue
+        if name == "phase_c.fill.declined" and d.get("route") == "pair":
+            # A declined pair returns. The event is not `pair.fill.*`, so
+            # without this the row opened on `pair.fill.start` stays live.
+            _tid = str(e.get("thread") or "")
+            _pu = next((x for x in reversed(list(units.values()))
+                        if x.route == "pair" and x.live and x.thread == _tid), None)
+            if _pu is not None:
+                current = "pair"
+                _pu.live = False
+            continue
+        if name.startswith("phase_c.pair.fill."):
+            # Only `start`/`resample_skipped` carry the pair's sites; the
+            # outcome events do not, so they close the pair-route unit opened
+            # on the same thread, never one guessed from another. A revert
+            # closes the row unless the event says the run continues.
+            _tid = str(e.get("thread") or "")
+            _pu = next((x for x in reversed(list(units.values()))
+                        if x.route == "pair" and x.live and x.thread == _tid), None)
+            if name.endswith("resample_skipped"):
+                _pu = units.get(_pair_key(d)) or _pu
+            if _pu is not None:
+                current = "pair"
+                if name.endswith((".done", ".partial", "resample_skipped")):
+                    _pu.live = False
+                elif name.endswith(".reverted"):
+                    _a = d.get("attempt")
+                    if isinstance(_a, int):
+                        _pu.attempt = _a
+                    if not d.get("retrying"):
+                        _pu.live = False
             continue
         hit = _route_of(name)
         if hit is None:
@@ -252,9 +339,27 @@ def fold_fill(events: list[dict[str, Any]]) -> FillProgress:
         route=u.route, label=u.label, file=u.file, members=u.members,
         refill=u.refill, thread=u.thread, since_iso=u.since_iso,
         attempt=u.attempt, max_attempts=u.max_attempts, floor=u.floor,
-        stalled=u.stalled, improving=u.improving)
+        stalled=u.stalled, improving=u.improving,
+        stage=stage_by_thread.get(u.thread, ""))
         for u in units.values() if u.live)
     return FillProgress(routes=routes, current=current, batch=batch, live=live)
+
+
+def _site(raw: object) -> dict[str, Any]:
+    """A site payload as a dict. Events written before the structured form
+    carry a flat `file::fn` string; it reads as a locator-only site."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw:
+        file, _, fn = raw.rpartition("::")
+        return {"file": file, "fn": fn or file, "container": ""}
+    return {}
+
+
+def _pair_key(d: dict[str, Any]) -> str:
+    a, b = _site(d.get("dispatcher")), _site(d.get("implementer"))
+    return (f"pair:{a.get('file')}::{a.get('container')}::{a.get('fn')}"
+            f"+{b.get('file')}::{b.get('container')}::{b.get('fn')}")
 
 
 def _unit_key(route: str, d: dict[str, Any]) -> str:

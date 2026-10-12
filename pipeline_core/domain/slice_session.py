@@ -838,6 +838,11 @@ class TurnReading:
     #: an EARLIER assertion position, when no target went green — the
     #: decided rule every keep reads (`TestOutcomes.refuses`).
     earlier: tuple[str, ...] = ()
+    #: Targets the baseline ran to a verdict and this turn's process killed
+    #: without printing a panic (`TestOutcomes.aborted`). A position move
+    #: and a destroyed verdict are different facts: a net gain forgives the
+    #: first and does not forgive the second.
+    aborted: tuple[str, ...] = ()
 
     @property
     def targets_green(self) -> bool:
@@ -846,20 +851,27 @@ class TurnReading:
     @property
     def clean(self) -> bool:
         return (self.targets_green and not self.newly_red
-                and not self.crashed and not self.hung)
+                and not self.crashed and not self.hung and not self.aborted)
 
     @property
     def regressed(self) -> bool:
         """The sweep's rule, applied to one turn: a strict net gain forgives
         a newly-red test or a crashed binary (its lost passes are already
         charged in `pass_delta`); at or below zero any loss convicts; a
-        shrunken verdict set always convicts. This used to be "any newly-red
-        test, whatever the net" — the bar that would have peeled the +15/−1
-        body of run `334902-2774708c`'s 05:39 turn while the sweep it never
-        reached would have accepted it."""
+        shrunken verdict set always convicts. A destroyed verdict does not
+        take that forgiveness: the test the baseline judged no longer has
+        a reading, so a gain beside it is not a measurement the keep can
+        trust. This used to be "any newly-red test, whatever the net" — the
+        bar that would have peeled the +15/−1 body of run
+        `334902-2774708c`'s 05:39 turn while the sweep it never reached
+        would have accepted it. Under test isolation the death is a
+        completed failure, so `newly_crashed` and `newly_red` do not name
+        it; `aborted` does."""
         if self.executed_shrank:
             return True
         if self.hung:
+            return True
+        if self.aborted:
             return True
         if self.pass_delta > 0:
             return False
@@ -907,12 +919,15 @@ class BestStateVerdict:
     #: green that the best had red: fewer assertions passed than the best
     #: had, which no name set shows (`TestOutcomes.refuses`).
     earlier_than_best: tuple[str, ...] = ()
+    #: Tests this turn's process killed without a panic that the best
+    #: state had not. A gain does not forgive it (`TestOutcomes.aborted`).
+    aborted: tuple[str, ...] = ()
 
     @property
     def holds(self) -> bool:
         return not (self.lost_targets or self.red_beyond or self.crashed_beyond
                     or self.executed_shrank or self.delta_below is not None
-                    or self.earlier_than_best)
+                    or self.earlier_than_best or self.aborted)
 
     def losses(self) -> str:
         """The lost evidence, for the log line and the transcript."""
@@ -931,6 +946,8 @@ class BestStateVerdict:
         if self.earlier_than_best:
             parts.append("made " + ", ".join(self.earlier_than_best)
                          + " fail at an earlier assertion")
+        if self.aborted:
+            parts.append("destroyed the verdict of " + ", ".join(self.aborted))
         return "; ".join(parts)
 
 
@@ -940,11 +957,18 @@ def judge_against_best(new: TurnReading, best: TurnReading) -> BestStateVerdict:
 
     The earlier clause is the decided rule (`TestOutcomes.refuses`): a
     target that stopped earlier than in the best state refuses only when
-    this turn gained no target over the best."""
+    this turn gained no target over the best. A destroyed verdict refuses
+    on its own, including beside that gain; it is not folded into the
+    position names."""
     earlier, _later = compare_positions(best.positions, new.positions)
     outcomes = TestOutcomes(
         gained=frozenset(new.green_targets - best.green_targets),
-        earlier=earlier)
+        earlier=earlier,
+        aborted=frozenset(new.aborted) - frozenset(best.aborted))
+    # Position movement and a destroyed verdict are different facts. An
+    # abort makes `refuses` true even when something was gained, and that
+    # must not copy the position names into `earlier_than_best`.
+    position_refuses = bool(outcomes.earlier) and not outcomes.gained
     return BestStateVerdict(
         lost_targets=tuple(sorted(best.green_targets - new.green_targets)),
         red_beyond=tuple(sorted(set(new.newly_red) - set(best.newly_red))),
@@ -952,7 +976,8 @@ def judge_against_best(new: TurnReading, best: TurnReading) -> BestStateVerdict:
         executed_shrank=new.executed_shrank and not best.executed_shrank,
         delta_below=((best.pass_delta, new.pass_delta)
                      if new.pass_delta < best.pass_delta else None),
-        earlier_than_best=(outcomes.earlier_tests if outcomes.refuses else ()))
+        earlier_than_best=(outcomes.earlier_tests if position_refuses else ()),
+        aborted=tuple(sorted(outcomes.aborted)))
 
 
 def render_restored_note(verdict: BestStateVerdict, best_turn: int) -> str:

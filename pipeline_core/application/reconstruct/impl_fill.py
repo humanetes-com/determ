@@ -5509,7 +5509,8 @@ def prepare_impl_fill(
                         _emit("phase_c.pair.fill.reverted", data={
                             "cluster": cluster_name, "why": "reply_refused",
                             "errors": len(_pair_text_refused),
-                            "attempt": _attempt})
+                            "attempt": _attempt,
+                            "retrying": _attempt < _FILE_FIRST_MAX_ATTEMPTS})
                         if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
                             _log(f"  [phase-c/pair] {pair_id}: "
                                  f"{len(_pair_text_refused)} body(ies) refused "
@@ -5560,7 +5561,8 @@ def prepare_impl_fill(
                         impls_failed += 1
                     _emit("phase_c.pair.fill.reverted", data={
                         "cluster": cluster_name, "why": "compile",
-                        "errors": len(_pair_sig), "attempt": _attempt})
+                        "errors": len(_pair_sig), "attempt": _attempt,
+                        "retrying": _attempt < _FILE_FIRST_MAX_ATTEMPTS})
                     _excerpt_parts = [
                         _focus_cargo_errors(_pair_out, b.file) for b in halves]
                     _excerpt = "\n".join(x for x in _excerpt_parts if x).strip()
@@ -6655,7 +6657,8 @@ def fill_impl_blocks(
             scheduled=os.getenv("PHASE_C_FILL_SCHEDULE", "1") != "0",
             parallelism=int(kw.get("parallelism", 1) or 1),
             unmeasurable_tests=frozenset(kw.get("unmeasurable_tests") or ()),
-            crash_blamed=frozenset(kw.get("crash_blamed") or ()),
+            crash_blamed=(kw.get("crash_sites") or CrashSites()).blame_map(
+                kw.get("crash_blamed") or ()),
             attributed=frozenset(kw.get("attributed") or ()),
             unit_evidence=kw.get("unit_evidence"),
             on_wave_kept=kw.get("on_wave_kept"),

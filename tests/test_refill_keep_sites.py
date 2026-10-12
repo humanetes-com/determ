@@ -229,6 +229,19 @@ def test_a_session_turn_that_fails_a_target_earlier_regresses_at_no_net_gain() -
                            pass_delta=1).regressed
 
 
+def test_a_silent_abort_regresses_even_beside_a_gain() -> None:
+    """A destroyed verdict is not forgiven by a strict net gain. Negative
+    control: the same gain with no abort is not a regression, and a
+    position move beside that gain is not either."""
+    red = (TargetStatus("test_new", False),)
+    assert TurnReading(targets=red, aborted=("test_new",),
+                       pass_delta=1).regressed
+    assert TurnReading(targets=red, aborted=("test_new",)).regressed
+    assert not TurnReading(targets=red, pass_delta=1).regressed
+    assert not TurnReading(targets=red, earlier=("test_new",),
+                           pass_delta=1).regressed
+
+
 def test_a_turn_that_fails_a_target_earlier_than_the_best_does_not_hold() -> None:
     """A turn is put back when a target stops earlier than in the session's
     best state and it gained no target over the best. Negative controls:
@@ -248,6 +261,35 @@ def test_a_turn_that_fails_a_target_earlier_than_the_best_does_not_hold() -> Non
         targets=(TargetStatus("test_new", False),
                  TargetStatus("test_gain", True)), positions={k: 90})
     assert judge_against_best(gained, best).earlier_than_best == ()
+    assert judge_against_best(gained, best).holds
+
+
+def test_a_turn_that_destroys_a_verdict_the_best_did_not_does_not_hold() -> None:
+    """A silent abort the best state did not have refuses, including beside
+    a target the turn turned green. The abort is not reported as an earlier
+    assertion. Negative control: the same gain with no abort holds."""
+    red = (TargetStatus("test_new", False), TargetStatus("test_gain", False))
+    best = TurnReading(targets=red)
+    destroyed = TurnReading(
+        targets=(TargetStatus("test_new", False),
+                 TargetStatus("test_gain", True)),
+        aborted=("test_new",), pass_delta=1)
+    verdict = judge_against_best(destroyed, best)
+    assert not verdict.holds
+    assert verdict.aborted == ("test_new",)
+    assert verdict.earlier_than_best == ()
+    assert "destroyed the verdict" in verdict.losses()
+    same_gain = TurnReading(
+        targets=(TargetStatus("test_new", False),
+                 TargetStatus("test_gain", True)),
+        pass_delta=1)
+    assert judge_against_best(same_gain, best).holds
+    already = TurnReading(targets=red, aborted=("test_new",))
+    again = TurnReading(
+        targets=(TargetStatus("test_new", False),
+                 TargetStatus("test_gain", True)),
+        aborted=("test_new",), pass_delta=1)
+    assert judge_against_best(again, already).holds
 
 
 _WRITER = TreeWriter(splice=splice_bodies,

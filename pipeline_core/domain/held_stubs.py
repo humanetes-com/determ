@@ -23,7 +23,7 @@ unit holds one:
   (:meth:`holds`): a verdict behind a stub is not a behaviour verdict;
 - the dispatch deferral (:meth:`consumer_deferrals`);
 - the dispatch rank, whose `HELD` class is :attr:`units`;
-- whether a run WRITES a held unit (:meth:`writes`).
+- whether a run WRITES a held unit (:meth:`Blockers.writes`).
 
 Test names are keyed bare (`bare_test_name`) because every consumer compares
 against bare names: a run's aimed tests, a session's targets, a slice key.
@@ -38,7 +38,7 @@ from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.test_outcome import StubHold
 
-__all__ = ["HeldStubs"]
+__all__ = ["Blockers", "HeldStubs"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,20 +116,67 @@ class HeldStubs:
                 active[unit] = tests
         return active, deferred
 
+
+@dataclass(frozen=True, slots=True)
+class Blockers:
+    """What the fill must write before red tests can move, and the one
+    answer to "does this run write that blocker".
+
+    Two kinds of blocker: a held stub (:class:`HeldStubs`, a red test's
+    first failure sits in it) and a crash culprit (the sweep's crash blame,
+    `crash_site.blamed_tests`: culprit -> the tests whose crash convicted
+    it). Every consumer of "this run writes a blocker" reads
+    :meth:`writes`: the schedule's blockers-first tier (`_level`), its
+    blocker cover (`_cover_blockers`), the unmeasurable demotion's crash
+    exemption (`_run_is_unmeasurable`) and the invariant check
+    (`schedule_invariants`). Run `2157238-210637e6` (2026-10-11) is why
+    there is one: the cover asked the aim question and the tier did not, so
+    every fill-2 session ranked with the blockers on a passenger stub or
+    culprit and opened ahead of the unit routes that aimed at them."""
+
+    held: HeldStubs = field(default_factory=HeldStubs)
+    blamed: Mapping[FnLocator, frozenset[str]] = field(default_factory=dict)
+
+    @staticmethod
+    def of(hollow: Mapping[str, Iterable[FnLocator]] | None,
+           crash_blamed: Mapping[FnLocator, Iterable[str]]
+           | Collection[FnLocator] = ()) -> Blockers:
+        """From the schedule's inputs. `crash_blamed` is the culprit ->
+        tests mapping; a bare collection of culprits (a caller or a record
+        that carries no tests) knows no test that crashed there, so no
+        session is its writer."""
+        if isinstance(crash_blamed, Mapping):
+            blamed = {u: frozenset(bare_test_name(t) for t in ts)
+                      for u, ts in crash_blamed.items()}
+        else:
+            blamed = {u: frozenset() for u in crash_blamed}
+        return Blockers(HeldStubs.of_map(hollow), blamed)
+
+    @property
+    def culprits(self) -> frozenset[FnLocator]:
+        return frozenset(self.blamed)
+
+    @property
+    def units(self) -> frozenset[FnLocator]:
+        """Every blocker: the held stubs and the crash culprits."""
+        return self.held.units | self.culprits
+
     def writes(self, unit: FnLocator, *, targets: Collection[FnLocator],
                aimed_tests: Collection[str], session: bool) -> bool:
         """Whether a run with these targets and aimed tests writes `unit`.
 
         A unit route writes what it targets. A session's targets are its
         editable set, and the model is asked to make the session's tests
-        pass; it writes a held unit only when one of those tests is held by
-        it. The session planner leaves every held test to the unit routes
-        (`slice_session.plan_slices`), so a session reaches a held stub
-        only as a passenger of another test's slice, and nothing in its
-        prompt asks for that body."""
+        pass. It writes a blocker only when one of those tests is stopped by
+        it: held there (the session planner leaves held tests to the unit
+        routes, `slice_session.plan_slices`, so this is a session that
+        should not exist), or crashed there. Otherwise the blocker rides in
+        another test's slice and nothing in the prompt asks for its body."""
         if unit not in targets:
             return False
         if not session or unit not in self.units:
             return True
         aimed = {bare_test_name(t) for t in aimed_tests}
-        return bool(aimed & self.tests_held_by(unit))
+        stopped = self.held.tests_held_by(unit) | self.blamed.get(
+            unit, frozenset())
+        return bool(aimed & stopped)

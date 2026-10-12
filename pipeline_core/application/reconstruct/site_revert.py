@@ -105,7 +105,9 @@ def judge_revert(pre: SiteSweep, after: SiteSweep) -> tuple[bool, TestOutcomes]:
         pre.view.ran, before_passed=pre.view.passed,
         before_failed=pre.view.failed, after_passed=after.view.passed,
         after_failed=after.view.failed, before_positions=pre.view.positions,
-        after_positions=after.view.positions)
+        after_positions=after.view.positions,
+        before_aborted=pre.view.aborted,
+        after_aborted_silent=after.view.aborted_silent)
     return (not outcomes.refuses and after.pass_count >= pre.pass_count,
             outcomes)
 

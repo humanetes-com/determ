@@ -41,6 +41,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     TODAY_ORDER,
@@ -53,12 +55,15 @@ from pipeline_core.domain.fill_schedule import (
     run_blocks,
     schedule,
 )
+from pipeline_core.domain.held_stubs import Blockers
 from tests.fills.harness import (
     candidate_runs,
     crash_blamed_of,
     hollow_of,
     ledger_of,
     load_fill,
+    recorded_blame_of,
+    recorded_held_of,
     replay,
     route_attempts_of,
     unmeasurable_of,
@@ -595,3 +600,48 @@ def test_the_3893442_fill_opens_the_never_served_runs_before_pairs_past_their_gr
         if p in order:
             assert all(order.index(n) < order.index(p) for n in never)
     assert not [s for s in sched.deferred if s.reason == "pair_wait"]
+
+
+def test_fill_2_of_the_2157238_run_opens_the_aimed_unit_runs_before_passenger_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fill 2 of run `2157238-210637e6` (2026-10-11, from scratch, git
+    `b4f9042`): four held stubs (`src/error.rs::from`, `context`,
+    `with_context`, `src/chain.rs::next`) and two stack-exhaustion culprits.
+    Every session carried a held stub as a passenger of another test's
+    slice, read tier 0, and the route order opened four sessions (110
+    minutes, net +1) before the file, impl and per-fn runs that aimed at
+    those stubs. With the tier read through `Blockers.writes`, no session
+    opens before a unit run that writes a blocker.
+
+    NEGATIVE CONTROL: the tier as shipped (target membership), frozen here,
+    opens the four sessions first — the recorded order."""
+    fix = load_fill("2157238-210637e6_iter2")
+    held = recorded_held_of(fix)
+    assert fix["hollow_recorded"] == len(held) == 19
+    runs = candidate_runs(fix)
+    sessions = {r.label for r in runs[RouteKind.SESSION]}
+    blamed = recorded_blame_of(fix)
+    assert len(blamed) == 6
+
+    out, opened = replay(fix, crash_blamed=blamed, hollow=held)
+    first_session = next(i for i, lab in enumerate(opened) if lab in sessions)
+    before = opened[:first_session]
+    assert {"file src/chain.rs", "per-fn 10 stub(s), 2 re-fill(s)"} <= set(before)
+    assert all(s.level == 2 for s in out.schedule.ordered
+               if s.run.kind is RouteKind.SESSION)
+
+    from pipeline_core.domain import fill_schedule as fs
+
+    def _shipped_level(run: RouteRun, blockers: Blockers) -> int:
+        if run.targets & blockers.culprits:
+            return 0
+        if fs._blocking_stubs(run, blockers.held.hollow()):
+            return 1
+        return 2
+
+    monkeypatch.setattr(fs, "_level", _shipped_level)
+    _out, opened_shipped = replay(fix, crash_blamed=blamed, hollow=held)
+    assert opened_shipped[:4] == [
+        "session[3 test(s), 19 unit(s)] #2", "session[11 test(s), 18 unit(s)] #3",
+        "session[9 test(s), 15 unit(s)] #8", "session[3 test(s), 21 unit(s)] #9"]

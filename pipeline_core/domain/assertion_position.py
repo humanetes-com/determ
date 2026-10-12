@@ -412,10 +412,19 @@ class TestOutcomes:
     `gained`: failing before, passing after. `lost`: passing before, failing
     after. `earlier` / `later`: failing in both, with a position under the
     same key in both, that moved. `unpositioned`: failing in both with no
-    comparable position.
+    comparable position. `aborted`: ran to its own verdict before (passed,
+    or failed with its own panic, in a process that did not abort), and
+    after, its own process died without printing a panic — a native fault
+    (stack exhaustion, a signal) in the code it now runs.
 
-    :attr:`refuses` is the decided rule, and the only one: any loss refuses;
-    an earlier position refuses only when nothing gained. Every keep that
+    :attr:`refuses` is the decided rule, and the only one: any loss refuses,
+    any abort refuses, and an earlier position refuses only when nothing
+    gained. An abort refuses whatever was gained because it removes the
+    measurement every later decision reads. Run `2157238-210637e6`
+    (2026-10-11): a file route kept five `construct_from_*` bodies that each
+    called themselves, red before and red after, "non-regression"; from the
+    next sweep 26 test binaries died of stack exhaustion and 86 to 95 tests
+    had no owner reading for the rest of the run. Every keep that
     compares an attempt to a baseline reads it — the ledger grade
     (`body_ledger.classify`), the refill keeps (`test_report.judge_refill`),
     the session's best state (`slice_session.judge_against_best`), the
@@ -428,10 +437,12 @@ class TestOutcomes:
     earlier: tuple[PositionMove, ...] = ()
     later: tuple[PositionMove, ...] = ()
     unpositioned: frozenset[str] = frozenset()
+    aborted: frozenset[str] = frozenset()
 
     @property
     def refuses(self) -> bool:
-        return bool(self.lost) or (bool(self.earlier) and not self.gained)
+        return (bool(self.lost) or bool(self.aborted)
+                or (bool(self.earlier) and not self.gained))
 
     @property
     def earlier_tests(self) -> tuple[str, ...]:
@@ -447,9 +458,18 @@ def outcomes_of(
     before_passed: Collection[str], before_failed: Collection[str],
     after_passed: Collection[str], after_failed: Collection[str],
     before_positions: Positions, after_positions: Positions,
+    before_aborted: Collection[str], after_aborted_silent: Collection[str],
 ) -> TestOutcomes:
     """The :class:`TestOutcomes` of `tests` (bare names) between two
-    readings. Name sets are compared by bare name; positions by key."""
+    readings. Name sets are compared by bare name; positions by key.
+
+    `before_aborted` is every test whose own process died in the before
+    reading (`TestStateReading.aborted_names`), `after_aborted_silent` the
+    after reading's deaths that printed no panic
+    (`aborted_silent_names`). Both are required: a reading that cannot say
+    whether a test's process died cannot build an outcome. A death that
+    printed a panic (a stub's `unimplemented!()` reached while unwinding) is
+    not a native fault of the code under judgement and is not `aborted`."""
     names = {leaf(t) for t in tests}
     bp = {leaf(t) for t in before_passed}
     bf = {leaf(t) for t in before_failed}
@@ -464,6 +484,11 @@ def outcomes_of(
     moved = {m.key.test for m in (*earlier, *later)}
     same = {k.test for k, v in positions_for(after_positions, red_both).items()
             if before_positions.get(k) == v}
+    b_abort = {leaf(t) for t in before_aborted}
+    a_silent = {leaf(t) for t in after_aborted_silent}
+    aborted = frozenset(t for t in names
+                        if (t in bp or t in bf) and t not in b_abort
+                        and t in a_silent)
     return TestOutcomes(
         gained=gained, lost=lost, earlier=earlier, later=later,
-        unpositioned=frozenset(red_both - moved - same))
+        unpositioned=frozenset(red_both - moved - same), aborted=aborted)

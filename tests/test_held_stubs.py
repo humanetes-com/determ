@@ -6,7 +6,7 @@ replaced (the slice intersection, the attribution deferral, the schedule's
 "any opened run with the stub in its targets")."""
 from __future__ import annotations
 
-from pipeline_core.domain.held_stubs import HeldStubs
+from pipeline_core.domain.held_stubs import Blockers, HeldStubs
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.slice_session import plan_slices
 from pipeline_core.domain.test_outcome import StubHold
@@ -83,7 +83,8 @@ def test_a_session_writes_a_held_stub_only_when_it_aims_at_a_test_it_holds() -> 
     not the stub's writer; a session aimed at a held test is, and a unit
     route writes what it targets."""
     source = FnLocator("src/wrapper.rs", "source")
-    held = HeldStubs({"boxed_error_display_is_forwarded": frozenset({source})})
+    held = Blockers(HeldStubs(
+        {"boxed_error_display_is_forwarded": frozenset({source})}))
     editable = frozenset({source, CONS})
     assert not held.writes(source, targets=editable,
                            aimed_tests={"test_debug_alternate"}, session=True)
@@ -92,6 +93,36 @@ def test_a_session_writes_a_held_stub_only_when_it_aims_at_a_test_it_holds() -> 
                        session=True)
     assert held.writes(source, targets={source}, aimed_tests=(), session=False)
     assert not held.writes(source, targets={CONS}, aimed_tests=(), session=False)
+
+
+def test_a_session_writes_a_crash_culprit_only_when_it_aims_at_a_test_that_crashed_there() -> None:
+    """The same question for a crash culprit that is not a stub (a
+    frame-sited body): a session carrying it for another test's slice is not
+    its writer; one aimed at a test whose crash convicted it is. A culprit
+    whose crashed tests are unknown (a bare set) has no session writer.
+
+    NEGATIVE CONTROL: the held view alone (the predicate before 2026-10-11)
+    answers True for the passenger session, because a non-held unit in the
+    targets read as written."""
+    culprit = FnLocator("src/c.rs", "recurse")
+    editable = frozenset({culprit, CONS})
+    blk = Blockers.of({}, {culprit: {"crashes_in_recurse"}})
+    assert not blk.writes(culprit, targets=editable,
+                          aimed_tests={"other_test"}, session=True)
+    assert blk.writes(culprit, targets=editable,
+                      aimed_tests={"crashes_in_recurse"}, session=True)
+    assert blk.writes(culprit, targets={culprit}, aimed_tests=(), session=False)
+    bare = Blockers.of({}, {culprit})
+    assert not bare.writes(culprit, targets=editable,
+                           aimed_tests={"crashes_in_recurse"}, session=True)
+    assert bare.writes(culprit, targets={culprit}, aimed_tests=(), session=False)
+
+    def _held_only(unit: FnLocator, targets: frozenset[FnLocator],
+                   session: bool) -> bool:
+        if unit not in targets:
+            return False
+        return not session or unit not in HeldStubs().units
+    assert _held_only(culprit, editable, True), "the pre-fix passenger write"
 
 
 def test_the_session_planner_leaves_held_tests_and_lists_held_units_first() -> None:

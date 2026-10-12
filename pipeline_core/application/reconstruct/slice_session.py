@@ -49,7 +49,12 @@ from pipeline_core.application.reconstruct.unit_conversation import (
     TranscriptBound,
     UnitConversation,
 )
-from pipeline_core.domain.assertion_position import TestKey, outcomes_of, positions_for
+from pipeline_core.domain.assertion_position import (
+    TestKey,
+    TestOutcomes,
+    outcomes_of,
+    positions_for,
+)
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.attribution import (
     container_key,
@@ -242,20 +247,23 @@ def _red_target_positions(
                          [t for t in tests if _leaf(t) in red])
 
 
-def _earlier_targets(
+def _target_outcomes(
     baseline: TestStateReading, after: TestStateReading, tests: Sequence[str],
-) -> tuple[str, ...]:
-    """Targets red at the session's baseline and in `after` that stopped at
-    an earlier assertion position, when no target went green — the decided
-    rule (`TestOutcomes.refuses`) over the session's targets. Read by the
-    turn judge and by the peel, so a peeled subset is held to the bar the
-    turn was. Both keep their suite-net early return above this."""
-    outcomes = outcomes_of(
+) -> TestOutcomes:
+    """The session's targets between the baseline and `after`.
+
+    Position movement and a destroyed verdict are both on the result.
+    `earlier_tests` is what the position rule names, and a caller empties
+    it when something was gained. `aborted` is not emptied by a gain: a
+    silent death removes the measurement. Read by the turn judge and by
+    the peel, so a peeled subset is held to the bar the turn was."""
+    return outcomes_of(
         tests, before_passed=baseline.passed_names,
         before_failed=baseline.failed_names, after_passed=after.passed_names,
         after_failed=after.failed_names, before_positions=baseline.positions,
-        after_positions=after.positions)
-    return () if outcomes.gained else outcomes.earlier_tests
+        after_positions=after.positions,
+        before_aborted=baseline.aborted_names,
+        after_aborted_silent=after.aborted_silent_names)
 
 
 def _admit_from_file_requests(
@@ -517,9 +525,12 @@ def run_slice_session(
                 t, False, said or "(no captured section — the binary may have aborted)",
                 observed.get(t) or observed.get(leaf, "")))
         # A target that moved to an earlier line of the same file is a loss
-        # the name sets cannot show (`TurnReading.earlier`).
+        # the name sets cannot show (`TurnReading.earlier`). A target whose
+        # process died without a panic is a different loss (`TurnReading.aborted`).
         positions_now = _red_target_positions(after, slice_.tests)
-        earlier = _earlier_targets(baseline, after, slice_.tests)
+        outcomes = _target_outcomes(baseline, after, slice_.tests)
+        earlier = () if outcomes.gained else outcomes.earlier_tests
+        aborted = tuple(sorted(outcomes.aborted))
         hung = tuple(cmp.hung_tests)
         if after is not None:
             hung = tuple(dict.fromkeys(
@@ -533,7 +544,7 @@ def run_slice_session(
             pass_delta=cmp.net_pass_delta,
             newly_green=tuple(sorted(cmp.newly_green)),
             executed_shrank=cmp.cur_executed < cmp.base_executed,
-            positions=positions_now, earlier=earlier)
+            positions=positions_now, earlier=earlier, aborted=aborted)
         return reading, after
 
     try:
@@ -1031,10 +1042,13 @@ def _peel(
             continue
         cmp = compare_readings(baseline, after)
         # The turn judge's bar (`TurnReading.regressed`): a strict net gain
-        # forgives; otherwise a target failing earlier than at baseline is
-        # a loss like a newly-red test.
-        _earlier = _earlier_targets(baseline, after, slice_.tests)
-        if not cmp.regressed and not (_earlier and cmp.net_pass_delta <= 0):
+        # forgives a newly-red test; a target failing earlier than at
+        # baseline is a loss only at or below zero; a destroyed verdict
+        # refuses even beside the gain.
+        _outcomes = _target_outcomes(baseline, after, slice_.tests)
+        _earlier = () if _outcomes.gained else _outcomes.earlier_tests
+        if (not cmp.regressed and not _outcomes.aborted
+                and not (_earlier and cmp.net_pass_delta <= 0)):
             ports.log(f"  [phase-c/session] {label}: peeled {len(reverted)} unit(s) — "
                       f"the remaining {len(remaining) + len(unrestored)} hold "
                       "with no previously-passing test red.")

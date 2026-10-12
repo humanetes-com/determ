@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, schedule
-from pipeline_core.domain.held_stubs import HeldStubs
+from pipeline_core.domain.held_stubs import Blockers, HeldStubs
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.schedule_invariants import (
     Decided,
@@ -125,9 +125,9 @@ def test_with_every_held_stub_batched_the_schedule_opens_an_aimed_writer() -> No
                      budget_minutes=float(ev["budget_minutes"]),
                      crash_blamed=held.units, bodies_sha=lambda _t: "b")
     for u in held.units:
-        assert any(held.writes(u, targets=s.run.targets,
-                               aimed_tests=s.run.target_tests,
-                               session=s.run.kind is RouteKind.SESSION)
+        assert any(Blockers(held).writes(u, targets=s.run.targets,
+                                         aimed_tests=s.run.target_tests,
+                                         session=s.run.kind is RouteKind.SESSION)
                    for s in sched.ordered), f"{u.file}::{u.fn_name} unwritten"
     found = violations(decided_from_schedule(sched), hollow=HELD,
                        crash_blamed=held.units,

@@ -223,3 +223,63 @@ def test_a_route_with_no_published_plan_draws_no_bar() -> None:
     assert "✓file 1/1" in after
     assert "▶impl 0/1" in after
     assert "░" in after
+
+
+def _ev(name: str, ts: str, thread: str = "T1", **data: Any) -> dict[str, Any]:
+    return {"event": name, "ts": f"2026-10-11T10:{ts}Z", "thread": thread, "data": data}
+
+
+def test_session_and_pair_routes_and_attempt_stage() -> None:
+    """Sessions and pair fills are routes of the fill, drawn in the order the
+    events opened them, beside a unit route that opened first. The unit's
+    stage is the newest event its own thread wrote. Event shapes are those
+    `slice_session.py` and `impl_fill.py` emit. Negative control: the
+    recorded window has neither emit, so it must keep folding to the same
+    three-route picture as before. A sort that forced session and pair to
+    the front would put them ahead of the file route this stream opened first."""
+    site = {"file": "src/a.rs", "fn": "d", "container": ""}
+    ev = [
+        _ev("phase_c.tdd.iter", "00:00", dispatched=3),
+        _ev("phase_c.file.fill.start", "00:00.5", file="src/a.rs"),
+        _ev("phase_c.session.start", "00:01", tests=["t_x"], units=[site, site],
+            max_turns=4),
+        _ev("phase_c.session.turn", "05:00", turn=2, kind="request"),
+        _ev("llm.request", "05:01"),
+        _ev("phase_c.pair.fill.start", "06:00", thread="T2", dispatcher=site,
+            implementer={**site, "fn": "i"}, convicting=["t"]),
+        _ev("cargo.spawn", "06:30", thread="T2"),
+    ]
+    fp = fold_fill(ev)
+    ids = [r.id for r in fp.routes]
+    assert ids == ["file", "session", "pair"]
+    by = {u.route: u for u in fp.live}
+    assert (by["session"].attempt, by["session"].max_attempts) == (2, 4)
+    assert by["session"].stage == "model" and by["pair"].stage == "cargo"
+    ev += [_ev("phase_c.file.fill.done", "06:45", file="src/a.rs"),
+           _ev("phase_c.pair.fill.done", "07:00", thread="T2", members_filled=2),
+           _ev("phase_c.session.end", "08:00", outcome="kept", turns=2)]
+    fp = fold_fill(ev)
+    assert not fp.live and all(r.finished == r.started for r in fp.routes)
+    assert [r.id for r in fold_fill(_window()).routes
+            if r.id in ("session", "pair")] == []
+
+
+def test_a_terminal_pair_revert_closes_the_row() -> None:
+    """A revert that will retry leaves the pair live. A revert that ends
+    the run, and a declined pair, close it. Negative control: the retrying
+    event on its own does not close the row."""
+    site = {"file": "src/a.rs", "fn": "d", "container": ""}
+    start = _ev("phase_c.pair.fill.start", "06:00", thread="T2", dispatcher=site,
+                implementer={**site, "fn": "i"})
+    retrying = _ev("phase_c.pair.fill.reverted", "06:30", thread="T2",
+                   why="compile", attempt=1, retrying=True)
+    live = fold_fill([_ev("phase_c.tdd.iter", "00:00"), start, retrying])
+    assert any(u.route == "pair" for u in live.live)
+    terminal = _ev("phase_c.pair.fill.reverted", "07:00", thread="T2",
+                   why="u2", attempt=2)
+    closed = fold_fill([_ev("phase_c.tdd.iter", "00:00"), start, terminal])
+    assert not any(u.route == "pair" for u in closed.live)
+    declined = _ev("phase_c.fill.declined", "07:00", thread="T2",
+                   route="pair", reason="ignored_inputs")
+    gone = fold_fill([_ev("phase_c.tdd.iter", "00:00"), start, declined])
+    assert not any(u.route == "pair" for u in gone.live)

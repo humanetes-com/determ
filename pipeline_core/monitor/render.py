@@ -389,7 +389,8 @@ def fill_unit_rows(fill: FillProgress, now: float, limit: int = 4) -> list[str]:
     units = sorted(fill.live, key=lambda u: _iso_ts_seconds(u.since_iso) or now)
     for u in units[:limit]:
         tag = ("↻" if u.refill else "⊞" if u.route == "impl"
-               else "▤" if u.route == "file" else " ")
+               else "▤" if u.route == "file" else "§" if u.route == "session"
+               else "⇄" if u.route == "pair" else " ")
         # Pad BEFORE colouring: an f-string width counts the ANSI escape bytes,
         # so `f"{cyan(x):<26}"` pads a coloured label to nothing and every
         # column right of it stops lining up (the same trap
@@ -401,8 +402,9 @@ def fill_unit_rows(fill: FillProgress, now: float, limit: int = 4) -> list[str]:
         if u.members > 1:
             seg.append(dim(f"{u.members} member(s)"))
         if u.attempt:
-            att = (f"attempt {u.attempt}/{u.max_attempts}" if u.max_attempts
-                   else f"attempt {u.attempt}")
+            noun = "turn" if u.route == "session" else "attempt"
+            att = (f"{noun} {u.attempt}/{u.max_attempts}" if u.max_attempts
+                   else f"{noun} {u.attempt}")
             seg.append(att)
         if u.floor:
             seg.append(dim(f"floor {u.floor}"))
@@ -410,6 +412,8 @@ def fill_unit_rows(fill: FillProgress, now: float, limit: int = 4) -> list[str]:
             seg.append(yellow(f"stall {u.stalled}"))
         elif u.improving:
             seg.append(green("floor fell"))
+        if u.stage:
+            seg.append(dim(f"in {u.stage}"))
         rows.append("           unit     " + "  ".join(seg))
     if len(units) > limit:
         rows.append("           " + dim(f"         +{len(units) - limit} more in flight"))

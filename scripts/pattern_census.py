@@ -342,6 +342,23 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      (use-after-free with an origin outside the crate) are NOT this class:
      the split is the report kind. Reaction: `fault=exhaustion` on the
      `[phase-c/crash]` line and the culprit fns named instead of NOBODY.
+  P48 dropped on a reserved share — a per-fn run logged `unit(s) not
+     claimed (the run's share is spent ...)` and its route row ended under
+     half its share. The share was reserved by sibling calls in flight, not
+     spent, and every queued unit was dropped in one pass. Run
+     `2157238-210637e6` (2026-10-11) fill 1: 1 call in 2.2 of 13 min, 18
+     units dropped; fill 2: six dropped while three calls ran. Reaction: a
+     claim on a reserved share waits for a sibling's call to return
+     (`RunClock.refusal`); the line then appears only on a spent share.
+  P49 kept process killer — between two coverage readings the count of
+     tests whose binary did not complete rose by 10 or more, with a
+     `re-fill KEPT on non-regression` line in between. Run
+     `2157238-210637e6` (2026-10-11): 0 -> 86 after a file route kept five
+     `construct_from_*` bodies that called themselves; under isolation the
+     stack overflow was a FAILED entry, red before and red after.
+     Reaction: the keep refuses a silent death of a test the baseline ran
+     to its own verdict (`TestOutcomes.aborted`, the gate's REJECT naming
+     the destroyed verdicts).
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -3138,6 +3155,79 @@ def detect_p47(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [run.start_ref]}]
 
 
+RE_P48_SCHEDULE_PER_FN = re.compile(
+    r"\[phase-c/schedule\] fill (\d+): \d+ run\(s\) — .*?"
+    r"\d+\. (per-fn .*?) share (\d+(?:\.\d+)?)m")
+RE_P48_SHARE_DROP = re.compile(
+    r"\[phase-c/per-fn\] pass \d+: (\d+) unit\(s\) not claimed "
+    r"\(the run's share is spent")
+RE_P48_ROUTE = re.compile(
+    r"\[phase-c/route\] per-fn .*?: [A-Z]+ after (\d+(?:\.\d+)?) min "
+    r"\((\d+) call")
+P48_SHARE_FRACTION = 0.5
+
+
+def detect_p48(run: Run, iters: list[dict]) -> list[dict]:
+    """A per-fn run that dropped units as "the run's share is spent" and
+    ended under half its share: the share was reserved by in-flight
+    sibling calls, not spent. Run `2157238-210637e6` (2026-10-11) fill 1:
+    1 call in 2.2 of 13 min, 18 units dropped. Reaction: a claim on a
+    reserved share waits for a sibling's call to return (`RunClock`)."""
+    share: float | None = None
+    dropped = 0
+    hits: list[tuple[str, str]] = []
+    for ref, text in run.lines:
+        if (m := RE_P48_SCHEDULE_PER_FN.search(text)):
+            share, dropped = float(m.group(3)), 0
+        elif (m := RE_P48_SHARE_DROP.search(text)):
+            dropped += int(m.group(1))
+        elif (m := RE_P48_ROUTE.search(text)):
+            minutes, calls = float(m.group(1)), int(m.group(2))
+            if (dropped and share
+                    and minutes < P48_SHARE_FRACTION * share):
+                hits.append((ref, f"{dropped} unit(s) dropped as spent after "
+                                  f"{minutes:.1f} of {share:.0f} min, "
+                                  f"{calls} call(s)"))
+            dropped = 0
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} per-fn run(s) dropped units on a "
+                         f"reserved share: {hits[0][1]}",
+             "refs": [r for r, _ in hits[:4]]}]
+
+
+RE_P49_UNMEASURED = re.compile(
+    r"\[coverage\] .*?, (\d+) unmeasured \(binary did not complete")
+RE_P49_KEPT = re.compile(r"re-fill KEPT on non-regression")
+P49_JUMP = 10
+
+
+def detect_p49(run: Run, iters: list[dict]) -> list[dict]:
+    """Between two coverage readings the count of tests whose binary did not
+    complete rose by `P49_JUMP` or more, with a non-regression keep in
+    between: a kept body that kills test processes. Run `2157238-210637e6`
+    (2026-10-11): 0 -> 86 after five self-recursive `construct_from_*`
+    bodies were kept red-before-red-after. Reaction: a silent death of a
+    test the baseline ran to its own verdict refuses the keep
+    (`TestOutcomes.aborted`)."""
+    last: int | None = None
+    kept_since = False
+    hits: list[tuple[str, str]] = []
+    for ref, text in run.lines:
+        if RE_P49_KEPT.search(text):
+            kept_since = True
+        elif (m := RE_P49_UNMEASURED.search(text)):
+            now = int(m.group(1))
+            if last is not None and kept_since and now - last >= P49_JUMP:
+                hits.append((ref, f"unmeasured {last} -> {now}"))
+            last, kept_since = now, False
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} sweep(s) lost test processes after a "
+                         f"non-regression keep: {hits[0][1]}",
+             "refs": [r for r, _ in hits[:4]]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3158,7 +3248,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P37": detect_p37, "P38": detect_p38, "P39": detect_p39,
              "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
-             "P46": detect_p46, "P47": detect_p47}
+             "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
+             "P49": detect_p49}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3201,6 +3292,8 @@ CLASS_NAMES = {
     "P45": "starved slice function (a function on a red test's executed slice no opened run wrote for 3 fills after the test's failure last moved; pre-fix src/ensure.rs::render went unwritten fills 3-8 of run 14141-9a904822)",
     "P47": "red ledger pipeline class (a cluster ended with a red test the pipeline held: a reverted run had turned it green, an offer failed to compile and no repair saw it, no route ever wrote its functions, or a real ask omitted the test's words)",
     "P46": "flat while held elsewhere (a FLAT grade whose every convicting test died first inside a different still-stubbed function; pre-fix 62 rows over ten cold runs)",
+    "P48": "dropped on a reserved share (a per-fn run refused units as share-spent and ended under half its share; pre-fix a sibling's in-flight reservation refused every queued unit, run 2157238-210637e6 fill 1: 18 dropped, 1 call in 2.2 of 13 min)",
+    "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

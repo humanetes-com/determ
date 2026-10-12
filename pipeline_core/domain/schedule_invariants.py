@@ -29,7 +29,7 @@ reason (and, for a hold, the runs it waited on). On that:
   candidate writes. A held test cannot be judged by any route until its stub
   has a body, so a fill that opens no writer of it spends its budget on
   tests that cannot move. A held stub counts as written only by a run that
-  aims at it (`HeldStubs.writes`), and it is reported even when no candidate
+  aims at it (`Blockers.writes`), and it is reported even when no candidate
   targets it at all: on run `857717-812ee44c` fills 3-5,
   `src/wrapper.rs::source` held three red tests and was in no candidate
   run's targets, and the old intersection of the blockers with the
@@ -67,7 +67,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from pipeline_core.domain.held_stubs import HeldStubs
+from pipeline_core.domain.held_stubs import Blockers
 from pipeline_core.domain.models import FnLocator
 
 __all__ = [
@@ -111,7 +111,8 @@ class ScheduleViolation:
 
 def violations(decided: Sequence[Decided], *,
                hollow: Mapping[str, Collection[FnLocator]] | None,
-               crash_blamed: Collection[FnLocator] = (),
+               crash_blamed: (Mapping[FnLocator, Collection[str]]
+                              | Collection[FnLocator]) = (),
                budget_minutes: float = 0.0,
                measured_owners: Collection[FnLocator] = (),
                due: Collection[FnLocator] = (),
@@ -138,13 +139,16 @@ def violations(decided: Sequence[Decided], *,
     candidates_write: set[FnLocator] = set()
     for d in decided:
         candidates_write |= d.targets
-    held = HeldStubs.of_map(hollow)
+    blk = Blockers.of(hollow, crash_blamed)
 
     def _writes(d: Decided, u: FnLocator) -> bool:
-        return held.writes(u, targets=d.targets, aimed_tests=d.aimed_tests,
-                           session=d.session)
+        return blk.writes(u, targets=d.targets, aimed_tests=d.aimed_tests,
+                          session=d.session)
 
-    blockers = set(frozenset(crash_blamed) & candidates_write) | held.units
+    # A culprit is reported when some candidate writes it; a held stub is
+    # reported even when none does (it stops red tests whatever else runs).
+    blockers = {u for u in blk.culprits
+                if any(_writes(d, u) for d in decided)} | blk.held.units
     written: set[FnLocator] = set()
     for d in opened:
         written |= d.targets
@@ -276,10 +280,17 @@ def measured_owners_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
     return frozenset(_loc(x) for x in inputs.get("measured_owners") or ())
 
 
-def blamed_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
+def blamed_from_event(
+    data: Mapping[str, Any],
+) -> dict[FnLocator, frozenset[str]]:
+    """The crash blame a recorded event carries: culprit -> the tests whose
+    crash convicted it. An event that predates `crash_blamed_tests` gives
+    each culprit no test (no session is its writer, `Blockers.of`)."""
     inputs = data.get("inputs")
     if not isinstance(inputs, Mapping):
-        return frozenset()
-    return frozenset(_loc(x) for x in inputs.get("crash_blamed") or ())
+        return {}
+    tests = inputs.get("crash_blamed_tests") or {}
+    return {_loc(x): frozenset(tests.get(x) or ())
+            for x in inputs.get("crash_blamed") or ()}
 
 

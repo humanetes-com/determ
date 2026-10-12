@@ -2087,6 +2087,18 @@ class CrashSites:
 
     blamed: frozenset[FnSite] = frozenset()
     evidence: Mapping[FnSite, str] = field(default_factory=dict)
+    #: Each blamed locator with the tests whose crash convicted it
+    #: (:func:`blamed_tests`), for the schedule's blocker predicate.
+    tests_of: Mapping[FnLocator, frozenset[str]] = field(default_factory=dict)
+
+    def blame_map(
+        self, culprits: Iterable[FnLocator],
+    ) -> dict[FnLocator, frozenset[str]]:
+        """`culprits` (the fill's blamed set, which may add units this
+        sweep's sites did not convict: held stubs, joined callees) each with
+        the tests whose crash convicted it here, empty when none did. The
+        schedule's `crash_blamed` input."""
+        return {u: self.tests_of.get(u, frozenset()) for u in culprits}
 
     def blames(self, blamed: Collection[FnLocator], file: str, fn_name: str,
                container: str) -> bool:
@@ -2170,7 +2182,8 @@ def crash_sites_of(
         if not keys:
             keys = [k for s in group for k in resolve(s.all_frames)]
         _put(sorted(set(keys)), render_exhaustion_evidence(group))
-    return CrashSites(frozenset(blamed), evidence)
+    return CrashSites(frozenset(blamed), evidence,
+                      tests_of=blamed_tests(tuple(sites)))
 
 
 def faulting_stack_sites(
@@ -2248,6 +2261,30 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     exhaustion (:func:`exhaustion_culprit_locators`). The set the refill
     stamp, the schedule and the dispatch grade read."""
     return reader_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+
+
+def blamed_tests(
+    sites: tuple[CrashSite, ...],
+) -> dict[FnLocator, frozenset[str]]:
+    """:func:`blamed_locators`, each culprit with the tests whose crash
+    convicted it (bare names: the site's own test and a chain site's tests).
+
+    The keys are exactly :func:`blamed_locators` of the same sites. A
+    culprit is asked of a SESSION only when one of the session's aimed tests
+    is among these: a session that merely has the culprit in its editable
+    set, for another test's slice, is not asked for that body. Run
+    `2157238-210637e6` (2026-10-11): every fill-2 session carried a crash
+    culprit as a passenger and opened in the blockers' tier ahead of the
+    unit routes that aimed at it."""
+    out: dict[FnLocator, set[str]] = {
+        loc: set() for loc in blamed_locators(sites)}
+    for s in sites:
+        names = {n.rsplit("::", 1)[-1]
+                 for n in (s.test_name, *s.chain_tests) if n}
+        for loc in blamed_locators((s,)):
+            if loc in out:
+                out[loc].update(names)
+    return {loc: frozenset(ts) for loc, ts in out.items()}
 
 
 def memory_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:

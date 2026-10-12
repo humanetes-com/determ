@@ -220,6 +220,36 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
     assert (root2 / "src" / "render.rs").read_text() == "BASE_REN"
 
 
+def test_a_peel_refuses_a_silent_abort_even_beside_a_net_gain(tmp_path):
+    """A subset that kills a baseline-judged test without a panic does not
+    hold, even when the suite's pass count rose. Negative control: the
+    sweep's own comparison does not call that rise a regression, which is
+    why the peel has to read the abort itself."""
+    root = _tree(tmp_path)
+    baseline = _reading({"t_keep"}, {"t_pair"})
+    after = TestStateReading(binaries=(BinaryResult(
+        label="unit", completed=True,
+        passed=frozenset({"t_keep", "t_bonus"}),
+        failed=frozenset({"t_pair"}),
+        pass_count=2, fail_count=1,
+        aborted=frozenset({"t_pair"}),
+        aborted_silent=frozenset({"t_pair"})),))
+    from pipeline_core.domain.test_results import compare_readings
+    assert not compare_readings(baseline, after).regressed
+    assert compare_readings(baseline, after).net_pass_delta > 0
+    kept, _reverted = _peel(
+        _ports(measure=lambda raw: after),
+        root,
+        SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
+        _RECS, baseline,
+        {_FMT: "BASE_LIB", _RENDER: "BASE_REN"},
+        _base_pre_images(root),
+        frozenset({_FMT, _RENDER}), peel_max=1, label="t")
+    assert kept == frozenset()
+    assert (root / "src" / "lib.rs").read_text() == "BASE_LIB"
+    assert (root / "src" / "render.rs").read_text() == "BASE_REN"
+
+
 def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
     """Plan: a hang is not a peelable subset — later binaries never ran,
     so no member's keep can be read. File-first already reverts on hang;

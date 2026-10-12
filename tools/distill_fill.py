@@ -59,7 +59,9 @@ HOW TO READ THE OUTPUT. The fixture is JSON: `run_id`, `iter`, `cluster`,
 else one per file that holds a stub, targets = that file's sites in the
 slices), `schedule_runs` (the schedule event's candidate runs, all kinds),
 `failed` / `failed_pairs` / `incomplete` (the iter event), `crash_blamed`
-([[file, fn], ...] from crash.localized), `ledger_rows` (prior route rows
+([[file, fn], ...] from crash.localized), `schedule_inputs` (the schedule
+event's own `inputs`: the held view it read as `hollow`, `crash_blamed` and
+`crash_blamed_tests`), `ledger_rows` (prior route rows
 for the cluster: with `ledger_source: "index"` the first N cluster rows of
 `logs/route_ledger/<project>/index.jsonl`, N being the `ledger N row(s)`
 the schedule loaded, kept for the candidates' work keys and every hop-pair
@@ -419,6 +421,13 @@ def distil(run_id: str, iter_n: int, stubs: list[str], *,
         "failed_pairs": [list(p) for p in (idat.get("failed_pairs") or [])],
         "incomplete": list(idat.get("incomplete") or []),
         "crash_blamed": crash_blamed,
+        # The schedule's own inputs, as it read them (absent on an event
+        # that predates `inputs`): the held view and the crash blame with
+        # its tests. `hollow_of` rebuilds a hollow map from the coverage
+        # slices, which since 2026-10-10 is not the map the schedule reads
+        # (run `2157238-210637e6` fill 2: 88 slice-hollow tests, 19 held).
+        "schedule_inputs": dict(((sched or {}).get("data") or {}).get(
+            "inputs") or {}),
         "classes": _classes(fill),
     }
 

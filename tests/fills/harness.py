@@ -124,6 +124,22 @@ def unmeasurable_of(fix: Mapping[str, Any]) -> frozenset[str]:
         if str(n).rsplit("::", 1)[-1] not in measured)
 
 
+def recorded_held_of(fix: Mapping[str, Any]) -> dict[str, frozenset[FnLocator]]:
+    """The held view the schedule itself read (`schedule_inputs.hollow`),
+    not the slice reading `hollow_of` rebuilds."""
+    raw = dict((fix.get("schedule_inputs") or {}).get("hollow") or {})
+    return {t: frozenset(_loc(u) for u in us) for t, us in raw.items()}
+
+
+def recorded_blame_of(fix: Mapping[str, Any]) -> dict[FnLocator, frozenset[str]]:
+    """The crash blame the schedule itself read, with the tests each culprit
+    crashed when the event carried them."""
+    inputs = fix.get("schedule_inputs") or {}
+    tests = dict(inputs.get("crash_blamed_tests") or {})
+    return {_loc(u): frozenset(tests.get(u) or ())
+            for u in inputs.get("crash_blamed") or ()}
+
+
 def crash_blamed_of(fix: Mapping[str, Any]) -> frozenset[FnLocator]:
     return frozenset(
         FnLocator(str(a), str(b)) for a, b in (fix.get("crash_blamed") or []))
@@ -260,7 +276,8 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
            opened: list[str] | None = None,
            log: list[str] | None = None,
            unmeasurable_tests: Sequence[str] = (),
-           crash_blamed: Sequence[FnLocator] = (),
+           crash_blamed: Sequence[FnLocator] | Mapping[FnLocator, frozenset[str]] = (),
+           hollow: Mapping[str, frozenset[FnLocator]] | None = None,
            oracle_fp: str = "o",
            sticky_reverts: bool = False,
            labelled: bool = True) -> tuple[FillExecution, list[str]]:
@@ -290,7 +307,9 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
         iteration=int(fix["iter"]), oracle_fp=oracle_fp, budget_minutes=budget,
         scheduled=scheduled, parallelism=1,
         unmeasurable_tests=frozenset(unmeasurable_tests),
-        crash_blamed=frozenset(crash_blamed))
-    out = execute_fill(routes, hollow=hollow_of(fix), bodies_sha=lambda _t: "b",
-                       deps=deps)
+        crash_blamed=(dict(crash_blamed) if isinstance(crash_blamed, Mapping)
+                      else frozenset(crash_blamed)))
+    out = execute_fill(routes,
+                       hollow=hollow_of(fix) if hollow is None else hollow,
+                       bodies_sha=lambda _t: "b", deps=deps)
     return out, opened

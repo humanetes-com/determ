@@ -29,6 +29,7 @@ from pipeline_core.domain.assertion_position import (
     TestSource,
     assertion_positions,
     is_oracle_test_path,
+    leaf,
 )
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.cluster_env import world_of_env
@@ -801,28 +802,54 @@ def u2_test_gate(
     # rc == 0 means the binary ran to completion, so a name absent from the
     # output was never executed (libtest's OR filter did not match it), not
     # killed mid-run — charging that would convict a body of a filter miss.
-    _aborted = (self_aborted_tests(frozenset(_missing), baseline.judged_names)
-                if baseline is not None and rc != 0 and not _compile_failed
-                else frozenset())
+    # Under test isolation an aborted test is re-run alone and rebuilt as a
+    # FAILED entry of a completed section, so it is never missing: the
+    # destroyed verdict is a silent death of a test the baseline ran to its
+    # own verdict without one. Before 2026-10-11 only the missing names were
+    # read here, and run `2157238-210637e6` kept five self-recursive bodies
+    # whose stack overflows read as ordinary self failures.
+    _own = {leaf(t) for t in fn_tests}
+    _before_dead = {leaf(t) for t in (baseline.aborted_names
+                                      if baseline is not None else ())}
+    # Two destroyed-verdict shapes, charged separately. A name with no
+    # section at all (`_missing`) can be an incomplete binary whose only
+    # panic is another unit's stub. A silent death is a completed FAILED
+    # section that printed no panic: the baseline judged that test, and a
+    # stub panic in a sibling section of the same capture does not clear
+    # it. Isolation can leave the original incomplete section beside the
+    # rebuilt one (the executable was gone, the listing failed, or the
+    # deadline cut that binary), which is how one capture holds both.
+    _silent = frozenset(
+        n for n in TestStateReading(
+            parse_binary_results(out or "")).aborted_silent_names
+        if leaf(n) in _own and leaf(n) not in _before_dead)
+    _judged = (baseline.judged_names if baseline is not None else frozenset())
+    _charge = baseline is not None and rc != 0 and not _compile_failed
+    _silent_aborted = (self_aborted_tests(_silent, _judged)
+                       if _charge else frozenset())
+    _missing_aborted = (self_aborted_tests(frozenset(_missing), _judged)
+                        if _charge else frozenset())
+    _aborted = _silent_aborted | _missing_aborted
     if _aborted:
-        # Destroyed verdicts convict the body — unless the capture proves the
-        # aborting panic fired inside ANOTHER unit's `unimplemented!()` stub
-        # (every crate panic in the ABORTED sections a stub panic, none
-        # resolving into this unit; the runtime's own double-panic line is
-        # the announcement of that stub panic in `Drop`, not a veto). Then
-        # the abort is the hollow tree speaking: a correct body finally made
-        # a still-stubbed sibling reachable (drop-path fns, typically), and
-        # rejecting it burns attempts toward a conviction the unit never
+        # A missing verdict convicts the body — unless the capture proves
+        # the aborting panic fired inside ANOTHER unit's `unimplemented!()`
+        # stub (every crate panic in the INCOMPLETE sections a stub panic,
+        # none resolving into this unit; the runtime's own double-panic
+        # line is the announcement of that stub panic in `Drop`, not a
+        # veto). Then the missing names are the hollow tree speaking: a
+        # correct body finally made a still-stubbed sibling reachable, and
+        # rejecting them burns attempts toward a conviction the unit never
         # earned — `from_boxed` spent attempts 2/4/5 exactly here in run
         # `1048052-2feafd52` while `src/error.rs` still held its hollow
         # drop machinery, and `ptr.rs::new` two attempts and two retro
         # rounds in run `2585062-494e630e` with the destructor line as the
-        # veto. Keep the fill, name the blockers, defer to the outer loop's
-        # producer re-admission.
+        # veto. That exemption is the missing names only. A silent death
+        # of a test the baseline judged stays a reject, even when the same
+        # capture also holds that stub section.
         _locate = make_fn_site_locator(structure, target_src_dir)
         _panics = crash_panics(out)
         _ext = external_stub_sites_of(_panics, frozenset(unit_sites), _locate)
-        if _ext:
+        if _ext and not _silent_aborted:
             _names = sorted(f"{s.file}::{s.fn_name}" for s in _ext)
             guard("phase-c/u2_abort_external",
                   f"{sorted(_aborted)} lost their verdict to an abort whose "
