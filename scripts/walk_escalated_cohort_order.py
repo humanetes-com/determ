@@ -75,7 +75,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pipeline_core.adapters.artifacts import load_baked_leaf_order  # noqa: E402
 from pipeline_core.adapters.extractor import CliExtractor  # noqa: E402
 from pipeline_core.application.reconstruct.scheduling import order_frontier  # noqa: E402
-from pipeline_core.domain.dispatch_rank import UnitFacts, rank  # noqa: E402
+from pipeline_core.domain.dispatch_rank import Service, UnitFacts, rank  # noqa: E402
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks  # noqa: E402
 from pipeline_core.domain.models import FnLocator  # noqa: E402
 
@@ -169,7 +169,9 @@ def main() -> int:
     ordered = order_frontier(frontier, load_baked_leaf_order(root, a.cluster))
     builders, callees = producer_dispatch_ranks(esc, fns, types)
     after = rank({
-        k: UnitFacts(static_index=i, escalated=k in esc,
+        # The walk reads no service record; every unit is stated never
+        # served, so they share one class and the producer order decides.
+        k: UnitFacts(static_index=i, service=Service.NEVER, escalated=k in esc,
                      builder=k in builders, callee=k in callees)
         for i, (k, _) in enumerate(ordered)})
     before = [k for k, _ in ordered]

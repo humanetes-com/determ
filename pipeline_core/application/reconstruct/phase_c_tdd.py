@@ -160,7 +160,9 @@ from pipeline_core.domain.dispatch_rank import (
     Withheld,
     off_batch_reasons,
     rank,
+    rotation_bound,
     service_of,
+    starved,
     streak_after_turn,
     take,
 )
@@ -5950,8 +5952,8 @@ def run_phase_c_tdd(
         # THE ONE RANK (`domain/dispatch_rank`). Every fact the steps above
         # computed is handed to it, and nothing after it reorders: held stubs
         # first and all of them in the batch, then the evidenced units (owed,
-        # or named by a fault site), then the rest; inside each class the
-        # units the last sweeps did not claim lead.
+        # named by a fault site, or never served a body), then the rest;
+        # inside each class the units the last sweeps did not claim lead.
         _chain_set = _crash_cohort.chain_only
         _facts: dict[FnLocator, UnitFacts] = {}
         for _i, _k in enumerate(_static):
@@ -6000,11 +6002,32 @@ def run_phase_c_tdd(
                         key=lambda x: (x.file, x.fn_name))
         _off = off_batch_reasons(_watch, _ranked, _batch.keys, _not_ranked,
                                  _dispatch_cap)
+        # The never-served members of the evidenced class are watched too:
+        # without them the reasons covered held, crash and owed units only,
+        # and a never-served unit out of the batch was in no line at all
+        # (runs `2157238-210637e6` .. `35210-6d56e8c9`: 44 of them, 0 slots,
+        # four sweeps). They go to the event in full and to the log as a
+        # count, and a member past the rotation bound is a HEALTH line.
+        _never_ev = sorted(
+            (k for k in _ranked
+             if _facts[k].rank_class is RankClass.EVIDENCED
+             and _facts[k].service is Service.NEVER),
+            key=lambda x: (x.file, x.fn_name))
+        _batch_set = set(_batch.keys)
+        _never_in = sum(1 for k in _never_ev if k in _batch_set)
+        _off_never = off_batch_reasons(
+            _never_ev, _ranked, _batch.keys, _not_ranked, _dispatch_cap)
+        _bound = rotation_bound(_by_class.get(RankClass.EVIDENCED, 0),
+                                _by_class.get(RankClass.HELD, 0),
+                                _dispatch_cap)
+        _starved = starved(_facts, _batch.keys, _dispatch_cap)
         deps.log(
             f"  {tag} [phase-c/dispatch] iter {iter_n}: rank — "
             f"{_by_class.get(RankClass.HELD, 0)} held stub(s), "
             f"{_by_class.get(RankClass.EVIDENCED, 0)} evidenced "
-            f"({len(_due.units)} owed, {len(_crash_grades)} crash-graded), "
+            f"({len(_due.units)} owed, {len(_crash_grades)} crash-graded, "
+            f"{len(_never_ev)} never served, {_never_in} of them in the "
+            f"batch; rotation bound {_bound} sweep(s)), "
             f"{_by_class.get(RankClass.OTHER, 0)} other; batch head: "
             + ", ".join(f"{k.file}::{k.fn_name}" for k in _batch.keys[:6])
             + ("; NOT in the batch: " + ", ".join(
@@ -6021,10 +6044,26 @@ def run_phase_c_tdd(
             "unclaimed": {f"{k.file}::{k.fn_name}": _facts[k].unclaimed
                           for k in _ranked if _facts[k].unclaimed},
             "off_batch": {f"{k.file}::{k.fn_name}": why
-                          for k, why in _off.items()},
+                          for k, why in {**_off, **_off_never}.items()},
+            "never_served": [f"{k.file}::{k.fn_name}" for k in _never_ev],
+            "bound": _bound,
+            "starved": {f"{k.file}::{k.fn_name}": n
+                        for k, n in sorted(_starved.items(),
+                                           key=lambda kv: (kv[0].file,
+                                                           kv[0].fn_name))},
             "withheld": {f"{k.file}::{k.fn_name}": why
                          for k, why in sorted(_not_ranked.reasons.items())},
         })
+        if _starved:
+            deps.log(
+                f"  HEALTH ‼ EVIDENCED_STARVED iter {iter_n}: "
+                f"{len(_starved)} evidenced unit(s) out of the batch with an "
+                f"unclaimed streak at or past the rotation bound ({_bound}): "
+                + ", ".join(f"{k.file}::{k.fn_name} (streak {n})"
+                            for k, n in sorted(
+                                _starved.items(),
+                                key=lambda kv: (-kv[1], kv[0].file,
+                                                kv[0].fn_name))[:8]))
         if _crash_grades:
             # The crash cohort's own line, with its cause computed: for every
             # crash unit not in the batch, the filter that withheld it or its

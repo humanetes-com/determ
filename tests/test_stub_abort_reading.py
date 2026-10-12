@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.domain.attribution import locator_of
-from pipeline_core.domain.dispatch_rank import UnitFacts, rank, take
+from pipeline_core.domain.dispatch_rank import Service, UnitFacts, rank, take
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteRun,
@@ -148,7 +148,7 @@ def _batch(held: frozenset[FnLocator], blockers: frozenset[FnLocator]) -> list[F
     static = ([_loc(k) for k in _LOGGED_BATCH]
               + [FnLocator("src/rest.rs", f"f{i}") for i in range(59)]
               + sorted(blockers))
-    ranked = rank({k: UnitFacts(static_index=i, held_tests=1 if k in held else 0)
+    ranked = rank({k: UnitFacts(static_index=i, service=Service.NEVER, held_tests=1 if k in held else 0)
                    for i, k in enumerate(static)})
     return list(take(ranked, held, 12, cohort=None, traversed=()).keys)
 

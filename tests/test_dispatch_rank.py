@@ -18,6 +18,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.domain.dispatch_batch import DEFAULT_MAX_DISPATCH, DispatchBatch
 from pipeline_core.domain.dispatch_rank import (
     Crash,
@@ -28,7 +30,9 @@ from pipeline_core.domain.dispatch_rank import (
     next_streak,
     off_batch_reasons,
     rank,
+    rotation_bound,
     service_of,
+    starved,
     streak_after_turn,
     take,
 )
@@ -39,7 +43,7 @@ from tests.test_dispatch_batch import _types
 
 
 def _static(keys: Sequence[str]) -> dict[str, UnitFacts]:
-    return {k: UnitFacts(static_index=i) for i, k in enumerate(keys)}
+    return {k: UnitFacts(static_index=i, service=Service.NEVER) for i, k in enumerate(keys)}
 
 
 def _sweeps(frontiers: Sequence[Sequence[str]], cap: int, *,
@@ -55,7 +59,7 @@ def _sweeps(frontiers: Sequence[Sequence[str]], cap: int, *,
     out: list[DispatchBatch[str]] = []
     for frontier in frontiers:
         def _f(k: str, i: int, now: dict[str, int] = streak) -> UnitFacts:
-            base = facts(k, i) if facts else UnitFacts(static_index=i)
+            base = facts(k, i) if facts else UnitFacts(static_index=i, service=Service.NEVER)
             return replace(base, unclaimed=now.get(k, 0))
         ranked = rank({k: _f(k, i) for i, k in enumerate(frontier)})
         if cohort is None and cohort_mode:
@@ -167,22 +171,22 @@ def test_every_held_stub_is_in_the_batch_whatever_the_cap():
     sweep."""
     held = [f"h{i}" for i in range(14)]
     others = [f"u{i}" for i in range(10)]
-    facts = {**{k: UnitFacts(static_index=20 + i, held_tests=1)
+    facts = {**{k: UnitFacts(static_index=20 + i, service=Service.NEVER, held_tests=1)
                 for i, k in enumerate(held)},
-             **{k: UnitFacts(static_index=i) for i, k in enumerate(others)}}
+             **{k: UnitFacts(static_index=i, service=Service.NEVER) for i, k in enumerate(others)}}
     b = take(rank(facts), held, 12, cohort=None, traversed=())
     assert set(held) <= set(b.keys)
     assert len(b.keys) == 15 and b.keys[-1] == "u0"
 
 
 def test_held_stubs_lead_in_order_of_the_tests_they_hold_then_rotate():
-    facts = {"small": UnitFacts(static_index=0, held_tests=1),
-             "big": UnitFacts(static_index=1, held_tests=54),
-             "owed": UnitFacts(static_index=2, owed_tier=0),
-             "blamed": UnitFacts(static_index=3, crash=Crash.BLAMED)}
+    facts = {"small": UnitFacts(static_index=0, service=Service.NEVER, held_tests=1),
+             "big": UnitFacts(static_index=1, service=Service.NEVER, held_tests=54),
+             "owed": UnitFacts(static_index=2, service=Service.NEVER, owed_tier=0),
+             "blamed": UnitFacts(static_index=3, service=Service.NEVER, crash=Crash.BLAMED)}
     assert rank(facts) == ["big", "small", "blamed", "owed"]
     # The one cut last sweep goes first among the held.
-    facts["small"] = UnitFacts(static_index=0, held_tests=1, unclaimed=1)
+    facts["small"] = UnitFacts(static_index=0, service=Service.NEVER, held_tests=1, unclaimed=1)
     assert rank(facts)[:2] == ["small", "big"]
 
 
@@ -237,7 +241,7 @@ def test_recorded_857717_iter5_held_stubs_lead_the_batch():
     assert (first + after).index("src/error.rs::object_drop_front") == 14
     assert (first + after).index("src/wrapper.rs::source") == 19
 
-    facts = {u: UnitFacts(static_index=i,
+    facts = {u: UnitFacts(static_index=i, service=Service.NEVER,
                           held_tests=_HELD_857717_ITER5.get(u, 0),
                           crash=Crash.SITED if u in _HELD_857717_ITER5 else None,
                           owed_tier=0)
@@ -258,7 +262,7 @@ def test_39786_fill4_shape_every_owed_unit_is_offered_within_the_bound():
     owed = [f"o{i:02d}" for i in range(26)]
 
     def facts(k: str, i: int) -> UnitFacts:
-        return UnitFacts(static_index=i,
+        return UnitFacts(static_index=i, service=Service.NEVER,
                          crash=Crash.SITED if k in crash else None,
                          owed_tier=0 if k in owed else None)
 
@@ -271,12 +275,12 @@ def test_39786_fill4_shape_every_owed_unit_is_offered_within_the_bound():
 def test_the_narrowest_owed_tier_leads_the_evidenced_class():
     """Owed functions are asked narrowest tier first; the crash provenance of
     a sited unit comes before the tier, and the streak before both."""
-    facts = {"wide": UnitFacts(static_index=0, owed_tier=5),
-             "narrow": UnitFacts(static_index=1, owed_tier=0),
-             "mid": UnitFacts(static_index=2, owed_tier=3),
-             "sited": UnitFacts(static_index=3, crash=Crash.SITED)}
+    facts = {"wide": UnitFacts(static_index=0, service=Service.NEVER, owed_tier=5),
+             "narrow": UnitFacts(static_index=1, service=Service.NEVER, owed_tier=0),
+             "mid": UnitFacts(static_index=2, service=Service.NEVER, owed_tier=3),
+             "sited": UnitFacts(static_index=3, service=Service.NEVER, crash=Crash.SITED)}
     assert rank(facts) == ["sited", "narrow", "mid", "wide"]
-    facts["wide"] = UnitFacts(static_index=0, owed_tier=5, unclaimed=2)
+    facts["wide"] = UnitFacts(static_index=0, service=Service.NEVER, owed_tier=5, unclaimed=2)
     assert rank(facts)[0] == "wide"
 
 
@@ -301,7 +305,7 @@ def test_a_fault_site_whose_body_did_not_land_leads_the_next_batch():
     opened = set(fault)
 
     def facts(k: str, i: int, streak: dict[str, int]) -> UnitFacts:
-        return UnitFacts(static_index=i,
+        return UnitFacts(static_index=i, service=Service.NEVER,
                          crash=Crash.BLAMED if k in fault else None,
                          owed_tier=0, unclaimed=streak.get(k, 0))
 
@@ -332,7 +336,7 @@ def test_an_unlanded_batch_still_rotates_the_frontier():
     cohort: tuple[str, ...] | None = None
     batches = []
     for _ in range(3):
-        ranked = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+        ranked = rank({k: UnitFacts(static_index=i, service=Service.NEVER, unclaimed=streak.get(k, 0))
                        for i, k in enumerate(frontier)})
         if cohort is None:
             cohort = tuple(ranked)
@@ -349,7 +353,7 @@ def test_an_unlanded_batch_still_rotates_the_frontier():
     assert [b.completes_pass for b in batches] == [False, False, True]
     assert batches[1].keys != batches[0].keys
     stuck = next_streak({}, frontier, ())
-    stuck_rank = rank({k: UnitFacts(static_index=i, unclaimed=stuck.get(k, 0))
+    stuck_rank = rank({k: UnitFacts(static_index=i, service=Service.NEVER, unclaimed=stuck.get(k, 0))
                        for i, k in enumerate(frontier)})
     assert take(stuck_rank, (), 12, cohort=None, traversed=()).keys == batches[0].keys
 
@@ -365,7 +369,7 @@ def test_sited_units_that_never_land_yield_the_batch_within_one_extra_sweep():
     frontier = crash + owed
 
     def facts(k: str, i: int, streak: dict[str, int]) -> UnitFacts:
-        return UnitFacts(static_index=i,
+        return UnitFacts(static_index=i, service=Service.NEVER,
                          crash=Crash.SITED if k in crash else None,
                          owed_tier=0 if k in owed else None,
                          unclaimed=streak.get(k, 0))
@@ -409,13 +413,42 @@ def test_a_share_cut_counts_as_unclaimed():
 def test_crash_evidence_is_ranked_ahead_of_the_static_order():
     """Run `1692702-94e6163a`: the five fns a double drop named waited for
     their alphabetical turn. An observed frame first, other site evidence
-    next, the chain inference leading everything else."""
-    facts = {f"u{i}": UnitFacts(static_index=i) for i in range(6)}
-    facts["u5"] = UnitFacts(static_index=5, crash=Crash.BLAMED)
-    facts["u4"] = UnitFacts(static_index=4, crash=Crash.CHAIN)
-    facts["u2"] = UnitFacts(static_index=2, crash=Crash.SITED)
+    next, the chain inference leading the served bodies with nothing new."""
+    def served(i: int, crash: Crash | None = None) -> UnitFacts:
+        return UnitFacts(static_index=i, service=Service.SERVED, crash=crash)
+    facts = {f"u{i}": served(i) for i in range(6)}
+    facts["u5"] = served(5, Crash.BLAMED)
+    facts["u4"] = served(4, Crash.CHAIN)
+    facts["u2"] = served(2, Crash.SITED)
     assert rank(facts) == ["u5", "u2", "u4", "u0", "u1", "u3"]
     assert rank(_static([f"u{i}" for i in range(5)])) == [f"u{i}" for i in range(5)]
+
+
+def test_a_chain_inference_is_not_a_fault_site_inside_the_evidenced_class():
+    """A never-served chain-inferred stub is evidenced because it was never
+    served, not because of the chain. At equal streak it sorts with the
+    un-owed never-served units, behind an owed unit with no crash and behind
+    both fault sites (blamed, then sited). Control: keying the raw `Crash`
+    ordinal, as the class's key did when only blamed and sited could reach
+    it, puts the chain unit (2) ahead of the owed one (no crash, 3)."""
+    facts = {
+        "chain": UnitFacts(static_index=0, service=Service.NEVER,
+                           crash=Crash.CHAIN),
+        "owed": UnitFacts(static_index=1, service=Service.SERVED,
+                          owed_tier=0),
+        "sited": UnitFacts(static_index=2, service=Service.SERVED,
+                           crash=Crash.SITED),
+        "blamed": UnitFacts(static_index=3, service=Service.SERVED,
+                            crash=Crash.BLAMED),
+        "plain": UnitFacts(static_index=4, service=Service.NEVER),
+    }
+    assert rank(facts) == ["blamed", "sited", "owed", "chain", "plain"]
+
+    def raw_ordinal_key(f: UnitFacts) -> tuple[int, ...]:
+        crash = int(f.crash) if f.crash is not None else len(Crash)
+        return (-f.unclaimed, crash)
+    pre = sorted(["chain", "owed"], key=lambda k: raw_ordinal_key(facts[k]))
+    assert pre == ["chain", "owed"]
 
 
 def test_one_fault_s_family_dispatches_together():
@@ -425,7 +458,7 @@ def test_one_fault_s_family_dispatches_together():
     fam = ["context_chain_drop_rest", "context_drop_rest", "drop",
            "object_drop", "object_drop_front"]
     keys = [f"u{i}" for i in range(20)] + fam
-    facts = {k: UnitFacts(static_index=i,
+    facts = {k: UnitFacts(static_index=i, service=Service.NEVER,
                           crash=Crash.SITED if k in fam else None)
              for i, k in enumerate(keys)}
     assert not set(keys[:12]) & set(fam)   # control: the static order's cut
@@ -438,10 +471,10 @@ def test_the_escalation_product_and_its_builders_lead_the_rest():
     first and a cap of 1 parked the producer. The product leads, builders
     before delegators inside it; a crash-blamed unit still leads both."""
     acc, deleg, build, crash = "acc", "deleg", "build", "crash"
-    facts = {acc: UnitFacts(static_index=0),
-             deleg: UnitFacts(static_index=1, escalated=True),
-             crash: UnitFacts(static_index=2, crash=Crash.BLAMED),
-             build: UnitFacts(static_index=3, escalated=True, builder=True,
+    facts = {acc: UnitFacts(static_index=0, service=Service.NEVER),
+             deleg: UnitFacts(static_index=1, service=Service.NEVER, escalated=True),
+             crash: UnitFacts(static_index=2, service=Service.NEVER, crash=Crash.BLAMED),
+             build: UnitFacts(static_index=3, service=Service.NEVER, escalated=True, builder=True,
                               callee=True)}
     assert rank(facts) == [crash, build, deleg, acc]
     assert take(rank(facts), (), 1, cohort=None, traversed=()).keys == (crash,)
@@ -460,7 +493,7 @@ def test_recorded_95878_cohort_dispatches_the_constructors_in_batch_one():
     esc = frozenset(FnLocator(f, n) for f, n in _COHORT_ORDER
                     if (f, n) not in _NOT_ESCALATED)
     builders, callees = producer_dispatch_ranks(esc, recs, _types())
-    ranked = rank({k: UnitFacts(static_index=i, escalated=k in esc,
+    ranked = rank({k: UnitFacts(static_index=i, service=Service.NEVER, escalated=k in esc,
                                 builder=k in builders, callee=k in callees)
                    for i, k in enumerate(order)})
     first = {(k.file, k.fn_name) for k in ranked[:12]}
@@ -511,7 +544,7 @@ def test_recorded_1577437_chain_cohort_is_offered_once_each_before_any_twice():
     assert len(chain) == 50
 
     def facts(k: str, i: int) -> UnitFacts:
-        return UnitFacts(static_index=i, crash=Crash.CHAIN)
+        return UnitFacts(static_index=i, service=Service.NEVER, crash=Crash.CHAIN)
 
     batches = _sweeps([chain] * 5, DEFAULT_MAX_DISPATCH, facts=facts)
     offered = [k for b in batches for k in b.keys]
@@ -559,10 +592,196 @@ def test_off_batch_reasons_name_the_filter_or_the_rank_position():
 
 
 def test_the_classes():
-    assert UnitFacts(static_index=0, held_tests=2).rank_class is RankClass.HELD
-    assert UnitFacts(static_index=0, owed_tier=1).rank_class is RankClass.EVIDENCED
-    assert (UnitFacts(static_index=0, crash=Crash.SITED).rank_class
+    """`EVIDENCED` is "something no prompt has asked this unit": owed
+    evidence, a fault site, or no body ever served. A chain inference alone
+    is not; a served body with nothing new, a dead and a red-dead unit stay
+    `OTHER`."""
+    def f(**kw: object) -> UnitFacts:
+        return UnitFacts(static_index=0, **kw)  # type: ignore[arg-type]
+    assert f(service=Service.NEVER, held_tests=2).rank_class is RankClass.HELD
+    assert (f(service=Service.SERVED, owed_tier=1).rank_class
             is RankClass.EVIDENCED)
-    assert (UnitFacts(static_index=0, crash=Crash.CHAIN).rank_class
+    assert (f(service=Service.SERVED, crash=Crash.SITED).rank_class
+            is RankClass.EVIDENCED)
+    assert (f(service=Service.SERVED, crash=Crash.CHAIN).rank_class
             is RankClass.OTHER)
-    assert UnitFacts(static_index=0).rank_class is RankClass.OTHER
+    assert f(service=Service.NEVER).rank_class is RankClass.EVIDENCED
+    assert (f(service=Service.NEVER, crash=Crash.CHAIN).rank_class
+            is RankClass.EVIDENCED)
+    for svc in (Service.SERVED, Service.FLAT, Service.RED_DEAD, Service.DEAD):
+        assert f(service=svc).rank_class is RankClass.OTHER
+
+
+def test_service_has_no_default():
+    """`NEVER` promotes a unit, so a constructor must say what it knows."""
+    with pytest.raises(TypeError):
+        UnitFacts(static_index=0)  # type: ignore[call-arg]
+
+# --- never-served units are evidenced ---------------------------------------
+#
+# Before 2026-10-12 a never-served unit that was neither held nor owed was
+# `OTHER`, and the streak rotates only inside a class. On runs
+# `2157238-210637e6` .. `35210-6d56e8c9` (cluster `stable`) 44 of them got no
+# slot on four consecutive sweeps while 2 held and 22 owed units filled the
+# cap of 12. The fixture is `3163270-ca5a787c` iter 2's rank inputs, written
+# by `scripts/never_served_starvation_fixture.py` from the run's events.
+
+_STARVED_FIXTURE = (Path(__file__).parent / "fixtures" / "dispatch"
+                    / "3163270-ca5a787c_iter2_rank.json")
+
+
+def _pre_change_key(f: UnitFacts) -> tuple[int, ...]:
+    """Frozen copy of the key before never-served units joined
+    `EVIDENCED`: class on owed or fault site only, raw crash ordinal, an
+    un-owed tier keyed 0."""
+    if f.held_tests > 0:
+        return (0, -f.unclaimed, -f.held_tests, f.static_index)
+    if f.owed_tier is not None or f.crash in (Crash.BLAMED, Crash.SITED):
+        crash = int(f.crash) if f.crash is not None else len(Crash)
+        return (1, -f.unclaimed, crash, f.owed_tier or 0, int(f.service),
+                f.static_index)
+    return (2, -f.unclaimed, 0 if f.crash is Crash.CHAIN else 1,
+            int(f.service), f.static_index)
+
+
+def _recorded_facts(inp: dict, streak: dict[str, int]) -> dict[str, UnitFacts]:
+    never, flat = set(inp["never_served"]), set(inp["flat"])
+    return {u: UnitFacts(
+        static_index=i,
+        service=(Service.NEVER if u in never
+                 else Service.FLAT if u in flat else Service.SERVED),
+        held_tests=inp["held"].get(u, 0),
+        crash=Crash.SITED if u in inp["sited"] else None,
+        owed_tier=inp["owed"].get(u),
+        unclaimed=streak.get(u, 0))
+        for i, u in enumerate(inp["frontier"])}
+
+
+def _first_offer(frontier: Sequence[str], held: set[str], cap: int,
+                 sweeps: int, facts_at: Callable[[dict[str, int]],
+                                                  dict[str, UnitFacts]],
+                 start: dict[str, int], *,
+                 key: Callable[[UnitFacts], tuple[int, ...]] | None = None,
+                 ) -> dict[str, int]:
+    """The sweep (1-based) at which each unit first entered a batch, every
+    admitted unit claimed."""
+    streak = dict(start)
+    first: dict[str, int] = {}
+    for n in range(1, sweeps + 1):
+        facts = facts_at(streak)
+        ranked = (rank(facts) if key is None
+                  else sorted(facts, key=lambda k: (key(facts[k]), k)))
+        batch = take(ranked, held, cap, cohort=None, traversed=()).keys
+        for u in batch:
+            first.setdefault(u, n)
+        streak = next_streak(streak, frontier, set(batch) - held)
+    return first
+
+
+def test_recorded_3163270_every_never_served_unit_is_offered_within_the_bound():
+    """The plan's sentence: every never-served unit that is not held, owed
+    or a crash culprit is offered within ceil(|EVIDENCED| / max(cap - held,
+    1)) sweeps, and so is every owed unit; the first sweep's free slots go to
+    the targets at the top streak. Control: the pre-change key offers none
+    of them in ten sweeps."""
+    inp = json.loads(_STARVED_FIXTURE.read_text())
+    held = set(inp["held"])
+    taken = held | set(inp["owed"]) | set(inp["sited"])
+    targets = [u for u in inp["never_served"] if u not in taken]
+    assert len(targets) == 44 and len(held) == 2
+    assert {"src/error.rs::construct", "src/error.rs::vtable",
+            "src/error.rs::object_ref", "src/wrapper.rs::fmt"} <= set(targets)
+    facts0 = _recorded_facts(inp, inp["unclaimed"])
+    evidenced = sum(1 for f in facts0.values()
+                    if f.rank_class is RankClass.EVIDENCED)
+    bound = rotation_bound(evidenced, len(held), 12)
+    assert bound == math.ceil(evidenced / 10)
+
+    def at(streak: dict[str, int]) -> dict[str, UnitFacts]:
+        return _recorded_facts(inp, streak)
+
+    first = _first_offer(inp["frontier"], held, 12, bound, at,
+                         inp["unclaimed"])
+    assert all(u in first for u in targets)
+    assert all(u in first for u in inp["owed"])
+    top = max(inp["unclaimed"].get(u, 0) for u in targets)
+    sweep1 = [u for u, n in first.items() if n == 1 and u not in held]
+    assert sweep1 and all(inp["unclaimed"].get(u, 0) == top for u in sweep1)
+
+    pre = _first_offer(inp["frontier"], held, 12, 10, at, inp["unclaimed"],
+                       key=_pre_change_key)
+    assert not set(targets) & set(pre)
+
+
+def test_shape_never_served_and_owed_both_reach_a_batch_within_the_bound():
+    """No live names: 2 held, 22 owed served bodies, 44 never-served units,
+    cap 12. The merged class offers every member of both within the bound,
+    so the merge does not move the starvation onto the owed units. Control:
+    the pre-change key never offers a never-served unit."""
+    held = ["h0", "h1"]
+    owed = [f"o{i:02d}" for i in range(22)]
+    never = [f"n{i:02d}" for i in range(44)]
+    frontier = held + owed + never
+
+    def at(streak: dict[str, int]) -> dict[str, UnitFacts]:
+        return {u: UnitFacts(
+            static_index=i,
+            service=Service.NEVER if u in never or u in held
+            else Service.SERVED,
+            held_tests=1 if u in held else 0,
+            owed_tier=0 if u in owed else None,
+            unclaimed=streak.get(u, 0)) for i, u in enumerate(frontier)}
+
+    bound = rotation_bound(66, 2, 12)
+    assert bound == 7
+    first = _first_offer(frontier, set(held), 12, bound, at, {})
+    assert set(owed) | set(never) <= set(first)
+    pre = _first_offer(frontier, set(held), 12, 20, at, {},
+                       key=_pre_change_key)
+    assert not set(never) & set(pre)
+
+
+def test_an_owed_unit_leads_an_unowed_never_served_one_at_equal_streak():
+    """Owed tiers are clamped to 0 by the driver, so an un-owed unit keyed
+    0 shared the tier and won on service: never served (0) before served
+    (1). The un-owed tier keys after every real tier. Control: the
+    pre-change evidenced key, the same two units, inverts them."""
+    facts = {"fresh": UnitFacts(static_index=0, service=Service.NEVER),
+             "owed": UnitFacts(static_index=1, service=Service.SERVED,
+                               owed_tier=0)}
+    assert rank(facts) == ["owed", "fresh"]
+
+    def inverted(f: UnitFacts) -> tuple[int, ...]:
+        crash = int(f.crash) if f.crash is not None else len(Crash)
+        return (1, -f.unclaimed, crash, f.owed_tier or 0, int(f.service),
+                f.static_index)
+    assert sorted(facts, key=lambda k: inverted(facts[k])) == ["fresh",
+                                                                "owed"]
+
+
+def test_the_streak_still_leads_the_owed_tier():
+    """A never-served unit the last sweeps did not reach leads an owed unit
+    with a lower streak: the streak is the bound, the tier only orders a
+    tie."""
+    facts = {"owed": UnitFacts(static_index=0, service=Service.SERVED,
+                               owed_tier=0),
+             "fresh": UnitFacts(static_index=1, service=Service.NEVER,
+                                unclaimed=3)}
+    assert rank(facts) == ["fresh", "owed"]
+
+
+def test_starved_names_an_evidenced_unit_past_the_bound_out_of_the_batch():
+    """The off-theory reading: an evidenced unit with a streak at the bound
+    and not in the batch. Nothing in a batch, or under the bound, is named."""
+    facts = {"h": UnitFacts(static_index=0, service=Service.NEVER,
+                            held_tests=1),
+             "a": UnitFacts(static_index=1, service=Service.NEVER,
+                            unclaimed=2),
+             "b": UnitFacts(static_index=2, service=Service.NEVER,
+                            unclaimed=1),
+             "c": UnitFacts(static_index=3, service=Service.SERVED,
+                            unclaimed=9)}
+    assert rotation_bound(2, 1, 2) == 2
+    assert starved(facts, ("h", "b"), 2) == {"a": 2}
+    assert starved(facts, ("h", "a"), 2) == {}
+    assert rotation_bound(0, 0, 12) == 1 and rotation_bound(5, 13, 12) == 5

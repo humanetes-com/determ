@@ -128,29 +128,36 @@ Other `continue.sh` flags:
 | `--no-pre-run` | Skip the stamp check. |
 | `--wipe` | Removed. Refuses. |
 
-`resume_from_t2.sh` is a shim for `restart_from.sh task2`.
+`resume_from_t2.sh` is a shim for `restart_from.sh task2`, so it drops the same products.
 
-### Re-enter a phase (fills stay unless you delete them)
+### Re-enter a phase
 
 ```bash
-bash restart_from.sh <stage> [--force]
+bash restart_from.sh <stage> [--force] [--keep-fills]
 ```
 
 `--force` SIGKILLs a running pipeline; without it the stop is graceful. Always
 relaunches detached (`--no-tail`). The named stage and everything after it are
-cleared in `pipeline_state.md`. **Fills are not deleted** — cluster seed is
-`if not dst.exists()`, so t2a continues on the bodies already on disk.
+cleared in `pipeline_state.md`.
+
+`task2` and `task2a` (aliases `t2`, `t2a`) also remove what that phase wrote:
+`.skeleton-filled/`, `.best_tree/`, `.skeleton/_tdd_floor_*.json`,
+`.phase_c_logs/retrospectives.json`, the ask ledgers and the red ledgers.
+The cluster seed copies a skeleton file only when the destination is missing,
+and heal would copy the best tree back, so both trees have to go or the first
+sweep scores the old fill. The layout, the generated tests and the FRs stay.
+`--keep-fills` skips that removal and re-enters on the bodies already on disk.
+`task2b` and later do not remove the trees.
 
 | Stage | What re-runs | What is kept |
 |---|---|---|
-| `task2` / `task2a` | per-cluster fill → merge → merged-fill → test → genesis | t0c tests, t1.5 layout (`.skeleton/`), existing fills |
+| `task2` / `task2a` | per-cluster fill from stubs → merge → merged-fill → test → genesis | t0c tests, t1.5 layout (`.skeleton/`). Fills, best tree, floor, convictions, ask ledger and red ledger are removed. `--keep-fills` keeps them |
 | `task2b` / `task2c` | merge onward (skips per-cluster fill) | the per-cluster trees |
 | `task3` / `task4` | test / genesis only | all fills |
 | `task1` | FR synthesis + the whole reconstruct loop | t0c tests, layout, fills (t2a still sees them) |
 | `task0c` | augmentation and everything after it | task0a/0b. Resets the workspace to `task0c-pre-*` |
 
-`task2a`…`task4` are visibility labels on one reconstruct phase, not separate
-resume points. `task2` and `task2a` clear the same keys.
+`task2` and `task2a` clear the same keys. `task2b` does not clear `task2a`.
 
 ### Wipe fills and start the reconstruct loop from stubs
 
@@ -168,28 +175,26 @@ is cleared, and bake + t1.5 author a new layout before t2a. `--full` also
 deletes `.skeleton/` in `redo.sh` itself; the restore already takes the layout
 off the workspace, so `--full` is not what decides whether t1.5 re-runs.
 
-There is no anyhow launcher that wipes fills **and** keeps the current
-layout. That pair is:
+A fresh per-cluster fill under the current layout is:
 
 ```bash
-bash pre_run.sh
-rm -rf tmp/anyhow/.skeleton-filled
-bash restart_from.sh task2a --force
+bash restart_from.sh task2a
 ```
 
 t2a then seeds each missing filled tree from `.skeleton/`. The body ledger
 (`logs/body_ledger/anyhow/`) lives outside the workspace and survives every
 launcher above; cluster entry may splice prior proven or unmeasured bodies
-back onto those stubs. That is by design. Do not delete the ledger unless
-the reading is a crate that has never been tried.
+back onto those stubs, and the entry line says how many. That is by design.
+Do not delete the ledger unless the reading is a crate that has never been
+tried. The first sweep is that stub baseline plus the re-seeded bodies.
 
 ### Which launcher for which question
 
 | Question | Command |
 |---|---|
 | Resume a stopped run on the same code | `bash continue.sh --y --no-tail` |
-| Driver-half t2a fix; keep the filled tree | `bash pre_run.sh` then `bash restart_from.sh task2a --force` |
-| Cold t2a from stubs; keep t0c and the current t1.5 layout | `bash pre_run.sh`; `rm -rf tmp/anyhow/.skeleton-filled`; `bash restart_from.sh task2a --force` |
+| Driver-half t2a fix; keep the filled tree | `bash pre_run.sh` then `bash continue.sh --y --no-tail`, or `bash restart_from.sh task2a --force --keep-fills` when task2a is already marked done |
+| Cold t2a from stubs; keep t0c and the current t1.5 layout | `bash restart_from.sh task2a` |
 | New layout, same generated tests (strip + task1 + t2a from stubs) | `bash pre_run.sh` then `bash redo.sh --force` |
 | Re-run task0c (test generator / admission change) | `bash pre_run.sh` then `bash restart_from.sh task0c --force` |
 | Stop only | `touch /tmp/pipeline_graceful_stop` |

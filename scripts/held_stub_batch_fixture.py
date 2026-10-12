@@ -52,6 +52,7 @@ sys.path.insert(0, str(ROOT))
 
 from pipeline_core.domain.dispatch_rank import (  # noqa: E402
     Crash,
+    Service,
     UnitFacts,
     rank,
     take,
@@ -80,16 +81,18 @@ def _pre_fix_share_batch(crash: list[str], owed: list[str], cap: int, *,
             list(crash_only[crash_take:]))
 
 
-def _events(run_id: str, iter_n: int) -> tuple[dict, dict, dict]:
+def _events(run_id: str, iter_n: int) -> tuple[dict, dict, dict, dict]:
     owed_ev: dict = {}
     sched_ev: dict = {}
     hold_ev: dict = {}
+    service_ev: dict = {}
     with (ROOT / "logs" / "events.jsonl").open() as fh:
         for line in fh:
             if run_id not in line:
                 continue
             if ('"phase_c.tdd.owed"' in line or '"phase_c.fill.schedule"' in line
-                    or '"phase_c.crash.stub_holds"' in line):
+                    or '"phase_c.crash.stub_holds"' in line
+                    or '"phase_c.dispatch.service_order"' in line):
                 d = json.loads(line)
                 data = d.get("data") or {}
                 if data.get("iter") != iter_n:
@@ -98,16 +101,18 @@ def _events(run_id: str, iter_n: int) -> tuple[dict, dict, dict]:
                     owed_ev = data
                 elif d["event"] == "phase_c.crash.stub_holds":
                     hold_ev = data
+                elif d["event"] == "phase_c.dispatch.service_order":
+                    service_ev = data
                 else:
                     sched_ev = data
-    return owed_ev, sched_ev, hold_ev
+    return owed_ev, sched_ev, hold_ev, service_ev
 
 
 def main() -> int:
     run_id = sys.argv[1] if len(sys.argv) > 1 else "857717-812ee44c"
     iter_n = int(sys.argv[2]) if len(sys.argv) > 2 else 5
     cap = int(sys.argv[3]) if len(sys.argv) > 3 else 12
-    owed_ev, sched_ev, hold_ev = _events(run_id, iter_n)
+    owed_ev, sched_ev, hold_ev, service_ev = _events(run_id, iter_n)
     if not owed_ev or not sched_ev:
         print(f"no owed/schedule event for {run_id} iter {iter_n}")
         return 2
@@ -149,8 +154,12 @@ def main() -> int:
     # recorded, so the owed set's name order stands in for it; it decides
     # only ties the facts leave, never a held unit's place.
     units = sorted(set(owed) | set(held) | set(crash))
+    # The sweep's own service reading where it was recorded; a held unit is
+    # a stub, which `service_of` always reads as never served.
+    never = set(service_ev.get("never_served") or ()) | set(held)
     facts = {u: UnitFacts(
         static_index=i, held_tests=len(held.get(u, ())),
+        service=Service.NEVER if u in never else Service.SERVED,
         crash=Crash.BLAMED if u in crash else None,
         owed_tier=tier_of.get(u, 0) if u in owed else None)
         for i, u in enumerate(units)}

@@ -38,7 +38,7 @@ def repair_missing_imports(
     earned the inserted imports, None when no suggestion was applied (the
     name was already bound, the re-check did not earn the write, or the
     file could not be read). An unreadable or unwritable file skips the
-    repair. A re-check that raises is restored to the original bytes and
+    repair. A re-check that raises is rolled back by the transaction and
     re-raised."""
     fixes = [f for d in diagnostics for f in d.import_fixes
              if f.file == file_rel]
@@ -46,8 +46,7 @@ def repair_missing_imports(
         return None
     path = cwd / file_rel
     try:
-        raw = path.read_bytes()
-        source = raw.decode("utf-8")
+        source = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
     patched = apply_import_fixes(source, fixes)
@@ -60,35 +59,31 @@ def repair_missing_imports(
                 f"{len(blocked)} suggestion(s) unapplied — the name is "
                 f"already bound: {'; '.join(blocked)}")
         return None
-    # A MECHANICAL write (rustc's own suggestion, no model in the loop):
-    # parse-verified through the transaction and undone by byte restore.
-    # The re-check is the other half of that contract. A suggestion that
-    # defines a name the file already binds, or that leaves the error set
-    # unchanged, is not a repair, and the bytes go back before any later
-    # keep can land on the broken tree.
-    txn = TreeTxn(cwd, validate_parse=validate_parse)
-    try:
-        txn.write(file_rel, patched)
-    except OSError:
-        return None
-    verdict = txn.close()
-    if not verdict.ok:
-        log(f"  {tag} {file_rel}: import repair left the file unparseable "
-            f"({verdict.reason}) — restored.")
-        return None
-    try:
+    # The transaction stays open through the re-check. close() would commit
+    # on a clean parse and drop the pre-image, so a later refusal would have
+    # to write the file back by hand. The rollback is that pre-image.
+    with TreeTxn(cwd, validate_parse=validate_parse) as txn:
+        try:
+            txn.write(file_rel, patched)
+        except OSError:
+            txn.rollback()
+            return None
+        verdict = txn.verify()
+        if not verdict.ok:
+            txn.rollback()
+            log(f"  {tag} {file_rel}: import repair left the file unparseable "
+                f"({verdict.reason}) — restored.")
+            return None
         rc, rendered, diags = check_diag(check_cmd, cwd, env)
-    except Exception:
-        path.write_bytes(raw)
-        raise
-    before = [(d.code, d.message) for d in diagnostics]
-    after = [(d.code, d.message) for d in diags]
-    added = sorted({f.replacement.strip() for f in fixes})
-    if rc != 0 and not repair_keeps(before, after):
-        path.write_bytes(raw)
-        log(f"  {tag} {file_rel}: import repair restored the file — the "
-            f"re-check did not earn {'; '.join(added)}")
-        return None
+        before = [(d.code, d.message) for d in diagnostics]
+        after = [(d.code, d.message) for d in diags]
+        added = sorted({f.replacement.strip() for f in fixes})
+        if rc != 0 and not repair_keeps(before, after):
+            txn.rollback()
+            log(f"  {tag} {file_rel}: import repair restored the file — the "
+                f"re-check did not earn {'; '.join(added)}")
+            return None
+        txn.commit()
     log(f"  {tag} {file_rel}: auto-imported {len(added)} use item(s) from "
         f"rustc suggestion(s): {'; '.join(added)}")
     return rc, rendered, diags

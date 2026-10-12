@@ -51,7 +51,13 @@ from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
 from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH
-from ...domain.dispatch_rank import UnitFacts, rank, streak_after_turn, take
+from ...domain.dispatch_rank import (
+    Service,
+    UnitFacts,
+    rank,
+    streak_after_turn,
+    take,
+)
 from ...domain.generation import (
     GenerationRequest,
     SkeletonConfig,
@@ -3450,10 +3456,13 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 continue
 
             # The one rank (`domain/dispatch_rank`): this loop has no held,
-            # crash or owed facts, so its frontier ranks on the unclaimed
-            # streak over the frontier's own order.
+            # crash, owed or service facts, so its frontier ranks on the
+            # unclaimed streak over the frontier's own order. It keeps no
+            # service record, so every unit is stated never served: one
+            # class, the same order as before the class rule read service.
             _ordered = rank({
-                k: UnitFacts(static_index=i, unclaimed=_unclaimed.get(k, 0))
+                k: UnitFacts(static_index=i, service=Service.NEVER,
+                             unclaimed=_unclaimed.get(k, 0))
                 for i, k in enumerate(eligible)})
             if _pass_cohort is None:
                 _pass_cohort = tuple(_ordered)

@@ -90,6 +90,83 @@ def test_restart_from_clear_task0c_on_the_live_state_shape(tmp_path):
     assert "removed 6 phase line(s)" in r.stdout
 
 
+@pytest.mark.parametrize("stage", ["task2", "task2a", "t2", "t2a"])
+def test_per_cluster_fill_stages_drop_their_products(stage):
+    r = subprocess.run(
+        ["bash", "-c", f'source "{_LIB}"; restart_from_drops_t2a "$1"', "_", stage],
+    )
+    assert r.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "stage", ["task2b", "task2c", "t2b", "t2c", "task3", "task4", "task1", "task0c", "t0c"])
+def test_later_and_earlier_stages_do_not_drop_the_per_cluster_fill(stage):
+    r = subprocess.run(
+        ["bash", "-c", f'source "{_LIB}"; restart_from_drops_t2a "$1"', "_", stage],
+    )
+    assert r.returncode == 1
+
+
+def test_dropping_t2a_products_leaves_the_layout_and_the_augmentation(tmp_path):
+    """The removal is the task0c analogue for a phase with no restore commit:
+    the filled tree, heal's snapshot, and the records that would resume the
+    deleted tree's dispatches go; the layout and the functional requirements
+    stay. restart_from_clear does not do this — hardcrate --from calls only
+    that, and a resume must keep the fills."""
+    ws = tmp_path / "ws"
+    (ws / ".skeleton-filled" / "stable").mkdir(parents=True)
+    (ws / ".skeleton-filled" / "stable" / "body.rs").write_text("fn filled() {}\n", encoding="utf-8")
+    (ws / ".best_tree" / "stable").mkdir(parents=True)
+    (ws / ".best_tree" / "stable" / "body.rs").write_text("fn best() {}\n", encoding="utf-8")
+    (ws / ".skeleton").mkdir()
+    (ws / ".skeleton" / "layout.rs").write_text("fn layout() {}\n", encoding="utf-8")
+    (ws / ".skeleton" / "_tdd_floor_stable.json").write_text("{}\n", encoding="utf-8")
+    (ws / ".phase_c_logs").mkdir()
+    (ws / ".phase_c_logs" / "retrospectives.json").write_text("{}\n", encoding="utf-8")
+    (ws / ".phase_c_logs" / "ask_ledger_stable.json").write_text("{}\n", encoding="utf-8")
+    (ws / ".phase_c_logs" / "red_ledger_stable.json").write_text("{}\n", encoding="utf-8")
+    (ws / "functional_requirements_demo.md").write_text("fr\n", encoding="utf-8")
+
+    r = subprocess.run(
+        ["bash", "-c", f'source "{_LIB}"; restart_from_drop_t2a_products "$1"',
+         "_", str(ws)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert not (ws / ".skeleton-filled").exists()
+    assert not (ws / ".best_tree").exists()
+    assert not (ws / ".skeleton" / "_tdd_floor_stable.json").exists()
+    assert not (ws / ".phase_c_logs" / "retrospectives.json").exists()
+    assert not (ws / ".phase_c_logs" / "ask_ledger_stable.json").exists()
+    assert not (ws / ".phase_c_logs" / "red_ledger_stable.json").exists()
+    assert (ws / ".skeleton" / "layout.rs").read_text(encoding="utf-8") == "fn layout() {}\n"
+    assert (ws / "functional_requirements_demo.md").read_text(encoding="utf-8") == "fr\n"
+
+    (ws / ".skeleton-filled").mkdir()
+    (ws / ".skeleton-filled" / "kept.rs").write_text("fn kept() {}\n", encoding="utf-8")
+    cleared = subprocess.run(
+        ["bash", "-c",
+         f'source "{_LIB}"; restart_from_clear "$1" $(restart_from_keys task2a)',
+         "_", str(ws)],
+        capture_output=True, text=True,
+    )
+    assert cleared.returncode == 0, cleared.stderr
+    assert (ws / ".skeleton-filled" / "kept.rs").read_text(encoding="utf-8") == "fn kept() {}\n"
+
+
+def test_anyhow_launcher_drops_t2a_and_hardcrate_resume_does_not():
+    """The wipe is gated on the anyhow launcher's task2/task2a path.
+    run_hardcrate.sh --from calls restart_from_clear only, so a hardcrate
+    resume cannot inherit the deletion."""
+    root = Path(__file__).resolve().parents[1]
+    restart = (root / "restart_from.sh").read_text(encoding="utf-8")
+    hard = (root / "run_hardcrate.sh").read_text(encoding="utf-8")
+    assert 'restart_from_drops_t2a "$_STAGE" && [[ "$_KEEP_FILLS" != true ]]' in restart
+    assert "restart_from_drop_t2a_products" in restart
+    assert "restart_from_drop_t2a_products" not in hard
+    assert "restart_from_clear" in hard
+
+
 def test_restart_from_and_redo_pass_no_tail_to_continue():
     """A Cursor terminal abort SIGTERMs a tailed continue.sh process group
     (2026-08-29, run 929966-abe13d11, exit 143). Both launchers that exec

@@ -20,6 +20,7 @@ from dataclasses import replace
 
 from pipeline_core.domain.dispatch_batch import DispatchBatch
 from pipeline_core.domain.dispatch_rank import (
+    Service,
     UnitFacts,
     rank,
     streak_after_turn,
@@ -103,7 +104,7 @@ def test_the_carry_survives_the_round_trip_through_disk() -> None:
 
 def _batch(frontier: tuple[str, ...], streak: dict[str, int],
            traversed: tuple[str, ...], cap: int) -> DispatchBatch[str]:
-    ranked = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+    ranked = rank({k: UnitFacts(static_index=i, service=Service.NEVER, unclaimed=streak.get(k, 0))
                    for i, k in enumerate(frontier)})
     return take(ranked, (), cap, cohort=frontier, traversed=traversed)
 

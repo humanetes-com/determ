@@ -24,10 +24,32 @@ THE RANK. One key per unit, built from typed evidence:
 
 - class `HELD`: a still-stubbed unit some red test's first failure sits in
   (`held_stubs.HeldStubs`). Every one is in the batch, whatever the cap.
-- class `EVIDENCED`: owed under evidence no prompt has asked yet
-  (`candidate_tiers`), or named by a crash's fault site (a localized frame,
-  a producer one call from it, a synthesized subject).
-- class `OTHER`: everything else; a crash's chain-derived inference leads it.
+- class `EVIDENCED`: the unit has something no prompt has asked it. That is
+  evidence it is owed and no prompt has asked yet (`candidate_tiers`), a
+  crash's fault site naming it (a localized frame, a producer one call from
+  it, a synthesized subject), or no body ever served to it
+  (`Service.NEVER`).
+- class `OTHER`: everything else. That is a served body with nothing new to
+  show (a re-buy), and a dead or red-dead unit, which cannot move a red
+  verdict this sweep and becomes held the sweep a red test reaches it while
+  it is a stub. A crash's chain-derived inference leads it.
+
+WHY A NEVER-SERVED UNIT IS EVIDENCED. The streak below rotates units only
+inside a class, and `EVIDENCED` does not drain: a unit stays owed until a
+body lands under its test's fingerprint or the misses run out, and the
+fingerprint moves with the tree. A never-served unit in `OTHER` therefore
+got no slot on any sweep where the held and owed units filled the cap. Runs
+`2157238-210637e6`, `3163270-ca5a787c` and `35210-6d56e8c9` (2026-10-11/12,
+cluster `stable`): 2 held and 22 owed against a cap of 12, and 44
+never-served units that were neither held nor owed got 0 slots on four
+consecutive sweeps, streaks up to 3. They were `construct`, `vtable`, every
+`object_*` vtable entry, every `src/ptr.rs` body and `src/wrapper.rs::fmt`,
+all still stubs. On the run that climbed (`857717-812ee44c`), the
+never-served order filled the same units and they paid +10, +13 and +39.
+A class of its own ahead of the owed units would not drain either:
+`service_of` keeps a stub `NEVER` while its offers fail to land. Inside one
+class the streak bounds both, every member offered within
+`ceil(|EVIDENCED| / max(cap - |held|, 1))` sweeps of claims.
 
 Within each class the first key is the unclaimed streak, the number of
 sweeps the unit has been on the frontier since a turn last counted
@@ -42,7 +64,8 @@ they sat 15th and 16th, past the cap, behind units no route had opened.
 A later peel does reset it, so a fault that never lands cannot hold the
 batch. That bound is what the pass cursor and the owed share's half split
 each tried to give and neither did for every unit. After the streak: tests
-held (`HELD`); crash provenance, owed tier and service bucket (`EVIDENCED`);
+held (`HELD`); fault site (blamed, then sited), owed tier with an un-owed
+unit after every tier, and service bucket (`EVIDENCED`);
 the chain inference, then the service bucket (`OTHER`: never served, served,
 served and last graded flat, red-dead, dead). Then the escalation's producer order: product units first,
 table builders, then callees before their callers. Then the static order
@@ -73,7 +96,9 @@ __all__ = [
     "off_batch_reasons",
     "streak_after_turn",
     "rank",
+    "rotation_bound",
     "service_of",
+    "starved",
     "take",
 ]
 
@@ -130,12 +155,20 @@ def service_of[K: Hashable](
     return Service.SERVED
 
 
+#: The owed-tier key of a unit nothing owes: after every real tier.
+_UNOWED_TIER = 1 << 30
+
+
 @dataclass(frozen=True, slots=True)
 class UnitFacts:
     """Everything the rank reads about one frontier unit."""
 
     #: Position in the static order (`order_frontier`). Unique per unit.
     static_index: int
+    #: How the unit's current body has been served (`service_of`). No
+    #: default: `NEVER` puts a unit in `EVIDENCED`, so a constructor that
+    #: forgot to ask would promote it.
+    service: Service
     #: Red tests whose first failure sits in this still-stubbed unit.
     held_tests: int = 0
     crash: Crash | None = None
@@ -147,7 +180,6 @@ class UnitFacts:
     builder: bool = False
     #: Called by another escalated unit through a resolved call.
     callee: bool = False
-    service: Service = Service.NEVER
     #: Sweeps on the frontier since a turn last counted (`streak_after_turn`).
     unclaimed: int = 0
 
@@ -155,8 +187,9 @@ class UnitFacts:
     def rank_class(self) -> RankClass:
         if self.held_tests > 0:
             return RankClass.HELD
-        if self.owed_tier is not None or self.crash in (Crash.BLAMED,
-                                                        Crash.SITED):
+        if (self.owed_tier is not None
+                or self.crash in (Crash.BLAMED, Crash.SITED)
+                or self.service is Service.NEVER):
             return RankClass.EVIDENCED
         return RankClass.OTHER
 
@@ -170,9 +203,16 @@ class UnitFacts:
             return (int(cls), -self.unclaimed, -self.held_tests,
                     self.static_index)
         if cls is RankClass.EVIDENCED:
-            crash = int(self.crash) if self.crash is not None else len(Crash)
-            return (int(cls), -self.unclaimed, crash,
-                    self.owed_tier if self.owed_tier is not None else 0,
+            # A fault site leads; a chain inference is not one and keys with
+            # no crash. An un-owed unit keys after every owed tier: the
+            # driver clamps tiers to 0, so an un-owed never-served unit keyed
+            # 0 would win on service over an owed served one.
+            fault = (int(self.crash) if self.crash in (Crash.BLAMED,
+                                                       Crash.SITED)
+                     else int(Crash.CHAIN))
+            tier = (self.owed_tier if self.owed_tier is not None
+                    else _UNOWED_TIER)
+            return (int(cls), -self.unclaimed, fault, tier,
                     int(self.service), *self._producer(), self.static_index)
         return (int(cls), -self.unclaimed,
                 0 if self.crash is Crash.CHAIN else 1,
@@ -219,6 +259,33 @@ def take[K: Hashable](
                          completes_pass=not (pending - set(keys)),
                          attempted_before=len(seen),
                          frontier_size=len(ranked))
+
+
+def rotation_bound(class_size: int, held: int, cap: int) -> int:
+    """Sweeps within which every `EVIDENCED` unit is offered, when the runs
+    claim what they are given: the class over the slots :func:`take` leaves
+    after the held units, never fewer than one slot."""
+    if cap <= 0 or class_size <= 0:
+        return 1
+    return -(-class_size // max(cap - held, 1))
+
+
+def starved[K: Hashable](
+    facts: Mapping[K, UnitFacts], batch: Collection[K], cap: int,
+) -> dict[K, int]:
+    """`EVIDENCED` units left out of `batch` whose unclaimed streak has
+    reached the rotation bound, with that streak.
+
+    The class's size moves between sweeps, so the bound is read on this
+    sweep's class; a unit at the bound and still out of the batch is a unit
+    the rotation did not reach. Empty when the rank keeps its promise."""
+    batch_set = set(batch)
+    evidenced = [k for k, f in facts.items()
+                 if f.rank_class is RankClass.EVIDENCED]
+    held = sum(1 for f in facts.values() if f.rank_class is RankClass.HELD)
+    bound = rotation_bound(len(evidenced), held, cap)
+    return {k: facts[k].unclaimed for k in evidenced
+            if k not in batch_set and facts[k].unclaimed >= bound}
 
 
 def next_streak[K: Hashable](

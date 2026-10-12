@@ -223,6 +223,31 @@ def test_a_recheck_that_defines_a_name_twice_restores_the_file(
     assert any("restored" in ln for ln in logs)
 
 
+def test_a_recheck_that_raises_restores_the_file(tmp_path: Path) -> None:
+    f = tmp_path / "src" / "error.rs"
+    f.parent.mkdir()
+    original = "fn f() {}\n"
+    f.write_text(original, encoding="utf-8")
+    at = len(original.encode())
+    diag = Diagnostic(code="E0425", file="src/error.rs", line=1,
+                      message="cannot find `Widget` in this scope",
+                      import_fixes=(ImportFix(
+                          "src/error.rs", at, at, "use crate::a::Widget;\n"),))
+
+    def _check(cmd, cwd, env):
+        raise RuntimeError("cargo died")
+
+    try:
+        repair_missing_imports(
+            _check, "cargo check", tmp_path, {}, "src/error.rs", [diag],
+            lambda _m: None, "[t]")
+    except RuntimeError as exc:
+        assert str(exc) == "cargo died"
+    else:
+        raise AssertionError("the re-check exception must propagate")
+    assert f.read_text(encoding="utf-8") == original
+
+
 def test_a_recheck_that_moves_the_error_keeps_the_use(tmp_path: Path) -> None:
     f = tmp_path / "src" / "error.rs"
     f.parent.mkdir()

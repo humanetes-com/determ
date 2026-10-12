@@ -20,7 +20,7 @@ from pipeline_core.application.reconstruct.scheduling import (
     rank_stubs_by_blocker_counts,
 )
 from pipeline_core.domain.dispatch_batch import dispatch_ranks_of
-from pipeline_core.domain.dispatch_rank import Crash, UnitFacts, rank, take
+from pipeline_core.domain.dispatch_rank import Crash, Service, UnitFacts, rank, take
 from pipeline_core.domain.models import FnLocator, Stub
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "dispatch" / "155810-cbb3b9fc_deferred.json"
@@ -71,7 +71,7 @@ def test_iter2_batch_opens_on_construct() -> None:
         FnLocator("src/kind.rs", "new"),
     ]
     static = accessors + list(hist)
-    facts = {k: UnitFacts(static_index=i, held_tests=hist.get(k, 0))
+    facts = {k: UnitFacts(static_index=i, service=Service.NEVER, held_tests=hist.get(k, 0))
              for i, k in enumerate(static)}
     ranked = rank(facts)
     assert ranked[0] == FnLocator("src/error.rs", "construct")
@@ -130,7 +130,7 @@ def _driver_order(hist: dict[FnLocator, int],
     with a static order by file name (the tie the bug was about)."""
     crash = crash or {}
     keys = sorted(set(hist) | set(crash), key=lambda k: (k.file, k.fn_name))
-    return rank({k: UnitFacts(static_index=i, held_tests=hist.get(k, 0),
+    return rank({k: UnitFacts(static_index=i, service=Service.NEVER, held_tests=hist.get(k, 0),
                               crash=crash.get(k))
                  for i, k in enumerate(keys)})
 

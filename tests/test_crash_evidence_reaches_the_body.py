@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.domain.attribution import FailureFrontier
-from pipeline_core.domain.dispatch_rank import Crash, UnitFacts, rank, take
+from pipeline_core.domain.dispatch_rank import Crash, Service, UnitFacts, rank, take
 from pipeline_core.domain.landed_change import declined_unchanged
 from pipeline_core.domain.language_driver import GenericLanguageDriver, using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
@@ -101,7 +101,7 @@ def _live_frontier() -> tuple[list[FnLocator], list[FnLocator], dict[FnLocator, 
     frontier = list(dict.fromkeys([*attempted, *others, *grades]))
     assert len(frontier) == rec["frontier_size"]
     crash = {DROP: Crash.BLAMED, OBJECT_DROP: Crash.SITED, AS_PTR: Crash.SITED}
-    ordered = rank({k: UnitFacts(static_index=i, crash=crash.get(k))
+    ordered = rank({k: UnitFacts(static_index=i, service=Service.NEVER, crash=crash.get(k))
                     for i, k in enumerate(frontier)})
     return ordered, attempted, grades
 
@@ -155,7 +155,7 @@ def test_the_promotion_ends_with_the_fault_and_not_on_a_budget() -> None:
     frontier = list(dict.fromkeys([DROP, OBJECT_DROP, AS_PTR, *attempted,
                                    *pending]))
     streak = dict.fromkeys(pending, 1)
-    healed = rank({k: UnitFacts(static_index=i, unclaimed=streak.get(k, 0))
+    healed = rank({k: UnitFacts(static_index=i, service=Service.NEVER, unclaimed=streak.get(k, 0))
                    for i, k in enumerate(frontier)})
     assert healed[:10] == pending
     assert healed.index(DROP) >= 10

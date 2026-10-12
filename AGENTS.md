@@ -78,7 +78,7 @@ A finished fix, mechanism, or gate is not finished until the reply names the exa
 
 Pick one lever from "Pick the restart lever by the phase your fix lives in" by the phase that executes the change, and write that command (pre_run.sh first — the stamp moved). The cases:
 
-- driver-half on the existing filled tree (dispatch, hop, attribution, charging, keep/revert, schedule, pair fill, session): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. If that phase is already marked done in pipeline_state.md, `bash restart_from.sh task2a --force` instead (anyhow). Fills stay on disk.
+- driver-half on the existing filled tree (dispatch, hop, attribution, charging, keep/revert, schedule, pair fill, session): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. `bash restart_from.sh task2a` deletes the filled tree, the best-tree snapshot, and that phase's floor, convictions, ask ledger and red ledger, then re-seeds stubs under the current layout. When the phase is already marked done and the filled tree is the measurement, `bash restart_from.sh task2a --force --keep-fills` instead (anyhow).
 - construction of the tree (t1.5 layout, bake, strip, FR synthesis): `bash pre_run.sh` then `bash redo.sh --full --force`. A tree built by the old code cannot measure this class.
 - hardcrate recovery smoke: `bash pre_run.sh` then `bash run_hardcrate.sh`. Add `--from=STAGE` only when the fills in tmp/hardcrate are the state the reading needs.
 - stop only, no relaunch: `touch /tmp/pipeline_graceful_stop`.
@@ -1520,25 +1520,30 @@ to in `.skeleton/<cluster>/src`.
 - **`bash restart_from.sh <stage>`** (anyhow; `<stage>` ∈ task1|task2|task2a|task2b|
   task2c|task3|task4, `--force` to skip the graceful stop) — clears the matching
   `[<key>]` lines from `pipeline_state.md` plus the `passing-*` lock tags, then
-  execs `continue.sh --y --no-tail`. **It preserves every fill on disk**: the cluster seed is
-  `if not dst.exists()`, so re-entering task2a resumes the TDD loop ON the existing
-  bodies rather than re-stubbing them. This is the lever for a driver-half fix
-  (charging, taint, epochs, re-admission, the red-build budget) that only executes
-  inside `run_phase_c_tdd`. Note the real boundaries are task1 and task2 —
-  task2a…task4 are visibility labels for sub-stages of one atomic `task2-4`
-  reconstruct phase, so task2a/2b/2c all re-run the loop; task3/task4 clear only
-  `task2-4` and go straight to test/fix. `resume_from_t2.sh` is a shim for
-  `restart_from.sh task2`.
+  execs `continue.sh --y --no-tail`. **task2 and task2a drop what that phase
+  wrote** (`.skeleton-filled`, `.best_tree`, the floors, the conviction store,
+  the ask ledgers, the red ledgers) and the seed then copies stubs, because the
+  seed copies a skeleton file only `if not dst.exists()` and heal would copy
+  the best tree back. The layout, the generated tests and the FRs stay. The
+  body ledger may copy proven bodies back; the cluster-entry line says how
+  many. `--keep-fills` is the re-entry on the bodies already on disk, and it
+  is the lever for a driver-half fix when task2a is already marked done.
+  task2b and task2c skip the per-cluster fill and keep the trees. task3/task4
+  clear only `task2-4` and go straight to test/fix. `resume_from_t2.sh` is a
+  shim for `restart_from.sh task2` and therefore drops the same products.
 - **`bash run_hardcrate.sh [--complexity=N] [--from=STAGE]`** — the hardcrate smoke
   in `tmp/hardcrate`, same t1…t4 vocabulary via the shared
   `lib/restart_from_lib.sh`. Without `--from` it re-assembles the crate and
-  `rm -rf`s the workspace; with `--from` it preserves fills exactly as
-  `restart_from.sh` does. Requires vLLM already up on :8000.
-- **`bash redo.sh [--force] [--full]`** — the only lever that DESTROYS the
-  reconstruction: it wipes `.skeleton-filled`, and with `--full` also `.skeleton`
-  (forcing the bake to re-run), then relaunches `continue.sh --y --keep-augmented --no-tail`,
-  i.e. `pipeline.py --restart-from-augmented`, whose `git reset --hard` to the
-  task0c tag removed 5,137 tracked files on 2026-08-08.
+  `rm -rf`s the workspace; with `--from` it clears phase entries only and
+  keeps the fills. It does not call the anyhow task2a product drop. Requires
+  vLLM already up on :8000.
+- **`bash redo.sh [--force] [--full]`** — wipes `.skeleton-filled` and
+  re-runs strip, task1 and the layout bake: it relaunches
+  `continue.sh --y --keep-augmented --no-tail`, i.e.
+  `pipeline.py --restart-from-augmented`, whose `git reset --hard` to the
+  task0c tag removed 5,137 tracked files on 2026-08-08. With `--full` it also
+  wipes `.skeleton`. A fresh task 2a under the current layout is
+  `restart_from.sh task2a`, not this.
 
 **When to wipe, and when wiping destroys the measurement.** Wipe when the thing
 under test is the construction of the tree itself — a t1.5 layout change, a bake or
