@@ -628,9 +628,47 @@ def test_a_scan_that_names_no_declared_type_drops_the_product(
     assert batches and _ADMIT not in batches[0] and _PROD not in batches[0]
     got = _rederived(events)
     assert got and got[0]["dropped_product"]
+    assert got[0]["drop_reason"] == "no_declared_type"
     assert set(got[0]["additions_gone"]) == {
         "src/b.rs::producer", "src/c.rs::widen"}
-    assert any("product dropped" in ln for ln in logs)
+    assert any("no declared type" in ln and "product dropped" in ln
+               for ln in logs)
+    assert not any("no producer and no traversal step" in ln for ln in logs)
+    assert "t2" not in (floor["row"].get("escalation_products") or {})
+
+
+def test_a_declared_type_with_nothing_named_drops_without_the_no_type_log(
+        tmp_path, monkeypatch) -> None:
+    """The accessor's type is declared and nothing produces it or is called
+    from it. A fire returns nothing after the scan, so the product goes,
+    and the log does not say the crate declares no such type."""
+    nobody = [
+        {**r, "sig_text": "fn producer() -> usize", "body_text": "1"}
+        if r["fn_name"] == "producer" else r
+        for r in _CELL_RECS
+    ]
+    fired: list[dict] = []
+
+    def _real_fire(src_dir: Path, tname: str, units: set[FnLocator],
+                   producers_out=None):
+        esc = producer_escalation(nobody, _CELL_TYPES, units)
+        if producers_out is not None:
+            producers_out.update(esc.producers)
+        fired.append(esc.additions(tname))
+        return esc.additions(tname)
+
+    floor, logs, events, batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch,
+        enumerate_fns=lambda _sd: nobody,
+        enumerate_types=lambda _sd: _CELL_TYPES, escalate=_real_fire)
+    assert all(not f for f in fired)
+    assert grades and _PROD not in grades[0] and _ADMIT not in grades[0]
+    assert batches and _ADMIT not in batches[0] and _PROD not in batches[0]
+    got = _rederived(events)
+    assert got and got[0]["dropped_product"]
+    assert got[0]["drop_reason"] == "nothing_named"
+    assert any("no producer and no traversal step" in ln for ln in logs)
+    assert not any("no declared type" in ln for ln in logs)
     assert "t2" not in (floor["row"].get("escalation_products") or {})
 
 

@@ -3530,8 +3530,11 @@ def run_phase_c_tdd(
                 # the same earned accessors and today's tree: its additions
                 # AND its producer grade, through `producer_escalation`, the
                 # one derivation the fire uses. A scan that names no
-                # declared type is a fire that does not escalate, so the
-                # product goes. An unreadable tree leaves the saved product:
+                # declared type is a fire that does not escalate, and a
+                # scan that names the type but no producer and no
+                # traversal step is a fire that returns nothing. Either
+                # way the product goes, and the log says which. An
+                # unreadable tree leaves the saved product:
                 # empty records and a failed read are not a measurement.
                 # Run `3076-051d385a` (2026-10-13) resumed a floor whose
                 # three products stored additions and producers as the same
@@ -3572,6 +3575,18 @@ def run_phase_c_tdd(
                         if not _adds:
                             del escalation_products[_t]
                             escalation_producers.pop(_t, None)
+                            # Empty additions are two different fires.
+                            # No declared type: the fire returns before it
+                            # looks for producers. A declared type with no
+                            # producer and no traversal step: the fire
+                            # returns nothing after the scan. Both drop the
+                            # product; the log has to say which, or a
+                            # declared type reads as "the crate has no such
+                            # type".
+                            _drop_reason = (
+                                "no_declared_type"
+                                if not _esc.scan.type_names else
+                                "nothing_named")
                         elif _derived == _saved and set(_adds) == set(_cached):
                             continue
                         else:
@@ -3580,17 +3595,26 @@ def run_phase_c_tdd(
                             escalation_producers[_t] = _derived
                             _resumed_regraded[_t] = frozenset(
                                 set(_adds) - set(_cached))
+                            _drop_reason = None
                         _gone = sorted(f"{k.file}::{k.fn_name}"
                                        for k in set(_cached) - set(_adds))
                         _new = sorted(f"{k.file}::{k.fn_name}"
                                       for k in set(_adds) - set(_cached))
+                        if _drop_reason == "no_declared_type":
+                            _why = ("the scan names no declared type, so a "
+                                    "fire would not escalate: product dropped")
+                        elif _drop_reason == "nothing_named":
+                            _why = ("the scan names a declared type but no "
+                                    "producer and no traversal step, so a "
+                                    "fire would return nothing: product "
+                                    "dropped")
+                        else:
+                            _why = (f"{len(_derived)} producer(s), "
+                                    f"{len(_adds)} addition(s)")
                         deps.log(
                             f"  {tag} [attribution/escalate] {_t}: resumed "
                             "product re-derived from the tree — "
-                            + (f"{len(_derived)} producer(s), "
-                               f"{len(_adds)} addition(s)" if _adds else
-                               "the scan names no declared type, so a fire "
-                               "would not escalate: product dropped")
+                            + _why
                             + f"; {len(_gone)} saved addition(s) gone"
                             + (": " + ", ".join(_gone[:8]) if _gone else "")
                             + f"; {len(_new)} new"
@@ -3600,6 +3624,7 @@ def run_phase_c_tdd(
                             data={
                                 "cluster": cluster.name, "test": _t,
                                 "dropped_product": not _adds,
+                                "drop_reason": _drop_reason,
                                 "producers": sorted(
                                     f"{k.file}::{k.fn_name}"
                                     for k in _derived),
