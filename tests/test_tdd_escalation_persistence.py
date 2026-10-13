@@ -30,6 +30,9 @@ from typing import Any
 
 import pytest
 
+from pipeline_core.application.reconstruct.attribution import (
+    producer_escalation,
+)
 from pipeline_core.application.reconstruct.phase_c_tdd import (
     PhaseCTddDeps,
     run_phase_c_tdd,
@@ -61,7 +64,9 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
           | None = None,
           fill=None, attribute=None, run_id: str = "",
           ledger_load=None, grades: list[frozenset[FnLocator]] | None = None,
-          enumerate_fns=None, enumerate_types=None) -> PhaseCTddDeps:
+          enumerate_fns=None, enumerate_types=None,
+          releases: list[frozenset[FnLocator]] | None = None,
+          escalate=None) -> PhaseCTddDeps:
     """One process's deps. Pass the SAME `floor` dict to two calls to model
     two processes sharing the on-disk `.phase_c_logs` floor file."""
     def _cargo(*a: Any, **k: Any) -> tuple[int, str]:
@@ -91,6 +96,11 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
             suspensions.append((frozenset(units), frozenset(tests)))
         return ["src/a.rs::fmt::impl Fmt"]
 
+    def _release(pd: Path, sd: Path, targets, why: str) -> list[str]:
+        if releases is not None:
+            releases.append(frozenset(targets))
+        return []
+
     def _attr(*a: Any, **k: Any) -> AttributionResult:
         if attribute is not None:
             return attribute()
@@ -115,8 +125,9 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
         scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
         scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
-        escalate_to_producers=_escalate,
+        escalate_to_producers=escalate or _escalate,
         suspend_futile_guidance=_suspend,
+        release_escalated_convictions=_release,
         load_tdd_floor=lambda *a, **k: floor.get("row"),
         save_tdd_floor=lambda p, c, row: floor.__setitem__("row", row),
         ledger_load=ledger_load,
@@ -548,65 +559,133 @@ def _resume_contaminated(tmp_path, monkeypatch, **dep_kw):
     return floor, logs, events, batches, grades
 
 
-def test_a_resumed_producer_grade_drops_a_saved_name_the_scan_does_not(
+def _rederived(events: list[tuple[str, dict]]) -> list[dict]:
+    return [d for ev, d in events
+            if ev == "phase_c.attribution.product_rederived"]
+
+
+def test_a_resumed_product_holds_what_a_fire_on_this_tree_would_write(
         tmp_path, monkeypatch) -> None:
-    """The fill's escalated set is the scan of the earned accessors. The
-    fn that hands their type back stays. The saved name that does not
-    produce it is still on the frontier and is not graded as futility."""
+    """The plan's sentence: a resumed product's additions AND grade are the
+    fire's. The fn that hands the accessor's type back is added and graded.
+    The saved name that does not produce it is neither graded nor put back
+    on the frontier by the product, and the floor no longer carries it."""
     floor, logs, events, batches, grades = _resume_contaminated(
         tmp_path, monkeypatch,
         enumerate_fns=lambda _sd: _CELL_RECS,
         enumerate_types=lambda _sd: _CELL_TYPES)
     assert grades and _PROD in grades[0] and _ADMIT not in grades[0]
-    assert batches and _ADMIT in batches[0] and _PROD in batches[0]
-    rederived = [d for ev, d in events
-                 if ev == "phase_c.attribution.producers_rederived"]
-    assert rederived and rederived[0]["test"] == "t2"
-    assert "src/b.rs::producer" in rederived[0]["producers"]
-    assert "src/c.rs::widen" in rederived[0]["dropped"]
-    assert "src/c.rs::widen" not in rederived[0]["producers"]
-    assert any("re-derived from the tree" in ln for ln in logs)
-    saved = floor["row"]["escalation_products"]["t2"]["producers"]
-    assert saved == ["src/b.rs::producer"]
-    assert "src/c.rs::widen" in (
-        floor["row"]["escalation_products"]["t2"]["additions"])
+    assert batches and _PROD in batches[0] and _ADMIT not in batches[0]
+    got = _rederived(events)
+    assert got and got[0]["test"] == "t2" and not got[0]["dropped_product"]
+    assert got[0]["producers"] == ["src/b.rs::producer"]
+    assert got[0]["producers_dropped"] == ["src/c.rs::widen"]
+    assert got[0]["additions_gone"] == ["src/c.rs::widen"]
+    assert any("resumed product re-derived from the tree" in ln for ln in logs)
+    body = floor["row"]["escalation_products"]["t2"]
+    assert body["producers"] == ["src/b.rs::producer"]
+    assert set(body["additions"]) == {"src/b.rs::producer"}
 
 
 def test_without_the_tree_records_the_saved_admit_stays_escalated(
         tmp_path, monkeypatch) -> None:
-    """NEGATIVE CONTROL. No fn or type enumerator is wired, so an empty
-    scan is not a measurement and the saved tuple still grades the admit."""
+    """NEGATIVE CONTROL, and the pre-change outcome. No fn or type enumerator
+    is wired, so an empty scan is not a measurement: the saved product
+    still grades the admit and still puts it on the frontier."""
     _floor, logs, events, batches, grades = _resume_contaminated(
         tmp_path, monkeypatch)
     assert grades and _PROD in grades[0] and _ADMIT in grades[0]
     assert batches and _ADMIT in batches[0]
-    assert not any(ev == "phase_c.attribution.producers_rederived"
-                   for ev, _ in events)
-    assert any("grade left as saved" in ln for ln in logs)
+    assert not _rederived(events)
+    assert any("resumed products left as saved" in ln for ln in logs)
 
 
-def test_a_completed_scan_that_names_nobody_replaces_the_saved_tuple(
+def test_a_scan_that_names_no_declared_type_drops_the_product(
         tmp_path, monkeypatch) -> None:
-    """The records were read and no fn produces the accessor's type. That
-    empty result replaces the saved tuple, admit and all."""
-    other = [
-        {**r, "sig_text": "fn producer() -> usize", "body_text": "1"}
-        if r["fn_name"] == "producer" else r
-        for r in _CELL_RECS
-    ]
+    """The records were read and the accessor's container names no type
+    the crate declares. A fire would not escalate, so the resumed product
+    goes, admit and all, and neither name is graded."""
+    types = [TypeRecord(kind="struct", name="Other")]
+    fired: list[dict] = []
+
+    def _real_fire(src_dir: Path, tname: str, units: set[FnLocator],
+                   producers_out=None):
+        # The live port's derivation on the same records: the resumed
+        # process may fire again once the product is gone, and must find
+        # what the seed found.
+        esc = producer_escalation(_CELL_RECS, types, units)
+        if producers_out is not None:
+            producers_out.update(esc.producers)
+        fired.append(esc.additions(tname))
+        return esc.additions(tname)
+
     floor, logs, events, batches, grades = _resume_contaminated(
         tmp_path, monkeypatch,
-        enumerate_fns=lambda _sd: other,
-        enumerate_types=lambda _sd: _CELL_TYPES)
+        enumerate_fns=lambda _sd: _CELL_RECS,
+        enumerate_types=lambda _sd: types, escalate=_real_fire)
+    assert all(not f for f in fired)
     assert grades and _PROD not in grades[0] and _ADMIT not in grades[0]
-    assert batches and _ADMIT in batches[0] and _PROD in batches[0]
-    rederived = [d for ev, d in events
-                 if ev == "phase_c.attribution.producers_rederived"]
-    assert rederived and rederived[0]["producers"] == []
-    assert "src/b.rs::producer" in rederived[0]["dropped"]
-    assert "src/c.rs::widen" in rederived[0]["dropped"]
-    assert any("0 producer(s)" in ln for ln in logs)
-    assert floor["row"]["escalation_products"]["t2"]["producers"] == []
+    assert batches and _ADMIT not in batches[0] and _PROD not in batches[0]
+    got = _rederived(events)
+    assert got and got[0]["dropped_product"]
+    assert set(got[0]["additions_gone"]) == {
+        "src/b.rs::producer", "src/c.rs::widen"}
+    assert any("product dropped" in ln for ln in logs)
+    assert "t2" not in (floor["row"].get("escalation_products") or {})
+
+
+# A second producer the saved product never named: the re-derivation adds
+# it, so it gets what a fire gives the units it names.
+_MAKE = FnLocator("src/b.rs", "make")
+_CELL_RECS_2 = [*_CELL_RECS, {
+    "file": "src/b.rs", "fn_name": "make", "container": "",
+    "sig_text": "fn make() -> Cell", "body_text": "Cell { n: 2 }"}]
+
+
+def test_a_newly_named_producer_gets_the_fires_effects(
+        tmp_path, monkeypatch) -> None:
+    """Added to the frontier and graded; its stored exhaustion verdict is
+    released as new evidence; every producer of the product has its stored
+    guidance suspended for the product's test."""
+    releases: list[frozenset[FnLocator]] = []
+    suspensions: list[tuple[frozenset[FnLocator], frozenset[str]]] = []
+    _floor, _logs, events, batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch,
+        enumerate_fns=lambda _sd: _CELL_RECS_2,
+        enumerate_types=lambda _sd: _CELL_TYPES,
+        releases=releases, suspensions=suspensions)
+    assert grades and {_PROD, _MAKE} <= grades[0]
+    assert batches and _MAKE in batches[0]
+    assert _rederived(events)[0]["additions_new"] == ["src/b.rs::make"]
+    assert frozenset({_MAKE}) in releases
+    assert (frozenset({_PROD, _MAKE}), frozenset({"t2"})) in suspensions
+
+
+def test_a_product_the_first_sweep_drops_gets_no_effects(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE CONTROL for the effects. The resumed test now renders
+    through a format trait, so the first sweep's sustain drops the product:
+    nothing is released and no producer guidance is suspended for it."""
+    releases: list[frozenset[FnLocator]] = []
+    suspensions: list[tuple[frozenset[FnLocator], frozenset[str]]] = []
+
+    def _fmt_attr() -> AttributionResult:
+        return AttributionResult(
+            {_ACC: {"t2"}}, FailureKind.RUNTIME, {_ACC: {"t2"}},
+            {"t2": 'fn t2() { assert_eq!(format!("{:?}", c), "C"); }'})
+
+    _floor, _logs, events, _batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch,
+        enumerate_fns=lambda _sd: _CELL_RECS_2,
+        enumerate_types=lambda _sd: _CELL_TYPES,
+        releases=releases, suspensions=suspensions, attribute=_fmt_attr)
+    assert _rederived(events), "the seed re-derived the product"
+    assert any(ev == "phase_c.attribution.escalation_dropped"
+               and d.get("reason") == "format_trait_test"
+               for ev, d in events)
+    assert not releases
+    assert not any(_MAKE in units for units, _ in suspensions)
+    assert grades and _MAKE not in grades[0]
 
 
 def test_a_pre_split_floor_re_earns_the_verified_view_and_keeps_the_fire(

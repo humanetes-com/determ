@@ -10,6 +10,7 @@ from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     container_type_name,
     escalate_frontier_to_producers,
+    producer_escalation,
     producer_scan,
     producers_for_types,
 )
@@ -393,3 +394,36 @@ def test_an_unreadable_type_list_is_not_a_producer_measurement() -> None:
     assert scan.producers == ()
     assert scan.candidates == ("Cell",)
     assert scan.type_names == ()
+
+
+# The derivation the fire and a resumed floor share. The accessor calls
+# `.source()`, which a trait impl defines: that impl is a traversal step,
+# added beside the producer and not graded as one.
+_LINK_RECS: list[dict[str, Any]] = [
+    {"file": "src/cell.rs", "fn_name": "fmt", "container": "impl Cell",
+     "sig_text": "fn fmt(&self) -> usize", "body_text": "self.inner.source()"},
+    {"file": "src/cell.rs", "fn_name": "make", "container": "",
+     "sig_text": "fn make() -> Cell", "body_text": "Cell { n: 1 }"},
+    {"file": "src/link.rs", "fn_name": "source",
+     "container": "impl StdError for Link",
+     "sig_text": "fn source(&self) -> Option<&dyn StdError>",
+     "body_text": "None"},
+]
+
+
+def test_the_escalation_adds_producers_and_steps_and_grades_producers() -> None:
+    esc = producer_escalation(
+        _LINK_RECS, [{"kind": "struct", "name": "Cell"}], {_CELL})
+    assert esc.producers == (FnLocator("src/cell.rs", "make"),)
+    assert esc.traversed == (FnLocator("src/link.rs", "source"),)
+    assert esc.additions("t") == {FnLocator("src/cell.rs", "make"): {"t"},
+                                  FnLocator("src/link.rs", "source"): {"t"}}
+
+
+def test_no_declared_type_is_no_escalation_even_with_steps() -> None:
+    """The fire returns nothing when the container names no declared type,
+    so a resumed product on that tree is dropped, steps and all."""
+    esc = producer_escalation(
+        _LINK_RECS, [{"kind": "struct", "name": "Other"}], {_CELL})
+    assert esc.additions("t") == {}
+    assert esc.traversed == ()

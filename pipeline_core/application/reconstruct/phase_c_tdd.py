@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
 from pipeline_core.application.reconstruct.attribution import (
     make_fn_site_locator,
-    producer_scan,
+    producer_escalation,
 )
 from pipeline_core.application.reconstruct.body_reseed import (
     ReseedOutcome,
@@ -1153,6 +1153,11 @@ def run_phase_c_tdd(
     #: and dies with `escalation_products`, so a dropped product cannot leave a
     #: stale ESCALATED grade behind.
     escalation_producers: dict[str, frozenset[FnLocator]] = {}
+    #: test -> additions a resumed product's re-derivation named that the
+    #: saved product did not. Held until the first sweep's sustain has
+    #: dropped the products whose evidence no longer stands, then given the
+    #: fire's new-evidence effects (see the sustain site).
+    _resumed_regraded: dict[str, frozenset[FnLocator]] = {}
     last_notes_count: dict[FnLocator, int] = {}
     last_total_filled = 0
     # Self-contained snapshot for the exhaustion-reset gate below — deliberately
@@ -1175,6 +1180,47 @@ def run_phase_c_tdd(
     # escape hatch as stubs).
     refill_attempts: dict[FnLocator, int] = {}
     _refill_max = int(os.getenv("TDD_REFILL_MAX_ATTEMPTS", "2"))
+
+    def _escalation_named(tname: str, targets: frozenset[FnLocator],
+                          iter_no: int) -> tuple[set[FnLocator], list[str]]:
+        """The escalation IS new evidence about the units it names: a
+        producer convicted before anyone knew this test needed it was judged
+        on a different question. Re-admits the locally exhausted ones and
+        opens the store's gate on them. Called by a fire and by a resumed
+        product's first naming of a unit, so neither can skip it.
+
+        An exhausted target silently swallowed by the exhaustion re-entry
+        filter is how arm A's hardcrate stable stopped at 46 while B/C
+        (whose filter never caught it) reached 47."""
+        re_admitted = set(targets) & permanently_exhausted
+        if re_admitted:
+            permanently_exhausted.difference_update(re_admitted)
+            for k in re_admitted:
+                refill_attempts.pop(k, None)
+            deps.log(
+                f"  {tag} [attribution/escalate] {tname}: "
+                f"{len(re_admitted)} escalation target(s) were exhausted — "
+                "re-admitted on the new evidence: " + ", ".join(
+                    sorted(f"{k.file}::{k.fn_name}" for k in re_admitted)))
+        # The SAME evidence opens the store's gate on the same targets. The
+        # local release above reaches only the exhaustion re-entry filter; a
+        # target whose disk record is `fully_exhausted` enters the frontier
+        # every sweep and is skipped at the route every time (the
+        # `<C,Error>` block, run `1246060-2339497b`). Capped per record by
+        # the reset budget, so a test that escalates to the same target every
+        # sweep buys it two re-attempts, not one per sweep.
+        disk_released: list[str] = []
+        if deps.release_escalated_convictions is not None and targets:
+            disk_released = deps.release_escalated_convictions(
+                project_dir, target_src_dir, targets,
+                f"TDD iter {iter_no}: escalation of {tname} named the unit "
+                "— new evidence about it")
+            if disk_released:
+                deps.log(
+                    f"  {tag} [attribution/escalate] {tname}: released "
+                    f"{len(disk_released)} stored exhaustion verdict(s) on "
+                    "its target(s): " + ", ".join(sorted(disk_released)[:6]))
+        return re_admitted, disk_released
     # Destruction epoch: bumped at every deliberate destruction this loop
     # performs (retrigger re-stub, charged ratchet restore), so any baseline
     # taken before it answers INCOMPARABLE instead of NOT_IMPROVED. The
@@ -3474,17 +3520,23 @@ def run_phase_c_tdd(
                             _cached[FnLocator(_af, _afn)] = set(_ats)
                     escalation_products[_t] = (_earned, _cached)
                     escalation_producers[_t] = _keys_to_locators(_prods_s)
-                # The saved producer tuple is not a measurement this process
-                # made. A writer that stored every frontier addition under
-                # that name grades a coverage admit as futility ("the defect
-                # is in what this fn constructs") for as long as the product
-                # lives. The grade is the producer scan a fire in this
-                # process would write, from the earned accessors and the
-                # tree — including an empty result, which is an answer.
-                # An unreadable tree leaves the saved tuple: empty records
-                # and a failed read are not a measurement either. Run
-                # `3076-051d385a` (2026-10-13) resumed a floor whose three
-                # products stored additions and producers as the same list.
+                # A saved product is not a measurement this process made. A
+                # writer that stored owner-map admits as additions and
+                # producers alike grades a coverage admit as futility ("the
+                # defect is in what this fn constructs"), ranks it as a
+                # product, exempts it from the red-dead filter and re-merges
+                # it every sweep, for as long as the product lives. The
+                # product is what a fire in this process would write from
+                # the same earned accessors and today's tree: its additions
+                # AND its producer grade, through `producer_escalation`, the
+                # one derivation the fire uses. A scan that names no
+                # declared type is a fire that does not escalate, so the
+                # product goes. An unreadable tree leaves the saved product:
+                # empty records and a failed read are not a measurement.
+                # Run `3076-051d385a` (2026-10-13) resumed a floor whose
+                # three products stored additions and producers as the same
+                # list; re-deriving only the grade left ten non-producers
+                # ranked and exempt, and graded 17 producers never added.
                 _fn_recs: list[dict[str, Any]] | None = None
                 _ty_recs: list[Any] | None = None
                 _grade_note = ""
@@ -3504,48 +3556,65 @@ def run_phase_c_tdd(
                     for _t, (_earned, _cached) in list(
                             escalation_products.items()):
                         try:
-                            _scan = producer_scan(
+                            _esc = producer_escalation(
                                 _fn_recs, _ty_recs, set(_earned))
-                        except Exception as _exc:  # noqa: BLE001 — leave this product's saved grade
+                        except Exception as _exc:  # noqa: BLE001 — leave this product as saved
                             deps.log(
                                 f"  {tag} [attribution/escalate] {_t}: "
-                                "resumed producer grade left as saved — "
-                                "the scan failed, so an empty result is "
-                                f"not a measurement ({type(_exc).__name__}: "
+                                "resumed product left as saved — the scan "
+                                "failed, so an empty result is not a "
+                                f"measurement ({type(_exc).__name__}: "
                                 f"{_exc})")
                             continue
-                        _derived = frozenset(_scan.producers)
+                        _adds = _esc.additions(_t)
+                        _derived = frozenset(_esc.producers)
                         _saved = escalation_producers.get(_t, frozenset())
-                        if _derived == _saved:
+                        if not _adds:
+                            del escalation_products[_t]
+                            escalation_producers.pop(_t, None)
+                        elif _derived == _saved and set(_adds) == set(_cached):
                             continue
-                        escalation_producers[_t] = _derived
-                        _dropped = _saved - _derived
+                        else:
+                            escalation_products[_t] = (
+                                _earned, {k: set(v) for k, v in _adds.items()})
+                            escalation_producers[_t] = _derived
+                            _resumed_regraded[_t] = frozenset(
+                                set(_adds) - set(_cached))
+                        _gone = sorted(f"{k.file}::{k.fn_name}"
+                                       for k in set(_cached) - set(_adds))
+                        _new = sorted(f"{k.file}::{k.fn_name}"
+                                      for k in set(_adds) - set(_cached))
                         deps.log(
                             f"  {tag} [attribution/escalate] {_t}: resumed "
-                            "producer grade re-derived from the tree — "
-                            f"{len(_derived)} producer(s); "
-                            f"{len(_dropped)} saved name(s) do not produce "
-                            "the accessors' type and are not graded as a "
-                            "futility measurement: " + ", ".join(sorted(
-                                f"{k.file}::{k.fn_name}"
-                                for k in _dropped)[:8]))
+                            "product re-derived from the tree — "
+                            + (f"{len(_derived)} producer(s), "
+                               f"{len(_adds)} addition(s)" if _adds else
+                               "the scan names no declared type, so a fire "
+                               "would not escalate: product dropped")
+                            + f"; {len(_gone)} saved addition(s) gone"
+                            + (": " + ", ".join(_gone[:8]) if _gone else "")
+                            + f"; {len(_new)} new"
+                            + (": " + ", ".join(_new[:8]) if _new else ""))
                         deps.emit(
-                            "phase_c.attribution.producers_rederived",
+                            "phase_c.attribution.product_rederived",
                             data={
                                 "cluster": cluster.name, "test": _t,
+                                "dropped_product": not _adds,
                                 "producers": sorted(
                                     f"{k.file}::{k.fn_name}"
                                     for k in _derived),
-                                "dropped": sorted(
+                                "producers_dropped": sorted(
                                     f"{k.file}::{k.fn_name}"
-                                    for k in _dropped),
+                                    for k in _saved - _derived),
+                                "additions_gone": _gone,
+                                "additions_new": _new,
                             })
                 elif escalation_products:
                     deps.log(
-                        f"  {tag} [attribution/escalate] resumed producer "
-                        "grade left as saved — the tree's fn or type "
-                        "records could not be read, so an empty scan is "
-                        "not a measurement"
+                        f"  {tag} [attribution/escalate] resumed products "
+                        "left as saved — the tree's fn or type records "
+                        "could not be read, so an empty scan is not a "
+                        "measurement"
                         + (f" ({_grade_note})" if _grade_note else ""))
             deps.log(f"  {tag} [phase-c/tdd] persisted floor for "
                      f"{cluster.name}: {_resume.note} "
@@ -4322,6 +4391,35 @@ def run_phase_c_tdd(
                     "tests": list(_sustain.sustained),
                     "added": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _sustain.merges)})
+            # A resumed product the seed re-derived is graded as a fire in
+            # this process would grade it, so it gets the fire's effects on
+            # the units it names: the ones it newly adds are new evidence
+            # (exhaustion re-admitted, stored convictions released), and its
+            # producers' stored guidance is suspended, so a prompt that says
+            # "the defect is in what this fn constructs" does not also carry
+            # a retro record advising the opposite. Applied after the
+            # sustain, so a product the first sweep drops (a format-trait
+            # test, a test no longer failing) gets none of it.
+            if _resumed_regraded:
+                _live = {t: n for t, n in _resumed_regraded.items()
+                         if t in escalation_products}
+                _resumed_regraded.clear()
+                for _t, _newly in sorted(_live.items()):
+                    if _newly:
+                        _escalation_named(_t, _newly, iter_n)
+                _rg_producers = frozenset(
+                    k for _t in _live
+                    for k in escalation_producers.get(_t, frozenset()))
+                if _rg_producers and deps.suspend_futile_guidance is not None:
+                    _rg_susp = deps.suspend_futile_guidance(
+                        project_dir, src_dir, _rg_producers, cluster.name,
+                        frozenset(_live))
+                    if _rg_susp:
+                        deps.log(
+                            f"  {tag} [attribution/escalate] suspended "
+                            f"stored guidance on {len(_rg_susp)} ESCALATED "
+                            "producer(s) of re-derived resumed product(s): "
+                            + ", ".join(sorted(_live)))
             for tname, units in units_by_test.items():
                 prev = prev_test_units.get(tname)
                 if prev != frozenset(units):
@@ -4425,45 +4523,8 @@ def run_phase_c_tdd(
                             _fired_producers)
                         _futile_fired.update(units)
                         _futile_fired_tests.add(tname)
-                        # The escalation IS new evidence about its targets: a
-                        # producer convicted before anyone knew this test
-                        # needed it was judged on a different question. An
-                        # exhausted target silently swallowed by the exhaustion
-                        # re-entry filter is how arm A's hardcrate stable stopped at 46 while
-                        # B/C (whose filter never caught it) reached 47.
-                        _re_admitted = set(extra) & permanently_exhausted
-                        if _re_admitted:
-                            permanently_exhausted -= _re_admitted
-                            for _k in _re_admitted:
-                                refill_attempts.pop(_k, None)
-                            deps.log(
-                                f"  {tag} [attribution/escalate] {tname}: "
-                                f"{len(_re_admitted)} escalation target(s) "
-                                "were exhausted — re-admitted on the new "
-                                "evidence: " + ", ".join(
-                                    sorted(f"{k.file}::{k.fn_name}"
-                                           for k in _re_admitted)))
-                        # The SAME evidence opens the store's gate on the same
-                        # targets. The local release above reaches only the
-                        # exhaustion re-entry filter; a target whose disk record is
-                        # `fully_exhausted` enters the frontier every sweep
-                        # and is skipped at the route every time (the
-                        # `<C,Error>` block, run `1246060-2339497b`). Capped
-                        # per record by the reset budget, so a test that
-                        # escalates to the same target every sweep buys it
-                        # two re-attempts, not one per sweep.
-                        _disk_released: list[str] = []
-                        if deps.release_escalated_convictions is not None:
-                            _disk_released = deps.release_escalated_convictions(
-                                project_dir, src_dir, frozenset(extra),
-                                f"TDD iter {iter_n}: escalation of {tname} "
-                                "named the unit — new evidence about it")
-                            if _disk_released:
-                                deps.log(
-                                    f"  {tag} [attribution/escalate] {tname}: "
-                                    f"released {len(_disk_released)} stored "
-                                    "exhaustion verdict(s) on its target(s): "
-                                    + ", ".join(sorted(_disk_released)[:6]))
+                        _re_admitted, _disk_released = _escalation_named(
+                            tname, frozenset(extra), iter_n)
                         for k, ts in extra.items():
                             frontier.setdefault(k, set()).update(ts)
                         deps.emit("phase_c.attribution.escalated", data={

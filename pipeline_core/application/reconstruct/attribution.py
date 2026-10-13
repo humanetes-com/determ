@@ -1500,6 +1500,55 @@ def producer_scan(
         tuple(producers), tuple(sorted(candidates)), tuple(sorted(type_names)))
 
 
+@dataclass(frozen=True, slots=True)
+class ProducerEscalation:
+    """Everything a futility fire derives from the tree for one test: the
+    producer scan and the traversal steps the futile accessors call.
+
+    The fire and a resumed floor both read this, so a product carried over
+    from an older process holds the additions and the grade a fire in this
+    process would write. Run `3076-051d385a` (2026-10-13) resumed a floor
+    whose writer had stored owner-map admits as additions and producers
+    alike: re-deriving only the grade left `src/ptr.rs::cast` and nine
+    other non-producers ranked as products, exempt from the red-dead
+    filter and re-merged every sweep, while 17 producers the scan names on
+    today's tree were graded without ever being added."""
+
+    scan: ProducerScan
+    traversed: tuple[FnLocator, ...]
+    #: Traversal steps found beyond `_MAX_TRAVERSAL_STEPS`, not escalated.
+    traversed_over: int
+
+    @property
+    def producers(self) -> tuple[FnLocator, ...]:
+        return self.scan.producers
+
+    def additions(self, test_name: str) -> Frontier:
+        """The frontier additions the fire returns: empty when the scan
+        names no declared type (the fire does not escalate), else every
+        producer and traversal step, attributed to `test_name`."""
+        if not self.scan.type_names:
+            return {}
+        return {k: {test_name} for k in (*self.scan.producers, *self.traversed)}
+
+
+def producer_escalation(
+    fn_records: list[dict[str, Any]],
+    type_records: list[Any] | None,
+    futile_units: set[FnLocator],
+) -> ProducerEscalation:
+    """The fire's derivation from records already read: `producer_scan`,
+    then the traversal steps of the futile accessors, excluding the
+    producers and oracle records, capped at `_MAX_TRAVERSAL_STEPS`."""
+    scan = producer_scan(fn_records, type_records, futile_units)
+    if not scan.type_names:
+        return ProducerEscalation(scan, (), 0)
+    recs = [r for r in fn_records if not is_test_fn_record(r)]
+    steps = _traversal_steps(recs, futile_units, exclude=set(scan.producers))
+    kept = steps[:_MAX_TRAVERSAL_STEPS]
+    return ProducerEscalation(scan, tuple(kept), len(steps) - len(kept))
+
+
 def producers_for_types(
     fn_records: list[dict[str, Any]],
     type_names: set[str],
@@ -1596,8 +1645,9 @@ def escalate_frontier_to_producers(
     # None is the extractor unavailable, which the scan treats as no nominal
     # type. An exception is the same empty scan, and the log below names the
     # exception rather than the crate.
-    scan = producer_scan(
+    esc = producer_escalation(
         recs, [] if types_unreadable else type_records, futile_units)
+    scan = esc.scan
     candidates = set(scan.candidates)
     type_names = set(scan.type_names)
     if not type_names:
@@ -1615,10 +1665,7 @@ def escalate_frontier_to_producers(
                      "(generic parameter, foreign type or alias)")
         return {}
     producers = list(scan.producers)
-    recs = [r for r in recs if not is_test_fn_record(r)]
-    _all_traversed = _traversal_steps(recs, futile_units,
-                                      exclude=set(producers))
-    traversed = _all_traversed[:_MAX_TRAVERSAL_STEPS]
+    traversed = list(esc.traversed)
     if not producers and not traversed:
         return {}
     dropped = sorted(candidates - type_names)
@@ -1634,9 +1681,9 @@ def escalate_frontier_to_producers(
                  "dispatch through (trait-impl methods they call, which "
                  "produce none of these types and no producer scan can "
                  f"name): {', '.join(f'{f}::{fn}' for f, fn in traversed)}"
-                 + (f" (+{len(_all_traversed) - len(traversed)} more over the "
+                 + (f" (+{esc.traversed_over} more over the "
                     f"cap of {_MAX_TRAVERSAL_STEPS}, NOT escalated)"
-                    if len(_all_traversed) > len(traversed) else ""))
+                    if esc.traversed_over else ""))
     # `producers_out`, when given, receives the PRODUCER subset alone.
     # The return value merges producers with traversal steps because the
     # frontier is one dict, and a caller that grades the two the same hands the
@@ -1647,7 +1694,7 @@ def escalate_frontier_to_producers(
     # apart; only the return value did not.
     if producers_out is not None:
         producers_out.update(producers)
-    return {key: {test_name} for key in [*producers, *traversed]}
+    return esc.additions(test_name)
 
 
 # The escalation may add at most this many traversal steps. A futile accessor
