@@ -37,6 +37,7 @@ from pipeline_core.application.reconstruct.fill_routes import (
 from pipeline_core.application.reconstruct.unit_pool import run_units_concurrently
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.body_ledger import ReportKeep, WaveKept
+from pipeline_core.domain.fill_asks import FillAsks
 from pipeline_core.domain.fill_context import route_scope
 from pipeline_core.domain.fill_schedule import (
     CrashBlame,
@@ -654,6 +655,12 @@ def execute_fill(
     # Units a run of this fill kept a body for; no later run of the fill
     # rewrites them before the sweep grades them (`withhold_landed`).
     landed_fill: set[FnLocator] = set()
+    # Shadow only (`domain.fill_asks`): runs that would re-ask units an
+    # earlier run of this fill asked under unchanged evidence. Counted and
+    # reported; no run is deferred on it.
+    fill_asks = FillAsks()
+    reasked: dict[str, tuple[FnLocator, ...]] = {}
+    reasked_minutes = 0.0
     i = 0
     # The schedule's holds and what the executor did to their holders: a
     # held run whose every holder this executor deferred is released
@@ -732,6 +739,17 @@ def execute_fill(
                 _release(withheld_keys)
             if not wave:
                 continue
+        for w in wave:
+            _tg = tuple(sorted(w.run.targets))
+            if fill_asks.would_defer(_tg):
+                reasked[w.run.label] = _tg
+                deps.log(
+                    f"  [phase-c/schedule] fill {deps.iteration}: SHADOW "
+                    f"asked_this_fill — {w.run.label} re-asks "
+                    + ", ".join(f"{a}::{b}" for a, b in _tg[:6])
+                    + " under evidence no run of this fill has moved "
+                    "(not deferred: the deferral waits on the route-order "
+                    "reading)")
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         # The plan reserved later floors against the whole budget. Opening
@@ -825,6 +843,9 @@ def execute_fill(
                            minutes=minutes, share=shares[w.run.key])
             rows.append(row)
             _log_row(deps, row, unchanged=rep.unchanged)
+            if w.run.label in reasked:
+                reasked_minutes += row.minutes
+            fill_asks.note(row, ((u.file, u.fn_name) for u in rep.dispatched))
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave],
                      rows[-len(wave):])
@@ -882,6 +903,17 @@ def execute_fill(
         deferred_rows.append(row)
         _log_row(deps, row)
     _flush(deferred_rows)
+    if reasked:
+        deps.log(
+            f"  [phase-c/schedule] fill {deps.iteration}: SHADOW "
+            f"asked_this_fill — {len(reasked)} run(s), {reasked_minutes:.1f} "
+            "min, re-asked units under unchanged evidence: "
+            + ", ".join(sorted(reasked)[:8]))
+        deps.emit("phase_c.fill.asked_again", data={
+            "cluster": deps.cluster, "iter": deps.iteration,
+            "runs": {k: [f"{a}::{b}" for a, b in v]
+                     for k, v in sorted(reasked.items())},
+            "minutes": round(reasked_minutes, 1)})
     return FillExecution(schedule=sched, rows=tuple(rows), stopped=stopped,
                          premise_moved=gate.moved)
 

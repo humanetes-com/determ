@@ -23,29 +23,12 @@ from dataclasses import replace
 from enum import StrEnum
 
 from pipeline_core.domain.attribution import FailureFrontier, container_key
+from pipeline_core.domain.format_traits import format_traits_used
 from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite, ImplBlock
 from pipeline_core.domain.rust_idents import impl_trait_name
 from pipeline_core.domain.test_report import parse_panic_location
 from pipeline_core.domain.test_results import identifiers_in
-
-
-def format_traits_used(test_src: str) -> frozenset[str]:
-    """Which std formatting traits a test's OWN source invokes, from its
-    format placeholders and stringify calls: `{:?}`/`{:#?}` need `Debug`,
-    `{}`/`{:#}`/`.to_string()` need `Display`.
-
-    The single home of the rule. The attribution module imports it for the
-    format-implementer hop and the futility-escalation gate; the stamp
-    filter reads it directly.
-    """
-    traits: set[str] = set()
-    if "{:?}" in test_src or "{:#?}" in test_src:
-        traits.add("Debug")
-    if ("{}" in test_src or "{:#}" in test_src
-            or ".to_string()" in test_src):
-        traits.add("Display")
-    return frozenset(traits)
 
 
 def homonym_containers(

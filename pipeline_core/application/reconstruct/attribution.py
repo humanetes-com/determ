@@ -35,6 +35,8 @@ from pipeline_core.domain.attribution import (
     record_site,
 )
 from pipeline_core.domain.coverage_slice import unreached_by_test
+from pipeline_core.domain.failing_observable import observable_source
+from pipeline_core.domain.format_traits import format_traits_used
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import (
@@ -46,7 +48,6 @@ from pipeline_core.domain.models import (
     SiteFrontier,
 )
 from pipeline_core.domain.oracle_immutability import is_oracle_path
-from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
     impl_self_type,
@@ -56,7 +57,10 @@ from pipeline_core.domain.rust_idents import (
 )
 from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
-from pipeline_core.domain.test_report import parse_test_output
+from pipeline_core.domain.test_report import (
+    failure_evidence_by_test,
+    parse_test_output,
+)
 from pipeline_core.domain.test_results import (
     build_phase_output,
     build_test_name_index,
@@ -65,7 +69,6 @@ from pipeline_core.domain.test_results import (
     parse_failed_tests,
     parse_rustc_compile_errors,
 )
-from pipeline_core.domain.type_production import EMPTY as EMPTY_PRODUCIBLE
 from pipeline_core.domain.type_production import (
     ProducibleTypes,
     called_method_names,
@@ -471,6 +474,7 @@ def _attribute_format_only_test(
     log: Callable[[str], None],
     owned: bool = False,
     pairs_out: set[FormatterPair] | None = None,
+    observed: str | None = None,
 ) -> None:
     """Give a frontier owner to a failing test whose only crate contact is a
     formatting macro (`format!("{:#?}", v)`), which names no crate fn — so
@@ -547,7 +551,12 @@ def _attribute_format_only_test(
     neither half: a pair no failing test runs is a transaction with no
     verdict to move, and the measured-owners withholding and the
     schedule's pair wait would otherwise hold the fill behind it."""
-    traits = format_traits_used(tsrc)
+    # The traits of what the test FAILS on (`domain.failing_observable`),
+    # not of every format token in its source: a test that renders a value
+    # on a passing line and then fails on a `None` downcast is not a format
+    # test (run `3076-051d385a`, `tests/test_boxed.rs:26:14`). `observed`
+    # None is ignorance and reads the whole source, as before.
+    traits = format_traits_used(observed if observed is not None else tsrc)
     fmt_recs = by_name.get("fmt")
     if not traits or not fmt_recs:
         return
@@ -699,6 +708,7 @@ def behavior_frontier_from_texts(
     test_output: str, texts: dict[str, str], fns_root: Path,
     unrepairable_tests: frozenset[str] = frozenset(),
     pairs_out: set[FormatterPair] | None = None,
+    observables_out: dict[str, str] | None = None,
 ) -> tuple[Frontier, SiteFrontier, dict[str, tuple[str, str]]]:
     """Core of :func:`behavior_frontier` over already-loaded test texts
     ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
@@ -711,7 +721,13 @@ def behavior_frontier_from_texts(
     assertion is about rustc's own output rather than about any body must not
     reach it. The body of `tests/compiletest.rs` is `trybuild::TestCases::new()`
     plus a glob, and its identifiers are the whole basis on which this path would
-    name fns."""
+    name fns.
+
+    `observables_out` collects, per failing test whose failure location
+    falls inside its own fn, the text that failure is about
+    (`failing_observable.observable_source`). Every question of the form
+    "does this failure render through a format trait" reads it; a test
+    absent from it is read on its whole source."""
     failed = failing_test_names(test_output)
     if unrepairable_tests:
         failed = [t for t in failed
@@ -730,6 +746,7 @@ def behavior_frontier_from_texts(
     frontier: Frontier = {}
     sites: SiteFrontier = {}
     test_srcs: dict[str, tuple[str, str]] = {}
+    _words = failure_evidence_by_test(test_output, per_test_cap=4000)
     for tname in failed:
         bare = tname.split("::")[-1].strip()
         trel = index.get(bare, "")
@@ -748,6 +765,12 @@ def behavior_frontier_from_texts(
         # the test never calls. The prompt still quotes `tsrc` unmasked.
         idents = identifiers_in(_code_only(tsrc))
         test_srcs[tname] = (trel, tsrc)
+        _observed = observable_source(
+            texts[trel], bare, _words.get(tname) or next(
+                (w for n, w in _words.items()
+                 if n.rsplit("::", 1)[-1] == bare), ""), trel)
+        if _observed is not None and observables_out is not None:
+            observables_out[tname] = _observed
         _owned = False
         for fn_name in idents & set(by_name):
             recs = by_name[fn_name]
@@ -762,7 +785,8 @@ def behavior_frontier_from_texts(
                                       rec.get("container", "") or "")),
                     set()).add(tname)
                 _owned = True
-        if not _owned or format_traits_used(tsrc):
+        if not _owned or format_traits_used(
+                _observed if _observed is not None else tsrc):
             # A formatting-macro test names no crate fn and so owns no unit;
             # attribute it through the format trait it uses. Additive only —
             # and no longer gated on being unowned: a test whose real calls
@@ -772,7 +796,7 @@ def behavior_frontier_from_texts(
             # hop no-ops for a test that uses no format trait).
             _attribute_format_only_test(
                 tname, tsrc, texts[trel], by_name, frontier, sites, deps.log,
-                owned=_owned, pairs_out=pairs_out)
+                owned=_owned, pairs_out=pairs_out, observed=_observed)
     return frontier, sites, test_srcs
 
 def extract_tdd_compile_frontier(deps: AttributionDeps,
@@ -1301,10 +1325,11 @@ def attribute_failures(
         extract_tdd_compile_frontier(deps, test_output, src_dir))
     _merge(_strip(_cc_d), FailureKind.COMPILE, _strip_sites(_cc_s))
     _hop_pairs: set[FormatterPair] = set()
+    _observables: dict[str, str] = {}
     if test_texts:
         _bf_raw: Any = behavior_frontier_from_texts(
             deps, test_output, test_texts, src_dir, unrepairable_tests,
-            pairs_out=_hop_pairs)
+            pairs_out=_hop_pairs, observables_out=_observables)
         if isinstance(_bf_raw, tuple) and len(_bf_raw) == 3:
             _bf, _bf_sites, _srcs = _bf_raw
         elif isinstance(_bf_raw, tuple) and len(_bf_raw) == 2:
@@ -1334,7 +1359,8 @@ def attribute_failures(
         # MERGED so the union is visible in logs/events.
         kind = contributors[0] if len(contributors) == 1 else FailureKind.MERGED
         return AttributionResult(merged, kind, convicting, _src_map,
-                                 frozenset(_hop_pairs), merged_sites)
+                                 frozenset(_hop_pairs), merged_sites,
+                                 observables=_observables)
     # 4. LLM classifier — turn off via PHASE_C_TDD_USE_CLASSIFIER=0.
     if os.getenv("PHASE_C_TDD_USE_CLASSIFIER", "1") != "0":
         failing = _failing()
@@ -1430,6 +1456,50 @@ def container_type_name(container: str) -> str:
     return name
 
 
+@dataclass(frozen=True, slots=True)
+class ProducerScan:
+    """Who produces the types the futile accessors' containers name.
+
+    `producers` is empty both when none of the fns produces a declared
+    nominal type and when there is no such type. `candidates` is every
+    container type the accessors named, before the nominal-type filter, so
+    a caller can tell "nothing matched" from "the scan was not run".
+    """
+
+    producers: tuple[FnLocator, ...]
+    candidates: tuple[str, ...]
+    type_names: tuple[str, ...]
+
+
+def producer_scan(
+    fn_records: list[dict[str, Any]],
+    type_records: list[Any] | None,
+    futile_units: set[FnLocator],
+) -> ProducerScan:
+    """The producer subset a futility fire would grade, from records already
+    read. Oracle fns are excluded. The futile accessors themselves are
+    excluded: the scan answers who builds what they read, not who they are.
+
+    `type_records` of None is the extractor unavailable, the same answer as
+    an empty declaration list: no nominal type, so no producer. A caller
+    that could not read the declarations must not treat that empty result
+    as a measurement."""
+    recs = [r for r in fn_records if not is_test_fn_record(r)]
+    producible = ProducibleTypes.from_type_records(type_records)
+    containers = {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
+                  for r in recs}
+    candidates = {container_type_name(containers.get((k[0], k[1]), ""))
+                  for k in futile_units}
+    candidates.discard("")
+    type_names = producible.filter(candidates)
+    if not type_names:
+        return ProducerScan((), tuple(sorted(candidates)), ())
+    producers = producers_for_types(
+        recs, set(type_names), exclude=set(futile_units))
+    return ProducerScan(
+        tuple(producers), tuple(sorted(candidates)), tuple(sorted(type_names)))
+
+
 def producers_for_types(
     fn_records: list[dict[str, Any]],
     type_names: set[str],
@@ -1517,20 +1587,19 @@ def escalate_frontier_to_producers(
     # they sat in the frontier and therefore in the pass denominator, and an
     # immutable skip is one of the three classes that inflate a traversal's
     # tried-set against the flat-sweep refutation.
-    recs = [r for r in recs if not is_test_fn_record(r)]
     types_unreadable = ""
     try:
-        producible = ProducibleTypes.from_type_records(
-            deps.structure.enumerate_types(src_dir))
+        type_records = deps.structure.enumerate_types(src_dir)
     except Exception as e:
-        producible = EMPTY_PRODUCIBLE
+        type_records = None
         types_unreadable = f"{type(e).__name__}: {e}"
-    containers = {(r.get("file", ""), r.get("fn_name", "")): r.get("container", "")
-                  for r in recs}
-    candidates = {container_type_name(containers.get((k[0], k[1]), ""))
-                  for k in futile_units}
-    candidates.discard("")
-    type_names = set(producible.filter(candidates))
+    # None is the extractor unavailable, which the scan treats as no nominal
+    # type. An exception is the same empty scan, and the log below names the
+    # exception rather than the crate.
+    scan = producer_scan(
+        recs, [] if types_unreadable else type_records, futile_units)
+    candidates = set(scan.candidates)
+    type_names = set(scan.type_names)
     if not type_names:
         if candidates and types_unreadable:
             # Says nothing about the candidates: they were never tested against
@@ -1545,7 +1614,8 @@ def escalate_frontier_to_producers(
                      f"{sorted(candidates)} name no type this crate declares "
                      "(generic parameter, foreign type or alias)")
         return {}
-    producers = producers_for_types(recs, type_names, exclude=futile_units)
+    producers = list(scan.producers)
+    recs = [r for r in recs if not is_test_fn_record(r)]
     _all_traversed = _traversal_steps(recs, futile_units,
                                       exclude=set(producers))
     traversed = _all_traversed[:_MAX_TRAVERSAL_STEPS]

@@ -24,7 +24,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
 
-from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
+from pipeline_core.application.reconstruct.attribution import (
+    make_fn_site_locator,
+    producer_scan,
+)
 from pipeline_core.application.reconstruct.body_reseed import (
     ReseedOutcome,
     TreeWriter,
@@ -102,6 +105,7 @@ from pipeline_core.domain.candidate_tiers import (
     merge_slices,
     miss_reasons,
     render_failed,
+    screen_unentered,
     slices_by_key,
     tiers_event,
     unit_key,
@@ -114,6 +118,7 @@ from pipeline_core.domain.coverage_slice import (
     records_standing_in,
     red_dead_units,
     unowned_among,
+    unreached_by_test,
     withhold_unmeasured,
 )
 from pipeline_core.domain.crash_scope import (
@@ -158,6 +163,8 @@ from pipeline_core.domain.dispatch_rank import (
     Service,
     UnitFacts,
     Withheld,
+    absence_notice,
+    asked_unchanged,
     off_batch_reasons,
     rank,
     rotation_bound,
@@ -178,7 +185,10 @@ from pipeline_core.domain.escalation_lifetime import (
     sustain_escalation_products,
     withholding_paired_tests,
 )
-from pipeline_core.domain.evidence_premise import evidence_fingerprints
+from pipeline_core.domain.evidence_premise import (
+    evidence_fingerprints,
+    unit_ask_fingerprints,
+)
 from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
@@ -266,7 +276,6 @@ from pipeline_core.domain.refill_evidence import (
     lesson_note,
     tests_in_prompt,
 )
-from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
@@ -939,6 +948,11 @@ def run_phase_c_tdd(
     # `0` runs every fill's plan to its end (the frozen-plan negative
     # control). Read once, like the stops.
     _replan_on_premise = os.getenv("PHASE_C_REPLAN_ON_PREMISE", "1") != "0"
+    # A served unit nothing owes, opened before under the same own body and
+    # red-test words, leaves the frontier (`dispatch_rank.asked_unchanged`).
+    # `0` keeps every such unit ranked: the negative control of the
+    # mechanisms that also refuse a re-buy (the standing-flat exclusion).
+    _asked_unchanged_on = os.getenv("PHASE_C_ASKED_UNCHANGED", "1") != "0"
     # The run-level LLM cut stop (`reasoning_cap.CutRate`): the share of the
     # process's last calls that returned no decided answer. Counts CALLS, not
     # iterations, so it can fire mid-fill of iteration 1; the reading it
@@ -1053,6 +1067,7 @@ def run_phase_c_tdd(
          + f", language-driver={language_driver().name}"
          + f", followup-think={'on' if followup_think_env_on() else 'off'}"
          + f", replan-on-premise={'on' if _replan_on_premise else 'off'}"
+         + f", asked-unchanged={'on' if _asked_unchanged_on else 'off'}"
          + f", {_cut_knobs.describe()}")
 
     if deps.migrate_retro_evidence is not None:
@@ -1114,6 +1129,7 @@ def run_phase_c_tdd(
     # an earlier one. The schedule checks the ones still in `ordered`
     # (`measured_owners_on_frontier`) for a candidate that writes them.
     _owner_map_units: set[FnLocator] = set()
+    _measured_owner_keys: frozenset[FnLocator] = frozenset()
     # Escalated test -> (the futile unit-set that EARNED its fire, the
     # additions the fire computed). The escalation's product lives exactly as
     # long as this evidence: while a test's attribution still equals the
@@ -1464,6 +1480,25 @@ def run_phase_c_tdd(
                 if (not deps.run_id or r_.run_id == deps.run_id)
                 and (iter_no is None or r_.iteration == iter_no)]
 
+    def _unit_ask_fps(units: Mapping[FnLocator, Any],
+                      aimed: Mapping[FnLocator, Collection[str]],
+                      recs: Sequence[Mapping[str, Any]]) -> dict[FnLocator, str]:
+        """Each unit's own ask fingerprint on this sweep: its body in
+        `recs`, the words of the red tests `aimed` points it at, its
+        retrospective rows and crash excerpt
+        (`evidence_premise.unit_ask_fingerprints`)."""
+        red_words = {bare_test_name(t_): w_ for t_, w_ in
+                     failure_evidence_by_test(output).items()}
+        red = {bare_test_name(t_) for t_ in cur_failed}
+        words = {k: tuple(red_words[b_] for b_ in sorted(
+                     {bare_test_name(t_) for t_ in aimed.get(k, ())} & red)
+                     if b_ in red_words)
+                 for k in units}
+        retro = (deps.retro_evidence_texts(project_dir)
+                 if deps.retro_evidence_texts is not None else {})
+        return unit_ask_fingerprints(list(units), recs, words=words,
+                                     retro=retro, crash=crash_texts)
+
     def _withdrawn_now() -> frozenset[str]:
         """Red tests (bare names) every failing copy of which the original
         crate also fails or skips under this cluster's cfg
@@ -1540,8 +1575,26 @@ def run_phase_c_tdd(
         if deps.load_lessons is not None:
             with suppress(OSError, ValueError, TypeError):
                 _lesson_store = deps.load_lessons(project_dir)
+        # The tiers rank only what the test can run through: a unit the
+        # sweep's coverage reading proves the test never enters is not a
+        # candidate for it (positive evidence only; a slice the screen would
+        # empty is kept whole).
+        _slices, _unentered = screen_unentered(
+            merge_slices(primary, fallback, red, site),
+            lambda u_, t_: unreached_by_test(
+                FnLocator(*u_.rsplit("::", 1)), t_))
+        if _unentered:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: owed tiers "
+                     "screened — the coverage reading proves these "
+                     "test(s) never enter: " + "; ".join(
+                         f"{t_}: " + ", ".join(sorted(us_)[:6])
+                         for t_, us_ in sorted(_unentered.items())[:6]))
+            deps.emit("phase_c.tdd.owed_screened", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "removed": {t_: sorted(us_)
+                            for t_, us_ in sorted(_unentered.items())}})
         return due_reading(
-            red, slices=merge_slices(primary, fallback, red, site),
+            red, slices=_slices,
             reach=_reach, evidence=evidence, held=held, ledger=_asks,
             tree=tree, misses=_owed_misses, withdrawn=withdrawn,
             joint=_joint_now, ladder=_ladder,
@@ -3421,6 +3474,79 @@ def run_phase_c_tdd(
                             _cached[FnLocator(_af, _afn)] = set(_ats)
                     escalation_products[_t] = (_earned, _cached)
                     escalation_producers[_t] = _keys_to_locators(_prods_s)
+                # The saved producer tuple is not a measurement this process
+                # made. A writer that stored every frontier addition under
+                # that name grades a coverage admit as futility ("the defect
+                # is in what this fn constructs") for as long as the product
+                # lives. The grade is the producer scan a fire in this
+                # process would write, from the earned accessors and the
+                # tree — including an empty result, which is an answer.
+                # An unreadable tree leaves the saved tuple: empty records
+                # and a failed read are not a measurement either. Run
+                # `3076-051d385a` (2026-10-13) resumed a floor whose three
+                # products stored additions and producers as the same list.
+                _fn_recs: list[dict[str, Any]] | None = None
+                _ty_recs: list[Any] | None = None
+                _grade_note = ""
+                try:
+                    _fn_recs = (
+                        (deps.enumerate_fns(target_src_dir) or [])
+                        if deps.enumerate_fns is not None else None)
+                    _ty_recs = (
+                        deps.enumerate_types(target_src_dir)
+                        if deps.enumerate_types is not None and _fn_recs
+                        else None)
+                except Exception as _exc:  # noqa: BLE001 — a failed read is not a measurement
+                    _fn_recs = None
+                    _ty_recs = None
+                    _grade_note = f"{type(_exc).__name__}: {_exc}"
+                if _fn_recs and _ty_recs is not None:
+                    for _t, (_earned, _cached) in list(
+                            escalation_products.items()):
+                        try:
+                            _scan = producer_scan(
+                                _fn_recs, _ty_recs, set(_earned))
+                        except Exception as _exc:  # noqa: BLE001 — leave this product's saved grade
+                            deps.log(
+                                f"  {tag} [attribution/escalate] {_t}: "
+                                "resumed producer grade left as saved — "
+                                "the scan failed, so an empty result is "
+                                f"not a measurement ({type(_exc).__name__}: "
+                                f"{_exc})")
+                            continue
+                        _derived = frozenset(_scan.producers)
+                        _saved = escalation_producers.get(_t, frozenset())
+                        if _derived == _saved:
+                            continue
+                        escalation_producers[_t] = _derived
+                        _dropped = _saved - _derived
+                        deps.log(
+                            f"  {tag} [attribution/escalate] {_t}: resumed "
+                            "producer grade re-derived from the tree — "
+                            f"{len(_derived)} producer(s); "
+                            f"{len(_dropped)} saved name(s) do not produce "
+                            "the accessors' type and are not graded as a "
+                            "futility measurement: " + ", ".join(sorted(
+                                f"{k.file}::{k.fn_name}"
+                                for k in _dropped)[:8]))
+                        deps.emit(
+                            "phase_c.attribution.producers_rederived",
+                            data={
+                                "cluster": cluster.name, "test": _t,
+                                "producers": sorted(
+                                    f"{k.file}::{k.fn_name}"
+                                    for k in _derived),
+                                "dropped": sorted(
+                                    f"{k.file}::{k.fn_name}"
+                                    for k in _dropped),
+                            })
+                elif escalation_products:
+                    deps.log(
+                        f"  {tag} [attribution/escalate] resumed producer "
+                        "grade left as saved — the tree's fn or type "
+                        "records could not be read, so an empty scan is "
+                        "not a measurement"
+                        + (f" ({_grade_note})" if _grade_note else ""))
             deps.log(f"  {tag} [phase-c/tdd] persisted floor for "
                      f"{cluster.name}: {_resume.note} "
                      f"(stall now {stall}/{max_stalls}, "
@@ -4158,7 +4284,7 @@ def run_phase_c_tdd(
                 escalation_products, units_by_test, _stub_keys,
                 format_tests=frozenset(
                     t for t in escalation_products
-                    if format_traits_used(_attr.source_for(t))))
+                    if _attr.observable_traits_for(t)))
             for k, ts in _sustain.merges.items():
                 frontier.setdefault(k, set()).update(ts)
             for tname, _why in _sustain.dropped:
@@ -4262,7 +4388,12 @@ def run_phase_c_tdd(
                     # remaining Debug tests' futility fires bought a 42-unit
                     # constructor family, re-merged every sweep, while the
                     # formatter was never dispatched under a rewrite grade.
-                    _fmt_traits = format_traits_used(_attr.source_for(tname))
+                    # The traits of what the test FAILS on, not of every
+                    # format token in its source: a downcast that panics on
+                    # `None` after a passing `.to_string()` line is a
+                    # producer question (run `3076-051d385a`,
+                    # `tests/test_boxed.rs:26:14`).
+                    _fmt_traits = _attr.observable_traits_for(tname)
                     if _fmt_traits:
                         deps.log(
                             f"  {tag} [attribution/escalate] {tname}: NOT "
@@ -5408,9 +5539,10 @@ def run_phase_c_tdd(
         # fire (run `9872-51b20f30`: never_served=[] from iter 1, FLAT=10,
         # zero `measured_owners` emissions). Dead product members still
         # count as exempt-from-service so an unattempted `write_str` cannot
-        # hold the fire. Additions join escalation_producers (ESCALATED
-        # grade) and the frontier; they do not replace an existing producer
-        # product and they do not re-admit permanently_exhausted.
+        # hold the fire. Additions join the frontier for this sweep, graded
+        # MEASURED_OWNER (coverage) and never ESCALATED; they do not touch an
+        # existing producer product and they do not re-admit
+        # permanently_exhausted.
         _owner_admits: dict[FnLocator, set[str]] = {}
         # The cohort is the attribution's, not the dispatchable subset: a
         # unit the exhaustion filter skipped is still one the test was
@@ -5503,30 +5635,26 @@ def run_phase_c_tdd(
             # after the last map filter.
             _owner_admits = _admission.admit(_owner_admits)
         if _owner_admits:
+            # Coverage, kept apart from the futility escalation. Written into
+            # `escalation_products` the admits were graded ESCALATED in every
+            # prompt ("the defect is in what this fn constructs"), exempted
+            # from the red-dead demotion, ranked as producers and re-merged
+            # by the sustain for as long as the test failed. None of that was
+            # measured for them: the measurement is that the red tests ran
+            # through them. Run `3076-051d385a` (2026-10-13) admitted 30 and
+            # a pointer cast was rewritten into two `E0512`s on that grade.
+            # They are recomputed every sweep from that sweep's owner map, so
+            # an admit no red test enters any more, or one graded flat,
+            # leaves.
             _by_test: dict[str, dict[FnLocator, set[str]]] = {}
             for _loc, _ts in _owner_admits.items():
                 eligible.setdefault(_loc, set()).update(_ts)
                 for _t in _ts:
                     _by_test.setdefault(_t, {}).setdefault(_loc, set()).add(_t)
-            for _tname, _cached_add in _by_test.items():
-                if _tname in escalation_products:
-                    _earned, _cached = escalation_products[_tname]
-                    for _loc, _ts in _cached_add.items():
-                        _cached.setdefault(_loc, set()).update(_ts)
-                else:
-                    escalation_products[_tname] = (
-                        frozenset(_units_for_owners.get(_tname, ())),
-                        dict(_cached_add),
-                    )
-                escalation_producers[_tname] = frozenset(
-                    escalation_producers.get(_tname, ())) | frozenset(
-                        _cached_add)
             _have = {k for k, _ in ordered}
             for _loc in _owner_admits:
                 if _loc not in _have:
                     ordered.append((_loc, eligible[_loc]))
-            _esc_keys = frozenset(
-                k for ks in escalation_producers.values() for k in ks)
             deps.log(
                 f"  {tag} [phase-c/dispatch] measured-owners: "
                 f"{len(_owner_admits)} unit(s) admitted from the owner map "
@@ -5581,6 +5709,9 @@ def run_phase_c_tdd(
                         for k, ts in sorted(_owner_attach.items())},
                 })
         _owner_map_units |= set(_owner_admits) | set(_owner_attach)
+        # This sweep's measured owners, for the prompt grade (MEASURED_OWNER)
+        # and the keep gates' test scope; not the futility set.
+        _measured_owner_keys = frozenset(_owner_admits) | frozenset(_owner_attach)
         # The empty-frontier decision is taken HERE, after the measured-owner
         # admission, not before it: a leftover whose whole attributed cohort
         # is exhausted, on an otherwise empty frontier, has owners the
@@ -5970,6 +6101,33 @@ def run_phase_c_tdd(
                     _k, served=_served_verified, flat=_flat_keys,
                     dead=_dead_keys, red_dead=_red_dead, hollow=_stub_keys),
                 unclaimed=_unclaimed.get(_k, 0))
+        # A served unit nothing owes, already opened under the fingerprint it
+        # would be asked under now (its own body + its red tests' words),
+        # leaves this sweep's frontier: the cap is a ceiling, not a quota.
+        # Held, owed, crash-sited and never-served units are untouched
+        # (`asked_unchanged`).
+        _own_fp_now = _unit_ask_fps(_facts, eligible, _disp_recs)
+        _spent_asks = asked_unchanged(
+            _facts, [k for k in _facts
+                     if _asks.unit_asked(unit_key(k), _own_fp_now.get(k, ""))]
+        ) if _asked_unchanged_on else frozenset()
+        if _spent_asks:
+            for _k in _spent_asks:
+                del _facts[_k]
+            _not_ranked.note(sorted(_spent_asks, key=lambda x: (x.file, x.fn_name)),
+                             "asked_unchanged")
+            deps.log(
+                f"  {tag} [phase-c/dispatch] iter {iter_n}: "
+                f"{len(_spent_asks)} served unit(s) nothing owes left the "
+                "frontier — opened before under the same own body and the "
+                "same red-test words: " + ", ".join(sorted(
+                    f"{k.file}::{k.fn_name}" for k in _spent_asks)[:8]))
+            deps.emit("phase_c.dispatch.asked_unchanged", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "units": sorted(f"{k.file}::{k.fn_name}" for k in _spent_asks),
+                "fingerprints": {f"{k.file}::{k.fn_name}": _own_fp_now.get(k, "")
+                                 for k in sorted(_spent_asks,
+                                                 key=lambda x: (x.file, x.fn_name))}})
         _ranked = rank(_facts)
         # Fault sites only: a chain inference is the OTHER class and must
         # rotate with it. The stay in `streak_after_turn` reads this set.
@@ -6007,7 +6165,9 @@ def run_phase_c_tdd(
         # and a never-served unit out of the batch was in no line at all
         # (runs `2157238-210637e6` .. `35210-6d56e8c9`: 44 of them, 0 slots,
         # four sweeps). They go to the event in full and to the log as a
-        # count, and a member past the rotation bound is a HEALTH line.
+        # count. A member this batch leaves out on the sweep that meets
+        # the bound leads the absence clause: the clause prints eight
+        # names, and appending it after a full watch hides it.
         _never_ev = sorted(
             (k for k in _ranked
              if _facts[k].rank_class is RankClass.EVIDENCED
@@ -6021,6 +6181,9 @@ def run_phase_c_tdd(
                                 _by_class.get(RankClass.HELD, 0),
                                 _dispatch_cap)
         _starved = starved(_facts, _batch.keys, _dispatch_cap)
+        _off_starved = off_batch_reasons(
+            list(_starved), _ranked, _batch.keys, _not_ranked, _dispatch_cap)
+        _shown = absence_notice(_off, _off_starved)
         deps.log(
             f"  {tag} [phase-c/dispatch] iter {iter_n}: rank — "
             f"{_by_class.get(RankClass.HELD, 0)} held stub(s), "
@@ -6032,9 +6195,9 @@ def run_phase_c_tdd(
             + ", ".join(f"{k.file}::{k.fn_name}" for k in _batch.keys[:6])
             + ("; NOT in the batch: " + ", ".join(
                 f"{k.file}::{k.fn_name} ({why})"
-                for k, why in list(_off.items())[:8])
-               + (f" (+{len(_off) - 8} more)" if len(_off) > 8 else "")
-               if _off else ""))
+                for k, why in list(_shown.items())[:8])
+               + (f" (+{len(_shown) - 8} more)" if len(_shown) > 8 else "")
+               if _shown else ""))
         deps.emit("phase_c.dispatch.rank", data={
             "cluster": cluster.name, "iter": iter_n,
             "batch": [f"{k.file}::{k.fn_name}" for k in _batch.keys],
@@ -6057,8 +6220,8 @@ def run_phase_c_tdd(
         if _starved:
             deps.log(
                 f"  HEALTH ‼ EVIDENCED_STARVED iter {iter_n}: "
-                f"{len(_starved)} evidenced unit(s) out of the batch with an "
-                f"unclaimed streak at or past the rotation bound ({_bound}): "
+                f"{len(_starved)} evidenced unit(s) left out on the sweep "
+                f"that meets the rotation bound ({_bound}): "
                 + ", ".join(f"{k.file}::{k.fn_name} (streak {n})"
                             for k, n in sorted(
                                 _starved.items(),
@@ -6066,10 +6229,11 @@ def run_phase_c_tdd(
                                                 kv[0].fn_name))[:8]))
         if _crash_grades:
             # The crash cohort's own line, with its cause computed: for every
-            # crash unit not in the batch, the filter that withheld it or its
-            # rank position. The line it replaces said "absent from this
-            # sweep's frontier" on run `857717-812ee44c` iter 5 while both
-            # units were on the frontier, ranked past the cap by name.
+            # crash unit not in the batch, its rank position when it is on
+            # the frontier, else the filter that kept it off. The line it
+            # replaces said "absent from this sweep's frontier" on run
+            # `857717-812ee44c` iter 5 while both units were on the frontier,
+            # ranked past the cap by name.
             _in_batch = set(_batch.keys)
             _aimed = [k for k in _ranked if k in _crash_grades
                       and k in _in_batch]
@@ -7053,6 +7217,8 @@ def run_phase_c_tdd(
                         owed={u_: _due.tests_for(u_) for u_ in _due.units})),
                     escalated_keys=_batch_escalated,
                     escalated_measured=_measured_escalated,
+                    measured_owner_keys=frozenset(
+                        k for k in _measured_owner_keys if k in frontier_keys),
                     ledger_entries=_ledger_entries(),
                     oracle_fp=_oracle_fp(iter_n),
                     tdd_test_cmd=test_cmd,     # scoped cluster test cmd
@@ -7179,6 +7345,22 @@ def run_phase_c_tdd(
             (deps.enumerate_fns(target_src_dir) or [])
             if _bodies_before is not None and deps.enumerate_fns is not None
             else None)
+        # Every unit a route OPENED was asked under its own body as the fill
+        # left it and this sweep's words: the rank's `asked_unchanged`
+        # compares the next sweep's fingerprint with these. Stamped on the
+        # tree after the fill, not at dispatch, so a body that landed is
+        # the premise and not a change of it.
+        if _attempted and deps.enumerate_fns is not None:
+            _ask_recs = (_recs_after_fill if _recs_after_fill is not None
+                         else (deps.enumerate_fns(target_src_dir) or []))
+            _opened_fps = _unit_ask_fps(
+                dict.fromkeys(_attempted), eligible, _ask_recs)
+            _new_unit_asks = sum(
+                _asks.record_unit(unit_key(k), fp_)
+                for k, fp_ in _opened_fps.items())
+            if _new_unit_asks and deps.save_ask_ledger is not None:
+                with suppress(OSError):
+                    deps.save_ask_ledger(project_dir, cluster.name, _asks)
         if _joint_cand and _joint_live:
             try:
                 _rc_j, _out_j = deps.run_cargo(

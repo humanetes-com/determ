@@ -246,6 +246,7 @@ from pipeline_core.domain.refill_evidence import (
     escalated_refill_names,
     history_for_block,
     inferred_refill_names,
+    measured_owner_refill_names,
     observed_stub_excerpts,
     pinned_observables_from_tests,
     quote_panic_site,
@@ -686,6 +687,11 @@ def prepare_impl_fill(
     # `installable_fns` asks what the fire MEASURED; `escalated_keys` stays
     # batch-scoped for the prompt grade and the landed-change audit.
     escalated_measured: frozenset[FnLocator] = frozenset(),
+    # Units the owner map admitted: the red tests executed them before
+    # failing. Graded MEASURED_OWNER (coverage), never ESCALATED: the
+    # futility sentence is a claim about consumers measured flat, which no
+    # one measured for these (run `3076-051d385a`, 2026-10-13).
+    measured_owner_keys: frozenset[FnLocator] = frozenset(),
     # Prior FLAT tries of dispatched units, from the proven-body ledger.
     # Threaded from `phase_c_tdd._ledger_entries` so `render_refill_evidence`
     # can name the runs that rewrote a body identically. Default empty: a
@@ -1526,6 +1532,7 @@ def prepare_impl_fill(
             _impl_block_id(b.file, b.container):
                 collect_refill_evidence(b, fblocks, _frontier_tests,
                                         escalated=escalated_keys,
+                                        measured_owner=measured_owner_keys,
                                         crashed=crash_blamed or frozenset(),
                                         aimed=_aimed_locs,
                                         crash_sites=crash_sites,
@@ -1826,6 +1833,8 @@ def prepare_impl_fill(
             inferred=tuple(sorted(inferred_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             escalated=tuple(sorted(escalated_refill_names(
+                _file_refill_evs[_impl_block_id(b.file, b.container)]))),
+            measured_owner=tuple(sorted(measured_owner_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
             crashed=tuple(sorted(crashed_refill_names(
                 _file_refill_evs[_impl_block_id(b.file, b.container)]))),
@@ -2572,7 +2581,7 @@ def prepare_impl_fill(
                     # letting it reject would revert every attempt forever.
                     _file_tests: set[str] = set()
                     for _key in _unit_fns:
-                        if _key in escalated_keys:
+                        if _key in escalated_keys or _key in measured_owner_keys:
                             _file_tests |= _frontier_tests.tests_for(_key)
                         else:
                             _file_tests |= _frontier_tests.convicting_for(_key)
@@ -3365,6 +3374,7 @@ def prepare_impl_fill(
             find_tests=lambda leaf, mx: _find_tests_referencing_fn(
                 tests_dir_files, leaf, max_blocks=mx),
             escalated=escalated_keys,
+            measured_owner=measured_owner_keys,
             crashed=crash_blamed or frozenset(),
             aimed=frozenset(
                 loc for loc in (crash_evidence or {})
@@ -3916,7 +3926,7 @@ def prepare_impl_fill(
                     _block_tests: set[str] = set()
                     for _bm in (*block.stub_members, *block.refill_members):
                         _lk = FnLocator(block.file, _bm.fn_name)
-                        if _lk in escalated_keys:
+                        if _lk in escalated_keys or _lk in measured_owner_keys:
                             _block_tests |= _frontier_tests.tests_for(_lk)
                         else:
                             _block_tests |= _frontier_tests.convicting_for(_lk)
@@ -5063,6 +5073,7 @@ def prepare_impl_fill(
             find_tests=lambda leaf, mx: _find_tests_referencing_fn(
                 tests_dir_files, leaf, max_blocks=mx),
             escalated=escalated_keys,
+            measured_owner=measured_owner_keys,
             crashed=crash_blamed or frozenset(),
             aimed=frozenset(
                 loc for loc in (crash_evidence or {})

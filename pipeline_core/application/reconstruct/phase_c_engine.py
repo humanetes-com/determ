@@ -353,6 +353,9 @@ class PhaseCFillEngine:
         # opinion about a measurement that already happened.
         escalated_keys: frozenset[FnLocator] = frozenset(),
         escalated_measured: frozenset[FnLocator] = frozenset(),
+        # Units the owner map admitted (the red tests executed them): graded
+        # as coverage, never with the escalation's futility sentence.
+        measured_owner_keys: frozenset[FnLocator] = frozenset(),
         # Prior FLAT tries of dispatched units, from the proven-body ledger.
         # Default empty: fn_walk and tests that do not pass it leave the
         # refill-evidence section byte-identical to the pre-history render.
@@ -527,6 +530,7 @@ class PhaseCFillEngine:
                 tdd_frontier_tests=tdd_frontier_tests,
                 escalated_keys=escalated_keys,
                 escalated_measured=escalated_measured,
+                measured_owner_keys=measured_owner_keys,
                 ledger_entries=ledger_entries,
                 oracle_fp=oracle_fp,
                 tdd_test_cmd=tdd_test_cmd,

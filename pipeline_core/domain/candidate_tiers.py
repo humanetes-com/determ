@@ -240,6 +240,26 @@ class AskLedger:
     joint_repaired: set[str] = field(default_factory=set)
     #: (unit, test) -> fingerprints a compile miss was left pending on once.
     pending: dict[str, set[str]] = field(default_factory=dict)
+    #: unit -> its own ask fingerprints (`evidence_premise.unit_ask_fingerprint`:
+    #: own body + its red tests' words) a route OPENED it under. Read by the
+    #: rank for served units nothing owes (`dispatch_rank.asked_unchanged`).
+    unit_asks: dict[str, set[str]] = field(default_factory=dict)
+
+    def record_unit(self, unit: str, fp: str) -> bool:
+        """Record that a route opened `unit` under its own fingerprint
+        `fp`; True when new. `fp` empty records nothing: an unobserved
+        premise is never an ask."""
+        if not fp:
+            return False
+        bucket = self.unit_asks.setdefault(unit, set())
+        if fp in bucket:
+            return False
+        bucket.add(fp)
+        return True
+
+    def unit_asked(self, unit: str, fp: str) -> bool:
+        """`unit` was opened under `fp` before. `fp` empty is never asked."""
+        return bool(fp) and fp in self.unit_asks.get(unit, ())
 
     @staticmethod
     def _key(unit: str, test: str) -> str:
@@ -435,7 +455,9 @@ class AskLedger:
                             for k, v in sorted(self.repairs.items())},
                 "absent": {k: sorted(v) for k, v in sorted(self.absent.items())},
                 "joint_repaired": sorted(self.joint_repaired),
-                "pending": {k: sorted(v) for k, v in sorted(self.pending.items())}}
+                "pending": {k: sorted(v) for k, v in sorted(self.pending.items())},
+                "unit_asks": {k: sorted(v)
+                              for k, v in sorted(self.unit_asks.items())}}
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> AskLedger:
@@ -449,6 +471,7 @@ class AskLedger:
         absent = raw.get("absent") or {}
         repaired = raw.get("joint_repaired") or ()
         pending = raw.get("pending") or {}
+        unit_asks = raw.get("unit_asks") or {}
         return cls(oracle_fp=str(raw.get("oracle_fp", "")),
                    seen={str(k): {str(x) for x in v} for k, v in seen.items()},
                    misses={str(k): {str(f): int(n) for f, n in v.items()}
@@ -465,7 +488,9 @@ class AskLedger:
                             for k, v in repairs.items()},
                    absent={str(k): {str(x) for x in v} for k, v in absent.items()},
                    joint_repaired={str(x) for x in repaired},
-                   pending={str(k): {str(x) for x in v} for k, v in pending.items()})
+                   pending={str(k): {str(x) for x in v} for k, v in pending.items()},
+                   unit_asks={str(k): {str(x) for x in v}
+                              for k, v in unit_asks.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -685,6 +710,39 @@ def tiers_event(reading: DueReading) -> dict[str, Any]:
                 "rungs": dict(sorted(r.rungs.items())),
                 "fingerprint": reading.fingerprints.get(t, "")}
             for t, r in sorted(reading.by_test.items())}
+
+
+def screen_unentered(
+    slices: Mapping[str, frozenset[str]],
+    unentered: Callable[[str, str], bool],
+) -> tuple[dict[str, frozenset[str]], dict[str, frozenset[str]]]:
+    """Each red test's slice without the functions the sweep's coverage
+    reading PROVES it never entered, and what was removed per test.
+
+    A slice is coverage owners PLUS the units attribution named and the hop
+    pair's members, and the tiers rank that union by reach. So a unit named
+    by an identifier and proven unentered could be tier 1 because few
+    examples exercise it. Run `3076-051d385a` iter 3 (2026-10-13): tier 1 of a
+    red test was `[src/chain.rs::len, src/error.rs::as_ref]` on the sweep
+    whose own service order listed `len` as executed by no failing test; the
+    fill then planned a file run on `len` alone and a per-fn run on it.
+
+    `unentered(unit, test)` answers on positive evidence only
+    (`coverage_slice.unreached_by_test`: False for an unmeasured or crashed
+    test). A slice the screen would empty is kept whole: the screen narrows a
+    test's question, it never takes the test's question away. Held stubs are
+    not slice members (`due_reading` takes them from `held`), so a stub a
+    test dies in is never screened."""
+    out: dict[str, frozenset[str]] = {}
+    removed: dict[str, frozenset[str]] = {}
+    for t, sl in slices.items():
+        gone = frozenset(u for u in sl if unentered(u, t))
+        if gone and gone != sl:
+            out[t] = frozenset(sl) - gone
+            removed[t] = gone
+        else:
+            out[t] = frozenset(sl)
+    return out, removed
 
 
 def slices_by_key(slices: Mapping[str, Iterable[Any]]) -> dict[str, frozenset[str]]:

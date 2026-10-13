@@ -333,3 +333,37 @@ def test_negative_control_the_dispatchable_cohort_spends_a_readmission_first(
         "the recorded shape: a re-admission is spent")
     assert _first(logs, _READMIT) < _first(
         logs, "unit(s) admitted from the owner map")
+
+
+def test_an_admitted_owner_reaches_the_fill_as_coverage_not_as_escalated(
+        monkeypatch, tmp_path: Path) -> None:
+    """Run `3076-051d385a` (2026-10-13): the admission wrote its owners into
+    the escalation's set, so the fill graded every one of them ESCALATED
+    ("the defect is in what this fn constructs") on no futility measurement.
+    The plan's sentence through the real driver: the batch that carries the
+    admitted owner hands it to the fill as a measured owner, and in neither
+    escalated set. Negative control, run on the pre-change tree
+    (`git archive 92e5f30`): there the same fill call carries the owner in
+    `escalated_keys` and `escalated_measured`."""
+    walk = load_walk("9872-51b20f30")
+    events: list[tuple[str, dict]] = []
+    calls: list[dict[str, Any]] = []
+
+    def _fill(**kw: Any) -> ClusterFillResult:
+        calls.append(kw)
+        keys = tuple(kw.get("tdd_frontier_keys") or ())
+        return ClusterFillResult(attempts=1, dispatched_fns=keys)
+
+    try:
+        replay(walk, monkeypatch, tmp_path, events=events,
+               frontier={_ACC: set(_REDS), _ACC2: set(_REDS)},
+               fill=_fill, coverage=_coverage)
+    finally:
+        bind(None)
+    with_owner = [kw for kw in calls
+                  if _OWNER in (kw.get("tdd_frontier_keys") or ())]
+    assert with_owner, "the admitted owner must reach a fill"
+    kw = with_owner[0]
+    assert _OWNER not in (kw.get("escalated_keys") or frozenset())
+    assert _OWNER not in (kw.get("escalated_measured") or frozenset())
+    assert _OWNER in (kw.get("measured_owner_keys") or frozenset())

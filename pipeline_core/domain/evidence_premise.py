@@ -92,6 +92,7 @@ import json
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from pipeline_core.domain.candidate_tiers import evidence_text
 from pipeline_core.domain.models import FnLocator
 
 # Digest width, matching `body_ledger.oracle_fingerprint` and
@@ -210,4 +211,67 @@ def evidence_fingerprints(
             retro=_retro.get(unit, ""),
             crash=_crash.get(unit, ""))
         for unit in units
+    }
+
+
+def _words_text(words: Iterable[str]) -> str:
+    """The red tests' words with libtest's per-run noise masked (the same
+    `evidence_text` a red test's own fingerprint reads), order-free."""
+    return "\n".join(sorted(evidence_text(w) for w in words))
+
+
+def unit_ask_fingerprint(*, body: str, words: Iterable[str] = (),
+                         retro: str = "", crash: str = "") -> str:
+    """What ONE unit is asked: its own body and the words of the red tests
+    it is aimed at, plus its retrospective rows and crash excerpt. `""` when
+    none of them was observed, which every reader takes as "ask it".
+
+    WHY NOT `evidence_fingerprint`. That identity's `context` channel is the
+    unit's whole FILE, which is right for the flat exclusion it was built for
+    (a landing elsewhere in the file is a new question for a flat-standing
+    unit) and wrong for the question "was this served unit already asked
+    exactly this": on a tail whose keeps all land in the files that hold its
+    units, every landing re-arms every unit of that file. Run
+    `3076-051d385a` (2026-10-13) iter 3: six served units nothing owed took
+    half of a twelve-unit batch, and three of them (`error.rs::drop`,
+    `error.rs::construct_from_std`, `ptr.rs::cast`) had file fingerprints
+    moved only by sibling keeps. This one moves when the unit's own body
+    moves or what its red tests say moves."""
+    words_text = _words_text(words)
+    if not (body or words_text or retro or crash):
+        return ""
+    h = hashlib.sha256()
+    for name, text in (("body", body), ("words", words_text),
+                       ("crash", crash), ("retro", retro)):
+        h.update(name.encode("utf-8"))
+        h.update(b"\0")
+        h.update(_fold(text).encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()[:_WIDTH]
+
+
+def unit_ask_fingerprints(
+    units: Iterable[FnLocator],
+    records: Iterable[Mapping[str, Any]],
+    *,
+    words: Mapping[FnLocator, Iterable[str]] | None = None,
+    retro: Mapping[FnLocator, str] | None = None,
+    crash: Mapping[FnLocator, str] | None = None,
+) -> dict[FnLocator, str]:
+    """Per unit, :func:`unit_ask_fingerprint` over the extractor's records:
+    every body the file declares under that name, sorted, so homonyms are
+    one comparable text."""
+    bodies: dict[tuple[str, str], list[str]] = {}
+    for rec in records:
+        key = (str(rec.get("file") or ""), str(rec.get("fn_name") or ""))
+        bodies.setdefault(key, []).append(_fold(rec.get("body_text") or ""))
+    _words = words or {}
+    _retro = retro or {}
+    _crash = crash or {}
+    return {
+        u: unit_ask_fingerprint(
+            body="\n".join(sorted(bodies.get((u.file, u.fn_name), ()))),
+            words=tuple(_words.get(u, ())),
+            retro=_retro.get(u, ""), crash=_crash.get(u, ""))
+        for u in units
     }

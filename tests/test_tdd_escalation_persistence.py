@@ -36,7 +36,12 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, LedgerKey
-from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator
+from pipeline_core.domain.models import (
+    BuildCluster,
+    ClusterFillResult,
+    FnLocator,
+    TypeRecord,
+)
 from pipeline_core.domain.stub_inventory import StubInventory
 
 _ACC = FnLocator("src/a.rs", "fmt")        # the futile accessor (consumer)
@@ -55,7 +60,8 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
           suspensions: list[tuple[frozenset[FnLocator], frozenset[str]]]
           | None = None,
           fill=None, attribute=None, run_id: str = "",
-          ledger_load=None) -> PhaseCTddDeps:
+          ledger_load=None, grades: list[frozenset[FnLocator]] | None = None,
+          enumerate_fns=None, enumerate_types=None) -> PhaseCTddDeps:
     """One process's deps. Pass the SAME `floor` dict to two calls to model
     two processes sharing the on-disk `.phase_c_logs` floor file."""
     def _cargo(*a: Any, **k: Any) -> tuple[int, str]:
@@ -63,6 +69,8 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
 
     def _fill(**kw: Any) -> ClusterFillResult:
         batches.append(tuple(kw.get("tdd_frontier_keys") or ()))
+        if grades is not None:
+            grades.append(frozenset(kw.get("escalated_keys") or ()))
         if fill is not None:
             return fill(**kw)
         return ClusterFillResult(attempts=1)
@@ -113,6 +121,8 @@ def _deps(*, logs: list[str], events: list[tuple[str, dict]],
         save_tdd_floor=lambda p, c, row: floor.__setitem__("row", row),
         ledger_load=ledger_load,
         run_id=run_id,
+        enumerate_fns=enumerate_fns,
+        enumerate_types=enumerate_types,
     )
 
 
@@ -495,6 +505,108 @@ def test_rebuy_does_not_fire_on_the_same_process_or_after_a_code_move(
                run_id="new-process"),
          tmp_path, monkeypatch)
     assert not any(ev == "phase_c.re_buy" for ev, _ in events)
+
+
+# A writer that stored every frontier addition under the producer name.
+# `widen` does not produce the earned accessor's type. `producer` does.
+_ADMIT = FnLocator("src/c.rs", "widen")
+_CELL_RECS = [
+    {"file": "src/a.rs", "fn_name": "fmt", "container": "impl Cell",
+     "sig_text": "fn fmt(&self) -> fmt::Result", "body_text": "Ok(())"},
+    {"file": "src/b.rs", "fn_name": "producer", "container": "",
+     "sig_text": "fn producer() -> Cell", "body_text": "Cell { n: 1 }"},
+    {"file": "src/c.rs", "fn_name": "widen", "container": "",
+     "sig_text": "fn widen(p: usize) -> usize", "body_text": "p"},
+]
+_CELL_TYPES = [TypeRecord(kind="struct", name="Cell")]
+
+
+def _contaminate(floor: dict) -> None:
+    """Put a non-producer into the saved producer tuple and the cached
+    additions, the shape a floor written before the split resumes with."""
+    body = floor["row"]["escalation_products"]["t2"]
+    prods = list(body.get("producers") or [])
+    if f"{_ADMIT.file}::{_ADMIT.fn_name}" not in prods:
+        prods.append(f"{_ADMIT.file}::{_ADMIT.fn_name}")
+    body["producers"] = prods
+    adds = dict(body.get("additions") or {})
+    adds[f"{_ADMIT.file}::{_ADMIT.fn_name}"] = ["t2"]
+    body["additions"] = adds
+
+
+def _resume_contaminated(tmp_path, monkeypatch, **dep_kw):
+    floor: dict = {}
+    _stopped_process(tmp_path, monkeypatch, floor)
+    _contaminate(floor)
+    logs: list[str] = []
+    events: list[tuple[str, dict]] = []
+    batches: list[tuple[FnLocator, ...]] = []
+    grades: list[frozenset[FnLocator]] = []
+    _run(_deps(logs=logs, events=events, batches=batches, floor=floor,
+               escalations=[], grades=grades, **dep_kw),
+         tmp_path, monkeypatch)
+    return floor, logs, events, batches, grades
+
+
+def test_a_resumed_producer_grade_drops_a_saved_name_the_scan_does_not(
+        tmp_path, monkeypatch) -> None:
+    """The fill's escalated set is the scan of the earned accessors. The
+    fn that hands their type back stays. The saved name that does not
+    produce it is still on the frontier and is not graded as futility."""
+    floor, logs, events, batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch,
+        enumerate_fns=lambda _sd: _CELL_RECS,
+        enumerate_types=lambda _sd: _CELL_TYPES)
+    assert grades and _PROD in grades[0] and _ADMIT not in grades[0]
+    assert batches and _ADMIT in batches[0] and _PROD in batches[0]
+    rederived = [d for ev, d in events
+                 if ev == "phase_c.attribution.producers_rederived"]
+    assert rederived and rederived[0]["test"] == "t2"
+    assert "src/b.rs::producer" in rederived[0]["producers"]
+    assert "src/c.rs::widen" in rederived[0]["dropped"]
+    assert "src/c.rs::widen" not in rederived[0]["producers"]
+    assert any("re-derived from the tree" in ln for ln in logs)
+    saved = floor["row"]["escalation_products"]["t2"]["producers"]
+    assert saved == ["src/b.rs::producer"]
+    assert "src/c.rs::widen" in (
+        floor["row"]["escalation_products"]["t2"]["additions"])
+
+
+def test_without_the_tree_records_the_saved_admit_stays_escalated(
+        tmp_path, monkeypatch) -> None:
+    """NEGATIVE CONTROL. No fn or type enumerator is wired, so an empty
+    scan is not a measurement and the saved tuple still grades the admit."""
+    _floor, logs, events, batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch)
+    assert grades and _PROD in grades[0] and _ADMIT in grades[0]
+    assert batches and _ADMIT in batches[0]
+    assert not any(ev == "phase_c.attribution.producers_rederived"
+                   for ev, _ in events)
+    assert any("grade left as saved" in ln for ln in logs)
+
+
+def test_a_completed_scan_that_names_nobody_replaces_the_saved_tuple(
+        tmp_path, monkeypatch) -> None:
+    """The records were read and no fn produces the accessor's type. That
+    empty result replaces the saved tuple, admit and all."""
+    other = [
+        {**r, "sig_text": "fn producer() -> usize", "body_text": "1"}
+        if r["fn_name"] == "producer" else r
+        for r in _CELL_RECS
+    ]
+    floor, logs, events, batches, grades = _resume_contaminated(
+        tmp_path, monkeypatch,
+        enumerate_fns=lambda _sd: other,
+        enumerate_types=lambda _sd: _CELL_TYPES)
+    assert grades and _PROD not in grades[0] and _ADMIT not in grades[0]
+    assert batches and _ADMIT in batches[0] and _PROD in batches[0]
+    rederived = [d for ev, d in events
+                 if ev == "phase_c.attribution.producers_rederived"]
+    assert rederived and rederived[0]["producers"] == []
+    assert "src/b.rs::producer" in rederived[0]["dropped"]
+    assert "src/c.rs::widen" in rederived[0]["dropped"]
+    assert any("0 producer(s)" in ln for ln in logs)
+    assert floor["row"]["escalation_products"]["t2"]["producers"] == []
 
 
 def test_a_pre_split_floor_re_earns_the_verified_view_and_keeps_the_fire(

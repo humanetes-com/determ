@@ -1,5 +1,11 @@
 {
- "flat": [],
+ "flat": [
+  "src/chain.rs::len",
+  "src/chain.rs::next_back",
+  "src/chain.rs::size_hint",
+  "src/error.rs::error",
+  "src/lib.rs::format_err"
+ ],
  "frontier": [
   "src/context.rs::context",
   "src/context.rs::with_context",
@@ -11,6 +17,8 @@
   "src/error.rs::as_ref",
   "src/error.rs::new",
   "src/chain.rs::next",
+  "src/chain.rs::len",
+  "src/chain.rs::next_back",
   "src/fmt.rs::display",
   "src/fmt.rs::debug",
   "src/ensure.rs::new",
@@ -60,7 +68,9 @@
   "src/context.rs::fmt",
   "src/error.rs::fmt",
   "src/chain.rs::default",
+  "src/chain.rs::size_hint",
   "src/ensure.rs::__dispatch_ensure",
+  "src/error.rs::error",
   "src/error.rs::from",
   "src/error.rs::from_boxed",
   "src/fmt.rs::write_str",
@@ -69,7 +79,8 @@
   "src/error.rs::downcast_mut",
   "src/error.rs::into_boxed_dyn_error",
   "src/error.rs::is",
-  "src/error.rs::root_cause"
+  "src/error.rs::root_cause",
+  "src/lib.rs::format_err"
  ],
  "held": {
   "src/context.rs::context": 8,
@@ -131,7 +142,10 @@
   "src/error.rs::fmt"
  ],
  "owed": {
+  "src/chain.rs::len": 0,
   "src/chain.rs::next": 0,
+  "src/chain.rs::next_back": 0,
+  "src/chain.rs::size_hint": 0,
   "src/context.rs::context": 0,
   "src/context.rs::with_context": 0,
   "src/ensure.rs::new": 0,
@@ -140,6 +154,7 @@
   "src/error.rs::backtrace": 0,
   "src/error.rs::downcast": 0,
   "src/error.rs::downcast_mut": 0,
+  "src/error.rs::error": 0,
   "src/error.rs::into_boxed_dyn_error": 0,
   "src/error.rs::is": 0,
   "src/error.rs::msg": 0,
@@ -147,7 +162,8 @@
   "src/error.rs::root_cause": 0,
   "src/fmt.rs::debug": 0,
   "src/fmt.rs::display": 0,
-  "src/lib.rs::Ok": 0
+  "src/lib.rs::Ok": 0,
+  "src/lib.rs::format_err": 0
  },
  "recorded_batch": [
   "src/context.rs::context",
@@ -170,8 +186,11 @@
  ],
  "unclaimed": {
   "src/chain.rs::default": 2,
+  "src/chain.rs::len": 1,
   "src/chain.rs::new": 2,
   "src/chain.rs::next": 1,
+  "src/chain.rs::next_back": 1,
+  "src/chain.rs::size_hint": 1,
   "src/context.rs::ext_context": 3,
   "src/context.rs::fmt": 1,
   "src/ensure.rs::__dispatch_ensure": 1,
@@ -196,6 +215,7 @@
   "src/error.rs::downcast_ref": 1,
   "src/error.rs::drop": 2,
   "src/error.rs::erase": 3,
+  "src/error.rs::error": 1,
   "src/error.rs::fmt": 1,
   "src/error.rs::from": 1,
   "src/error.rs::from_boxed": 2,

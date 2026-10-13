@@ -64,6 +64,17 @@ class Attribution(Enum):
     is the strongest evidence the loop ever produces about a producer: the
     accessors were tried and they did not pay.
 
+    MEASURED_OWNER — the owner map admitted this unit: the listed red tests
+    EXECUTED this body before their failure. That is coverage, not a
+    conviction, and it used to ride in the escalation's set and render the
+    futility sentence ("the fns that consume what this one produces were
+    rewritten … the defect is in what this fn constructs"), which is a claim
+    about a measured futility chain that never ran for it. Run
+    `3076-051d385a` (2026-10-13): a `src/ptr.rs` file prompt told the model
+    a pointer cast was that defect for three leftovers failing on a Debug
+    rendering and a downcast; the reply rewrote pointer code and failed
+    `E0512` twice. This grade states only what was measured.
+
     AIMED — a callee of the faulting frame, computed from that body's own
     call text (`callee_subjects`), carried as evidence and deliberately kept
     out of `crash_blamed`. A crashed binary reports no convicting test, so
@@ -112,6 +123,7 @@ class Attribution(Enum):
     CRASHED = auto()
     DIRECT = auto()
     ESCALATED = auto()
+    MEASURED_OWNER = auto()
     AIMED = auto()
     NAMED = auto()
 
@@ -290,6 +302,7 @@ def collect_refill_evidence(
     read_source: Callable[[str], str | None] | None = None,
     history: Mapping[str, Sequence[TryRecord]] | None = None,
     crash_sites: CrashSites | None = None,
+    measured_owner: frozenset[FnLocator] = frozenset(),
 ) -> tuple[RefillEvidence, ...]:
     """What the frontier supports for each of `block.refill_members`.
 
@@ -328,6 +341,8 @@ def collect_refill_evidence(
             grade = Attribution.DIRECT
         elif key in escalated:
             grade = Attribution.ESCALATED
+        elif key in measured_owner:
+            grade = Attribution.MEASURED_OWNER
         elif at_site.evidences(aimed, block.file, m.fn_name, block.container):
             grade = Attribution.AIMED
         else:
@@ -520,6 +535,15 @@ def escalated_refill_names(evidence: Iterable[RefillEvidence]) -> frozenset[str]
                      if e.attribution is Attribution.ESCALATED)
 
 
+def measured_owner_refill_names(
+    evidence: Iterable[RefillEvidence],
+) -> frozenset[str]:
+    """Members the owner map admitted: the red tests executed them before
+    failing. Neither convicted nor merely named."""
+    return frozenset(e.fn_name for e in evidence
+                     if e.attribution is Attribution.MEASURED_OWNER)
+
+
 def attributed_test_leaves(
     evidence: Iterable[RefillEvidence], *, cap: int = 4,
 ) -> tuple[str, ...]:
@@ -583,6 +607,16 @@ def render_refill_evidence(
                 f"changed its verdict, so the defect is not in them — it is in "
                 f"what this fn constructs or returns. This is a measurement, "
                 f"not a claim about which line is wrong. Rewrite it.")
+        elif e.attribution is Attribution.MEASURED_OWNER:
+            # Coverage, stated as coverage. No consumer of this body was
+            # measured futile and no failure points at it; what is known is
+            # that the attributed tests ran through it before they failed.
+            lines.append(
+                f"`{e.fn_name}` — ON THE FAILING PATH: the attributed tests "
+                f"executed this body before their failure (measured coverage). "
+                f"Nothing convicts it and nothing measured its consumers. "
+                f"Compare what it returns with what the quoted failures need; "
+                f"rewrite it if that is wrong, else return it unchanged.")
         elif e.attribution is Attribution.AIMED:
             # AIMED exists only for an invalid-memory crash: it is the
             # crash evidence keys minus `crash_blamed`, and a stack

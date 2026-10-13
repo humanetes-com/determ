@@ -234,6 +234,7 @@ def assemble_block_evidence(
     aimed: frozenset[FnLocator] = frozenset(),
     crash_sites: CrashSites | None = None,
     read_source: Callable[[str], str | None] | None = None,
+    measured_owner: frozenset[FnLocator] = frozenset(),
     ledger_entries: Sequence[Any] = (),
     oracle_fp: str = "",
     tuple_structs: Iterable[str] = (),
@@ -274,6 +275,7 @@ def assemble_block_evidence(
             escalated=escalated, crashed=crashed, aimed=aimed,
             crash_sites=crash_sites,
             read_source=read_source,
+            measured_owner=measured_owner,
             history=history_for_block(b, ledger_entries,
                                       oracle_fp=oracle_fp)))
     evidence = tuple(evs)

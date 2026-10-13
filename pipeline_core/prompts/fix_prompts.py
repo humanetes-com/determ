@@ -155,6 +155,12 @@ class BlockFillPlan:
     # `rewrite` went to `from` in 20 and `new` re-check in 17. The escalation
     # had just declared those accessors futile.
     escalated: tuple[str, ...] = ()
+    # The subset the owner map admitted: the red tests executed these bodies
+    # before failing. Coverage, not a conviction — rendered as such, never
+    # with the escalation's futility sentence (run `3076-051d385a`,
+    # 2026-10-13: a pointer cast told it was "the defect" for a Debug
+    # rendering, rewritten into two `E0512`s).
+    measured_owner: tuple[str, ...] = ()
     # The subset a runtime fault's own frame named. It is listed FIRST and it
     # outranks `inferred` because the two are produced by the same event: a
     # crashed binary reports no verdict, so the crash strips its own blamed
@@ -333,7 +339,13 @@ def _plan_line(p: BlockFillPlan) -> str:
                    if r not in p.inferred and r not in p.escalated
                    and r not in p.installable and r not in bypass_names
                    and r not in recipe_names and r not in p.crashed
-                   and r not in p.aimed)
+                   and r not in p.aimed and r not in p.measured_owner)
+    measured_owner = tuple(r for r in p.refills
+                           if r in p.measured_owner and r not in p.escalated
+                           and r not in p.installable
+                           and r not in bypass_names
+                           and r not in recipe_names and r not in p.crashed
+                           and r not in p.aimed)
     escalated = tuple(r for r in p.refills
                       if r in p.escalated and r not in p.installable
                       and r not in bypass_names and r not in recipe_names
@@ -397,6 +409,15 @@ def _plan_line(p: BlockFillPlan) -> str:
                             p.pins, wraps=p.wraps_pinned_type)
                         if p.pins else "")
                      + "): " + ", ".join(escalated))
+    if measured_owner:
+        # Coverage only: the attributed tests ran through these bodies before
+        # failing. No consumer was measured futile and no failure points at
+        # them, so the line asks for a comparison, not a rewrite.
+        parts.append("on the failing path (the attributed tests executed "
+                     "these bodies before their failure; nothing convicts "
+                     "them — rewrite one only if what it returns is wrong for "
+                     "the quoted failure, else return it unchanged): "
+                     + ", ".join(measured_owner))
     if installable:
         # Nothing was measured about these bodies themselves; what was
         # measured is that rewriting the producer that names them in its table

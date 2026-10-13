@@ -4,14 +4,16 @@ frontier escalates to producers of the exercised type."""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     container_type_name,
     escalate_frontier_to_producers,
+    producer_scan,
     producers_for_types,
 )
-from pipeline_core.domain.models import TypeRecord
+from pipeline_core.domain.models import FnLocator, TypeRecord
 
 RECS = [
     {"file": "src/chain.rs", "fn_name": "len",
@@ -353,3 +355,41 @@ def test_negative_control_the_unguarded_scan_does_name_them() -> None:
                               exclude={("src/chain.rs", "len")})
     assert ("tests/test_chain.rs", "error") in got
     assert ("tests/test_context.rs", "make_chain") in got
+
+
+# A resumed floor's producer grade is this scan, not the saved tuple. The
+# accessor's own impl returns the type and is excluded. The free fn hands
+# the type back. The third fn does not. An oracle fn that constructs it is
+# not a producer either.
+_CELL_RECS: list[dict[str, Any]] = [
+    {"file": "src/cell.rs", "fn_name": "fmt", "container": "impl Cell",
+     "sig_text": "fn fmt(&self) -> Cell", "body_text": "Cell { n: 0 }"},
+    {"file": "src/cell.rs", "fn_name": "make", "container": "",
+     "sig_text": "fn make() -> Cell", "body_text": "Cell { n: 1 }"},
+    {"file": "src/cell.rs", "fn_name": "widen", "container": "",
+     "sig_text": "fn widen(p: usize) -> usize", "body_text": "p"},
+    {"file": "tests/t.rs", "fn_name": "builds", "container": "",
+     "sig_text": "fn builds() -> Cell", "body_text": "Cell { n: 2 }",
+     "is_test": True},
+]
+_CELL = FnLocator("src/cell.rs", "fmt")
+
+
+def test_the_producer_scan_names_who_builds_the_accessors_type() -> None:
+    """The grade a futility fire would write. The accessor, the fn that
+    does not produce the type, and the oracle fn are not in it."""
+    scan = producer_scan(
+        _CELL_RECS, [{"kind": "struct", "name": "Cell"}], {_CELL})
+    assert scan.producers == (FnLocator("src/cell.rs", "make"),)
+    assert scan.type_names == ("Cell",)
+    assert "Cell" in scan.candidates
+
+
+def test_an_unreadable_type_list_is_not_a_producer_measurement() -> None:
+    """`None` is the extractor unavailable: no producer, and the candidates
+    are still named so a caller can refuse to treat that empty result as a
+    measurement."""
+    scan = producer_scan(_CELL_RECS, None, {_CELL})
+    assert scan.producers == ()
+    assert scan.candidates == ("Cell",)
+    assert scan.type_names == ()

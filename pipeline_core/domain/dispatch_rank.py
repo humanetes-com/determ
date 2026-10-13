@@ -78,6 +78,7 @@ WHAT A PASS STILL MEANS. The terminators count completed traversals
 closes when every cohort member has been traversed or has left the frontier.
 It no longer decides the order.
 """
+
 from __future__ import annotations
 
 from collections.abc import Collection, Hashable, Iterable, Mapping, Sequence
@@ -88,7 +89,9 @@ from pipeline_core.domain.dispatch_batch import DispatchBatch
 
 __all__ = [
     "Crash",
+    "asked_unchanged",
     "RankClass",
+    "absence_notice",
     "Service",
     "UnitFacts",
     "Withheld",
@@ -131,8 +134,12 @@ class Crash(IntEnum):
 
 
 def service_of[K: Hashable](
-    key: K, *, served: Collection[K], flat: Collection[K],
-    dead: Collection[K] = (), red_dead: Collection[K] = (),
+    key: K,
+    *,
+    served: Collection[K],
+    flat: Collection[K],
+    dead: Collection[K] = (),
+    red_dead: Collection[K] = (),
     hollow: Collection[K] = (),
 ) -> Service:
     """The unit's service bucket.
@@ -187,36 +194,62 @@ class UnitFacts:
     def rank_class(self) -> RankClass:
         if self.held_tests > 0:
             return RankClass.HELD
-        if (self.owed_tier is not None
-                or self.crash in (Crash.BLAMED, Crash.SITED)
-                or self.service is Service.NEVER):
+        if self.owed_tier is not None or self.crash in (Crash.BLAMED, Crash.SITED) or self.service is Service.NEVER:
             return RankClass.EVIDENCED
         return RankClass.OTHER
 
     def _producer(self) -> tuple[int, int, int]:
-        return (0 if self.escalated else 1, 0 if self.builder else 1,
-                0 if self.callee else 1)
+        return (0 if self.escalated else 1, 0 if self.builder else 1, 0 if self.callee else 1)
 
     def key(self) -> tuple[int, ...]:
         cls = self.rank_class
         if cls is RankClass.HELD:
-            return (int(cls), -self.unclaimed, -self.held_tests,
-                    self.static_index)
+            return (int(cls), -self.unclaimed, -self.held_tests, self.static_index)
         if cls is RankClass.EVIDENCED:
             # A fault site leads; a chain inference is not one and keys with
             # no crash. An un-owed unit keys after every owed tier: the
             # driver clamps tiers to 0, so an un-owed never-served unit keyed
             # 0 would win on service over an owed served one.
-            fault = (int(self.crash) if self.crash in (Crash.BLAMED,
-                                                       Crash.SITED)
-                     else int(Crash.CHAIN))
-            tier = (self.owed_tier if self.owed_tier is not None
-                    else _UNOWED_TIER)
-            return (int(cls), -self.unclaimed, fault, tier,
-                    int(self.service), *self._producer(), self.static_index)
-        return (int(cls), -self.unclaimed,
-                0 if self.crash is Crash.CHAIN else 1,
-                int(self.service), *self._producer(), self.static_index)
+            fault = int(self.crash) if self.crash in (Crash.BLAMED, Crash.SITED) else int(Crash.CHAIN)
+            tier = self.owed_tier if self.owed_tier is not None else _UNOWED_TIER
+            return (int(cls), -self.unclaimed, fault, tier, int(self.service), *self._producer(), self.static_index)
+        return (
+            int(cls),
+            -self.unclaimed,
+            0 if self.crash is Crash.CHAIN else 1,
+            int(self.service),
+            *self._producer(),
+            self.static_index,
+        )
+
+
+def asked_unchanged[K: Hashable](
+    facts: Mapping[K, UnitFacts], asked: Collection[K],
+) -> frozenset[K]:
+    """The units that leave this sweep's frontier: class `OTHER`, a body
+    already served, and opened before under the own fingerprint they would
+    be asked under now (`asked`, computed by the caller from
+    `evidence_premise.unit_ask_fingerprint`: own body + the words of the red
+    tests the unit is aimed at).
+
+    The cap is a ceiling, not a quota. Every sweep used to fill it, and the
+    unclaimed streak rotated served units nothing owed back in under
+    unchanged evidence, each pulling a file run, an impl run and a per-fn
+    target with it: run `3076-051d385a` iter 3 (2026-10-13) gave six of
+    twelve slots to such units at 148/151.
+
+    The class decides what is never touched: a held stub, an owed unit, a
+    crash fault site and a never-served unit are `HELD`/`EVIDENCED`, and
+    they keep their slots whatever `asked` says. That is the climb: a
+    never-served stub ahead of the current failure point is on no red slice
+    yet and is the layer fill that paid +10, +13 and +39 on
+    `857717-812ee44c`. `asked` holding a unit whose fingerprint was empty
+    (nothing observed) is the caller's error; such a unit must stay."""
+    have = frozenset(asked)
+    return frozenset(
+        k for k, f in facts.items()
+        if k in have and f.rank_class is RankClass.OTHER
+        and f.service is not Service.NEVER)
 
 
 def rank[K: Hashable](facts: Mapping[K, UnitFacts]) -> list[K]:
@@ -225,8 +258,12 @@ def rank[K: Hashable](facts: Mapping[K, UnitFacts]) -> list[K]:
 
 
 def take[K: Hashable](
-    ranked: Sequence[K], held: Collection[K], cap: int, *,
-    cohort: Collection[K] | None, traversed: Collection[K],
+    ranked: Sequence[K],
+    held: Collection[K],
+    cap: int,
+    *,
+    cohort: Collection[K] | None,
+    traversed: Collection[K],
 ) -> DispatchBatch[K]:
     """The batch for this sweep, and where it leaves the open pass.
 
@@ -255,10 +292,9 @@ def take[K: Hashable](
     cohort_live = live if cohort is None else live & set(cohort)
     seen = set(traversed) & cohort_live
     pending = cohort_live - seen
-    return DispatchBatch(keys=keys,
-                         completes_pass=not (pending - set(keys)),
-                         attempted_before=len(seen),
-                         frontier_size=len(ranked))
+    return DispatchBatch(
+        keys=keys, completes_pass=not (pending - set(keys)), attempted_before=len(seen), frontier_size=len(ranked)
+    )
 
 
 def rotation_bound(class_size: int, held: int, cap: int) -> int:
@@ -271,25 +307,33 @@ def rotation_bound(class_size: int, held: int, cap: int) -> int:
 
 
 def starved[K: Hashable](
-    facts: Mapping[K, UnitFacts], batch: Collection[K], cap: int,
+    facts: Mapping[K, UnitFacts],
+    batch: Collection[K],
+    cap: int,
 ) -> dict[K, int]:
-    """`EVIDENCED` units left out of `batch` whose unclaimed streak has
-    reached the rotation bound, with that streak.
+    """`EVIDENCED` units this batch leaves out on the sweep that meets the
+    rotation bound, with the streak read at rank time.
 
-    The class's size moves between sweeps, so the bound is read on this
-    sweep's class; a unit at the bound and still out of the batch is a unit
-    the rotation did not reach. Empty when the rank keeps its promise."""
+    The streak climbs after the batch is chosen. A unit already at
+    `bound - 1` that this batch does not take has then been left out for
+    `bound` sweeps. A class that fits in one batch has bound 1, so a
+    streak of 0 left out is already the miss. The class's size moves
+    between sweeps, so the bound is read on this sweep's class. Empty
+    when the rank keeps its promise."""
     batch_set = set(batch)
-    evidenced = [k for k, f in facts.items()
-                 if f.rank_class is RankClass.EVIDENCED]
+    evidenced = [k for k, f in facts.items() if f.rank_class is RankClass.EVIDENCED]
     held = sum(1 for f in facts.values() if f.rank_class is RankClass.HELD)
     bound = rotation_bound(len(evidenced), held, cap)
-    return {k: facts[k].unclaimed for k in evidenced
-            if k not in batch_set and facts[k].unclaimed >= bound}
+    # Rank time is before this sweep's climb, so the breaking streak is
+    # one below the bound. `rotation_bound` never returns less than 1.
+    missed = bound - 1
+    return {k: facts[k].unclaimed for k in evidenced if k not in batch_set and facts[k].unclaimed >= missed}
 
 
 def next_streak[K: Hashable](
-    streak: Mapping[K, int], frontier: Iterable[K], reset: Collection[K],
+    streak: Mapping[K, int],
+    frontier: Iterable[K],
+    reset: Collection[K],
 ) -> dict[K, int]:
     """The unclaimed streak after a fill.
 
@@ -297,8 +341,7 @@ def next_streak[K: Hashable](
     Every other unit still on the frontier climbs by one. Units that left
     the frontier are dropped. Which turns count is :func:`streak_after_turn`."""
     reset_set = set(reset)
-    return {k: (0 if k in reset_set else streak.get(k, 0) + 1)
-            for k in frontier}
+    return {k: (0 if k in reset_set else streak.get(k, 0) + 1) for k in frontier}
 
 
 def streak_after_turn[K: Hashable](
@@ -353,26 +396,49 @@ class Withheld[K: Hashable]:
             self.reasons.setdefault(u, reason)
 
     def held_violations(self, held: Collection[K]) -> dict[K, str]:
-        return {u: r for u, r in self.reasons.items()
-                if u in held and r != "cfg_inactive"}
+        return {u: r for u, r in self.reasons.items() if u in held and r != "cfg_inactive"}
 
 
 def off_batch_reasons[K: Hashable](
-    units: Iterable[K], ranked: Sequence[K], batch: Collection[K],
-    withheld: Withheld[K], cap: int,
+    units: Iterable[K],
+    ranked: Sequence[K],
+    batch: Collection[K],
+    withheld: Withheld[K],
+    cap: int,
 ) -> dict[K, str]:
-    """For each of `units` not in the batch: its withheld reason, or its
-    rank position past the cap, or that it is not on the frontier at all."""
+    """For each of `units` not in the batch: its rank position when it is
+    on the frontier, else the filter that kept it off, else that it was
+    never on the frontier.
+
+    A filter note does not outrank the frontier. The standing-flat
+    exclusion notes a unit and the owed admission then puts that unit
+    back; the note stays. The unit is ranked, so the reason it missed
+    the batch is the position."""
     pos = {k: i for i, k in enumerate(ranked, 1)}
     batch_set = set(batch)
     out: dict[K, str] = {}
     for u in units:
         if u in batch_set:
             continue
-        if u in withheld.reasons:
-            out[u] = f"withheld: {withheld.reasons[u]}"
-        elif u in pos:
+        if u in pos:
             out[u] = f"rank {pos[u]} past the cap of {cap}"
+        elif u in withheld.reasons:
+            out[u] = f"withheld: {withheld.reasons[u]}"
         else:
             out[u] = "not on the frontier"
+    return out
+
+
+def absence_notice[K: Hashable](
+    watched: Mapping[K, str],
+    urgent: Mapping[K, str],
+) -> dict[K, str]:
+    """Reasons for the log's absence clause, `urgent` first.
+
+    The clause prints a fixed number of names. A unit the rotation has
+    already failed to reach has to be among those names. Appending it
+    after a full watch leaves it in the unprinted tail."""
+    out = dict(urgent)
+    for key, why in watched.items():
+        out.setdefault(key, why)
     return out

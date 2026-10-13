@@ -89,6 +89,10 @@ def test_negative_control_the_pre_change_cursor_closes_over_them(
         monkeypatch, tmp_path: Path) -> None:
     import pipeline_core.application.reconstruct.phase_c_tdd as _mod
     monkeypatch.setattr(_mod, "reoffer_unopened", lambda *_a, **_k: frozenset())
+    # The opened unit came back unchanged under the same red-test words; the
+    # own-ask exclusion would keep it out of the new pass on its own, which
+    # is not the cursor this control isolates.
+    monkeypatch.setenv("PHASE_C_ASKED_UNCHANGED", "0")
     events, batches = _replay(monkeypatch, tmp_path)
     assert not [e for e, _ in events if e == "phase_c.tdd.pass_reoffer"]
     audits = [d for e, d in events if e == "phase_c.tdd.pass_audit"]

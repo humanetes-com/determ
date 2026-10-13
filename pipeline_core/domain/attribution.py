@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
 
+from pipeline_core.domain.format_traits import format_traits_used
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite, Frontier, SiteFrontier
 from pipeline_core.domain.rust_idents import _skip_generics, canon_token_text
@@ -315,6 +316,11 @@ class AttributionResult(NamedTuple):
     # Every site the attribution paths named this sweep, container-qualified.
     # The session route reads this; dispatch keeps the locator-keyed frontier.
     site_frontier: SiteFrontier = {}
+    # Per failing test, the text its failure is ABOUT: the panicking
+    # statement cut at the panicking call, plus the `let`s it reads
+    # (`domain.failing_observable`). Absent for a test whose failure
+    # location is not inside its own fn.
+    observables: Mapping[str, str] = {}
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         """Union over sites with this file+name — the locator view tests
@@ -324,6 +330,24 @@ class AttributionResult(NamedTuple):
             if k[0] == key.file and k[1] == key.fn_name:
                 out |= tests
         return out
+
+    def observable_traits_for(self, test: str) -> frozenset[str]:
+        """The format traits the test's FAILING observable renders through.
+
+        The question the format-implementer hop, the futility-escalation
+        withhold and the product sustain ask. Read on the observable when
+        the failure location is inside the test's own fn, else on the whole
+        source (the reading those three had before the observable existed).
+        `assertion_owned_by_container` asks a different question and keeps
+        the whole source: on an empty trait set it falls through to a
+        tie-of-zeros keep that stamps every homonym."""
+        obs = self.observables.get(test)
+        if obs is None:
+            leaf = test.rsplit("::", 1)[-1]
+            obs = next((v for k, v in self.observables.items()
+                        if k.rsplit("::", 1)[-1] == leaf), None)
+        return format_traits_used(obs if obs is not None
+                                  else self.source_for(test))
 
     def source_for(self, test: str) -> str:
         """The failing test's own source (signature + body), or "". Exact

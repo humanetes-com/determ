@@ -16,8 +16,8 @@ from pipeline_core.application.reconstruct.attribution import (
     _impl_trait_and_self,
     behavior_frontier_from_texts,
 )
+from pipeline_core.domain.format_traits import format_traits_used
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.domain.refill_stamp import format_traits_used
 from pipeline_core.domain.rust_fn_headers import locate_fn
 
 

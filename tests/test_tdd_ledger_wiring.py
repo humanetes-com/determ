@@ -501,7 +501,13 @@ def test_under_a3_only_an_attempted_escalated_unit_leaves_a_flat_row(
     assert named, "escalation must fire and the FLAT arm must name a set"
     row = named[0]
     assert row["esc_unchanged"] == ["src/a.rs::width"]
-    assert "src/a.rs::depth" in row["attempted"]
+    # `depth` was served on the sweep before the fire and is not re-asked on
+    # the fire's sweep: a served unit nothing owes, under the same own body
+    # and the same red-test words, leaves the frontier
+    # (`dispatch_rank.asked_unchanged`).
+    assert any(d.get("attempted") == ["src/a.rs::depth"]
+               for ev, d in events if ev == "phase_c.tdd.landed_change")
+    assert "src/a.rs::depth" not in row["attempted"]
     assert "src/a.rs::width" in row["attempted"]
     assert "src/a.rs::height" not in row["attempted"]
     assert "src/a.rs::height" not in row["esc_unchanged"]
@@ -932,6 +938,9 @@ def test_a_kept_flat_body_is_not_bought_again_on_its_own_landing(
 
     control = tmp_path / "control"
     (control / "src").mkdir(parents=True)
+    # The control isolates the flat exclusion's stamp: with the own-ask
+    # exclusion on, the unit would also leave on its unchanged own premise.
+    monkeypatch.setenv("PHASE_C_ASKED_UNCHANGED", "0")
     c_dispatched, c_logs = _flat_landing_run(monkeypatch, control,
                                              stamp_at_dispatch=True)
     assert not any("EXCLUDED from the batch" in ln for ln in c_logs)
@@ -979,6 +988,9 @@ def test_an_iteration_that_dispatches_nothing_charges_the_frontier_stop(
 
     # CONTROL — the same run with the premise erased, so the unit is
     # dispatchable every iteration: nothing charges and the stop is silent.
+    # The own-ask exclusion is off: with it on, the served unit nothing owes
+    # leaves on its unchanged own premise and the batch empties the same way.
+    monkeypatch.setenv("PHASE_C_ASKED_UNCHANGED", "0")
     control = tmp_path / "control"
     (control / "src").mkdir(parents=True)
     _tree(control, layout=_LAYOUT_TWO)
