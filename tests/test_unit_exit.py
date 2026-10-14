@@ -198,6 +198,14 @@ def test_the_scheduler_writes_what_the_run_opened() -> None:
                               opened=frozenset({a, b}))).opened == (
         ("src/e.rs", "a"), ("src/e.rs", "b"))
     assert row(None).opened is None
+    # The session bit rides the same copy. None stays off the wire so a
+    # row written before the bit still round-trips as unrecorded.
+    assert row(RouteRunReport(carried_body=True)).carried_body is True
+    assert row(RouteRunReport(carried_body=False)).carried_body is False
+    assert row(RouteRunReport()).carried_body is None
+    absent = row(RouteRunReport()).to_dict()
+    assert "carried_body" not in absent
+    assert row(RouteRunReport(carried_body=False)).to_dict()["carried_body"] is False
 
 
 def test_a_filtered_unit_names_the_predicate_that_dropped_it() -> None:

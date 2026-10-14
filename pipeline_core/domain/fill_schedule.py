@@ -408,6 +408,12 @@ class RouteLedgerRow:
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
     #: The union gate repaired this run's gained revert. Absent on older rows.
     joint_repaired: bool = False
+    #: Whether a reply of this session carried a function body. None on
+    #: every non-session row and on every session row written before the
+    #: bit. False is a session whose replies were requests, notes or empty.
+    #: True is a session that routed, refused, compiled or judged a body,
+    #: including one whose bodies did not compile.
+    carried_body: bool | None = None
 
     @property
     def identity(self) -> str:
@@ -447,6 +453,8 @@ class RouteLedgerRow:
             **({"candidate_bodies": dict(sorted(self.candidate_bodies.items()))}
                if self.candidate_bodies else {}),
             **({"joint_repaired": True} if self.joint_repaired else {}),
+            **({"carried_body": self.carried_body}
+               if self.carried_body is not None else {}),
         }
 
     @classmethod
@@ -498,6 +506,8 @@ class RouteLedgerRow:
                 str(k): str(v) for k, v in dict(
                     raw.get("candidate_bodies") or {}).items() if v},
             joint_repaired=bool(raw.get("joint_repaired", False)),
+            carried_body=(bool(raw["carried_body"])
+                          if isinstance(raw.get("carried_body"), bool) else None),
         )
 
     def to_json(self) -> str:
@@ -953,6 +963,51 @@ def unit_evidence_from(
         standing_flat=dict(standing_flat))
 
 
+def share_ended_session(row: RouteLedgerRow, min_turns: int) -> bool:
+    """The share, not the route, ended this session: fewer turns than
+    ``min_turns`` and the minutes ran out the share. ``min_turns`` of 0
+    prices no floor, so no row was ended by it."""
+    return (row.kind is RouteKind.SESSION and min_turns > 0
+            and row.model_calls < min_turns
+            and row.share_minutes is not None
+            and row.minutes >= row.share_minutes)
+
+
+def session_row_tried(row: RouteLedgerRow, *, min_turns: int = 0) -> bool:
+    """Whether this session row is a graded try of the slice it aimed at.
+
+    A try is a reply that carried a function body. The row says so when
+    it recorded the bit. A row written before the bit tried the slice
+    when it kept or reverted a unit: that landing is the body. A row
+    that records the units it opened and the tests it greened, and both
+    are empty, left no body. A notes reply and a compile failure that
+    restored the tree share that shape — the ledger stores neither
+    ``compile_failures`` nor the bit — and reading it as a try is what
+    defers the next slice. A row the share ended stays a try: the cut
+    rule grades that outcome on the second cut, and the bit that would
+    split a notes reply from a restored compile failure is absent.
+    A row written before ``opened`` and ``newly_green`` (both None)
+    keeps the outcome it recorded. A row that paid is a try. Anything
+    that is not a session row is not this question.
+    """
+    if row.kind is not RouteKind.SESSION:
+        return True
+    if row.outcome is RunOutcome.CASHED or row.net_pass_delta > 0:
+        return True
+    if row.outcome not in (RunOutcome.FLAT, RunOutcome.REVERTED,
+                           RunOutcome.DECLINED):
+        return False
+    if row.carried_body is True:
+        return True
+    if row.carried_body is False:
+        return False
+    if row.kept or row.reverted:
+        return True
+    if row.opened is not None and row.newly_green is not None:
+        return share_ended_session(row, min_turns)
+    return True
+
+
 class UnitService:
     """Which units the ledger has served under one oracle, and how.
 
@@ -969,8 +1024,7 @@ class UnitService:
 
     def __init__(self, rows: Iterable[RouteLedgerRow], oracle_fp: str, *,
                  session_min_turns: int = 0,
-                 evidence: UnitEvidence | None = None,
-                 unanswered_bound: int = DEFAULT_UNPAID_GRACE) -> None:
+                 evidence: UnitEvidence | None = None) -> None:
         self._opened: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
         # Every opened row under the oracle in ledger order, and the session
@@ -979,11 +1033,11 @@ class UnitService:
         self._opened_rows: list[RouteLedgerRow] = []
         self._sessions: list[RouteLedgerRow] = []
         self._sessions_deferred: list[RouteLedgerRow] = []
-        # Session tries in ledger order, the UNMEASURED ones included: an
-        # unmeasured try is no verdict on the slice, but a run of them on
-        # the same test is what `session_rebuy` bounds.
+        # Session tries in ledger order, the UNMEASURED ones included.
+        # A try that carried no body is no verdict on the slice
+        # (:func:`session_row_tried`); `session_rebuy` ranks the next
+        # slice from the tries that did.
         self._session_tries: list[RouteLedgerRow] = []
-        self._unanswered_bound = unanswered_bound
         self._min_turns = session_min_turns
         self._evidence = evidence
         rows = list(rows)
@@ -1032,10 +1086,7 @@ class UnitService:
         REVERTED; ranked on that row it would be a zero-weight re-buy, so
         the starved share would convict the route it starved. Zero turns
         configured means no row is starved (the pre-floor reading)."""
-        return (row.kind is RouteKind.SESSION and self._min_turns > 0
-                and row.model_calls < self._min_turns
-                and row.share_minutes is not None
-                and row.minutes >= row.share_minutes)
+        return share_ended_session(row, self._min_turns)
 
     def _prior_cut(self, row: RouteLedgerRow, test: str) -> bool:
         """The session try on `test` before `row` was cut by its share too."""
@@ -1069,57 +1120,55 @@ class UnitService:
         return any(not self._prior_cut(row, t) for t in row.target_tests)
 
     def session_rebuy(self, run: RouteRun) -> tuple[int, int] | None:
-        """(rank, deferrals) when every test `run` aims at was last tried by a
-        session that was graded and did not pay it; None otherwise.
+        """(rank, deferrals) for a session, from the tests it aims at.
 
         A session's slice is re-packed around its leftovers every fill, so
         a new unit set or a moved body makes a new identity and a new work
         key for the same question. The question is the test. Its latest
-        session row decides: graded (not starved, or starved on a test whose
-        try before was starved too — :meth:`cut_by_share`), FLAT / REVERTED /
-        DECLINED, not paying the test, and no later opened row on any route
-        paying it. One test without such a row (never tried by a session,
-        owed its look after a first cut, or paid since) leaves the run at
-        the rank it already holds. An unopened unit does not: `_rank_of`
-        asks this for `never_served` as well as `served`, so a unit no
-        route has opened, riding on tests that already have the row, is
-        the re-buy. Deferrals are the session deferrals aimed at the test
-        since that row, the least over the tests, for the bounded
-        re-admission.
+        session row that :func:`session_row_tried` is the try: graded (not
+        starved, or starved on a test whose try before was starved too —
+        :meth:`cut_by_share`), FLAT / REVERTED / DECLINED, not paying the
+        test, and no later opened row on any route paying it. That is a
+        re-buy. One test no session has opened, one owed its look after a
+        first cut, or one paid since, leaves the run at the rank it
+        already holds. An unopened unit does not: `_rank_of` asks this for
+        `never_served` as well as `served`, so a unit no route has opened,
+        riding on tests that already have the row, is the re-buy.
+        Deferrals are the session deferrals aimed at the test since that
+        row, the least over the tests, for the bounded re-admission.
 
-        An UNMEASURED try (every reply reasoning-capped, or no reply carried
-        a body) is no verdict, so it never hides or replaces the latest
-        graded row. But `unanswered_bound` of them in a row, as a test's
-        latest session tries, are graded together as one unpaid try: the
-        route was offered that many times and never answered. Without the
-        bound an unmeasured row ranks the next slice ``never_served`` at
-        full weight on every fill (`_ledger_rank`), so a test whose sessions
-        never produce a body would re-open one every fill. 0 disables the
-        bound."""
+        A session row that did not try the slice (no reply carried a body,
+        or every landing was reasoning-capped) is not a miss and does not
+        hide an earlier try that did. When every session row on the test
+        is of that kind, the question was opened and not asked: the rank
+        is ``never_served``, including when another route has already
+        opened the units. Returning no rank there would leave the unit's
+        rank, and a unit another route opened is ``served``, which puts
+        the slice behind a never-served per-fn run. Repeating it does not
+        change the rank. The fill's session cap and the budget bound how
+        often it opens. A later opened row that paid the test leaves the
+        run at the rank it already holds."""
         if run.kind is not RouteKind.SESSION or not run.target_tests:
             return None
-        worst = _RANK_PAYING
+        worst: int | None = None
+        unasked = False
         deferrals: list[int] = []
         for t in run.target_tests:
             tries = [r for r in self._session_tries if t in r.target_tests]
-            streak = 0
-            for r in reversed(tries):
-                if r.outcome is not RunOutcome.UNMEASURED:
-                    break
-                streak += 1
-            if self._unanswered_bound > 0 and streak >= self._unanswered_bound:
+            graded = [r for r in tries
+                      if session_row_tried(r, min_turns=self._min_turns)]
+            if not graded:
+                if not tries:
+                    return None
                 if any(row_paid_test(r, t) for r in self._opened_rows
                        if r.started > tries[-1].started):
                     return None
-                worst = max(worst, _RANK_REBUY_FLAT)
+                unasked = True
                 deferrals.append(sum(
                     1 for d in self._sessions_deferred
                     if t in d.target_tests and d.started >= tries[-1].started))
                 continue
-            mine = [r for r in self._sessions if t in r.target_tests]
-            if not mine:
-                return None
-            last = mine[-1]
+            last = graded[-1]
             owed = self.starved(last) and not self._prior_cut(last, t)
             if (owed or row_paid_test(last, t)
                     or last.outcome not in (RunOutcome.FLAT,
@@ -1129,13 +1178,18 @@ class UnitService:
             at = next(i for i, r in enumerate(self._opened_rows) if r is last)
             if any(row_paid_test(r, t) for r in self._opened_rows[at + 1:]):
                 return None
-            worst = max(worst, _RANK_REBUY_REVERTED
-                        if last.outcome is RunOutcome.REVERTED
-                        else _RANK_REBUY_FLAT)
+            rank = (_RANK_REBUY_REVERTED
+                    if last.outcome is RunOutcome.REVERTED
+                    else _RANK_REBUY_FLAT)
+            worst = rank if worst is None else max(worst, rank)
             deferrals.append(sum(
                 1 for d in self._sessions_deferred
                 if t in d.target_tests and d.started >= last.started))
-        return worst, min(deferrals)
+        if worst is not None:
+            return worst, min(deferrals)
+        if unasked:
+            return _RANK_NEVER_SERVED, (min(deferrals) if deferrals else 0)
+        return None
 
     def rank(self, run: RouteRun, *, grace_left: bool,
              readmit_after: int) -> tuple[int, str]:
@@ -1212,7 +1266,9 @@ class UnitService:
             return self._landing_class(t, run, grace_left=grace_left)
         opened = self._opened[t]
         here_at = [i for i, r in enumerate(opened)
-                   if self._same_route(r, run)]
+                   if self._same_route(r, run)
+                   and (run.kind is not RouteKind.SESSION
+                        or session_row_tried(r, min_turns=self._min_turns))]
         if (not here_at or self.cut_by_share(opened[here_at[-1]])
                 or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
             # Never tried on this route, starved by its share, or a later
@@ -1570,7 +1626,8 @@ def _rank_of(run: RouteRun, oracle_fp: str,
                                   readmit_after=readmit_after)
     else:
         rank, reason = _ledger_rank(run, last, grace_left=grace_left,
-                                    starved=units.cut_by_share(last))
+                                    starved=units.cut_by_share(last),
+                                    min_turns=units._min_turns)
     if (run.kind is RouteKind.PAIR and not grace_left
             and rank in (_RANK_NEVER_SERVED, _RANK_SERVED)):
         # Past the grace a pair is never "never served": its work key has
@@ -1590,9 +1647,11 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         # unopened unit is `never_served` from `UnitService.rank` whatever
         # rides with it, which is how a twice-cut test reopened: the slice
         # added one unit no route had opened. The tests still decide.
-        # `paying` is left alone, and so is a `never_served` whose tests
-        # have no graded unpaid row (`session_rebuy` returns None): a
-        # first cut, an untried test, an interrupted try.
+        # `paying` is left alone. So is a rank `session_rebuy` does not
+        # replace: a first cut, a test no session has opened, an
+        # interrupted try, a test a later row paid. An opened session
+        # that carried no body comes back `never_served`, which replaces
+        # a `served` unit rank.
         rebuy = units.session_rebuy(run)
         if rebuy is not None:
             rank, deferrals = rebuy
@@ -1604,12 +1663,18 @@ def _rank_of(run: RouteRun, oracle_fp: str,
 
 
 def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
-                 grace_left: bool, starved: bool = False) -> tuple[int, str]:
+                 grace_left: bool, starved: bool = False,
+                 min_turns: int = 0) -> tuple[int, str]:
     """(rank, reason) from the latest graded row on the run's identity."""
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
         return _RANK_PAYING, _REASON[_RANK_PAYING]
     if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
         # Interrupted, or every reply reasoning-capped: not evidence.
+        return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
+    if (run.kind is RouteKind.SESSION
+            and not session_row_tried(last, min_turns=min_turns)):
+        # The identical session left no body. It is not the re-buy its
+        # FLAT outcome would say; the slice is still an unasked question.
         return _RANK_NEVER_SERVED, _REASON[_RANK_NEVER_SERVED]
     if starved:
         # Ended by its share before its minimum turns, the first such cut
@@ -2185,9 +2250,12 @@ def schedule(
     test set (:meth:`UnitService.cut_by_share`). ``0`` restores the plain
     weighted split and the pre-floor grading.
 
-    A session aimed only at tests whose latest session try was graded,
-    unpaid and not cut by its share ranks as the re-buy of that try under
-    any packing (:meth:`UnitService.session_rebuy`).
+    A session aimed only at tests whose latest session try carried a body,
+    was graded, unpaid and not cut by its share ranks as the re-buy of
+    that try under any packing (:meth:`UnitService.session_rebuy`). A
+    session whose rows carried no body ranks ``never_served`` even when
+    another route has opened its units, and repeating those rows does not
+    make it a re-buy.
     """
     rows_list = list(rows)
     history = _latest_by_identity(rows_list)
@@ -2198,8 +2266,7 @@ def schedule(
     # oracle are still a new try, not a served one.
     units = UnitService(rows_list, oracle_fp,
                         session_min_turns=session_min_turns,
-                        evidence=unit_evidence,
-                        unanswered_bound=unpaid_grace)
+                        evidence=unit_evidence)
     blockers = Blockers.of(hollow, crash_blamed)
 
     # Routes whose schedule exemptions have lapsed: graded `unpaid_grace`

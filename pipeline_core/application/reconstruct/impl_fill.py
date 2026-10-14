@@ -6319,8 +6319,9 @@ def prepare_impl_fill(
             if _out.unmeasured and _out.unanswered and not _out.capped_turns:
                 # No reply carried a body: the model was asked and wrote
                 # nothing (requests, notes, an empty reply). The slice was
-                # not tried, so the row is not a re-buy; the schedule bounds
-                # repeated unanswered tries on the same test.
+                # not tried, so the row is not a re-buy. Another such
+                # session is the same unasked question; the fill cap and
+                # the budget bound how often it opens.
                 _log(f"  [phase-c/session] {_sl.label()}: {_out.model_calls} "
                      f"call(s), {_out.requests} request(s), no reply carried a "
                      "body — graded UNMEASURED, not a re-buy.")
@@ -6465,7 +6466,8 @@ def prepare_impl_fill(
                 # Every slice unit with a record was editable and in view;
                 # a unit with none (`_missing`) was left out inside the run.
                 opened=frozenset(locator_of(u) for u in _records),
-                candidate_bodies=dict(_out.candidate_bodies))
+                candidate_bodies=dict(_out.candidate_bodies),
+                carried_body=_out.carried_body)
 
         return SessionRoute(_plans, _run_one_session, served, log=_log)
 

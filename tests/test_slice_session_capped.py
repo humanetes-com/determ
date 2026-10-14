@@ -188,8 +188,24 @@ def test_an_unmeasured_row_ranks_the_slice_never_served_not_rebuy() -> None:
 
     unmeasured = schedule([run], [row(RunOutcome.UNMEASURED)], oracle_fp="o", hollow={})
     assert unmeasured.ordered[0].reason == "never_served"
+    # A row written before the opened and green fields: the outcome stands.
     flat = schedule([run], [row(RunOutcome.FLAT)], oracle_fp="o", hollow={})
     assert flat.ordered[0].reason == "rebuy_flat"
+    # The same outcome once the row records an empty open and an empty
+    # green set is not a try, including when another route opened the unit.
+    recorded = RouteLedgerRow(
+        kind=run.kind, label=run.label, targets=(("src/lib.rs", "fmt"),),
+        bodies_sha="b", oracle_fp="o", outcome=RunOutcome.FLAT, run_id="r",
+        iteration=1, cluster="c", started="2", minutes=1.0, model_calls=8,
+        target_tests=("t_fmt",), opened=(("src/lib.rs", "fmt"),),
+        newly_green=())
+    other = RouteLedgerRow(
+        kind=RouteKind.FILE, label="file", targets=(("src/lib.rs", "fmt"),),
+        bodies_sha="f", oracle_fp="o", outcome=RunOutcome.FLAT, run_id="r",
+        iteration=1, cluster="c", started="1", minutes=1.0, model_calls=1,
+        target_tests=("t_fmt",))
+    assert schedule([run], [other, recorded], oracle_fp="o", hollow={}
+                    ).ordered[0].reason == "never_served"
     # Nor "served under another identity": a moved body after an
     # unmeasured row is a new try, not a served one.
     moved = RouteRun(kind=run.kind, label=run.label, targets=run.targets,

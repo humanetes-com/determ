@@ -415,6 +415,7 @@ def _row_for(
         joint_sets=tuple(_pairs(frozenset(js)) for js in rep.joint_sets),
         opened=(_pairs(rep.opened_units) if report is not None else None),
         first_turn_minutes=rep.first_turn_minutes,
+        carried_body=rep.carried_body,
         candidate_bodies=dict(rep.candidate_bodies),
         joint_repaired=bool(getattr(rep, "joint_repaired", False)))
 

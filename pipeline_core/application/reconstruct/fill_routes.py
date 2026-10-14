@@ -86,6 +86,11 @@ class RouteRunReport:
     #: rows alone cannot. Every other route answers the simpler question the
     #: executor folds — were ALL of this run's joined fill replies cut.
     cap_owned: bool = False
+    #: Whether a reply carried a function body. None for every route that
+    #: does not answer it. The session route sets it from its own turns:
+    #: false when every reply was a request, notes or empty, true when one
+    #: carried a block, including a block that did not compile.
+    carried_body: bool | None = None
     #: The units the route reported kept left every target body as it was
     #: before the run (whitespace-folded): the reply re-emitted the tree.
     #: Set by the executor, which then records the run as keeping nothing.

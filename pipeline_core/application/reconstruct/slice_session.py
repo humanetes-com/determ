@@ -199,7 +199,8 @@ class SessionOutcome:
     judged_turns: int = 0
     judged_capped_turns: int = 0
     #: Replies that carried at least one function block (a change set the
-    #: session routed, refused, compiled or judged), and request replies.
+    #: session routed, refused, compiled or judged). A request reply is
+    #: not one: it spends no attempt turn and it is not a body.
     answered_turns: int = 0
     requests: int = 0
     #: Minutes from the session's opening (before its baseline suite) to the
@@ -210,6 +211,14 @@ class SessionOutcome:
     #: tests green is still on the tree. Empty when the session did not
     #: revert a gain.
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def carried_body(self) -> bool:
+        """A reply carried a function block, or the session accepted a
+        state. False when the session ran and every reply was a request,
+        notes or empty. The session route writes this onto the ledger
+        row. A row written before the bit is read from its landing."""
+        return self.answered_turns > 0 or self.outcome == "accepted"
 
     @property
     def unanswered(self) -> bool:
@@ -232,8 +241,8 @@ class SessionOutcome:
         next fill's ordering. Run `1430425-193a8f28` (2026-10-14) graded
         such a session FLAT because no reply was capped, and the next
         fill deferred the one-test slice on that test as `rebuy_flat`.
-        Repeated unanswered tries are bounded by the schedule
-        (`UnitService.session_rebuy`), not here."""
+        Repeating an unanswered session does not make it a try; the
+        fill's session cap and the budget bound how often it opens."""
         if self.outcome == "accepted":
             return False
         if self.unanswered:

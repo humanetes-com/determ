@@ -300,7 +300,11 @@ def test_the_executor_opens_each_equal_count_session_once_in_schedule_order(
         def run_one(sl: SessionSlice, clock: RunClock) -> RouteRunReport:
             opened.append(sl.tests)
             clock.may_claim()
-            return RouteRunReport(model_calls=1)
+            # A flat miss is a reply that carried a body and kept nothing.
+            # Leaving the bit unset, with an empty landing, is an unasked
+            # session: both slices would then be never_served and this
+            # order would not reverse.
+            return RouteRunReport(model_calls=1, carried_body=True)
 
         log: list[str] = []
         events: list[tuple[str, dict]] = []
