@@ -1317,11 +1317,12 @@ def carve_rebuys(run: RouteRun, units: UnitService, *,
     its own deferrals since that try are fewer than `readmit_after` (the
     same bounded re-admission the whole run gets). Returns `(run,)` when
     the run is not divisible or nothing splits; otherwise the open piece
-    first and the re-buy piece second, each carrying `parent=run.key`, its
-    own targets, stubs, files and the union of its units' aimed tests. The
-    re-buy piece is ranked, deferred and rowed like any run, so each of
-    its units accrues its own deferrals and is re-admitted on its own
-    count."""
+    first and the re-buy piece second, each carrying the planned run's key
+    as ``parent`` (``run.plan_key``, so a piece of a piece still resolves to
+    the route that planned it), its own targets, stubs, files and the union
+    of its units' aimed tests. The re-buy piece is ranked, deferred and
+    rowed like any run, so each of its units accrues its own deferrals and
+    is re-admitted on its own count."""
     if not run.unit_tests:
         return (run,)
     rebuy: set[FnLocator] = set()
@@ -1345,11 +1346,73 @@ def carve_rebuys(run: RouteRun, units: UnitService, *,
             unit_tests=tuple((t, tests_of.get(t, frozenset()))
                              for t in sorted(targets,
                                              key=lambda u: (u.file, u.fn_name))),
-            bodies_sha="", parent=run.key)
+            bodies_sha="", parent=run.plan_key)
 
     open_part = frozenset(run.targets) - rebuy
     return (_piece(open_part, "unit(s) to try"),
             _piece(frozenset(rebuy), "re-buy unit(s)"))
+
+
+def carve_coverage_split(run: RouteRun, attributed: Collection[FnLocator],
+                         ) -> tuple[RouteRun, ...]:
+    """A coverage-split run whose route writes each target on its own, split
+    into the write the hold has no reason to defer and the extras it does.
+
+    The hold (:func:`_targets_split`, reason ``coverage_split``) is about
+    ORDER: a leftover's attributed write goes before a run that spends the
+    fill on coverage locators in files none of its attributed members
+    occupy. Deferring the RUN for its extras also deferred the attributed
+    units it carried. Run `673664-014fd53a` (2026-10-14, cluster `stable`,
+    a from-scratch climb), fills 2, 3 and 4: the per-fn run held the five
+    constructor stubs that were the first failure of 92 of 97 red tests,
+    and one `src/lib.rs` unit and two `src/ptr.rs` units made it a split.
+    It was deferred behind `impl src/error.rs` and `file src/error.rs`,
+    which reverted those same constructors on compile each fill. When the
+    grace lapsed in fill 5 the per-fn run kept two of them within minutes.
+
+    The pieces follow the split model itself, not a new one. The first
+    piece is the attributed members with the same-file extras, which are
+    that file's installable complement: the table fns a constructor
+    installs ride with it, or its tests first panic in a deferred stub.
+    That piece is not a split, so it ranks and opens like any attributed
+    write. The second piece is the extras in other files. It keeps the
+    planned run's ``target_tests``, so it shares the leftovers with the
+    attributed writes exactly as the whole run did and stays
+    ``coverage_split`` under the unchanged `unpaid_grace` bound.
+
+    Only a route that writes each target on its own (``unit_tests``) can
+    run a subset; a transaction (file, impl, pair, session) is returned
+    whole. Returns ``(run,)`` when the run is not a split or has no
+    attributed member. Both pieces carry ``parent=run.plan_key``."""
+    if not run.unit_tests:
+        return (run,)
+    attr = frozenset(attributed)
+    if not _targets_split(run.targets, run.target_tests, attr):
+        return (run,)
+    held = frozenset(run.targets) & attr
+    if not held:
+        return (run,)
+    files = {loc.file for loc in held}
+    kept = frozenset(t for t in run.targets if t.file in files)
+    extras = frozenset(run.targets) - kept
+    tests_of = dict(run.unit_tests)
+
+    def _piece(targets: frozenset[FnLocator], what: str,
+               target_tests: frozenset[str] | None) -> RouteRun:
+        ordered = sorted(targets, key=lambda u: (u.file, u.fn_name))
+        return replace(
+            run, label=f"{run.label} [{len(targets)} {what}]",
+            targets=targets,
+            stubs_in_targets=run.stubs_in_targets & targets,
+            target_tests=(target_tests if target_tests is not None
+                          else frozenset().union(
+                              *(tests_of.get(t, frozenset()) for t in targets))),
+            files=tuple(sorted({t.file for t in targets})),
+            unit_tests=tuple((t, tests_of.get(t, frozenset())) for t in ordered),
+            bodies_sha="", parent=run.plan_key)
+
+    return (_piece(kept, "attributed unit(s)", None),
+            _piece(extras, "coverage unit(s)", run.target_tests))
 
 
 def release_held(held: Sequence[ScheduledRun],
@@ -1981,8 +2044,11 @@ def schedule(
     cover stage opens the first one (:func:`admit_ranked`).
 
     A run whose route writes each target on its own (``unit_tests``) is
-    ranked by unit: its re-buy units are carved into a run of their own
-    (:func:`carve_rebuys`) and the rest open at their own class. The
+    ranked by unit: a coverage split is carved into its attributed write
+    and its other-file extras (:func:`carve_coverage_split`), so the hold
+    defers the extras and not the attributed units; then its re-buy units
+    are carved into a run of their own (:func:`carve_rebuys`) and the rest
+    open at their own class. The
     carved pieces are stamped with ``bodies_sha`` when given (the
     executor's reader of the targets' bodies), so their ledger rows carry
     the same identity any planned run's would.
@@ -2111,10 +2177,11 @@ def schedule(
 
     carved: list[RouteRun] = []
     for planned in runs:
-        for piece in carve_rebuys(planned, units, readmit_after=readmit_after):
-            if piece.parent and bodies_sha is not None:
-                piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
-            carved.append(piece)
+        for part in carve_coverage_split(planned, attributed):
+            for piece in carve_rebuys(part, units, readmit_after=readmit_after):
+                if piece.parent and bodies_sha is not None:
+                    piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
+                carved.append(piece)
 
     ranked: list[RankedRun] = []
     for run in carved:

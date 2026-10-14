@@ -77,20 +77,26 @@ def test_a_definition_with_no_item_declaration_is_untouched() -> None:
 
 # --- the splice actually applies it -------------------------------------------
 
-def test_the_splice_restores_the_repr_in_the_text_it_writes() -> None:
-    """End-to-end over `_splice_component`: the carry has to reach the file the
-    accept gate compiles, not just the domain helper."""
+def test_the_commit_writes_and_returns_the_carried_repr() -> None:
+    """End-to-end over `_try_commit`: the carry has to reach the file the
+    accept gate compiles AND the text the caller stores (registry, locate
+    keys, authored items). A splice that carried only into the file it wrote
+    left the stores on the model's text, and the cluster-start
+    reconciliation reinstalls a stored definition the live tree does not
+    contain verbatim (`plan_layout_reconciliation`)."""
     from pipeline_core.application.author_layout import (
         AuthorLayoutDeps,
-        _splice_component,
+        _try_commit,
     )
     from pipeline_core.domain.authored_layout import AuthoredItem
+    from pipeline_core.domain.layout_probe import LayoutGate
     from pipeline_core.domain.private_surface import (
         PrivateSurfaceItem,
         SurfaceItemKind,
     )
 
     skeleton = f"pub use anyhow as format_err;\n{_FROZEN_ERROR}\n"
+    written: dict[str, str] = {}
     items = (PrivateSurfaceItem(kind=SurfaceItemKind.PUB_FIELDS, name="Error",
                                 file="src/lib.rs", definition=_FROZEN_ERROR),)
     authored = {"Error": AuthoredItem(
@@ -98,12 +104,16 @@ def test_the_splice_restores_the_repr_in_the_text_it_writes() -> None:
         "pub struct Error {\n    inner: Own<ErrorImpl>,\n}")}
     deps = AuthorLayoutDeps(
         run_model=lambda p: "", read_skeleton=lambda rel: skeleton,
-        write_skeleton=lambda rel, txt: None,
+        write_skeleton=written.__setitem__,
         compile_check=lambda: (True, ""), log=lambda m: None)
 
-    edited, reason = _splice_component(items, authored, deps)
-    assert reason == ""
-    assert "#[repr(transparent)]\npub struct Error {" in edited["src/lib.rs"]
+    tried = _try_commit(items, authored, deps, LayoutGate(), {})
+    assert tried.committed
+    assert "#[repr(transparent)]\npub struct Error {" in written["src/lib.rs"]
+    assert tried.authored["Error"].definition.startswith(
+        "#[repr(transparent)]\npub struct Error {")
+    # The caller's candidate is not the stored text.
+    assert not authored["Error"].definition.startswith("#[repr")
 
 
 def test_contract_line_stays_above_the_carried_repr() -> None:

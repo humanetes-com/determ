@@ -16,13 +16,18 @@ signature, not a whole item, and their bodies belong to the fill loop.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 
 from pipeline_core.application.author_layout import (
     LayoutComponentRecord,
     LayoutOutcome,
 )
 from pipeline_core.application.definition_merge import merge_live_bodies
-from pipeline_core.domain.authored_layout import AuthoredItem, component_uids
+from pipeline_core.domain.authored_layout import (
+    AuthoredItem,
+    carry_stored_definition,
+    component_uids,
+)
 from pipeline_core.domain.private_surface import (
     PrivateSurface,
     PrivateSurfaceItem,
@@ -117,7 +122,14 @@ def plan_layout_reconciliation(
     tree plans zero work and this is a no-op on every normal iteration. The
     locate side is SLICED from the live file — the skeleton's text is what we
     are installing, so it cannot also be what we search for, and an extractor's
-    rendering of it is not the bytes on disk (see `live_definition`)."""
+    rendering of it is not the bytes on disk (see `live_definition`).
+
+    The text matched and installed is the stored definition after
+    `carry_stored_definition`, not the bytes the store happens to hold. A
+    registry written before frozen repr and visibility were carried still has
+    the model's text; matching that text treats a private field as installed
+    and reinstalls it over a tree that had already been spliced with the
+    carried one."""
     plan: dict[str, list[DefReplacement]] = {}
     notes: list[str] = []
     for rec in records:
@@ -131,6 +143,10 @@ def plan_layout_reconciliation(
                 authored = authored_by_uid.get(uid)
                 if not authored:
                     continue
+                # Match and install the carried text. The store may still hold
+                # the model's definition; using that for the span check leaves
+                # a dropped frozen visibility in place for the life of the tree.
+                authored = carry_stored_definition(it, authored)
                 text = read_live(it.file)
                 if text is None:
                     # Never silent: an unreadable path is indistinguishable
@@ -174,6 +190,70 @@ def plan_layout_reconciliation(
                              + (" (live member bodies preserved)"
                                 if merged != authored else ""))
     return plan, notes
+
+
+def carry_registry(
+    surface: PrivateSurface, registry: Mapping[str, AuthoredItem],
+) -> dict[str, AuthoredItem]:
+    """``registry`` with each stored definition carried against the surface.
+
+    Items this surface does not declare are left as stored: another cluster's
+    sync carries those. Unchanged items keep their object, so a caller can
+    tell a rewrite from an identity by comparing definitions."""
+    by_uid = _surface_by_uid(surface)
+    out = dict(registry)
+    for uid, item in registry.items():
+        it = by_uid.get(uid)
+        if it is None:
+            continue
+        text = carry_stored_definition(it, item.definition)
+        if text != item.definition:
+            out[uid] = replace(item, definition=text)
+    return out
+
+
+def carried_locate_keys(
+    surface: PrivateSurface,
+    records: Sequence[LayoutComponentRecord],
+    read_live: Callable[[str], str | None],
+) -> tuple[list[LayoutComponentRecord], bool]:
+    """Records whose locate keys are the carried definition, once that text
+    is what ``read_live`` holds.
+
+    A key is updated only when the file contains the carried definition.
+    Updating a key the skeleton does not hold makes the next re-author miss
+    the item. Fn keys are never carried (they are signatures, not layouts).
+    The bool is whether any key changed."""
+    by_uid = _surface_by_uid(surface)
+    out: list[LayoutComponentRecord] = []
+    changed = False
+    for rec in records:
+        defs: list[tuple[str, str]] = []
+        for uid, stored in rec.defs:
+            it = by_uid.get(uid)
+            text = stored
+            if it is not None:
+                carried = carry_stored_definition(it, stored)
+                live = read_live(it.file)
+                if (live is not None
+                        and find_definition_span(live, carried) is not None):
+                    text = carried
+            if text != stored:
+                changed = True
+            defs.append((uid, text))
+        out.append(LayoutComponentRecord(
+            names=rec.names, outcome=rec.outcome, defs=tuple(defs)))
+    return out, changed
+
+
+def _surface_by_uid(
+    surface: PrivateSurface,
+) -> dict[str, PrivateSurfaceItem]:
+    out: dict[str, PrivateSurfaceItem] = {}
+    for comp in surface.components:
+        for uid, it in zip(component_uids(comp), comp, strict=True):
+            out[uid] = it
+    return out
 
 
 def live_definition(text: str, item: PrivateSurfaceItem) -> str | None:

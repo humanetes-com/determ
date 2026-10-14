@@ -14,14 +14,14 @@ pure orchestration over domain VOs.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
     AuthoredItem,
     adopt_component,
     authored_locate_keys,
-    carry_frozen_repr,
+    carry_frozen_facts,
     component_uids,
     definition_replacements,
     layout_regressions,
@@ -224,18 +224,9 @@ def _splice_component(
     a missing block, an unreadable file and a locate miss are three different
     bugs and collapsing them into one message hides which one is happening."""
     filled = deps.filled_bodies() if deps.filled_bodies is not None else ""
-    # A dropped `#[repr(...)]` is not a layout choice — see `carry_frozen_repr`
-    # for the sweep it cost. Restored BEFORE the checks below so everything
-    # downstream (contract check, member eviction, the replacement plan) reads
-    # the text that will actually be spliced.
-    authored = dict(authored)
-    for uid, it in zip(component_uids(items), items, strict=True):
-        block = authored.get(uid)
-        if block is None:
-            continue
-        carried = carry_frozen_repr(it.definition, block.definition)
-        if carried != block.definition:
-            authored[uid] = replace(block, definition=carried)
+    # `authored` is already carried (`carry_frozen_facts`, applied once in
+    # `_try_commit`), so every check below reads the text that is spliced
+    # AND stored.
     if deps.guard_replaced_layout:
         for uid, it in zip(component_uids(items), items, strict=True):
             block = authored.get(uid)
@@ -450,10 +441,11 @@ def author_layout(
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: adopted the "
                          "layout already fixed by an earlier cluster "
                          "(no model call).")
+                kept = dict(tried.authored)
                 results.append(ComponentResult(
                     names, True, "",
-                    authored_defs=authored_locate_keys(comp, adopted),
-                    authored_items=tuple((u, adopted[u]) for u in uids),
+                    authored_defs=authored_locate_keys(comp, kept),
+                    authored_items=tuple((u, kept[u]) for u in uids),
                     adopted=True))
                 continue
             # Two failures wear one message otherwise, and they call for
@@ -555,9 +547,10 @@ def author_layout(
             gate = _gate_after(gate, tried)
             if tried.committed:
                 committed = True
-                committed_defs = authored_locate_keys(comp, authored)
-                committed_items = tuple((u, authored[u]) for u in uids
-                                       if u in authored)
+                kept = dict(tried.authored)
+                committed_defs = authored_locate_keys(comp, kept)
+                committed_items = tuple((u, kept[u]) for u in uids
+                                       if u in kept)
                 pin_note = _verified_note(gate)
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).{pin_note}")
@@ -677,6 +670,12 @@ class CommitAttempt:
     reason: str = ""
     errors: str = ""
     probe_dropped: bool = False
+    #: The candidate with the crate's frozen facts carried
+    #: (`carry_frozen_facts`): the text that was spliced. A committed
+    #: layout is stored from this, never from the candidate the caller
+    #: passed in, so the registry, the locate keys and the skeleton hold one
+    #: text.
+    authored: Mapping[str, AuthoredItem] = field(default_factory=dict)
 
 
 def _try_commit(
@@ -692,9 +691,10 @@ def _try_commit(
     sequence is how one path ends up skipping the pin probe or leaking a failed
     candidate into the tree.
     """
+    authored = carry_frozen_facts(items, authored)
     edited, splice_err = _splice_component(items, authored, deps)
     if splice_err:
-        return CommitAttempt(False, splice_err)
+        return CommitAttempt(False, splice_err, authored=authored)
     for rel, txt in edited.items():
         deps.write_skeleton(rel, txt)
     # The probes ride along with THIS compile: a layout that no longer satisfies
@@ -732,7 +732,8 @@ def _try_commit(
                  "reach, not a layout violation; this candidate was decided "
                  f"without it ({'compiles' if compiled else 'still refused'}).")
     if compiled:
-        return CommitAttempt(True, probe_dropped=probe_dropped)
+        return CommitAttempt(True, probe_dropped=probe_dropped,
+                             authored=authored)
     for rel, orig in pristine.items():
         if orig is not None:
             deps.write_skeleton(rel, orig)
@@ -740,7 +741,7 @@ def _try_commit(
         False,
         ("authored scaffold did not compile:\n" + errors
          if errors else "authored scaffold did not compile"),
-        errors, probe_dropped)
+        errors, probe_dropped, authored)
 
 
 def _public_anchors(

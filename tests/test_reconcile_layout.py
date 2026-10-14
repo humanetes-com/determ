@@ -375,3 +375,57 @@ def test_a_filled_member_body_is_not_a_superseded_definition() -> None:
     (rep,) = plan["kind.rs"]
     once = ("pub struct Tag;\n" + _TAG_FILLED_DECL + "\n").replace(rep.old, rep.new)
     assert once.count("/// Picks") == 1 and _tag_plan(once)[0] == {}
+
+
+# --- a stored definition that dropped a frozen field visibility ---------------
+# The registry keeps the first text `setdefault` stored. Reconciliation used
+# to match that text, so a live file that still held it planned nothing and
+# the private field stayed private. The install matches the carried text.
+
+_FROZEN_WRAP = "#[repr(transparent)]\npub struct Wrap<M>(pub M);"
+_STORED_WRAP = ("/// Holds the payload.\n"
+                "#[repr(transparent)]\npub struct Wrap<M>(M);")
+
+
+def _wrap_surface():
+    return classify_private_surface([
+        TypeRecord(file="wrap.rs", kind="struct", name="Wrap", is_pub=False,
+                   definition=_FROZEN_WRAP),
+    ], [], cfg_cluster="stable")
+
+
+def _wrap_record():
+    surface = _wrap_surface()
+    comp = next(iter(surface.components))
+    return surface, LayoutComponentRecord(
+        frozenset(i.name for i in comp), LayoutOutcome.AUTHORED,
+        tuple((uid, _STORED_WRAP) for uid in component_uids(comp)))
+
+
+def test_a_stored_private_field_is_reinstalled_at_its_frozen_visibility():
+    """The live file holds the stored definition, so a match on the stored
+    text plans nothing. The carried text is what gets installed, and the
+    same stored row against that installed text plans nothing — the private
+    field is not put back."""
+    surface, rec = _wrap_record()
+    plan, notes = plan_layout_reconciliation(
+        surface, [rec], lambda rel: _STORED_WRAP + "\n")
+    assert "wrap.rs" in plan, notes
+    (rep,) = plan["wrap.rs"]
+    assert "(pub M);" in rep.new and "(M);" not in rep.new
+    assert any("superseded" in n for n in notes)
+    again, _ = plan_layout_reconciliation(
+        surface, [rec], lambda rel: rep.new + "\n")
+    assert again == {}
+
+
+def test_without_the_carry_the_stored_private_field_stays_installed(monkeypatch):
+    """Negative control: identity carry is the pre-fix match. The live file
+    holds the stored text, so the plan is empty and the private field stays."""
+    import pipeline_core.application.reconcile_layout as mod
+    monkeypatch.setattr(
+        mod, "carry_stored_definition", lambda item, stored: stored)
+    surface, rec = _wrap_record()
+    plan, _notes = plan_layout_reconciliation(
+        surface, [rec], lambda rel: _STORED_WRAP + "\n")
+    assert plan == {}

@@ -32,6 +32,8 @@ from ...application.author_layout import (
 )
 from ...application.reconcile_layout import (
     adopt_registry_definitions,
+    carried_locate_keys,
+    carry_registry,
     plan_layout_reconciliation,
 )
 from ...application.reconstruct.fill_merge import backfill_stub_bodies
@@ -1078,6 +1080,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # The layout store is per cluster; the crate is not. Optional — omitted, a
     # cluster's own record stands, which is the pre-registry behaviour.
     layout_registry: Any = None
+    # `project_dir, registry -> path`. Writes the carried registry back.
+    # None: the in-memory carry still installs, and the file stays as stored.
+    save_layout_registry: Any = None
+    # `project_dir, cluster_name, records -> path`. Writes locate keys back
+    # once the skeleton holds the carried definition. None: keys stay stored.
+    save_layout_records: Any = None
     # `project_dir -> ReferenceMeasurement | None`: the original crate's verdict
     # vector, the same floor task2a closes a cluster on and task3 passes one
     # on. Omitted, the post-merge per-cluster sweep keeps the absolute rule.
@@ -1095,6 +1103,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
         """Reinstall every AUTHORED layout definition the live tree is missing.
         Silent no-op on a healthy tree (nothing is superseded), so this reads a
         handful of files per cluster start and never rewrites a filled body.
+
+        The definition matched and installed is the stored text with frozen
+        repr and visibility carried. When the filled tree keeps that text, it
+        is written back into the registry, the locate keys and the skeleton.
+        ``setdefault`` does not replace an entry already stored, so a registry
+        written before the carry existed would otherwise be reinstalled, and
+        the next seed would copy it out of the skeleton, for the life of the
+        tree. A reinstall the compile gate rolls back is not written back.
 
         DONOR clusters' authored definitions count too, and that is not a
         convenience — it is what makes the cross-cluster body seed sound. Bodies
@@ -1172,6 +1188,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if _streak.green_reverts:
                 self._save_reinstall_streak(project_dir, cluster,
                                             _streak.cleared())
+            # The filled tree already holds the carried text. The stores and
+            # the skeleton may still hold the model's — that is what a later
+            # seed and a raw compare would put back.
+            self._rewrite_stored_layout(
+                tag, project_dir, cluster, surface, own_records, skeleton_dir)
             return
         _stale_after = int(os.getenv("LAYOUT_SYNC_STALE_AFTER",
                                      str(DEFAULT_STALE_AFTER)))
@@ -1246,6 +1267,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if _streak.green_reverts:
                 self._save_reinstall_streak(project_dir, cluster,
                                             _streak.cleared())
+            self._rewrite_stored_layout(
+                tag, project_dir, cluster, surface, own_records, skeleton_dir)
             return
         if _rc_before != 0:
             # The rollback rule below cannot judge a reinstall on a tree that
@@ -1266,6 +1289,8 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # test files are the oracle (never rewritten) and, for a lib that
             # does not build, cascades that repairing the lib removes.
             _txn.commit()
+            self._rewrite_stored_layout(
+                tag, project_dir, cluster, surface, own_records, skeleton_dir)
             self._restub_after_reinstall(
                 tag, filled_dir, skeleton_dir, project_dir, cluster,
                 _check, _env, _rc_after, _out_after, _diags_after)
@@ -1295,6 +1320,78 @@ class StaticSkeletonTask2Generator(Task2Generator):
             "definitions": sum(len(v) for v in plan.values()),
             "green_reverts": _streak.green_reverts,
         })
+
+    def _rewrite_stored_layout(
+        self, tag: str, project_dir: Path, cluster: Any, surface: Any,
+        records: Sequence[Any], skeleton_dir: Path | None,
+    ) -> None:
+        """Persist the carried definition into the skeleton, the locate keys
+        and the registry. The filled tree already holds it (the reinstall
+        committed, or the file already matched). A green-tree rollback does
+        not call this: the carried text did not compile, and storing it would
+        make the registry the side the staleness streak then refuses.
+
+        The skeleton is updated first, and a locate key moves only once that
+        file contains the carried definition. The registry is the crate-wide
+        copy ``setdefault`` will not replace, so it is rewritten whenever the
+        carry changes an entry, including one the skeleton does not hold —
+        the next cluster start installs from it."""
+        save_reg = getattr(self, "save_layout_registry", None)
+        save_recs = getattr(self, "save_layout_records", None)
+        if (skeleton_dir is None and save_reg is None and save_recs is None
+                and self.layout_registry is None):
+            return
+        skel_files = 0
+        read_skel: Callable[[str], str | None] | None = None
+        if skeleton_dir is not None:
+            skel_src = skeleton_dir / "src"
+            if skel_src.is_dir():
+                read_skel = lambda rel: _read_text(skel_src / rel)  # noqa: E731
+                skel_plan, skel_notes = plan_layout_reconciliation(
+                    surface, records, read_skel)
+                for n in skel_notes:
+                    self.tel.log(f"  {tag} [layout-sync] skeleton: {n}")
+                if skel_plan:
+                    _structure = getattr(self, "structure", None)
+                    _txn = TreeTxn(skel_src, validate_parse=(
+                        _structure.parse_ok if _structure is not None else None))
+                    apply_to_tree = self.layout_sync[2]
+                    written, err = apply_to_tree(skel_plan, _txn)
+                    _pv = _txn.verify()
+                    if err or not _pv.ok:
+                        _txn.rollback()
+                        self.tel.log(
+                            f"  {tag} [layout-sync] skeleton carry NOT kept"
+                            + (f" ({err})" if err else "")
+                            + (f" ({_pv.reason})" if not _pv.ok else ""))
+                    else:
+                        _txn.commit()
+                        skel_files = written
+        n_reg = 0
+        if self.layout_registry is not None and save_reg is not None:
+            reg = self.layout_registry(project_dir)
+            carried = carry_registry(surface, reg)
+            n_reg = sum(
+                1 for uid, item in carried.items()
+                if uid not in reg or item.definition != reg[uid].definition)
+            if n_reg:
+                save_reg(project_dir, carried)
+        n_keys = 0
+        if save_recs is not None and read_skel is not None:
+            updated, changed = carried_locate_keys(
+                surface, records, read_skel)
+            if changed:
+                save_recs(project_dir, getattr(cluster, "name", ""), updated)
+                n_keys = sum(
+                    1 for old, new in zip(records, updated, strict=True)
+                    for (_ou, od), (_nu, nd) in zip(
+                        old.defs, new.defs, strict=True)
+                    if od != nd)
+        if n_reg or skel_files or n_keys:
+            self.tel.log(
+                f"  {tag} [layout-sync] carried frozen facts into the stored "
+                f"layout — registry {n_reg}, skeleton file(s) {skel_files}, "
+                f"locate key(s) {n_keys}")
 
     @staticmethod
     def _reinstall_streak_path(project_dir: Path, cluster: Any) -> Path:

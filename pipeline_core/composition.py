@@ -186,9 +186,15 @@ from pipeline_core.adapters.held_out_store import (
     save_held_out,
     scratch_tree,
 )
-from pipeline_core.adapters.layout_outcome_store import load_layout_records
+from pipeline_core.adapters.layout_outcome_store import (
+    load_layout_records,
+    save_layout_records,
+)
 from pipeline_core.adapters.layout_registry_store import (
     load_registry as load_layout_registry,
+)
+from pipeline_core.adapters.layout_registry_store import (
+    save_registry as save_layout_registry,
 )
 from pipeline_core.adapters.layout_tree_splice import apply_layout_to_tree
 from pipeline_core.adapters.model_conformance import (
@@ -2346,6 +2352,8 @@ def build_app(
             layout_sync=(load_private_surface, load_layout_records,
                          apply_layout_to_tree),
             layout_registry=load_layout_registry,
+            save_layout_registry=save_layout_registry,
+            save_layout_records=save_layout_records,
             reference_measurement=_reference,
             agreement=_measure_agreement,
             blueprint_deps=BlueprintDeps(

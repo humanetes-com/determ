@@ -1640,8 +1640,9 @@ class _PerFnRoute:
         eng = self._engine
         kw = dict(self._kw)
         if run.parent:
-            # A carved run: the schedule deferred the rest of the planned
-            # targets as re-buys. The passes write only what this run holds.
+            # A carved run: the schedule split the planned targets (re-buys,
+            # or a coverage split's attributed write and its other-file
+            # extras). The passes write only what this run holds.
             kw["tdd_frontier_keys"] = set(run.targets)
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])

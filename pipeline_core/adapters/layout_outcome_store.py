@@ -13,6 +13,7 @@ cfg-cluster mirrors the skeleton's per-cluster layout, matching
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from pipeline_core.application.author_layout import (
@@ -77,6 +78,20 @@ def update_layout_outcome(
     if not replaced:
         rows.append(new_row)
     p.write_text(json.dumps(rows, indent=2, sort_keys=True), encoding="utf-8")
+    return p
+
+
+def save_layout_records(
+    project_dir: Path, cfg_cluster: str,
+    records: Sequence[LayoutComponentRecord],
+) -> Path:
+    """Rewrite a cluster's outcome rows. The caller passes the full list:
+    this replaces the file, it does not merge by uid. Used when a stored
+    locate key has to become the carried definition the skeleton now holds."""
+    p = _outcomes_path(project_dir, cfg_cluster)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = [_row(r.names, r.outcome, r.defs) for r in records]
+    p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     return p
 
 

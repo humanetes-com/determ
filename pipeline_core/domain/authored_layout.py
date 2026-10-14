@@ -19,8 +19,9 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from pipeline_core.domain.frozen_visibility import carry_frozen_visibility
 from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.private_surface import (
     PrivateSurfaceItem,
@@ -182,6 +183,64 @@ def carry_frozen_repr(frozen: str, authored: str) -> str:
     indent = decl.group(1)
     carried = "".join(f"{indent}{a.strip()}\n" for a in attrs)
     return authored[:decl.start()] + carried + authored[decl.start():]
+
+
+def carry_frozen_facts(
+    items: tuple[PrivateSurfaceItem, ...], authored: Mapping[str, AuthoredItem],
+) -> dict[str, AuthoredItem]:
+    """``authored`` (keyed by protocol uid) with the facts of the crate that
+    are not layout choices put back: the frozen ``#[repr(...)]``
+    (:func:`carry_frozen_repr`) and the frozen module-external visibility
+    (:func:`frozen_visibility.carry_frozen_visibility`).
+
+    This dict is the ONE text every consumer of a committed layout stores:
+    the splice writes it, and the registry, the layout store's locate keys and
+    the component's authored items are built from it. Carrying only inside
+    the splice left those stores on the model's text, and the cluster-start
+    reconciliation reinstalls a stored definition the live tree does not
+    contain verbatim.
+
+    A definition stored before this carry ran is not rewritten by
+    ``setdefault`` (the first cluster to reach a uid wins). Readers of an
+    already-stored definition go through :func:`carry_stored_definition`,
+    which is this function on one item, so the match, the install and the
+    store share the carried text.
+
+    ``PUB_FIELDS`` items are not given visibility: their frozen fields are
+    elided (there is nothing to carry), and `_public_contract_broken` refuses
+    a field turned ``pub`` on a public type."""
+    out = dict(authored)
+    for uid, it in zip(component_uids(items), items, strict=True):
+        block = out.get(uid)
+        if block is None:
+            continue
+        text = _carry_item(it, block.definition)
+        if text != block.definition:
+            out[uid] = replace(block, definition=text)
+    return out
+
+
+def carry_stored_definition(item: PrivateSurfaceItem, stored: str) -> str:
+    """``stored`` with this item's frozen repr and visibility carried.
+
+    The text a match, an install and a store share. An entry already in the
+    registry stays there (``setdefault`` does not replace it), and the
+    cluster-start reconciliation used to treat that stored text as installed
+    whenever the live file still contained it — a field the frozen definition
+    exposed outside its module stayed private for the life of the tree, and
+    the next seed copied it back out of the skeleton. Fn items are returned
+    unchanged: their stored key is a signature the fill loop rewrites, and
+    reconciliation does not reinstall them."""
+    if item.kind is SurfaceItemKind.FN_SIG:
+        return stored
+    return _carry_item(item, stored)
+
+
+def _carry_item(item: PrivateSurfaceItem, stored: str) -> str:
+    text = carry_frozen_repr(item.definition, stored)
+    if item.kind is not SurfaceItemKind.PUB_FIELDS:
+        text = carry_frozen_visibility(item.definition, text)
+    return text
 
 
 def derive_traits(definition: str) -> frozenset[str]:
