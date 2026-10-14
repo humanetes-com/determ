@@ -6294,7 +6294,11 @@ def prepare_impl_fill(
                     cluster_name=cluster_name, slice_=_sl, records=_records,
                     turn0=_turn0, max_turns=_max_turns, max_minutes=_max_minutes,
                     max_transcript_chars=int(deps.single_call_char_limit or 0),
-                    all_records=list(_all_recs.values()), executed=_slices)
+                    all_records=list(_all_recs.values()), executed=_slices,
+                    # The answerer serves `_max_pulls_session` pulls and one
+                    # refusal notice; that many request replies spend no
+                    # attempt turn.
+                    request_allowance=_max_pulls_session + 1)
             attempts.note_dispatched(
                 locator_of(u) for u in (_out.dispatched | _out.kept))
             attempts.note_reverted(locator_of(u) for u in _out.reverted)
@@ -6312,7 +6316,16 @@ def prepare_impl_fill(
             # full-revert session spent GPU and left the tree as it was —
             # the pair and per-fn routes still have a shot this call.
             served |= {locator_of(u) for u in _out.kept}
-            if _out.unmeasured:
+            if _out.unmeasured and _out.unanswered and not _out.capped_turns:
+                # No reply carried a body: the model was asked and wrote
+                # nothing (requests, notes, an empty reply). The slice was
+                # not tried, so the row is not a re-buy; the schedule bounds
+                # repeated unanswered tries on the same test.
+                _log(f"  [phase-c/session] {_sl.label()}: {_out.model_calls} "
+                     f"call(s), {_out.requests} request(s), no reply carried a "
+                     "body — graded UNMEASURED, not a re-buy.")
+                _cls(FillOutcomeClass.DECLINED, _sid, "session")
+            elif _out.unmeasured:
                 # Every landing (if any) came from a reasoning-capped reply:
                 # an answer the cap dropped, not a measured refusal. The
                 # class and the route row say so; the next schedule ranks

@@ -550,3 +550,22 @@ def test_c13_the_recorded_collapse_warns_at_fill_six_and_not_at_fill_five() -> N
     short = [(1, 65, 6), (2, 87, 3), (3, 20, 0)]
     assert check_fill_yield(RunData(events=_yield_events(short, 3))).status == "PASS"
     assert check_fill_yield(RunData(events=[])).status == "SKIP"
+
+
+def test_the_plateau_warning_names_the_score_that_repeated(tmp_path: Path) -> None:
+    """Run `1430425-193a8f28` (2026-10-14): 47, 47, 47, 49, 101, 124, 126,
+    and every report from iteration 5 on warned `3 consecutive iterations at
+    pass=126`. The plan's sentence: the warning names the repeated score and
+    where it ended, and a later different score ends the warning. Negative
+    control: the series that still ends on its plateau warns, at that score."""
+    climbed = [_tdd(f"2026-10-14T0{i}:00:00", "stable", i, c)
+               for i, c in enumerate([47, 47, 47, 49, 101, 124, 126], start=1)]
+    ev, pdir, lg = _write_run(tmp_path, climbed)
+    vs = {v.check: v for v in flow_audit.audit(ev, pdir, lg, None, "", 3)}
+    assert vs["C4 plateau"].status == "PASS"
+    assert "earlier plateau: 3x pass=47 ending iter 3" in vs["C4 plateau"].evidence
+    stuck = climbed[:3]
+    ev2, pdir2, lg2 = _write_run(tmp_path / "stuck", stuck)
+    vs2 = {v.check: v for v in flow_audit.audit(ev2, pdir2, lg2, None, "", 3)}
+    assert vs2["C4 plateau"].status == "WARN"
+    assert "pass=47 through iter 3" in vs2["C4 plateau"].evidence

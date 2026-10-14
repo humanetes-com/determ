@@ -198,6 +198,10 @@ class SessionOutcome:
     #: forced completion's guess).
     judged_turns: int = 0
     judged_capped_turns: int = 0
+    #: Replies that carried at least one function block (a change set the
+    #: session routed, refused, compiled or judged), and request replies.
+    answered_turns: int = 0
+    requests: int = 0
     #: Minutes from the session's opening (before its baseline suite) to the
     #: end of its first turn; None when no turn made a call. The fill
     #: schedule prices the first turn apart from the turns after it.
@@ -208,14 +212,32 @@ class SessionOutcome:
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
 
     @property
+    def unanswered(self) -> bool:
+        """The model was asked and no reply carried a function block: the
+        session ended on requests, on notes, on an empty or a capped reply.
+        Nothing was written, so nothing about the slice was tried. A reply
+        whose bodies did not compile, or were refused by routing, IS an
+        answer and is graded like any other."""
+        return (self.outcome != "accepted" and self.model_calls > 0
+                and self.answered_turns == 0)
+
+    @property
     def unmeasured(self) -> bool:
-        """The session measured nothing it can be graded on: every judged
-        landing came from a reasoning-capped reply, or no turn was judged
-        and every reply was capped. A truncated call is not a measured
-        refusal (the batch routes' rule for an escalated rewrite), so such
-        a session is not a FLAT re-buy for the next fill's ordering."""
+        """The session measured nothing it can be graded on: no reply
+        carried a body (:attr:`unanswered`), or every judged landing came
+        from a reasoning-capped reply, or no turn was judged and every reply
+        was capped. A truncated call is not a measured refusal (the batch
+        routes' rule for an escalated rewrite), and a session that wrote
+        nothing did not try the slice, so neither is a FLAT re-buy for the
+        next fill's ordering. Run `1430425-193a8f28` (2026-10-14) graded
+        such a session FLAT because no reply was capped, and the next
+        fill deferred the one-test slice on that test as `rebuy_flat`.
+        Repeated unanswered tries are bounded by the schedule
+        (`UnitService.session_rebuy`), not here."""
         if self.outcome == "accepted":
             return False
+        if self.unanswered:
+            return True
         uncapped_judged = self.judged_turns - self.judged_capped_turns
         if uncapped_judged > 0 or not self.capped_turns:
             return False
@@ -333,6 +355,7 @@ def run_slice_session(
     end_on_keepable: bool = True,
     all_records: Sequence[FnRecord] = (),
     executed: Mapping[str, Collection[FnSite]] | None = None,
+    request_allowance: int = 0,
 ) -> SessionOutcome:
     """Run one session and leave the tree in its accepted, kept, or
     restored state. Never raises on a model or splice failure; a graceful
@@ -370,7 +393,23 @@ def run_slice_session(
     `executed` (test -> the units it executes, the map the slice was planned
     from) is the session's attribution: a body that ignores a declared input
     is kept only when a test executing THAT unit turned green on the turn.
-    None attributes nothing, so such a body is never vouched."""
+    None attributes nothing, so such a body is never vouched.
+
+    `request_allowance` is how many request replies (context pulls answered
+    by `ports.answer_pulls`) the session takes without spending a turn of
+    `max_turns`. The turn budget bounds attempts: change sets judged,
+    refused or failing to compile. Charging retrieval to it let a session
+    end before its first attempt: run `1430425-193a8f28` (2026-10-14,
+    cluster `stable`, fill 6) opened a one-test session with the failing
+    test's unit editable, and its replies 1-7 were request tags, four of
+    them for a file already in its prompt; reply 8, told one turn was
+    left, was deliberation and notes with no body, and the session ended
+    with zero judged turns. Requests are already bounded by the answerer's
+    own round-trip budget (it answers `max_pulls` and refuses once, then
+    returns None); the allowance is the caller's statement of that bound,
+    and a request past it is charged as a turn so the loop terminates
+    whatever the answerer does. 0 charges every request, the behaviour
+    before, and is the negative control."""
     label = slice_.label()
     files = list(slice_.files)
     # The write set starts as the planned slice and may grow when a FILE
@@ -407,8 +446,9 @@ def run_slice_session(
 
     # The session's transcript is a `UnitConversation`, the engine every
     # fill route talks through. The session keeps its own request handling
-    # (a request is a counted turn that may admit units), so it sends plain
-    # turns (`say`); the engine owns the transcript and its bound.
+    # (a request may admit units, and past `request_allowance` it is a
+    # counted turn), so it sends plain turns (`say`); the engine owns the
+    # transcript and its bound.
     conv = UnitConversation(
         ConversationPorts(ask_turns=ports.ask_turns, log=ports.log,
                           emit=ports.emit,
@@ -451,6 +491,8 @@ def run_slice_session(
     capped_turns = 0
     judged_turns = 0
     judged_capped = 0
+    answered_turns = 0
+    requests = 0
 
     def _restore(pre_images: Mapping[str, PreImage]) -> None:
         for pre in pre_images.values():
@@ -579,7 +621,6 @@ def run_slice_session(
                           f"{turns + 1}: {exc}")
                 turns += 1
                 break
-            turns += 1
             model_calls += 1
             turn_notes = extract_notes(reply)
             if turn_notes:
@@ -588,20 +629,34 @@ def run_slice_session(
             cap = _reply_capped()
             if cap is not None and cap.capped:
                 capped_turns += 1
+            followup = (ports.answer_pulls(reply, conversation=conv.text())
+                        if not parsed else None)
+            if followup:
+                # A request is retrieval, not an attempt: within the
+                # allowance it spends no turn, so the budget line keeps
+                # counting the change sets the session may still try. Past
+                # the allowance it is charged as a turn, which is what
+                # bounds a session whose answerer never stops answering.
+                requests += 1
+                charged = requests > request_allowance
+                if charged:
+                    turns += 1
+                admitted = _admit_from_file_requests(
+                    reply, records, all_records, files, baseline_texts,
+                    baseline_bodies, target_src_dir, ports)
+                if admitted:
+                    followup += render_admitted_units(admitted)
+                ports.emit("phase_c.session.turn", data={
+                    "cluster": cluster_name, "turn": turns, "kind": "request",
+                    "request": requests, "charged": charged,
+                    "admitted": [site_payload(record_site(r))
+                                 for r in admitted]})
+                pending = followup + "\n" + render_budget_turn(max_turns - turns)
+                continue
+            turns += 1
+            if parsed:
+                answered_turns += 1
             if not parsed:
-                followup = ports.answer_pulls(reply, conversation=conv.text())
-                if followup:
-                    admitted = _admit_from_file_requests(
-                        reply, records, all_records, files, baseline_texts,
-                        baseline_bodies, target_src_dir, ports)
-                    if admitted:
-                        followup += render_admitted_units(admitted)
-                    ports.emit("phase_c.session.turn", data={
-                        "cluster": cluster_name, "turn": turns, "kind": "request",
-                        "admitted": [site_payload(record_site(r))
-                                     for r in admitted]})
-                    pending = followup + "\n" + render_budget_turn(max_turns - turns)
-                    continue
                 if cap is not None and cap.empty_after_cap:
                     # The reply was cut by the reasoning cap before it
                     # decided anything and its forced completion salvaged
@@ -916,6 +971,7 @@ def run_slice_session(
         preferred_turn=best.turn if best is not None else None,
         restored_turns=restored_turns, capped_turns=capped_turns,
         judged_turns=judged_turns, judged_capped_turns=judged_capped,
+        answered_turns=answered_turns, requests=requests,
         first_turn_minutes=first_turn_minutes,
         candidate_bodies=_candidate_bodies)
     ports.emit("phase_c.session.end", data={
@@ -928,6 +984,8 @@ def run_slice_session(
         "restored_turns": restored_turns,
         "capped_turns": capped_turns, "judged_turns": judged_turns,
         "judged_capped_turns": judged_capped, "unmeasured": result.unmeasured,
+        "answered_turns": answered_turns, "requests": requests,
+        "unanswered": result.unanswered,
         "first_turn_minutes": (round(first_turn_minutes, 3)
                                if first_turn_minutes is not None else None)})
     ports.log(f"  [phase-c/session] {label}: {outcome.upper()} after {turns} turn(s) "

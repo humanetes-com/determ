@@ -969,7 +969,8 @@ class UnitService:
 
     def __init__(self, rows: Iterable[RouteLedgerRow], oracle_fp: str, *,
                  session_min_turns: int = 0,
-                 evidence: UnitEvidence | None = None) -> None:
+                 evidence: UnitEvidence | None = None,
+                 unanswered_bound: int = DEFAULT_UNPAID_GRACE) -> None:
         self._opened: dict[FnLocator, list[RouteLedgerRow]] = {}
         self._deferred: dict[FnLocator, list[RouteLedgerRow]] = {}
         # Every opened row under the oracle in ledger order, and the session
@@ -978,6 +979,11 @@ class UnitService:
         self._opened_rows: list[RouteLedgerRow] = []
         self._sessions: list[RouteLedgerRow] = []
         self._sessions_deferred: list[RouteLedgerRow] = []
+        # Session tries in ledger order, the UNMEASURED ones included: an
+        # unmeasured try is no verdict on the slice, but a run of them on
+        # the same test is what `session_rebuy` bounds.
+        self._session_tries: list[RouteLedgerRow] = []
+        self._unanswered_bound = unanswered_bound
         self._min_turns = session_min_turns
         self._evidence = evidence
         rows = list(rows)
@@ -990,6 +996,10 @@ class UnitService:
                           RunOutcome.EMPTY, RunOutcome.STOPPED,
                           RunOutcome.UNMEASURED)
                       else None)
+            if r.kind is RouteKind.SESSION and (
+                    bucket is self._opened
+                    or r.outcome is RunOutcome.UNMEASURED):
+                self._session_tries.append(r)
             if bucket is None:
                 continue
             if bucket is self._opened:
@@ -1075,12 +1085,37 @@ class UnitService:
         route has opened, riding on tests that already have the row, is
         the re-buy. Deferrals are the session deferrals aimed at the test
         since that row, the least over the tests, for the bounded
-        re-admission."""
+        re-admission.
+
+        An UNMEASURED try (every reply reasoning-capped, or no reply carried
+        a body) is no verdict, so it never hides or replaces the latest
+        graded row. But `unanswered_bound` of them in a row, as a test's
+        latest session tries, are graded together as one unpaid try: the
+        route was offered that many times and never answered. Without the
+        bound an unmeasured row ranks the next slice ``never_served`` at
+        full weight on every fill (`_ledger_rank`), so a test whose sessions
+        never produce a body would re-open one every fill. 0 disables the
+        bound."""
         if run.kind is not RouteKind.SESSION or not run.target_tests:
             return None
         worst = _RANK_PAYING
         deferrals: list[int] = []
         for t in run.target_tests:
+            tries = [r for r in self._session_tries if t in r.target_tests]
+            streak = 0
+            for r in reversed(tries):
+                if r.outcome is not RunOutcome.UNMEASURED:
+                    break
+                streak += 1
+            if self._unanswered_bound > 0 and streak >= self._unanswered_bound:
+                if any(row_paid_test(r, t) for r in self._opened_rows
+                       if r.started > tries[-1].started):
+                    return None
+                worst = max(worst, _RANK_REBUY_FLAT)
+                deferrals.append(sum(
+                    1 for d in self._sessions_deferred
+                    if t in d.target_tests and d.started >= tries[-1].started))
+                continue
             mine = [r for r in self._sessions if t in r.target_tests]
             if not mine:
                 return None
@@ -2163,7 +2198,8 @@ def schedule(
     # oracle are still a new try, not a served one.
     units = UnitService(rows_list, oracle_fp,
                         session_min_turns=session_min_turns,
-                        evidence=unit_evidence)
+                        evidence=unit_evidence,
+                        unanswered_bound=unpaid_grace)
     blockers = Blockers.of(hollow, crash_blamed)
 
     # Routes whose schedule exemptions have lapsed: graded `unpaid_grace`

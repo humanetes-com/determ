@@ -302,25 +302,44 @@ def check_floor_monotonicity(run: RunData) -> Verdict:
 
 
 def check_plateau(run: RunData, plateau_n: int) -> Verdict:
-    """Per loop; WARN on the first loop whose series repeats a score
-    `plateau_n` times in a row."""
+    """Per loop; WARN while the series ENDS on `plateau_n` or more equal
+    scores in a row, naming that score and the iteration the run of it
+    reached. A plateau the series has since climbed out of is history, not
+    a warning: the PASS line names it.
+
+    The check used to warn on the longest equal run anywhere in the series
+    and print the latest score as the one that repeated. Run
+    `1430425-193a8f28` (2026-10-14, cluster `stable`): the series was 47,
+    47, 47, 49, 101, 124, 126, and every periodic report from iteration 5
+    on printed `3 consecutive iterations at pass=126 — repair is not
+    advancing`, a score that had occurred once, about a lock broken four
+    iterations earlier."""
     by_loop = iteration_series_by_loop(run)
-    checkable = {k: [c for _, _, c in v] for k, v in by_loop.items()
-                 if len(v) >= plateau_n}
+    checkable = {k: v for k, v in by_loop.items() if len(v) >= plateau_n}
     if not checkable:
         return Verdict("C4 plateau", SKIP, f"fewer than {plateau_n} iterations")
     advancing: list[str] = []
-    for key, series in sorted(checkable.items()):
-        streak, worst = 1, 1
-        for prev, cur in zip(series, series[1:], strict=False):
-            streak = streak + 1 if cur == prev else 1
-            worst = max(worst, streak)
-        if worst >= plateau_n:
+    for key, rows in sorted(checkable.items()):
+        series = [c for _, _, c in rows]
+        trailing = 1
+        while trailing < len(series) and series[-1 - trailing] == series[-1]:
+            trailing += 1
+        if trailing >= plateau_n:
             return Verdict("C4 plateau", WARN,
-                           f"{key}: {worst} consecutive iterations at "
-                           f"pass={series[-1]} (series: {series}) — repair is "
-                           "not advancing")
-        advancing.append(f"{key}: {series}")
+                           f"{key}: {trailing} consecutive iterations at "
+                           f"pass={series[-1]} through iter {rows[-1][1]} "
+                           f"(series: {series}) — repair is not advancing")
+        past: list[str] = []
+        start = 0
+        for i in range(1, len(series) + 1):
+            if i == len(series) or series[i] != series[start]:
+                if i - start >= plateau_n:
+                    past.append(f"{i - start}x pass={series[start]} "
+                                f"ending iter {rows[i - 1][1]}")
+                start = i
+        advancing.append(f"{key}: {series}"
+                         + (f" (earlier plateau: {'; '.join(past)})"
+                            if past else ""))
     return Verdict("C4 plateau", PASS, "series advances: " + "; ".join(advancing))
 
 

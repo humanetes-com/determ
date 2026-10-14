@@ -129,7 +129,10 @@ def test_without_a_cap_reading_an_empty_reply_still_ends_the_session(tmp_path: P
     base = _reading({"t_keep"}, {"t_fmt"})
     out, calls = _run(root, ["", _BODY], None, measure=lambda raw: base)
     assert out.outcome == "no_change" and out.turns == 1 and len(calls) == 1
-    assert out.capped_turns == 0 and not out.unmeasured
+    # The session still ends, but it wrote nothing, so it is no verdict on
+    # the slice (`SessionOutcome.unanswered`; run `1430425-193a8f28`
+    # graded such a session FLAT and the next fill deferred the slice).
+    assert out.capped_turns == 0 and out.unanswered and out.unmeasured
 
 
 def test_every_reply_capped_and_empty_ends_unmeasured_after_the_budget(tmp_path: Path):
