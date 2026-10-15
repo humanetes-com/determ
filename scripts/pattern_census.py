@@ -360,16 +360,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      to its own verdict (`TestOutcomes.aborted`, the gate's REJECT naming
      the destroyed verdicts).
   P50 clean gain reverted — a `[phase-c/fill-reading]` line with a positive
-     net and `no regression in the measured scope`, followed within two
-     lines by a joint route's `reverted (U2 test failure (no strict
-     improvement` with no clause named. Run `14495-a26ad4ea` (2026-10-15)
+     net and `no regression in the measured scope` that does not itself
+     list `newly red:`, followed within two lines by a joint revert on
+     `no strict improvement` that either names no clause (the historical
+     line) or names `newly red:`. A clause that is only `panics earlier`
+     or `aborted`, and a reading that already listed `newly red:`, are
+     not this class: a strict net gain can still name a real loss, and
+     the joint keep refuses that loss. Run `14495-a26ad4ea` (2026-10-15)
      fill 6: `src/error.rs` read `pass 120 -> 127` three times and was
-     reverted each time, because `test_drop` passed in one binary and was
-     red before and after in another, and the joint keep compared bare
-     names. Reaction: every keep compares per (binary, test)
-     (`assertion_position.KeyedVerdicts`), and a joint revert names its
-     refusing clause (`newly red: …` / `aborted: …` / `panics earlier:
-     …`) inside the parentheses, which this detector then does not count.
+     reverted each time on the bare line, because one binary's copy
+     passed while another binary's copy of the same name stayed red.
+     Reaction: every keep compares per (binary, test).
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -3242,25 +3243,39 @@ def detect_p49(run: Run, iters: list[dict]) -> list[dict]:
 RE_P50_READING = re.compile(
     r"\[phase-c/fill-reading\] pass \d+ -> \d+ \(net \+([1-9]\d*)\);.*"
     r"no regression in the measured scope")
-RE_P50_REVERT = re.compile(
+# The historical line ends at the parentheses. A later revert inserts
+# "; newly red: …" before them. Only that clause is this class: a strict
+# net gain can still name a real loss (`render_fill_reading` prints
+# `newly red:` and then `no regression` on the same line), and an
+# earlier-panic or abort clause is a different gate.
+RE_P50_REVERT_BARE = re.compile(
     r"reverted \(U2 test failure \(no strict improvement\)\)")
+RE_P50_REVERT_NAMED_RED = re.compile(
+    r"reverted \(U2 test failure \(no strict improvement; newly red:")
+_P50_READING_ALREADY_RED = "newly red:"
 
 
 def detect_p50(run: Run, iters: list[dict]) -> list[dict]:
     """A joint route reverted on "no strict improvement" right after a
-    reading that gained tests and regressed none, with no refusing clause
-    named. Run `14495-a26ad4ea` (2026-10-15) fill 6: `src/error.rs`,
-    `pass 120 -> 127` three times, reverted three times on a bare-name
-    collision. Reaction: per-(binary, test) outcomes in every keep, and a
-    named clause on every joint revert."""
+    reading that gained tests, regressed none, and did not itself list a
+    newly-red test. The revert may name no clause (the historical line)
+    or name `newly red:`. Run `14495-a26ad4ea` (2026-10-15) fill 6:
+    `src/error.rs`, `pass 120 -> 127` three times, reverted three times
+    on a bare-name collision. A reading that already lists `newly red:`
+    is a real loss the suite still netted, and is not a hit."""
     hits: list[tuple[str, str]] = []
     gain: tuple[int, str] | None = None
     since = 99
     for ref, text in run.lines:
         since += 1
         if (m := RE_P50_READING.search(text)):
-            gain, since = (int(m.group(1)), ref), 0
-        elif gain and since <= 2 and RE_P50_REVERT.search(text):
+            if _P50_READING_ALREADY_RED in text:
+                gain, since = None, 99
+            else:
+                gain, since = (int(m.group(1)), ref), 0
+        elif gain and since <= 2 and (
+                RE_P50_REVERT_BARE.search(text)
+                or RE_P50_REVERT_NAMED_RED.search(text)):
             hits.append((ref, f"net +{gain[0]} reverted"))
             gain = None
     if not hits:
@@ -3336,7 +3351,7 @@ CLASS_NAMES = {
     "P46": "flat while held elsewhere (a FLAT grade whose every convicting test died first inside a different still-stubbed function; pre-fix 62 rows over ten cold runs)",
     "P48": "dropped on a reserved share (a per-fn run refused units as share-spent and ended under half its share; pre-fix a sibling's in-flight reservation refused every queued unit, run 2157238-210637e6 fill 1: 18 dropped, 1 call in 2.2 of 13 min)",
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
-    "P50": "clean gain reverted (a joint route reverted on no strict improvement right after a reading that gained tests and regressed none, no clause named; pre-fix the keep compared bare names and a test passing in one binary read newly red when its namesake in another stayed red, run 14495-a26ad4ea fill 6)",
+    "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

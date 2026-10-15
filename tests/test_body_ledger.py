@@ -13,7 +13,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from pipeline_core.domain.assertion_position import KeyedVerdicts
+from pipeline_core.domain.assertion_position import KeyedVerdicts, TestKey
 from pipeline_core.domain.body_ledger import (
     GATE_VERSION,
     BodyState,
@@ -339,6 +339,38 @@ def test_tests_that_ran_and_are_all_still_red_are_a_graded_empty_delta() -> None
                         body_now_sha=e.body_sha)
     assert state is BodyState.FLAT
     assert not replace(e, state=state).reseedable
+
+
+def _shared_name(passed: tuple[TestKey, ...],
+                 failed: tuple[TestKey, ...]) -> SweepView:
+    """The sweep's name sets union every copy of one leaf. The verdicts
+    keep each copy, which is what `classify` has to read."""
+    return SweepView.of_sweep(
+        passed={k.test for k in passed}, failed={k.test for k in failed},
+        vanished=(), intact=True, epoch=0, positions={},
+        aborted=(), aborted_silent=(),
+        verdicts=KeyedVerdicts(passed=frozenset(passed),
+                               failed=frozenset(failed)))
+
+
+def test_one_name_in_two_binaries_is_not_lost_when_its_red_copy_stayed_red() -> None:
+    """The name sets hold the leaf in passed and in failed at once, which
+    is the reading that refutes a landing: passing before, failing after.
+    Those are two copies. The copy that passed still passes, and the copy
+    that failed still fails, so the landing is flat. The copy that passed
+    turning red refutes it."""
+    e = _entry(state=BodyState.LANDED)
+    green, red = TestKey("bin_a", "t_shared"), TestKey("bin_b", "t_shared")
+    before = _shared_name((green,), (red,))
+    stayed = _shared_name((green,), (red,))
+    assert before.passed & stayed.failed == frozenset({"t_shared"})
+    state, delta = classify(e, attributed={"t_shared"}, before=before,
+                            after=stayed, body_now_sha=e.body_sha)
+    assert state is BodyState.FLAT and delta == ()
+    lost = _shared_name((), (green, red))
+    state, delta = classify(e, attributed={"t_shared"}, before=before,
+                            after=lost, body_now_sha=e.body_sha)
+    assert state is BodyState.REFUTED and delta == (("t_shared", "lost"),)
 
 
 def test_a_passing_sibling_does_not_prove_a_body_whose_convicting_tests_fail(
