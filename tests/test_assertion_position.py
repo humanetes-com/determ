@@ -27,6 +27,7 @@ from pipeline_core.application.reconstruct.site_revert import (
 )
 from pipeline_core.domain import body_ledger, slice_session, test_report
 from pipeline_core.domain.assertion_position import (
+    KeyedVerdicts,
     TestKey,
     TestOutcomes,
     assertion_positions,
@@ -57,11 +58,19 @@ def _any_source(_rel: str) -> str:
 
 
 def _view(text: str, positions: dict[TestKey, int]) -> SweepView:
+    """The view of one capture. A failing name is keyed under the binary its
+    injected position names, so the raw line-order control compares its
+    positions over the same keys its verdicts sit under."""
     rep = parse_test_output(text)
-    return SweepView(passed=frozenset(bare_test_name(t) for t in rep.passed),
-                     failed=frozenset(bare_test_name(t)
-                                      for t in parse_failed_tests(text)),
-                     positions=positions)
+    passed = frozenset(bare_test_name(t) for t in rep.passed)
+    failed = frozenset(bare_test_name(t) for t in parse_failed_tests(text))
+    where = {k.test: k.binary for k in positions}
+    return SweepView(
+        passed=passed, failed=failed, positions=positions,
+        verdicts=KeyedVerdicts(
+            passed=frozenset(TestKey("", t) for t in passed),
+            failed=frozenset(TestKey(where.get(t, ""), t) for t in failed),
+            positions=positions))
 
 
 def _raw_line_order_positions(text: str) -> dict[TestKey, int]:
@@ -212,48 +221,76 @@ def test_a_panic_in_another_file_than_the_binary_has_no_position() -> None:
 
 # --- the decided rule ----------------------------------------------------------
 
+def _kv(binary: str = "tests/t.rs", **kw: object) -> KeyedVerdicts:
+    return KeyedVerdicts.of_names(binary=binary, **kw)  # type: ignore[arg-type]
+
+
 def test_the_decided_rule_on_mixed_outcomes() -> None:
     """Any lost refuses; earlier refuses only when nothing gained."""
     k = TestKey("tests/t.rs", "e")
+    red = ("g", "e", "l")
 
-    def _o(**kw: object) -> TestOutcomes:
-        base: dict[str, object] = {
-            "before_passed": (), "before_failed": ("g", "e", "l"),
-            "after_passed": (), "after_failed": ("g", "e", "l"),
-            "before_positions": {k: 10}, "after_positions": {k: 10},
-            "before_aborted": (), "after_aborted_silent": ()}
-        base.update(kw)
-        return outcomes_of(("g", "e"), **base)  # type: ignore[arg-type]
+    def _o(after_positions: dict[TestKey, int] | None = None,
+           after_passed: tuple[str, ...] = (),
+           after_failed: tuple[str, ...] = red) -> TestOutcomes:
+        return outcomes_of(
+            ("g", "e"), before=_kv(failed=red, positions={k: 10}),
+            after=_kv(passed=after_passed, failed=after_failed,
+                      positions=after_positions or {k: 10}))
 
     assert not _o().refuses
     assert _o(after_positions={k: 9}).refuses                       # earlier alone
     assert not _o(after_positions={k: 9}, after_passed=("g",),
                   after_failed=("e",)).refuses                      # gained + earlier
-    lost = outcomes_of(("g",), before_passed=("g",), before_failed=(),
-                       after_passed=(), after_failed=("g",),
-                       before_positions={}, after_positions={},
-                       before_aborted=(), after_aborted_silent=())
+    lost = outcomes_of(("g",), before=_kv(passed=("g",)),
+                       after=_kv(failed=("g",)))
     assert lost.refuses and lost.lost == frozenset({"g"})
 
 
 def test_a_silent_death_refuses_whatever_was_gained() -> None:
     """A test that ran to its own verdict before and whose own process died
     with no panic after refuses, even beside a gain. A death already present
-    before, or one that printed a panic (not in `after_aborted_silent`), is
-    not an abort of this attempt. Negative control: the model without the
-    abort clause (`aborted` empty) does not refuse the same outcome."""
-    o = outcomes_of(("g", "d"), before_passed=(), before_failed=("g", "d"),
-                    after_passed=("g",), after_failed=("d",),
-                    before_positions={}, after_positions={},
-                    before_aborted=(), after_aborted_silent=("d",))
+    before, or one that printed a panic (not in `aborted_silent`), is not an
+    abort of this attempt. Negative control: the model without the abort
+    clause (`aborted` empty) does not refuse the same outcome."""
+    o = outcomes_of(("g", "d"), before=_kv(failed=("g", "d")),
+                    after=_kv(passed=("g",), failed=("d",),
+                              aborted_silent=("d",)))
     assert o.aborted == frozenset({"d"}) and o.gained == frozenset({"g"})
     assert o.refuses
     assert not TestOutcomes(gained=o.gained, lost=o.lost).refuses
-    again = outcomes_of(("d",), before_passed=(), before_failed=("d",),
-                        after_passed=(), after_failed=("d",),
-                        before_positions={}, after_positions={},
-                        before_aborted=("d",), after_aborted_silent=("d",))
+    again = outcomes_of(("d",), before=_kv(failed=("d",), aborted=("d",)),
+                        after=_kv(failed=("d",), aborted_silent=("d",)))
     assert not again.aborted and not again.refuses
+
+
+def test_one_name_in_two_binaries_is_two_tests() -> None:
+    """Run `14495-a26ad4ea` (2026-10-15): `tests/test_repr.rs::test_drop`
+    passes, `tests/test_downcast.rs::test_drop` is red before and after, and
+    another attributed test turns green. Nothing is lost and the gain
+    stands. A copy that WAS green and now fails is still lost, whatever the
+    other copy does. Negative control: the same readings collapsed onto bare
+    names, as the name-set rule read them, put `test_drop` in passed-before
+    and failed-after and refuse."""
+    repr_, down = "tests/test_repr.rs", "tests/test_downcast.rs"
+    before = KeyedVerdicts(
+        passed=frozenset({TestKey(repr_, "test_drop")}),
+        failed=frozenset({TestKey(down, "test_drop"), TestKey(down, "gain")}))
+    after = KeyedVerdicts(
+        passed=frozenset({TestKey(repr_, "test_drop"), TestKey(down, "gain")}),
+        failed=frozenset({TestKey(down, "test_drop")}))
+    o = outcomes_of(("test_drop", "gain"), before=before, after=after)
+    assert o.lost == frozenset() and o.gained == frozenset({"gain"})
+    assert not o.refuses
+    broke = KeyedVerdicts(
+        passed=frozenset({TestKey(down, "gain")}),
+        failed=frozenset({TestKey(repr_, "test_drop"),
+                          TestKey(down, "test_drop")}))
+    assert outcomes_of(("test_drop", "gain"), before=before,
+                       after=broke).lost == frozenset({"test_drop"})
+    names_before_passed = {k.test for k in before.passed}
+    names_after_failed = {k.test for k in after.failed}
+    assert "test_drop" in names_before_passed & names_after_failed
 
 
 # --- localization ------------------------------------------------------------
@@ -352,7 +389,7 @@ def test_no_judge_orders_raw_panic_lines() -> None:
     that reads a raw panic line (or the deleted line-order comparison) fails
     here without this test being edited. Negative control: the pre-fix
     `classify` body named `compare_panic_sites` over `panic_sites`."""
-    judges = (body_ledger.classify, test_report.assess_joint_improvement,
+    judges = (body_ledger.classify, test_report.judge_refill,
               slice_session.judge_against_best)
     for fn in judges:
         src = inspect.getsource(fn)

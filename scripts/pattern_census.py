@@ -359,6 +359,17 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      Reaction: the keep refuses a silent death of a test the baseline ran
      to its own verdict (`TestOutcomes.aborted`, the gate's REJECT naming
      the destroyed verdicts).
+  P50 clean gain reverted — a `[phase-c/fill-reading]` line with a positive
+     net and `no regression in the measured scope`, followed within two
+     lines by a joint route's `reverted (U2 test failure (no strict
+     improvement` with no clause named. Run `14495-a26ad4ea` (2026-10-15)
+     fill 6: `src/error.rs` read `pass 120 -> 127` three times and was
+     reverted each time, because `test_drop` passed in one binary and was
+     red before and after in another, and the joint keep compared bare
+     names. Reaction: every keep compares per (binary, test)
+     (`assertion_position.KeyedVerdicts`), and a joint revert names its
+     refusing clause (`newly red: …` / `aborted: …` / `panics earlier:
+     …`) inside the parentheses, which this detector then does not count.
 
 P24 rows read: `LOCKED iters a->b` — consecutive dispatching sweeps, each
 with cohort K > batch M, whose later batch is a subset of the earlier one
@@ -3228,6 +3239,37 @@ def detect_p49(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [r for r, _ in hits[:4]]}]
 
 
+RE_P50_READING = re.compile(
+    r"\[phase-c/fill-reading\] pass \d+ -> \d+ \(net \+([1-9]\d*)\);.*"
+    r"no regression in the measured scope")
+RE_P50_REVERT = re.compile(
+    r"reverted \(U2 test failure \(no strict improvement\)\)")
+
+
+def detect_p50(run: Run, iters: list[dict]) -> list[dict]:
+    """A joint route reverted on "no strict improvement" right after a
+    reading that gained tests and regressed none, with no refusing clause
+    named. Run `14495-a26ad4ea` (2026-10-15) fill 6: `src/error.rs`,
+    `pass 120 -> 127` three times, reverted three times on a bare-name
+    collision. Reaction: per-(binary, test) outcomes in every keep, and a
+    named clause on every joint revert."""
+    hits: list[tuple[str, str]] = []
+    gain: tuple[int, str] | None = None
+    since = 99
+    for ref, text in run.lines:
+        since += 1
+        if (m := RE_P50_READING.search(text)):
+            gain, since = (int(m.group(1)), ref), 0
+        elif gain and since <= 2 and RE_P50_REVERT.search(text):
+            hits.append((ref, f"net +{gain[0]} reverted"))
+            gain = None
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} joint revert(s) right after a clean "
+                         f"gain: {hits[0][1]}",
+             "refs": [r for r, _ in hits[:4]]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3249,7 +3291,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
-             "P49": detect_p49}
+             "P49": detect_p49, "P50": detect_p50}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3294,6 +3336,7 @@ CLASS_NAMES = {
     "P46": "flat while held elsewhere (a FLAT grade whose every convicting test died first inside a different still-stubbed function; pre-fix 62 rows over ten cold runs)",
     "P48": "dropped on a reserved share (a per-fn run refused units as share-spent and ended under half its share; pre-fix a sibling's in-flight reservation refused every queued unit, run 2157238-210637e6 fill 1: 18 dropped, 1 call in 2.2 of 13 min)",
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
+    "P50": "clean gain reverted (a joint route reverted on no strict improvement right after a reading that gained tests and regressed none, no clause named; pre-fix the keep compared bare names and a test passing in one binary read newly red when its namesake in another stayed red, run 14495-a26ad4ea fill 6)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 
 

@@ -13,6 +13,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from pipeline_core.domain.assertion_position import KeyedVerdicts
 from pipeline_core.domain.body_ledger import (
     GATE_VERSION,
     BodyState,
@@ -260,12 +261,16 @@ def test_a_test_lost_to_an_aborted_binary_is_unmeasured_not_refuted() -> None:
     before = SweepView.of_sweep(passed={"test_new", "test_conv"},
                                 failed=set(), vanished=(), intact=True,
                                 epoch=0, positions={},
-                                aborted=(), aborted_silent=())
-    # What the sweep hands over: both names counted failing, both vanished.
+                                aborted=(), aborted_silent=(),
+                                verdicts=KeyedVerdicts.of_names(
+                                    passed=("test_new", "test_conv")))
+    # What the sweep hands over: both names counted failing, both vanished
+    # (the capture reported neither, so its reading holds no key for them).
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_conv"},
                                vanished={"test_new", "test_conv"}, intact=True,
                                epoch=0, positions={},
-                                aborted=(), aborted_silent=())
+                               aborted=(), aborted_silent=(),
+                               verdicts=KeyedVerdicts())
     state, delta = classify(e, attributed={"test_new"}, before=before,
                             after=after, body_now_sha=e.body_sha)
     assert state is BodyState.UNMEASURED and delta == ()
@@ -282,7 +287,9 @@ def test_a_test_that_really_failed_beside_an_aborted_binary_still_refutes() -> N
     before, _ = _views(({"test_new"}, set()), (set(), set()))
     after = SweepView.of_sweep(passed=set(), failed={"test_new", "test_gone"},
                                vanished={"test_gone"}, intact=True, epoch=0,
-                               positions={}, aborted=(), aborted_silent=())
+                               positions={}, aborted=(), aborted_silent=(),
+                               verdicts=KeyedVerdicts.of_names(
+                                   failed=("test_new",)))
     state, _ = classify(e, attributed={"test_new"}, before=before, after=after,
                         body_now_sha=e.body_sha)
     assert state is BodyState.REFUTED

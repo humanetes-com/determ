@@ -29,6 +29,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("domain/test_results.py", "native_crashes"): "the one crash definition",
     ("domain/test_results.py", "still_open_names"): "dangling name of an unclosed section (fallback shape)",
     ("domain/test_results.py", "TestStateReading.passed_names"): "verdict bookkeeping, not a crash decision",
+    ("domain/test_results.py", "TestStateReading.keyed"): "verdict bookkeeping per (binary, test), the passed_names rule per key; not a crash decision",
     ("domain/test_results.py", "TestStateReading.judged_names"): "verdict bookkeeping, not a crash decision",
     ("domain/test_results.py", "TestStateReading.crashed"): "unclosed sections for compare_readings' fallback branches",
     ("domain/test_results.py", "compare_readings"): "per-test comparison; unclosed sections are the documented fallback",

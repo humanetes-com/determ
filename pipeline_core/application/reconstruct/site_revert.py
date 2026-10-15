@@ -89,7 +89,7 @@ def _moved_back(moves: Sequence[PositionMove], view: SweepView) -> bool:
     """Some move's test is green again, or stands at or past its position
     before the landing."""
     for m in moves:
-        if m.key.test in view.passed and m.key.test not in view.failed:
+        if m.key in view.keyed.passed and m.key not in view.keyed.failed:
             return True
         now = view.positions.get(m.key)
         if now is not None and now >= m.before:
@@ -101,13 +101,8 @@ def judge_revert(pre: SiteSweep, after: SiteSweep) -> tuple[bool, TestOutcomes]:
     """Whether a revert stands: the decided rule over every test the
     pre-revert sweep judged, with that sweep as the baseline, and no drop
     of the pass count in hand before it."""
-    outcomes = outcomes_of(
-        pre.view.ran, before_passed=pre.view.passed,
-        before_failed=pre.view.failed, after_passed=after.view.passed,
-        after_failed=after.view.failed, before_positions=pre.view.positions,
-        after_positions=after.view.positions,
-        before_aborted=pre.view.aborted,
-        after_aborted_silent=after.view.aborted_silent)
+    outcomes = outcomes_of(pre.view.ran, before=pre.view.keyed,
+                           after=after.view.keyed)
     return (not outcomes.refuses and after.pass_count >= pre.pass_count,
             outcomes)
 

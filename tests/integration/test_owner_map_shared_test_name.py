@@ -22,6 +22,19 @@ Premise: the sweep labels the binaries `tests/one.rs` / `tests/two.rs` and
 cargo builds them as targets `one` / `two` — the mapping
 `cargo_target_of` relies on.
 
+The keep judge, run `14495-a26ad4ea` (2026-10-15, cluster `stable`, fill
+6): `tests/test_repr.rs::test_drop` passed and `tests/test_downcast.rs::
+test_drop` was red before and after a `src/error.rs` rewrite that read
+`pass 120 -> 127 … no regression`; the joint keep counted `test_drop` newly
+red by name and reverted the rewrite three times. Shape here: `t` passes in
+`tests/one.rs` and fails in `tests/two.rs` before and after; `g` in
+`tests/two.rs` turns green when `gamma` is fixed. Asserted through the real
+U2 gate's scoped capture: the keep banks; a fill that also turns
+`tests/one.rs::t` red is refused. Negative control: the name-set rule on the
+same real readings names `t` newly red. Premise: libtest's OR filter in the
+scoped run executes BOTH copies of `t`, so the capture holds a passing and a
+failing `t`.
+
 Gated on `INTEGRATION=1`; `scripts/run_integration.sh` is the launcher.
 """
 from __future__ import annotations
@@ -149,3 +162,108 @@ def test_negative_control_the_name_alone_measures_one_binary(tmp_path: Path) -> 
     project = _workspace(tmp_path)
     owners, _logs = _owners(project, None)
     assert len(owners & {"alpha", "beta"}) == 1
+
+
+# --- the keep judge over a name two binaries hold ---------------------------
+
+_KEEP_LIB = """pub fn alpha() -> u8 {{
+    {alpha}
+}}
+
+pub fn beta() -> u8 {{
+    1
+}}
+
+pub fn gamma() -> u8 {{
+    {gamma}
+}}
+"""
+
+_KEEP_ONE = """#[test]
+fn t() {
+    assert_eq!(widgets::alpha(), 1);
+}
+"""
+
+_KEEP_TWO = """#[test]
+fn t() {
+    assert_eq!(widgets::beta(), 2);
+}
+
+#[test]
+fn g() {
+    assert_eq!(widgets::gamma(), 2);
+}
+"""
+
+
+class _NoRecords:
+    def enumerate_fns(self, _src: Path) -> list[dict[str, object]]:
+        return []
+
+
+def _keep_crate(tmp_path: Path, alpha: int, gamma: int) -> Path:
+    root = tmp_path / f"keep-{alpha}-{gamma}"
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(
+        '[package]\nname = "widgets"\nversion = "0.1.0"\nedition = "2021"\n')
+    (root / "src" / "lib.rs").write_text(_KEEP_LIB.format(alpha=alpha, gamma=gamma))
+    (root / "tests" / "one.rs").write_text(_KEEP_ONE)
+    (root / "tests" / "two.rs").write_text(_KEEP_TWO)
+    return root
+
+
+def _baseline(root: Path):
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        oracle_test_source,
+    )
+    from pipeline_core.domain.test_report import reading_of_capture
+    _rc, out = run_cargo(CargoCli(), _CMD, root, _env(), timeout=600)
+    return reading_of_capture(out, sources=oracle_test_source(root))
+
+
+def _gate(root: Path, baseline):
+    from pipeline_core.application.reconstruct.cargo_runner import u2_test_gate
+
+    def _run(cmd: str, cwd: Path, env_: dict[str, str], timeout: int = 600):
+        return run_cargo(CargoCli(), cmd, cwd, env_, timeout=timeout)
+    return u2_test_gate(
+        _run, {"t", "g"}, frozenset(), _CMD, root, _env(),
+        structure=_NoRecords(), enabled=True, timeout=600, err_cap=2000,
+        guard=lambda *_: None, baseline=baseline)
+
+
+def test_premise_the_scoped_run_holds_both_copies_of_the_name(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.test_results import TestStateReading
+    root = _keep_crate(tmp_path, alpha=1, gamma=1)
+    base = _baseline(root)
+    assert "t" in base.passed_names and "t" in base.failed_names, (
+        "the two copies no longer report one passing and one failing")
+    v = _gate(_keep_crate(tmp_path, alpha=1, gamma=2), base)
+    after = TestStateReading(parse_binary_results(v.capture)).keyed()
+    assert {(k.binary, k.test) for k in after.passed} >= {
+        ("tests/one.rs", "t"), ("tests/two.rs", "g")}
+    assert ("tests/two.rs", "t") in {(k.binary, k.test) for k in after.failed}
+
+
+def test_a_gain_beside_a_shared_name_red_before_and_after_banks(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.test_report import U2Decision, judge_refill
+    base = _baseline(_keep_crate(tmp_path, alpha=1, gamma=1))
+    v = _gate(_keep_crate(tmp_path, alpha=1, gamma=2), base)
+    assert v.decision is U2Decision.REJECT and v.self_failures == {"t"}
+    ji = judge_refill({"t", "g"}, base, v)
+    assert ji.new_failures == frozenset() and ji.resolved == {"g"}
+    assert ji.banks
+    # NEGATIVE CONTROL: the name-set rule the judge read before.
+    assert v.self_failures & base.passed_names == {"t"}
+
+
+def test_turning_the_green_copy_red_is_still_refused(tmp_path: Path) -> None:
+    from pipeline_core.domain.test_report import judge_refill
+    base = _baseline(_keep_crate(tmp_path, alpha=1, gamma=1))
+    v = _gate(_keep_crate(tmp_path, alpha=3, gamma=2), base)
+    ji = judge_refill({"t", "g"}, base, v)
+    assert ji.new_failures == {"t"} and not ji.non_regression

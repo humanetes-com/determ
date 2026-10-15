@@ -2738,7 +2738,12 @@ def run_phase_c_tdd(
             sweep's reconciled failing set (crash-vanished names included,
             which `of_sweep` takes back out)."""
             _report_v = parse_test_output(output_)
-            _reading_v = TestStateReading(parse_binary_results(output_))
+            # Where each failing test panicked: the one reading that can
+            # tell a body which got a test past an assertion from one that
+            # moved nothing, when both leave the verdict vector identical.
+            _positions_v = assertion_positions(output_, _oracle_source)
+            _reading_v = TestStateReading(parse_binary_results(output_),
+                                          positions=_positions_v)
             return SweepView.of_sweep(
                 aborted=_reading_v.aborted_names,
                 aborted_silent=_reading_v.aborted_silent_names,
@@ -2746,10 +2751,8 @@ def run_phase_c_tdd(
                 failed=(bare_test_name(t_) for t_ in failed_),
                 vanished=vanished_,
                 intact=reconciled_, epoch=_epoch,
-                # Where each failing test panicked: the one reading that can
-                # tell a body which got a test past an assertion from one that
-                # moved nothing, when both leave the verdict vector identical.
-                positions=assertion_positions(output_, _oracle_source),
+                positions=_positions_v,
+                verdicts=_reading_v.keyed(),
                 held=held_)
 
         def _grade_landing(row_: LedgerEntry, before_: SweepView,

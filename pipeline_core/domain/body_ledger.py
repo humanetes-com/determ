@@ -45,7 +45,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from pipeline_core.domain.assertion_position import TestKey, outcomes_of
+from pipeline_core.domain.assertion_position import (
+    KeyedVerdicts,
+    TestKey,
+    outcomes_of,
+)
 from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite
@@ -754,10 +758,31 @@ class SweepView:
     #: tell a body that made a test's process die from one that left it red.
     aborted: frozenset[str] = frozenset()
     aborted_silent: frozenset[str] = frozenset()
+    #: The same sweep per (binary, test) (`TestStateReading.keyed`), what
+    #: every outcome the ledger grades is read from. The name sets above
+    #: union the binaries: on run `14495-a26ad4ea` (2026-10-15)
+    #: `tests/test_repr.rs::test_drop` passed while
+    #: `tests/test_downcast.rs::test_drop` failed, so `test_drop` sat in
+    #: `passed` and in `failed` at once, and a name-set grade reads a
+    #: landing that left that test red as "lost" or as "proven". None only
+    #: on a view given by names (a one-binary fixture, never the loop's:
+    #: `of_sweep` requires it): :attr:`keyed` then reads every name as a
+    #: test of one binary, the one its positions name when they name one.
+    verdicts: KeyedVerdicts | None = None
 
     @property
     def ran(self) -> frozenset[str]:
         return self.passed | self.failed
+
+    @property
+    def keyed(self) -> KeyedVerdicts:
+        if self.verdicts is not None:
+            return self.verdicts
+        labels = {k.binary for k in self.positions}
+        return KeyedVerdicts.of_names(
+            passed=self.passed, failed=self.failed, aborted=self.aborted,
+            aborted_silent=self.aborted_silent, positions=self.positions,
+            binary=labels.pop() if len(labels) == 1 else "")
 
     def observers_of(self, unit: FnLocator, tests: Iterable[str]) -> frozenset[str]:
         """`tests` minus those held at a still-stubbed function other than
@@ -772,6 +797,7 @@ class SweepView:
         vanished: Iterable[str], intact: bool, epoch: int,
         positions: Mapping[TestKey, int],
         aborted: Iterable[str], aborted_silent: Iterable[str],
+        verdicts: KeyedVerdicts,
         held: Mapping[str, frozenset[FnLocator]] | None = None,
     ) -> SweepView:
         """The ledger's view of a sweep whose failed set the score has already
@@ -789,14 +815,17 @@ class SweepView:
         `refuted` on `lost` tests that had not run — `ptr.rs::new`,
         `ptr.rs::boxed` and `ptr.rs::read` among them. A refuted row is never
         re-seeded. So vanished names are removed from `failed` here; they are
-        neither passed nor failed to the ledger."""
+        neither passed nor failed to the ledger. `verdicts` is the capture's
+        own per-binary reading; a vanished test reported no verdict, so it
+        holds no key for it."""
         gone = frozenset(vanished)
         return cls(passed=frozenset(passed),
                    failed=frozenset(t for t in failed if t not in gone),
                    intact=intact, epoch=epoch, positions=positions,
                    held=dict(held or {}),
                    aborted=frozenset(aborted),
-                   aborted_silent=frozenset(aborted_silent))
+                   aborted_silent=frozenset(aborted_silent),
+                   verdicts=verdicts)
 
 
 def judgment_attributed(
@@ -892,10 +921,11 @@ def classify(
     judged = names & after.ran & before.ran
     if not judged:
         return BodyState.UNMEASURED, ()
-    lost = tuple(sorted(t for t in judged
-                        if t in before.passed and t in after.failed))
-    gained = tuple(sorted(t for t in judged
-                          if t in before.failed and t in after.passed))
+    # Per (binary, test), never by name set: the name sets union the
+    # binaries (`SweepView.verdicts`).
+    judged_out = outcomes_of(judged, before=before.keyed, after=after.keyed)
+    lost = tuple(sorted(judged_out.lost))
+    gained = tuple(sorted(judged_out.gained))
     delta = tuple([(t, "lost") for t in lost] + [(t, "gained") for t in gained])
     if lost:
         return BodyState.REFUTED, delta
@@ -910,12 +940,8 @@ def classify(
     if convicting:
         if not (convicting & after.ran):
             return BodyState.UNMEASURED, delta
-        outcomes = outcomes_of(
-            convicting, before_passed=before.passed,
-            before_failed=before.failed, after_passed=after.passed,
-            after_failed=after.failed, before_positions=before.positions,
-            after_positions=after.positions, before_aborted=before.aborted,
-            after_aborted_silent=after.aborted_silent)
+        outcomes = outcomes_of(convicting, before=before.keyed,
+                               after=after.keyed)
         if outcomes.aborted:
             return BodyState.REFUTED, delta + tuple(
                 (t, "aborted") for t in sorted(outcomes.aborted))
@@ -926,13 +952,13 @@ def classify(
         if outcomes.refuses:
             return BodyState.REFUTED, delta + tuple(
                 (t, "regressed") for t in outcomes.earlier_tests)
-        if not (convicting & after.passed):
+        if not outcomes.gained:
             if outcomes.later:
                 return BodyState.ADVANCED, delta + tuple(
                     (t, "advanced") for t in outcomes.later_tests)
             return BodyState.FLAT, delta
         if (entry.kept_green is not None
-                and not (convicting & after.passed & frozenset(entry.kept_green))):
+                and not (outcomes.gained & frozenset(entry.kept_green))):
             # The convicting tests that turned green were not turned by THIS
             # landing's keep (its own comparison recorded none of them): a
             # sibling keep paid them. A graded try that bought nothing.

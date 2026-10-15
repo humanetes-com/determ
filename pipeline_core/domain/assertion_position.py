@@ -40,7 +40,7 @@ attempt stands (:class:`TestOutcomes`).
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from pipeline_core.domain.generation import parse_gen_tests_filename
@@ -409,9 +409,10 @@ def compare_positions(
 class TestOutcomes:
     """Typed per-test outcomes of one attempt over its attributed tests.
 
-    `gained`: failing before, passing after. `lost`: passing before, failing
-    after. `earlier` / `later`: failing in both, with a position under the
-    same key in both, that moved. `unpositioned`: failing in both with no
+    Each set is the names of tests judged per :class:`TestKey`
+    (:func:`outcomes_of`). `gained`: not passing before, passing after.
+    `lost`: passing before, failing after. `earlier` / `later`: failing in
+    both, with a position under the same key in both, that moved. `unpositioned`: failing in both with no
     comparable position. `aborted`: ran to its own verdict before (passed,
     or failed with its own panic, in a process that did not abort), and
     after, its own process died without printing a panic — a native fault
@@ -453,42 +454,92 @@ class TestOutcomes:
         return tuple(sorted({m.key.test for m in self.later}))
 
 
-def outcomes_of(
-    tests: Iterable[str], *,
-    before_passed: Collection[str], before_failed: Collection[str],
-    after_passed: Collection[str], after_failed: Collection[str],
-    before_positions: Positions, after_positions: Positions,
-    before_aborted: Collection[str], after_aborted_silent: Collection[str],
-) -> TestOutcomes:
-    """The :class:`TestOutcomes` of `tests` (bare names) between two
-    readings. Name sets are compared by bare name; positions by key.
+@dataclass(frozen=True, slots=True)
+class KeyedVerdicts:
+    """One reading's verdicts, each under its :class:`TestKey`.
 
-    `before_aborted` is every test whose own process died in the before
-    reading (`TestStateReading.aborted_names`), `after_aborted_silent` the
-    after reading's deaths that printed no panic
-    (`aborted_silent_names`). Both are required: a reading that cannot say
-    whether a test's process died cannot build an outcome. A death that
-    printed a panic (a stub's `unimplemented!()` reached while unwinding) is
-    not a native fault of the code under judgement and is not `aborted`."""
+    The only currency :func:`outcomes_of` accepts. A bare name is not a
+    test: when two binaries each hold a test of one name, a name set holds
+    that name in `passed` and in `failed` at once, and "passing before,
+    failing after" is true of a test that was red before and after. Run
+    `14495-a26ad4ea` (2026-10-15, cluster `stable`, fill 6):
+    `tests/test_repr.rs::test_drop` passed and `tests/test_downcast.rs::
+    test_drop` was red before and after a `src/error.rs` rewrite that read
+    `pass 120 -> 127 … no regression`; the joint keep counted `test_drop`
+    as newly red and reverted the rewrite on all three attempts.
+
+    `passed` holds completed binaries only (a crashed binary's partial `ok`
+    lines are a nondeterministic prefix); `failed`, `ignored`, `aborted` and
+    `aborted_silent` hold every binary's."""
+
+    __test__ = False
+
+    passed: frozenset[TestKey] = frozenset()
+    failed: frozenset[TestKey] = frozenset()
+    ignored: frozenset[TestKey] = frozenset()
+    aborted: frozenset[TestKey] = frozenset()
+    aborted_silent: frozenset[TestKey] = frozenset()
+    positions: Positions = field(default_factory=dict)
+
+    @property
+    def keys(self) -> frozenset[TestKey]:
+        return self.passed | self.failed | self.ignored | self.aborted
+
+    @classmethod
+    def of_names(
+        cls, *, passed: Iterable[str] = (), failed: Iterable[str] = (),
+        ignored: Iterable[str] = (), aborted: Iterable[str] = (),
+        aborted_silent: Iterable[str] = (), positions: Positions | None = None,
+        binary: str = "",
+    ) -> KeyedVerdicts:
+        """A reading of ONE binary given by names: every name is a test of
+        `binary`. For a view that never held more than one binary (an
+        invented fixture); a multi-binary capture is read by its sections
+        (`TestStateReading.keyed`), never through this."""
+        def _k(names: Iterable[str]) -> frozenset[TestKey]:
+            return frozenset(TestKey(binary, leaf(n)) for n in names)
+        return cls(passed=_k(passed), failed=_k(failed), ignored=_k(ignored),
+                   aborted=_k(aborted), aborted_silent=_k(aborted_silent),
+                   positions=dict(positions or {}))
+
+
+def outcomes_of(
+    tests: Iterable[str], *, before: KeyedVerdicts, after: KeyedVerdicts,
+) -> TestOutcomes:
+    """The :class:`TestOutcomes` of `tests` (names; a qualified name is read
+    by its leaf) between two readings, judged per :class:`TestKey`.
+
+    Every key of either reading whose test is one of `tests` is judged on
+    its own. `gained`: passing after (and not failing), and neither passing
+    nor ignored before. `lost`: passing before (and not failing), failing
+    after. `aborted`: ran to its own verdict before in a process that did
+    not abort, and after its own process died without a panic (a death that
+    printed a panic, such as a stub's `unimplemented!()` reached while
+    unwinding, is not a native fault of the code under judgement).
+    Positions compare under one key, over keys failing in both. The name
+    sets on the result are the leaves of the judged keys: a name is lost
+    when one of its tests was lost, never because another test of that name
+    passes elsewhere."""
     names = {leaf(t) for t in tests}
-    bp = {leaf(t) for t in before_passed}
-    bf = {leaf(t) for t in before_failed}
-    ap = {leaf(t) for t in after_passed}
-    af = {leaf(t) for t in after_failed}
-    gained = frozenset(t for t in names if t in bf and t in ap and t not in af)
-    lost = frozenset(t for t in names if t in bp and t not in bf and t in af)
-    red_both = frozenset(t for t in names if t in bf and t in af)
-    earlier, later = compare_positions(
-        positions_for(before_positions, red_both),
-        positions_for(after_positions, red_both))
-    moved = {m.key.test for m in (*earlier, *later)}
-    same = {k.test for k, v in positions_for(after_positions, red_both).items()
-            if before_positions.get(k) == v}
-    b_abort = {leaf(t) for t in before_aborted}
-    a_silent = {leaf(t) for t in after_aborted_silent}
-    aborted = frozenset(t for t in names
-                        if (t in bp or t in bf) and t not in b_abort
-                        and t in a_silent)
+    keys = {k for k in before.keys | after.keys if k.test in names}
+    gained = {k for k in keys
+              if k in after.passed and k not in after.failed
+              and k not in before.passed and k not in before.ignored}
+    lost = {k for k in keys
+            if k in before.passed and k not in before.failed
+            and k in after.failed}
+    red_both = {k for k in keys if k in before.failed and k in after.failed}
+    before_pos = {k: v for k, v in before.positions.items() if k in red_both}
+    after_pos = {k: v for k, v in after.positions.items() if k in red_both}
+    earlier, later = compare_positions(before_pos, after_pos)
+    moved = {m.key for m in (*earlier, *later)}
+    same = {k for k, v in after_pos.items() if before_pos.get(k) == v}
+    aborted = {k for k in keys
+               if (k in before.passed or k in before.failed)
+               and k not in before.aborted and k in after.aborted_silent}
     return TestOutcomes(
-        gained=gained, lost=lost, earlier=earlier, later=later,
-        unpositioned=frozenset(red_both - moved - same), aborted=aborted)
+        gained=frozenset(k.test for k in gained),
+        lost=frozenset(k.test for k in lost),
+        earlier=earlier, later=later,
+        unpositioned=frozenset(k.test for k in red_both - moved - same),
+        aborted=frozenset(k.test for k in aborted))

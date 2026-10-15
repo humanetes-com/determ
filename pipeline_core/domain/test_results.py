@@ -29,7 +29,7 @@ from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reference_floor import doc_test_line
 
 if TYPE_CHECKING:
-    from pipeline_core.domain.assertion_position import TestKey
+    from pipeline_core.domain.assertion_position import KeyedVerdicts, TestKey
 
 
 class ClusterStatus(StrEnum):
@@ -1528,6 +1528,36 @@ class TestStateReading:
 
     def by_label(self) -> dict[str, BinaryResult]:
         return {b.label: b for b in self.binaries}
+
+    def keyed(self) -> KeyedVerdicts:
+        """This reading per (binary, test): what every keep compares
+        (`assertion_position.outcomes_of`). The `*_names` properties union
+        the binaries, so a name two binaries hold can sit in `passed_names`
+        and `failed_names` at once; no comparison reads them for that."""
+        from pipeline_core.domain.assertion_position import (
+            KeyedVerdicts,
+            TestKey,
+        )
+
+        def _k(label: str, names: Iterable[str]) -> set[TestKey]:
+            return {TestKey(label, bare_test_name(n)) for n in names}
+
+        passed: set[TestKey] = set()
+        failed: set[TestKey] = set()
+        ignored: set[TestKey] = set()
+        aborted: set[TestKey] = set()
+        silent: set[TestKey] = set()
+        for b in self.binaries:
+            if b.completed:
+                passed |= _k(b.label, b.passed)
+            failed |= _k(b.label, b.failed)
+            ignored |= _k(b.label, b.ignored)
+            aborted |= _k(b.label, b.aborted)
+            silent |= _k(b.label, b.aborted_silent)
+        return KeyedVerdicts(
+            passed=frozenset(passed), failed=frozenset(failed),
+            ignored=frozenset(ignored), aborted=frozenset(aborted),
+            aborted_silent=frozenset(silent), positions=dict(self.positions))
 
 
 # Verdict tokens libtest itself prints. Anything ELSE sitting where a verdict

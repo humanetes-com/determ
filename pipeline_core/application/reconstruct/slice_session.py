@@ -288,13 +288,7 @@ def _target_outcomes(
     it when something was gained. `aborted` is not emptied by a gain: a
     silent death removes the measurement. Read by the turn judge and by
     the peel, so a peeled subset is held to the bar the turn was."""
-    return outcomes_of(
-        tests, before_passed=baseline.passed_names,
-        before_failed=baseline.failed_names, after_passed=after.passed_names,
-        after_failed=after.failed_names, before_positions=baseline.positions,
-        after_positions=after.positions,
-        before_aborted=baseline.aborted_names,
-        after_aborted_silent=after.aborted_silent_names)
+    return outcomes_of(tests, before=baseline.keyed(), after=after.keyed())
 
 
 def _admit_from_file_requests(

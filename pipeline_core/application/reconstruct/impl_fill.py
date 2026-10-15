@@ -3004,7 +3004,13 @@ def prepare_impl_fill(
                     prior_error = ""
                     _file_kind = None
                 elif rc == 0:
-                    _revert_reason = "U2 test failure (no strict improvement)"
+                    # The refusing clause and its tests, so a refused joint
+                    # keep names why: run `14495-a26ad4ea` reverted a clean
+                    # +7 three times and the record held no reason.
+                    _why_f = _joint.refusal if _joint is not None else ""
+                    _revert_reason = (
+                        "U2 test failure (no strict improvement"
+                        + (f"; {_why_f}" if _why_f else "") + ")")
                     prior_error = _u2_file.detail if _u2_file is not None else ""
                     _file_kind = LastErrorKind.REDDENED
                 else:

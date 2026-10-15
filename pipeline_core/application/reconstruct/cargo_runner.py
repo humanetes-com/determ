@@ -770,7 +770,8 @@ def u2_test_gate(
                   "a test that never returns convicts the body under test")
             return U2Verdict(
                 U2Decision.REJECT, self_failures=frozenset({name}),
-                detail=render_hang_detail(name, hung[-1].label, timeout))
+                detail=render_hang_detail(name, hung[-1].label, timeout),
+                capture=out or "")
         return U2Verdict.accept()  # build did not finish → INCONCLUSIVE
     report = parse_test_output(out)
     scoped = TestRunReport(

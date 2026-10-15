@@ -277,24 +277,54 @@ def test_blameverdict_no_verdict_defaults_empty() -> None:
 
 
 # --- comparative banking for joint routes (JointImprovement) -----------------
-from pipeline_core.domain.test_report import (  # noqa: E402
-    assess_joint_improvement,
+from pipeline_core.domain.assertion_position import TestKey as _Key  # noqa: E402
+from pipeline_core.domain.test_report import judge_refill  # noqa: E402
+from pipeline_core.domain.test_results import (  # noqa: E402
+    TestStateReading,
+    parse_binary_results,
 )
+
+
+def _section(binary: str, passed: tuple[str, ...] = (),
+             failed: tuple[str, ...] = (), ignored: tuple[str, ...] = ()) -> str:
+    """One completed libtest section of an invented binary."""
+    lines = [f"     Running {binary} (target/debug/deps/x-0)", "",
+             f"running {len(passed) + len(failed) + len(ignored)} tests"]
+    lines += [f"test {t} ... ok" for t in passed]
+    lines += [f"test {t} ... FAILED" for t in failed]
+    lines += [f"test {t} ... ignored" for t in ignored]
+    lines += ["", "failures:", ""]
+    for t in failed:
+        lines += [f"---- {t} stdout ----",
+                  f"thread '{t}' panicked at {binary}:1:1:", "boom", ""]
+    lines += ["failures:", *(f"    {t}" for t in failed), "",
+              f"test result: {'FAILED' if failed else 'ok'}. {len(passed)} "
+              f"passed; {len(failed)} failed; {len(ignored)} ignored; "
+              "0 measured; 0 filtered out", ""]
+    return "\n".join(lines)
+
+
+def _reading(*sections: str) -> TestStateReading:
+    return TestStateReading(parse_binary_results("".join(sections)))
 
 
 def _reject(self_failures: set[str],
             no_verdict: frozenset[str] = frozenset(),
-            self_passed: frozenset[str] = frozenset()) -> U2Verdict:
+            self_passed: frozenset[str] = frozenset(),
+            capture: str = "") -> U2Verdict:
     return U2Verdict.reject(frozenset(self_failures), "detail",
-                            no_verdict=no_verdict, self_passed=self_passed)
+                            no_verdict=no_verdict, self_passed=self_passed,
+                            capture=capture)
+
+
+_ONE = "tests/test_one.rs"
 
 
 def test_joint_banks_on_positive_pass_evidence() -> None:
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "b", "c"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"a"}, self_passed=frozenset({"b", "c"})))
+    base = _reading(_section(_ONE, failed=("a", "b", "c")))
+    ji = judge_refill({"a", "b", "c"}, base, _reject(
+        {"a"}, self_passed=frozenset({"b", "c"}),
+        capture=_section(_ONE, passed=("b", "c"), failed=("a",))))
     assert ji.baseline_failing == {"a", "b", "c"}
     assert ji.resolved == {"b", "c"}
     assert ji.banks
@@ -305,58 +335,51 @@ def test_joint_absence_is_not_resolution() -> None:
     # `b` appears in NEITHER reading (stale attribution, cfg drift, crashed
     # scoped binary): unmeasured, never "fixed" — no bank without positive
     # pass evidence.
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "b"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"a"}))
+    base = _reading(_section(_ONE, failed=("a",)))
+    ji = judge_refill({"a", "b"}, base, _reject(
+        {"a"}, capture=_section(_ONE, failed=("a",))))
     assert ji.resolved == frozenset()
     assert not ji.banks
 
 
 def test_joint_no_bank_when_nothing_resolved() -> None:
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "b"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"a", "b"}))
+    base = _reading(_section(_ONE, failed=("a", "b")))
+    ji = judge_refill({"a", "b"}, base, _reject(
+        {"a", "b"}, capture=_section(_ONE, failed=("a", "b"))))
     assert not ji.banks
 
 
 def test_joint_no_bank_on_new_self_failure() -> None:
     # `c` was passing at baseline and fails now: improvement elsewhere cannot
     # buy a regression (the global gate reverts it anyway).
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "b", "c"}),
-        baseline_passed=frozenset({"c"}),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"c"}, self_passed=frozenset({"a", "b"})))
+    base = _reading(_section(_ONE, passed=("c",), failed=("a", "b")))
+    ji = judge_refill({"a", "b", "c"}, base, _reject(
+        {"c"}, self_passed=frozenset({"a", "b"}),
+        capture=_section(_ONE, passed=("a", "b"), failed=("c",))))
     assert ji.new_failures == {"c"}
+    assert ji.refusal == "newly red: c"
     assert not ji.banks
 
 
 def test_joint_aborted_previously_failing_is_not_resolved() -> None:
     # `b` printed no verdict (aborted) and was failing before — unmeasured,
     # not progress; `a` passing is what banks.
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "b", "c"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"c"}, no_verdict=frozenset({"b"}),
-                        self_passed=frozenset({"a"})))
+    base = _reading(_section(_ONE, failed=("a", "b", "c")))
+    ji = judge_refill({"a", "b", "c"}, base, _reject(
+        {"c"}, no_verdict=frozenset({"b"}), self_passed=frozenset({"a"}),
+        capture=_section(_ONE, passed=("a",), failed=("c",))))
     assert ji.resolved == {"a"}
     assert ji.unresolved == {"b", "c"}
     assert ji.banks
 
 
 def test_joint_baseline_vanished_counts_as_failing_and_can_resolve() -> None:
-    # An attributed test absent from baseline passes (its binary crashed at
+    # An attributed test the baseline never reported (its binary crashed at
     # baseline) was certainly not passing; observing it pass now banks.
-    ji = assess_joint_improvement(
-        attributed=frozenset({"vanished", "red"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject({"red"}, self_passed=frozenset({"vanished"})))
+    base = _reading(_section(_ONE, failed=("red",)))
+    ji = judge_refill({"vanished", "red"}, base, _reject(
+        {"red"}, self_passed=frozenset({"vanished"}),
+        capture=_section(_ONE, passed=("vanished",), failed=("red",))))
     assert ji.baseline_failing == {"vanished", "red"}
     assert ji.resolved == {"vanished"}
     assert ji.banks
@@ -364,13 +387,56 @@ def test_joint_baseline_vanished_counts_as_failing_and_can_resolve() -> None:
 
 def test_joint_ignored_tests_never_pad_the_baseline() -> None:
     # A cfg-ignored test must not sit in baseline_failing looking resolvable.
-    ji = assess_joint_improvement(
-        attributed=frozenset({"a", "ign"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset({"ign"}),
-        verdict=_reject({"a"}))
+    base = _reading(_section(_ONE, failed=("a",), ignored=("ign",)))
+    ji = judge_refill({"a", "ign"}, base, _reject(
+        {"a"}, capture=_section(_ONE, failed=("a",), ignored=("ign",))))
     assert ji.baseline_failing == {"a"}
     assert not ji.banks
+
+
+_REPR, _DOWN = "tests/test_repr.rs", "tests/test_downcast.rs"
+
+
+def test_a_name_two_binaries_hold_is_not_newly_red_when_its_red_copy_stayed_red() -> None:
+    """Run `14495-a26ad4ea` (2026-10-15, fill 6): `tests/test_repr.rs::
+    test_drop` passed, `tests/test_downcast.rs::test_drop` was red before and
+    after a `src/error.rs` rewrite that read `pass 120 -> 127 … no
+    regression`, and the joint keep reverted it on all three attempts. The
+    plan's sentence: that attempt banks, and an attempt that turns the green
+    copy red is refused. Negative control: the name-set rule the judge read
+    before (`self_failures & baseline.passed_names`) names `test_drop` newly
+    red on the same readings."""
+    base = _reading(_section(_REPR, passed=("test_drop",)),
+                    _section(_DOWN, failed=("test_drop", "gain")))
+    attempt = _reject(
+        {"test_drop"}, self_passed=frozenset({"gain", "test_drop"}),
+        capture=(_section(_REPR, passed=("test_drop",))
+                 + _section(_DOWN, passed=("gain",), failed=("test_drop",))))
+    ji = judge_refill({"test_drop", "gain"}, base, attempt)
+    assert ji.new_failures == frozenset() and ji.resolved == {"gain"}
+    assert ji.banks
+    assert attempt.self_failures & base.passed_names == {"test_drop"}
+
+    broke = _reject(
+        {"test_drop"}, self_passed=frozenset({"gain"}),
+        capture=(_section(_REPR, failed=("test_drop",))
+                 + _section(_DOWN, passed=("gain",), failed=("test_drop",))))
+    refused = judge_refill({"test_drop", "gain"}, base, broke)
+    assert refused.new_failures == {"test_drop"} and not refused.non_regression
+
+
+def test_a_verdict_without_a_capture_never_hides_a_loss_or_invents_a_gain() -> None:
+    """A verdict built without a run is read against the baseline's tests:
+    a self-failure of a shared name is every baseline test of it (refuses,
+    as before), and a pass of a shared name is no gain."""
+    base = _reading(_section(_REPR, passed=("test_drop",)),
+                    _section(_DOWN, failed=("test_drop",)))
+    ji = judge_refill({"test_drop"}, base, _reject({"test_drop"}))
+    assert not ji.non_regression
+    gain = judge_refill({"test_drop"}, base, _reject(
+        set(), self_passed=frozenset({"test_drop"})))
+    assert gain.resolved == frozenset()
+    assert _Key(_DOWN, "test_drop") in base.keyed().failed
 
 
 # --- verdicts a body destroyed ---------------------------------------------- #
@@ -768,12 +834,10 @@ def test_a_later_position_in_the_same_test_is_progress_not_a_regression() -> Non
 def test_an_earlier_position_is_a_regression_the_name_set_cannot_see() -> None:
     """Same verdict vector, strictly fewer assertions reached. `new_failures`
     is empty because the test was already red at baseline."""
-    ji = assess_joint_improvement(
-        attributed=frozenset({"t"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject_at({"t": 103}),
-        baseline_positions={TestKey(_BIN, "t"): 124})
+    base = TestStateReading(
+        parse_binary_results(_section(_BIN, failed=("t",))),
+        positions={TestKey(_BIN, "t"): 124})
+    ji = judge_refill({"t"}, base, _reject_at({"t": 103}))
     assert ji.new_failures == frozenset()
     assert ji.regressed_sites == (PositionMove(TestKey(_BIN, "t"), 124, 103),)
     assert "panic EARLIER" in ji.site_movement
@@ -800,11 +864,8 @@ def test_a_failure_with_no_position_is_absent_not_defaulted() -> None:
 def test_position_comparison_is_scoped_to_the_units_attributed_tests() -> None:
     """A position that moved in a test this unit does not answer for is
     somebody else's measurement."""
-    ji = assess_joint_improvement(
-        attributed=frozenset({"mine"}),
-        baseline_passed=frozenset(),
-        baseline_ignored=frozenset(),
-        verdict=_reject_at({"mine": 50, "theirs": 10}),
-        baseline_positions={TestKey(_BIN, "mine"): 50,
-                            TestKey(_BIN, "theirs"): 99})
+    base = TestStateReading(
+        parse_binary_results(_section(_BIN, failed=("mine", "theirs"))),
+        positions={TestKey(_BIN, "mine"): 50, TestKey(_BIN, "theirs"): 99})
+    ji = judge_refill({"mine"}, base, _reject_at({"mine": 50, "theirs": 10}))
     assert ji.regressed_sites == ()      # `theirs` moved earlier; not ours

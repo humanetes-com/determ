@@ -1528,7 +1528,7 @@ class FillOneFn:
                 # and recording that as a win is what let a 7h48m run report 50
                 # successes against a byte-identical verdict vector (run
                 # `1064759-0f23fb68`, 2026-08-15/16). The joint routes already
-                # bank on positive evidence only (`assess_joint_improvement`:
+                # bank on positive evidence only (`JointImprovement.resolved`:
                 # "counting absence as progress fabricated improvement"); this
                 # is that rule at the per-fn ledger.
                 self.tel.emit("phase_c.verdict", data={

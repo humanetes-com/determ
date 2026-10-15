@@ -16,22 +16,20 @@ structure reader), never approximated here.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from pathlib import Path
 from typing import Protocol
 
 from pipeline_core.domain.assertion_position import (
+    KeyedVerdicts,
     PositionMove,
-    Positions,
     TestKey,
     TestOutcomes,
     TestSource,
     assertion_positions,
-    compare_positions,
     leaf,
     outcomes_of,
-    positions_for,
 )
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.rust_idents import canon_container
@@ -887,45 +885,60 @@ class JointImprovement:
     its own test is simply wrong — but where one prompt rewrites a coupled
     family, the only REACHABLE step may be FEWER self-failures, and an
     absolute gate discards exactly the improvements the iter-level ratchet
-    exists to bank. A vanished test counts by PRIOR state. A test the
-    baseline ran to its own verdict whose own process the attempt killed
-    without a panic is `aborted`, and refuses (`TestOutcomes.refuses`)
-    whatever its prior state: until 2026-10-11 this read "a test that was
-    failing and now aborts is still failing, not newly broken", and run
-    `2157238-210637e6` kept five self-recursive `construct_from_*` bodies on
-    it, after which 26 binaries died of stack exhaustion every sweep.
+    exists to bank. A test whose baseline process ran to its own verdict and
+    whose process the attempt killed without a panic is `aborted`, and
+    refuses (`TestOutcomes.refuses`) whatever its prior state: until
+    2026-10-11 this read "a test that was failing and now aborts is still
+    failing, not newly broken", and run `2157238-210637e6` kept five
+    self-recursive `construct_from_*` bodies on it, after which 26 binaries
+    died of stack exhaustion every sweep.
 
-    ``baseline_failing`` — the unit's attributed tests not observed passing
-    (and not cfg-ignored) at the fresh in-lock baseline. ``resolved`` — the
-    subset observed PASSING in the fill's own scoped run: banking demands
-    POSITIVE evidence (a test absent from both readings is unmeasured, not
-    fixed — counting absence as progress fabricated improvement). ``new_failures``
-    — self-failures the baseline saw passing (or ignored). Banks iff something
-    resolved AND nothing newly red."""
+    ``outcomes`` is the attempt in the one outcome model every keep reads,
+    judged per (binary, test) (`assertion_position.outcomes_of`): until
+    2026-10-15 this class built "newly red" itself as the self-failures whose
+    NAME any baseline binary passed, and run `14495-a26ad4ea` reverted a
+    `pass 120 -> 127`, no-regression `src/error.rs` rewrite three times
+    because `tests/test_repr.rs::test_drop` passed while
+    `tests/test_downcast.rs::test_drop` was red before and after.
+
+    ``baseline_failing`` — the attributed names with a test not observed
+    passing (and not cfg-ignored) at the in-lock baseline, a name the
+    baseline never reported included (its binary crashed: certainly not
+    passing). ``resolved`` — the names with a test that turned green in the
+    fill's own scoped run: banking demands POSITIVE evidence (a test absent
+    from both readings is unmeasured, not fixed — counting absence as
+    progress fabricated improvement). Banks iff something resolved and the
+    outcome does not refuse."""
 
     baseline_failing: frozenset[str]
-    resolved: frozenset[str]
-    new_failures: frozenset[str]
-    #: Attributed tests red before and after whose assertion POSITION moved
-    #: (`assertion_position.compare_positions`): `regressed` stopped at an
-    #: earlier line of its own test body, `advanced` at a later one. A panic
-    #: in `src/`, a helper or a closure has no position and is in neither.
-    regressed_sites: tuple[PositionMove, ...] = ()
-    advanced_sites: tuple[PositionMove, ...] = ()
-    #: Attributed tests the baseline ran to their own verdict whose own
-    #: process this attempt killed without a panic (`TestOutcomes.aborted`).
-    aborted: frozenset[str] = frozenset()
+    outcomes: TestOutcomes
+
+    @property
+    def resolved(self) -> frozenset[str]:
+        return self.outcomes.gained
+
+    @property
+    def new_failures(self) -> frozenset[str]:
+        """Names with a test that passed at baseline and fails now."""
+        return self.outcomes.lost
+
+    @property
+    def regressed_sites(self) -> tuple[PositionMove, ...]:
+        """Attributed tests red before and after that stopped at an earlier
+        line of their own body (`assertion_position.compare_positions`)."""
+        return self.outcomes.earlier
+
+    @property
+    def advanced_sites(self) -> tuple[PositionMove, ...]:
+        return self.outcomes.later
+
+    @property
+    def aborted(self) -> frozenset[str]:
+        return self.outcomes.aborted
 
     @property
     def unresolved(self) -> frozenset[str]:
         return self.baseline_failing - self.resolved
-
-    @property
-    def outcomes(self) -> TestOutcomes:
-        """This attempt in the one outcome model every keep reads."""
-        return TestOutcomes(gained=self.resolved, lost=self.new_failures,
-                            earlier=self.regressed_sites,
-                            later=self.advanced_sites, aborted=self.aborted)
 
     @property
     def banks(self) -> bool:
@@ -936,20 +949,35 @@ class JointImprovement:
     @property
     def non_regression(self) -> bool:
         """The decided rule (`TestOutcomes.refuses`): nothing newly red,
-        and no attributed test stopped at an earlier assertion position
-        unless another attributed test went green. The one definition every
-        refill keep reads (`judge_refill`); a keep on names alone is how run
-        `24951-a72c4642` (2026-09-29) kept a pair write that turned
-        `test_altdebug`'s passing first assertion red while the test, red
-        before and after, left the name set unchanged."""
+        nothing aborted, and no attributed test stopped at an earlier
+        assertion position unless another attributed test went green. The
+        one definition every refill keep reads (`judge_refill`); a keep on
+        names alone is how run `24951-a72c4642` (2026-09-29) kept a pair
+        write that turned `test_altdebug`'s passing first assertion red
+        while the test, red before and after, left the name set unchanged."""
         return not self.outcomes.refuses
 
     @property
     def refused_on_position(self) -> bool:
         """Refused by the earlier-position clause alone: nothing newly red,
-        nothing resolved, and an attributed test stopped earlier."""
+        nothing resolved, nothing aborted, and an attributed test stopped
+        earlier."""
         return (not self.new_failures and not self.resolved
-                and bool(self.regressed_sites))
+                and not self.aborted and bool(self.regressed_sites))
+
+    @property
+    def refusal(self) -> str:
+        """Which clause refuses, with its tests, or "" when none does: the
+        log and the verdict row name it, so a refused keep is a lookup."""
+        o = self.outcomes
+        parts = []
+        if o.lost:
+            parts.append("newly red: " + ", ".join(sorted(o.lost)))
+        if o.aborted:
+            parts.append("aborted: " + ", ".join(sorted(o.aborted)))
+        if o.earlier and not o.gained:
+            parts.append("panics earlier: " + ", ".join(o.earlier_tests))
+        return "; ".join(parts)
 
     @property
     def site_movement(self) -> str:
@@ -975,39 +1003,52 @@ class JointImprovement:
                 f"{len(self.unresolved)} (resolved: {shown})")
 
 
-def assess_joint_improvement(
-    attributed: frozenset[str],
-    baseline_passed: frozenset[str],
-    baseline_ignored: frozenset[str],
-    verdict: U2Verdict,
-    baseline_positions: Positions | None = None,
-    aborted: frozenset[str] = frozenset(),
-) -> JointImprovement:
-    """Build the :class:`JointImprovement` for a joint fill judged REJECT by
-    the absolute U2 gate. ``attributed − passed − ignored`` (rather than the
-    baseline's failed names) is the honest "was failing" set: a test whose
-    baseline binary crashed printed no verdict at all, yet it was certainly
-    not passing. Resolution comes only from ``verdict.self_passed`` — the
-    same scoped run that produced the failures."""
-    baseline_failing = attributed - baseline_passed - baseline_ignored
-    # Scoped to the attributed tests red before and after: a position that
-    # moved in a test this unit does not answer for is somebody else's
-    # measurement, and a test that went green has no position to compare.
-    _red = baseline_failing & verdict.self_failures
-    regressed, advanced = compare_positions(
-        positions_for(baseline_positions or {}, _red),
-        positions_for(verdict.positions, _red))
-    return JointImprovement(
-        baseline_failing=frozenset(baseline_failing),
-        resolved=frozenset(verdict.self_passed & baseline_failing),
-        # By PRIOR state, like everything else here: a self-failure is new
-        # only when the baseline saw it passing (or ignored it). The file
-        # route used to count any self-failure outside `attributed` as new
-        # and the per-fn keep did not; one rule for both since 2026-09-29.
-        new_failures=frozenset(
-            verdict.self_failures & (baseline_passed | baseline_ignored)),
-        regressed_sites=regressed, advanced_sites=advanced,
-        aborted=frozenset(aborted & attributed))
+def keyed_verdict(verdict: U2Verdict, baseline: KeyedVerdicts) -> KeyedVerdicts:
+    """The scoped run behind `verdict`, per (binary, test).
+
+    Read off the verdict's own capture, so a name two binaries hold is two
+    tests. A failing test counts only when its name is one of the verdict's
+    self-failures (the gate's blame already excluded a failure inside
+    another unit's stub). A name the gate says lost its verdict
+    (`verdict.aborted`) and that the capture does not report is a death of
+    the baseline's tests of that name that the capture does not hold.
+
+    A verdict with no parsed capture (one built without a run) is read
+    against the baseline's keys: a self-failure is every baseline test of
+    that name, and a pass counts only where the baseline holds that name
+    once — it never invents a gain and never hides a loss."""
+    reading = TestStateReading(parse_binary_results(verdict.capture or ""))
+    own_failed = {leaf(n) for n in verdict.self_failures}
+    gone = {leaf(n) for n in verdict.aborted}
+    if reading.binaries:
+        k = reading.keyed()
+        reported = k.keys
+        silent = set(k.aborted_silent) | {
+            b for b in baseline.keys if b.test in gone and b not in reported}
+        return KeyedVerdicts(
+            passed=k.passed,
+            failed=frozenset(x for x in k.failed if x.test in own_failed),
+            ignored=k.ignored, aborted=k.aborted,
+            aborted_silent=frozenset(silent),
+            positions=dict(verdict.positions))
+
+    def _of(name: str) -> set[TestKey]:
+        return {b for b in baseline.keys if b.test == name}
+
+    failed: set[TestKey] = set()
+    for n in own_failed:
+        failed |= _of(n) or {TestKey("", n)}
+    passed: set[TestKey] = set()
+    for n in {leaf(x) for x in verdict.self_passed}:
+        held = _of(n)
+        if len(held) <= 1:
+            passed |= held or {TestKey("", n)}
+    silent_k: set[TestKey] = set()
+    for n in gone:
+        silent_k |= _of(n)
+    return KeyedVerdicts(passed=frozenset(passed), failed=frozenset(failed),
+                         aborted_silent=frozenset(silent_k),
+                         positions=dict(verdict.positions))
 
 
 def judge_refill(
@@ -1020,28 +1061,32 @@ def judge_refill(
     `.non_regression` and `.banks`.
 
     It takes the baseline READING rather than its parts so that no caller
-    can judge without the positions: the reading carries them
-    (`TestStateReading.positions`, filled by `reading_of_capture`). Before
-    this function the four keep sites each built "non-regression" from their
-    own flags, and three of them (impl, pair, per-fn) omitted the site
-    clause the file route had carried since 2026-08-20.
+    can judge without the positions or the binaries: both readings go to
+    `outcomes_of` per (binary, test), never as name sets. Before this
+    function the four keep sites each built "non-regression" from their own
+    flags, and three of them (impl, pair, per-fn) omitted the site clause
+    the file route had carried since 2026-08-20."""
+    names = frozenset(leaf(t) for t in attributed)
+    before = baseline.keyed()
+    after = keyed_verdict(verdict, before)
+    # A self-failure judges the attempt whether or not it is attributed: a
+    # test the scoped run named red that passed at baseline is lost. A
+    # position is evidence only for a test the unit answers for: one that
+    # moved in another test is somebody else's measurement.
+    judged = names | {leaf(t) for t in verdict.self_failures | verdict.aborted}
 
-    The abort clause reads the same two readings: the baseline's own
-    process deaths, and the verdict's (the gate's destroyed verdicts plus
-    every silent death its capture shows), through `outcomes_of`'s rule."""
-    names = frozenset(attributed)
-    after_silent = frozenset(verdict.aborted) | TestStateReading(
-        parse_binary_results(verdict.capture or "")).aborted_silent_names
-    aborted = outcomes_of(
-        names, before_passed=baseline.passed_names,
-        before_failed=baseline.failed_names, after_passed=frozenset(),
-        after_failed=frozenset(), before_positions={}, after_positions={},
-        before_aborted=baseline.aborted_names,
-        after_aborted_silent=after_silent).aborted
-    return assess_joint_improvement(
-        names, baseline.passed_names,
-        baseline.ignored_names, verdict, baseline.positions,
-        aborted=frozenset(t for t in names if leaf(t) in aborted))
+    def _own(pos: Mapping[TestKey, int]) -> dict[TestKey, int]:
+        return {k: v for k, v in pos.items() if k.test in names}
+
+    outcomes = outcomes_of(
+        judged, before=replace(before, positions=_own(before.positions)),
+        after=replace(after, positions=_own(after.positions)))
+    clear = before.passed | before.ignored
+    failing = frozenset(
+        n for n in names
+        if not (held := {k for k in before.keys if k.test == n})
+        or not held <= clear)
+    return JointImprovement(baseline_failing=failing, outcomes=outcomes)
 
 
 def turned_green(
