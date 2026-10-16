@@ -1224,8 +1224,11 @@ def _header_core(container: str) -> str:
 
 
 def _canon_tail(s: str) -> str:
-    return _drop_empty_generics(
-        _drop_orphan_plus("".join(_strip_lifetimes(s).split())))
+    # Lifetime elision runs first. A list still open after that is a header
+    # whose last `>` never arrived; closing it here is what every identity
+    # comparison reads (`canon_container`, `container_identity`).
+    return repair_truncated_generics(_drop_empty_generics(
+        _drop_orphan_plus("".join(_strip_lifetimes(s).split()))))
 
 
 def _path_segments(path: str) -> tuple[str, ...]:
@@ -1302,7 +1305,11 @@ def repair_truncated_generics(canon: str) -> str:
 
     Only a TRAILING run of ``)`` / ``]`` is rewritten, and only while an
     angle bracket is still open at that point: ``Foofor(A,B)`` (a tuple self
-    type, depth 0 at its ``)``) is identity and is returned unchanged."""
+    type, depth 0 at its ``)``) is identity and is returned unchanged. A list
+    still open after that — no closer was written at all — is closed by
+    appending the missing ``>``. A shorter argument list is a different
+    type and is not rewritten into a longer one: ``Foo<A, B`` becomes
+    ``Foo<A, B>``, which does not equal ``Foo<A, B, C>``."""
     depth = 0
     for ch in canon:
         if ch == "<":
@@ -1317,4 +1324,6 @@ def repair_truncated_generics(canon: str) -> str:
         out[i] = ">"
         depth -= 1
         i -= 1
+    if depth > 0:
+        out.append(">" * depth)
     return "".join(out)

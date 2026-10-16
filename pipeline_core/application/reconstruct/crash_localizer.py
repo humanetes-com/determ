@@ -162,7 +162,8 @@ def _site_for_report(
         label, dangling, kind, access, origin_raw_frames=origin,
         raw_report=asan_stack_excerpt(report.text), origin_capable=True,
         source_line=source_line, source_loc=source_loc,
-        source_window=source_window)
+        source_window=source_window,
+        origin_stack_lines=report.origin_stack_lines)
     if site.origin_unattributed:
         # Say WHICH starvation this is — the verdict alone left "no origin
         # stack at all", "unsymbolized raw addresses" and "symbolized but
@@ -286,10 +287,14 @@ def localize_crashes(
     """Localize every crashed binary visible in ``sweep_output`` (capped).
 
     gdb runs first because it is cheap and confirms WHICH binary/test dies,
-    but its backtrace names only the faulting frame. For a memory fault that
-    frame is usually not the fn to fix, so the sanitized sweep runs too and
-    its ORIGIN-bearing site supersedes gdb's FOR THAT BINARY. gdb's result is
-    kept for every binary the sanitizer did not report (no nightly, sanitizer
+    but its backtrace names only the faulting frame. For an invalid-memory
+    fault the sanitized sweep runs even when the debugger traced an origin:
+    a pointer loaded from memory is produced, by that trace, by the frame
+    that loaded it. A sanitized site supersedes that trace only when it
+    printed an origin stack (`origin_stack_lines`). A report that printed
+    none leaves the trace standing. A sanitized site for a binary the
+    debugger did not report is kept either way. gdb's result is also kept
+    for every binary the sanitizer did not report (no nightly, sanitizer
     unsupported, crash not reproducible under instrumentation, or — live on
     run `1577437-c93d5c26` iter 4 — `tests/test_context.rs` aborting on a
     panic in a destructor with no AddressSanitizer report at all).
@@ -350,38 +355,55 @@ def localize_crashes(
             sites.append(site)
     if deps.asan_sweep is None:
         return tuple(sites)
-    # Escalate to the sanitizer whenever origin evidence is missing and could
-    # change the blame: a crashed binary gdb could not reproduce (precisely
-    # the layout-dependent memory bugs), or a memory-fault backtrace whose
-    # innermost frame may be an innocent reader.
+    # Escalate whenever a sanitized origin could change the blame. A binary
+    # gdb could not reproduce needs the sanitizer because that is the only
+    # report. An invalid-memory fault needs it even when the debugger
+    # already filled origin frames: that trace follows a pointer the
+    # faulting frame was handed, and a pointer loaded from a field is
+    # produced by the loader, which is the sanitizer's question.
     unreproduced = len(sites) < len(considered)
     needs_origin = unreproduced or any(
-        s.fault is FaultClass.INVALID_MEMORY and not s.origin_frames
-        for s in sites)
+        s.fault is FaultClass.INVALID_MEMORY for s in sites)
     if not needs_origin:
         return tuple(sites)
+    if unreproduced:
+        why = "native re-run showed no fault (layout-dependent crash)"
+    elif any(s.origin_traced for s in sites):
+        why = ("a traced origin followed a pointer the faulting frame was "
+               "handed")
+    else:
+        why = "backtrace names only the faulting frame"
     deps.log("  [phase-c/crash-localizer] "
-             + ("native re-run showed no fault (layout-dependent crash)"
-                if unreproduced else
-                "backtrace names only the faulting frame")
+             + why
              + " — running ASAN sweep for the memory's origin.")
     asan = _asan_sites(deps, test_cmd, workspace_root, env)
     if not asan:
         return tuple(sites)
     # Each test binary is its own process and its own heap. A sanitized site
-    # supersedes the gdb site of the SAME binary — same label — because it
-    # carries the origin gdb cannot see. It says nothing about any other
-    # binary: `halt_on_error` stops one process, cargo starts the next, and
-    # the three incomplete binaries of run `1577437-c93d5c26` were three
-    # separate faults. The previous consolidation dropped every other
-    # memory-fault backtrace as a "downstream reader of the same corruption"
-    # — a one-heap premise that is false across processes — and that is
-    # how a sweep with three reports produced one nobody site.
-    asan_labels = {s.binary_label for s in asan}
-    kept = [s for s in sites if s.binary_label not in asan_labels]
+    # supersedes the gdb site of the SAME binary only when it printed an
+    # origin stack: that stack is the free or the allocation the debugger
+    # cannot see. A report that printed none (a SEGV) does not refute a
+    # trace, so the debugger site stands. A sanitized site for a binary the
+    # debugger did not report is kept either way — it is the only evidence
+    # for that binary. `halt_on_error` stops one process, cargo starts the
+    # next, and the three incomplete binaries of run `1577437-c93d5c26`
+    # were three separate faults. The previous consolidation dropped every
+    # other memory-fault backtrace as a "downstream reader of the same
+    # corruption" — a one-heap premise that is false across processes.
+    gdb_labels = {s.binary_label for s in sites}
+    bearing = {s.binary_label for s in asan if s.origin_stack_lines > 0}
+    kept = [s for s in sites if s.binary_label not in bearing]
+    kept_asan = [s for s in asan
+                 if s.origin_stack_lines > 0 or s.binary_label not in gdb_labels]
     superseded = len(sites) - len(kept)
     if superseded:
         deps.log(f"  [phase-c/crash-localizer] {superseded} gdb backtrace(s) "
                  "superseded by the sanitized site of the same binary; "
                  f"{len(kept)} kept for binaries the sanitizer did not report.")
-    return (*asan, *kept)
+    stood = [s for s in kept if s.binary_label in
+             {a.binary_label for a in asan if a.origin_stack_lines <= 0}]
+    if stood:
+        deps.log(f"  [phase-c/crash-localizer] {len(stood)} sanitized "
+                 "report(s) printed no origin stack; the traced site of "
+                 "that binary stands.")
+    return (*kept_asan, *kept)

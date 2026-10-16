@@ -23,7 +23,9 @@ share's starvation guard, so that guard never fired either.
 THE RANK. One key per unit, built from typed evidence:
 
 - class `HELD`: a still-stubbed unit some red test's first failure sits in
-  (`held_stubs.HeldStubs`). Every one is in the batch, whatever the cap.
+  (`held_stubs.HeldStubs`), or an origin or exhaustion culprit
+  (`crash_site.blocker_culprit_tests`). Every one is in the batch,
+  whatever the cap, ordered by how many tests it blocks.
 - class `EVIDENCED`: the unit has something no prompt has asked it. That is
   evidence it is owed and no prompt has asked yet (`candidate_tiers`), a
   crash's fault site naming it (a localized frame, a producer one call from
@@ -189,10 +191,18 @@ class UnitFacts:
     callee: bool = False
     #: Sweeps on the frontier since a turn last counted (`streak_after_turn`).
     unclaimed: int = 0
+    #: An origin or exhaustion culprit (`blocker_culprit_tests`). Held even
+    #: when the crash recorded no test name. A family sibling widened onto
+    #: the blame is not one: it stays `Crash.BLAMED` inside `EVIDENCED`.
+    culprit: bool = False
+    #: Tests this unit blocks: stub holds union the crash's tests. The held
+    #: key orders by this when it is non-zero, and by `held_tests` otherwise,
+    #: so a caller that only counted stub holds keeps that order.
+    blocked_tests: int = 0
 
     @property
     def rank_class(self) -> RankClass:
-        if self.held_tests > 0:
+        if self.held_tests > 0 or self.culprit:
             return RankClass.HELD
         if self.owed_tier is not None or self.crash in (Crash.BLAMED, Crash.SITED) or self.service is Service.NEVER:
             return RankClass.EVIDENCED
@@ -204,7 +214,8 @@ class UnitFacts:
     def key(self) -> tuple[int, ...]:
         cls = self.rank_class
         if cls is RankClass.HELD:
-            return (int(cls), -self.unclaimed, -self.held_tests, self.static_index)
+            blocked = self.blocked_tests or self.held_tests
+            return (int(cls), -self.unclaimed, -blocked, self.static_index)
         if cls is RankClass.EVIDENCED:
             # A fault site leads; a chain inference is not one and keys with
             # no crash. An un-owed unit keys after every owed tier: the

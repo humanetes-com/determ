@@ -17,7 +17,7 @@ The loop, per reading of the suite:
 2. `settle_step`: OWN or UNSETTLED ends the loop and the write is judged as
    before; NO_CRASH ends it with the stubs that are in;
 3. STUB: record the culprits' current bodies as refuted, put back the one
-   occurrence of each the stack ran (`occurrence_of_line`), and re-run the
+   occurrence of each the stack ran (`occurrence_of_frame`), and re-run the
    whole suite — a culprit off this binary's stack (another caller of the
    same reader) shows up as the next reading's crash.
 
@@ -39,7 +39,7 @@ from pipeline_core.application.reconstruct.tree_txn import TreeTxn
 from pipeline_core.domain.crash_settlement import (
     SettlementOutcome,
     frame_locator,
-    occurrence_of_line,
+    occurrence_of_frame,
     settle_step,
 )
 from pipeline_core.domain.crash_site import CrashFrame, CrashSite
@@ -239,7 +239,7 @@ class CrashSettler:
             for f in fs:
                 locs = locate_all_fns(text, f.fn_name)
                 spans = [(s, e) for _sig, s, _b, e in locs]
-                i = occurrence_of_line(spans, text, f.line)
+                i = occurrence_of_frame(spans, text, f.line)
                 if i is None:
                     return False
                 _sig, _s, b, e = locs[i]

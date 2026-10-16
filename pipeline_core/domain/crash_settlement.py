@@ -123,6 +123,23 @@ def _distinct(frames: Iterable[CrashFrame]) -> list[CrashFrame]:
     return out
 
 
+def occurrence_of_frame(
+    spans: Sequence[tuple[int, int]], text: str, line: int,
+) -> int | None:
+    """Index of the occurrence a frame ran.
+
+    A positive line is the span that holds it
+    (:func:`occurrence_of_line`). A frame recovered from caller source has
+    line 0: the stack named the function and not a source line. When that
+    name occurs once in the file, that occurrence is the body. A shared
+    name with no line stays unresolved — nothing picks one of them."""
+    if line > 0:
+        return occurrence_of_line(spans, text, line)
+    if len(spans) == 1:
+        return 0
+    return None
+
+
 def occurrence_of_line(
     spans: Sequence[tuple[int, int]], text: str, line: int,
 ) -> int | None:

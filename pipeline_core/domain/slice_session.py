@@ -31,9 +31,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pipeline_core.domain.assertion_position import TestKey, TestOutcomes, compare_positions
-from pipeline_core.domain.attribution import container_key, locator_of, site_label
+from pipeline_core.domain.attribution import locator_of, site_label
 from pipeline_core.domain.fill_schedule import RouteRun
-from pipeline_core.domain.impl_routing import norm_src_rel
+from pipeline_core.domain.impl_routing import named_container, norm_src_rel
+from pipeline_core.domain.rust_idents import container_identity
 from pipeline_core.domain.last_error import (
     kind_of_compiled_run,
     last_error_prefix,
@@ -753,11 +754,16 @@ def route_change_set(
             rejected.append(f"`{name}`: not in this session's editable set")
             continue
         if block:
-            want = container_key(block)
-            matched = [c for c in cands
-                       if container_key(records[c].container) == want]
+            matched = []
+            for c in cands:
+                cont = records[c].container
+                named, _amb = named_container(
+                    block, [(cont, container_identity(cont))])
+                if named is not None:
+                    matched.append(c)
             if not matched:
-                # Fall back to the file-unique name when the block is off.
+                # Fall back to the file-unique name when the header names
+                # nothing. A name declared once has one body to write.
                 matched = cands if len(cands) == 1 else []
         else:
             matched = cands if len(cands) == 1 else []

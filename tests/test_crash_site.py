@@ -1503,3 +1503,141 @@ def test_a_stub_abort_is_never_traced() -> None:
     site = site_from_frames("tests/t.rs", "t", "SIGABRT", frames,
                             fault_addr=0x8)
     assert not site.origin_traced
+
+
+_BOX_ACCESS = [{
+    "func": "<alloc::boxed::Box<dyn core::error::Error> as core::fmt::Display>::fmt",
+    "file": "/rustc/library/alloc/src/boxed.rs", "line": 1,
+}]
+
+
+def _cell_window(lines: list[str]):
+    from pipeline_core.domain.crash_site import SourceWindow
+    return SourceWindow(file_rel="tests/cell_gen_1.rs", first_line=1,
+                        lines=tuple(lines))
+
+
+def _recover(lines: list[str]):
+    from pipeline_core.domain.crash_site import recover_owner_from_caller_source
+    return recover_owner_from_caller_source(
+        [], _BOX_ACCESS, None, source_window=_cell_window(lines))
+
+
+def test_the_fault_line_resolves_through_the_name_it_reads() -> None:
+    """Two calls in the window. The fault reads `boxed`, bound on the line
+    that calls `repack`. The frame is line 0, anchored at the test file's
+    crate file. Two binders, or two calls on the binding line, name
+    nobody even when the window's unique call would be `repack`."""
+    lines = [
+        "fn test_take() {",
+        "    let cell = make();",
+        "    let boxed = cell.repack();",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ]
+    with using_driver(GenericLanguageDriver()):
+        frame = _recover(lines)
+        two_calls = _recover([
+            "fn test_take() {",
+            "    let boxed = cell.repack(other.wrap());",
+            '    assert_eq!(boxed.to_string(), "io");',
+        ])
+        two_binders = _recover([
+            "fn test_take() {",
+            "    let boxed = cell.repack();",
+            "    let boxed = cell.repack();",
+            '    assert_eq!(boxed.to_string(), "io");',
+        ])
+        no_binding = _recover([
+            "fn test_take() {",
+            "    let a = cell.repack();",
+            "    let b = cell.other();",
+            "    assert_eq!(1, 2);",
+        ])
+        one_call = _recover([
+            "fn test_take() {",
+            "    cell.repack();",
+            "    assert_eq!(1, 2);",
+        ])
+    assert frame is not None
+    assert frame.fn_name == "repack" and frame.line == 0
+    assert frame.file_rel == "src/cell.rs"
+    assert frame.named_by == ("tests/cell_gen_1.rs", 3)
+    assert two_calls is None and two_binders is None and no_binding is None
+    assert one_call is not None and one_call.fn_name == "repack"
+
+
+def test_a_catalog_window_still_names_the_bound_family_call() -> None:
+    """The catalog matcher already names a window with one family call.
+    Two family calls, and the fault reads the name one of them bound,
+    names that call rather than nobody."""
+    one = _recover([
+        "fn test_take() {",
+        "    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ])
+    picked = _recover([
+        "fn test_take() {",
+        "    let other = err.into_boxed_dyn_error();",
+        "    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ])
+    both = _recover([
+        "fn test_take() {",
+        "    let boxed = err.into_boxed_dyn_error(other.downcast());",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ])
+    assert one is not None
+    assert one.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
+    assert picked is not None and picked.fn_name == one.fn_name
+    assert picked.named_by == ("tests/cell_gen_1.rs", 3)
+    assert both is None
+
+
+def test_dispatch_holds_the_origin_and_not_the_widened_family() -> None:
+    from pipeline_core.domain.crash_site import (
+        CrashFrame,
+        CrashSite,
+        StackCycle,
+        blamed_locators,
+        blocker_culprit_tests,
+    )
+    origin = CrashFrame("src/cell.rs", 4, "into_boxed_dyn_error",
+                        "into_boxed_dyn_error")
+    site = CrashSite(
+        binary_label="tests/cell_gen_1.rs", test_name="t_a",
+        signal="AddressSanitizer: heap-use-after-free", frames=(),
+        origin_frames=(origin,), origin_capable=True)
+    loc = FnLocator("src/cell.rs", "into_boxed_dyn_error")
+    assert loc in blamed_locators((site,))
+    assert len(blamed_locators((site,))) > 1
+    held = blocker_culprit_tests((site,))
+    assert set(held) == {loc} and held[loc] == frozenset({"t_a"})
+    left = CrashFrame("src/cell.rs", 1, "left", "left")
+    right = CrashFrame("src/cell.rs", 2, "right", "right")
+    exhausted = CrashSite(
+        binary_label="tests/cell_gen_1.rs", test_name="t_b",
+        signal="stack-overflow", frames=(left, right),
+        cycle=StackCycle(frames=(left, right, left, right, left, right),
+                         repeats=3))
+    got = blocker_culprit_tests((exhausted,))
+    assert set(got) == {FnLocator("src/cell.rs", "left"),
+                        FnLocator("src/cell.rs", "right")}
+    with using_driver(GenericLanguageDriver()):
+        repack = CrashFrame("src/cell.rs", 4, "repack", "repack")
+        one = CrashSite(
+            binary_label="tests/cell_gen_1.rs", test_name="t_a",
+            signal="AddressSanitizer: heap-use-after-free", frames=(),
+            origin_frames=(repack,), origin_capable=True)
+        two = CrashSite(
+            binary_label="tests/cell_gen_1.rs", test_name="t_c",
+            signal="AddressSanitizer: heap-use-after-free", frames=(),
+            origin_frames=(repack,), origin_capable=True)
+        unnamed = CrashSite(
+            binary_label="tests/cell_gen_1.rs", test_name=None,
+            signal="AddressSanitizer: heap-use-after-free", frames=(),
+            origin_frames=(repack,), origin_capable=True)
+        rloc = FnLocator("src/cell.rs", "repack")
+        assert blamed_locators((one,)) == frozenset({rloc})
+        assert blocker_culprit_tests((one, two))[rloc] == frozenset(
+            {"t_a", "t_c"})
+        assert blocker_culprit_tests((unnamed,))[rloc] == frozenset()

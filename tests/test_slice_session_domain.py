@@ -209,6 +209,40 @@ def test_a_unique_name_routes_even_when_the_block_is_off() -> None:
     assert [r.unit for r in cs.routed] == [_RENDER]
 
 
+def test_a_header_missing_its_last_closer_routes_and_a_shorter_list_does_not() -> None:
+    """A header whose last `>` never arrived names the closed impl. A
+    shorter argument list does not name the longer one, and a name shared
+    by two impls stays dropped."""
+    one = FnSite("src/cell.rs", "show", "impl Trait for Holder<T>")
+    two = FnSite("src/cell.rs", "show", "impl Trait for Holder<T, U>")
+    recs = {
+        one: FnRecord(file="src/cell.rs", fn_name="show",
+                      container="impl Trait for Holder<T>",
+                      sig_text="fn show(&self)"),
+        two: FnRecord(file="src/cell.rs", fn_name="show",
+                      container="impl Trait for Holder<T, U>",
+                      sig_text="fn show(&self)"),
+    }
+    cs = route_change_set(
+        [{"fn_name": "show", "block": "impl Trait for Holder<T", "body": "A"}],
+        recs)
+    assert [r.unit for r in cs.routed] == [one]
+    longer = FnSite("src/cell.rs", "show", "impl Trait for Holder<A, B, C>")
+    other = FnSite("src/cell.rs", "show", "impl Other")
+    shared = {
+        longer: FnRecord(file="src/cell.rs", fn_name="show",
+                         container="impl Trait for Holder<A, B, C>",
+                         sig_text="fn show(&self)"),
+        other: FnRecord(file="src/cell.rs", fn_name="show",
+                        container="impl Other", sig_text="fn show(&self)"),
+    }
+    cs = route_change_set(
+        [{"fn_name": "show", "block": "impl Trait for Holder<A, B", "body": "B"}],
+        shared)
+    assert cs.routed == ()
+    assert "ambiguous" in cs.rejected[0]
+
+
 def test_a_body_given_twice_keeps_the_first() -> None:
     cs = route_change_set([
         {"fn_name": "render", "block": "", "body": "B1", "where_clause": None},

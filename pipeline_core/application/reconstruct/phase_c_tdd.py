@@ -147,6 +147,7 @@ from pipeline_core.domain.crash_site import (
     faulting_stack_sites,
     memory_blamed_locators,
     observed_cycle_sites,
+    blocker_culprit_tests,
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
@@ -6211,14 +6212,22 @@ def run_phase_c_tdd(
             if _u not in _static:
                 _static.append(_u)
         # THE ONE RANK (`domain/dispatch_rank`). Every fact the steps above
-        # computed is handed to it, and nothing after it reorders: held stubs
-        # first and all of them in the batch, then the evidenced units (owed,
-        # named by a fault site, or never served a body), then the rest;
-        # inside each class the units the last sweeps did not claim lead.
+        # computed is handed to it, and nothing after it reorders: held
+        # units first and all of them in the batch (a stub a red test stops
+        # in, or an origin or exhaustion culprit), then the evidenced units
+        # (owed, named by a fault site, or never served a body), then the
+        # rest; inside each class the units the last sweeps did not claim
+        # lead. The culprit set is the observed origin plus the exhaustion
+        # cycle, with the tests that convicted each. The widened blame
+        # (`crash_blamed`) stays the family the schedule and the grade
+        # read; a sibling it adds is `Crash.BLAMED` and not held.
         _chain_set = _crash_cohort.chain_only
+        _culprit_tests = blocker_culprit_tests(_sites)
         _facts: dict[FnLocator, UnitFacts] = {}
         for _i, _k in enumerate(_static):
-            _held_n = len(_holds.tests_held_by(_k))
+            _held_names = _holds.tests_held_by(_k)
+            _crash_names = _culprit_tests.get(_k, frozenset())
+            _held_n = len(_held_names)
             _crash_k = (Crash.BLAMED if _k in crash_blamed
                         else Crash.CHAIN if _k in _chain_set
                         else Crash.SITED if _k in _crash_grades else None)
@@ -6230,7 +6239,9 @@ def run_phase_c_tdd(
                 service=service_of(
                     _k, served=_served_verified, flat=_flat_keys,
                     dead=_dead_keys, red_dead=_red_dead, hollow=_stub_keys),
-                unclaimed=_unclaimed.get(_k, 0))
+                unclaimed=_unclaimed.get(_k, 0),
+                culprit=_k in _culprit_tests,
+                blocked_tests=len(_held_names | _crash_names))
         # A served unit nothing owes, already opened under the fingerprint it
         # would be asked under now (its own body + its red tests' words),
         # leaves this sweep's frontier: the cap is a ceiling, not a quota.
@@ -6265,7 +6276,7 @@ def run_phase_c_tdd(
             k for k, fact in _facts.items()
             if fact.crash in (Crash.BLAMED, Crash.SITED))
         ordered = [(k, eligible.get(k, set())) for k in _ranked]
-        _held_in = _holds.units & frozenset(_ranked)
+        _held_in = (_holds.units | frozenset(_culprit_tests)) & frozenset(_ranked)
         _held_off = _not_ranked.held_violations(_holds.units)
         if _held_off:
             deps.log(
@@ -6331,7 +6342,8 @@ def run_phase_c_tdd(
         deps.emit("phase_c.dispatch.rank", data={
             "cluster": cluster.name, "iter": iter_n,
             "batch": [f"{k.file}::{k.fn_name}" for k in _batch.keys],
-            "held": {f"{k.file}::{k.fn_name}": _facts[k].held_tests
+            "held": {f"{k.file}::{k.fn_name}": (
+                        _facts[k].blocked_tests or _facts[k].held_tests)
                      for k in sorted(_held_in, key=lambda x: (x.file, x.fn_name))},
             "classes": {c.name.lower(): n for c, n in _by_class.items()},
             "unclaimed": {f"{k.file}::{k.fn_name}": _facts[k].unclaimed

@@ -295,6 +295,65 @@ def test_origin_unattributed_site_survives_with_zero_crate_frames() -> None:
     assert any("blaming NOBODY" in m for m in logged)
 
 
+_ASAN_SEGV = """\
+    Running tests/test_source.rs (target-asan/debug/deps/test_source-999)
+running 1 test
+test test_io_source ... ==1==ERROR: AddressSanitizer: SEGV on unknown address 0x10
+READ of size 8 at 0x10 thread T0
+    #0 0x1 in core::fmt::write /rustc/library/core/src/fmt/mod.rs:1
+    #1 0x2 in test_source::test_io_source /w/tests/test_source.rs:19:1
+SUMMARY: AddressSanitizer: SEGV
+"""
+
+_TRACED_GDB = (
+    "SIGSEGV",
+    [
+        {"func": "crate::read", "file": "src/lib.rs", "line": 3,
+         "ptr_args": [[0x8, 16]]},
+        {"func": "crate::make", "file": "src/lib.rs", "line": 9,
+         "ptr_args": []},
+    ],
+    0x8,
+)
+
+
+def test_a_printed_origin_supersedes_a_traced_site() -> None:
+    """An invalid-memory fault runs the sanitizer even after the debugger
+    traced an origin. A report that printed a free stack replaces that
+    trace for the same binary."""
+    logged: list[str] = []
+    deps, calls = _deps(gdb_result=_TRACED_GDB, asan_result=(101, _ASAN_OUT),
+                        log=logged.append)
+    (site,) = _run(deps)
+    assert calls["asan"] == ["cargo test"]
+    assert site.origin_stack_lines > 0
+    assert site.origin_capable
+    assert site.blamed_locator == FnLocator("src/error.rs", "construct_from_std")
+    assert any("superseded by the sanitized site of the same binary" in m
+               for m in logged)
+
+
+def test_a_report_with_no_origin_leaves_the_traced_site_standing() -> None:
+    """A SEGV that printed no free stack does not refute the trace."""
+    logged: list[str] = []
+    deps, calls = _deps(gdb_result=_TRACED_GDB, asan_result=(101, _ASAN_SEGV),
+                        log=logged.append)
+    (site,) = _run(deps)
+    assert calls["asan"] == ["cargo test"]
+    assert site.origin_traced
+    assert not site.origin_capable
+    assert site.blamed_locator == FnLocator("src/lib.rs", "make")
+    assert any("printed no origin stack" in m for m in logged)
+
+
+def test_a_segv_the_debugger_did_not_report_is_kept() -> None:
+    deps, _ = _deps(gdb_result=None, asan_result=(101, _ASAN_SEGV))
+    (site,) = _run(deps)
+    assert site.origin_capable
+    assert site.origin_stack_lines == 0
+    assert site.binary_label == "tests/test_source.rs"
+
+
 _ASAN_TEST_ONLY_ORIGIN = """\
     Running tests/test_source.rs (target-asan/debug/deps/test_source-999)
 running 3 tests
@@ -523,8 +582,9 @@ def test_three_reports_become_three_sites(tmp_path: Path) -> None:
 def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: Path) -> None:
     """The iter-4 shape exactly: three binaries crashed, two of them with an
     AddressSanitizer report, and `tests/test_context.rs` aborted on a panic
-    in a destructor with no report at all. gdb's SIGSEGV for
-    `tests/error_gen_3.rs` is superseded by that label's sanitized site; its
+    in a destructor with no report at all. The SEGV in `tests/error_gen_3.rs`
+    printed no free stack, so the debugger site of that binary stands; the
+    use-after-free that printed one replaces gdb for its own binary. The
     SIGABRT for `tests/test_context.rs` survives as the third site — it is
     not "a downstream reader" of a fault in another process."""
     sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=True)
@@ -547,10 +607,15 @@ def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: 
     by_label = {s.binary_label: s for s in sites}
     assert set(by_label) == {
         "tests/error_gen_3.rs", "tests/test_downcast.rs", "tests/test_context.rs"}
-    assert by_label["tests/error_gen_3.rs"].origin_capable, (
-        "the sanitized site replaced gdb's for the same binary")
-    assert by_label["tests/error_gen_3.rs"].blamed_locator == FnLocator(
+    segv = by_label["tests/error_gen_3.rs"]
+    assert not segv.origin_capable and segv.signal == "SIGSEGV", (
+        "a report that printed no origin leaves the debugger site standing")
+    assert segv.origin_stack_lines == 0
+    assert segv.blamed_locator == FnLocator(
         "src/error.rs", "reallocate_into_boxed_dyn_error_without_backtrace")
+    uaf = by_label["tests/test_downcast.rs"]
+    assert uaf.origin_capable and uaf.origin_stack_lines > 0
+    assert uaf.blamed_locator == FnLocator("src/error.rs", "downcast")
     kept = by_label["tests/test_context.rs"]
     assert not kept.origin_capable and kept.signal == "SIGABRT"
     assert kept.blamed_locator == FnLocator("src/error.rs", "context_drop_rest")

@@ -127,6 +127,35 @@ def test_negative_control_the_label_read_as_a_bare_name_is_refused(
         "fmt [impl Display for Gauge]"]
 
 
+def test_a_header_missing_its_last_closer_is_admitted() -> None:
+    recs = list(_RECS) + [
+        {"file": "src/a.rs", "fn_name": "paint",
+         "container": "impl Display for Gauge<T>",
+         "sig_text": "fn paint(&self)", "cfg_predicates": []},
+        {"file": "src/a.rs", "fn_name": "paint",
+         "container": "impl Display for Gauge<T, U>",
+         "sig_text": "fn paint(&self)", "cfg_predicates": []},
+    ]
+    adm = admit_joint(
+        [_block("paint", "impl Display for Gauge<T")],
+        target_file="src/a.rs", target_name="build",
+        target_container="impl Gauge", records=recs)
+    assert [u.container for u in adm.admitted] == ["impl Display for Gauge<T>"]
+    longer = admit_joint(
+        [_block("paint", "impl Display for Gauge<A, B")],
+        target_file="src/a.rs", target_name="build",
+        target_container="impl Gauge",
+        records=[
+            {"file": "src/a.rs", "fn_name": "paint",
+             "container": "impl Display for Gauge<A, B, C>",
+             "sig_text": "fn paint(&self)", "cfg_predicates": []},
+            {"file": "src/a.rs", "fn_name": "paint",
+             "container": "impl Other",
+             "sig_text": "fn paint(&self)", "cfg_predicates": []},
+        ])
+    assert not longer.admitted
+
+
 # ---- the unit writes, keeps and reverts the set as one ----
 
 

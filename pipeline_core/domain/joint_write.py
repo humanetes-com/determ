@@ -41,7 +41,9 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from pipeline_core.domain.impl_routing import named_container
 from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.rust_idents import container_identity
 
 #: How many functions besides the target one reply may add. Sized to the
 #: widest joint write measured: a table-builder and the three table entries
@@ -123,7 +125,9 @@ def _block_matches(block: str, container: str) -> bool:
     b = _norm(block)
     if not b or b.lower() == FREE_FNS:
         return not container
-    return b == _norm(container)
+    named, _amb = named_container(
+        block, [(container, container_identity(container))])
+    return named is not None
 
 
 def admit_joint(

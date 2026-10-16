@@ -651,6 +651,48 @@ def test_an_urgent_absence_leads_the_eight_name_notice():
     assert "n" not in list(hidden)[:8]
 
 
+def test_an_origin_culprit_is_held_when_stubs_already_fill_the_cap():
+    """A culprit is in the batch when held stubs already fill the cap,
+    ordered by how many tests the crash convicted. A frame-sited unit and
+    a blamed sibling that is not the origin stay evidenced. Control: the
+    same origin without the culprit flag falls past the cap, behind
+    never-served units the last sweep did not claim."""
+    stubs = {
+        f"h{i}": UnitFacts(static_index=i, service=Service.SERVED, held_tests=1)
+        for i in range(12)}
+    never = {
+        f"n{i}": UnitFacts(static_index=100 + i, service=Service.NEVER,
+                           unclaimed=1)
+        for i in range(4)}
+    facts = {
+        **stubs, **never,
+        "origin": UnitFacts(static_index=200, service=Service.SERVED,
+                            crash=Crash.BLAMED, culprit=True, blocked_tests=12),
+        "small": UnitFacts(static_index=201, service=Service.SERVED,
+                           crash=Crash.BLAMED, culprit=True, blocked_tests=1),
+        "sited": UnitFacts(static_index=202, service=Service.NEVER,
+                           crash=Crash.SITED),
+        "sibling": UnitFacts(static_index=203, service=Service.SERVED,
+                             crash=Crash.BLAMED),
+    }
+    order = rank(facts)
+    held = [k for k in order if facts[k].rank_class is RankClass.HELD]
+    assert held[0] == "origin" and "small" in held
+    assert facts["sited"].rank_class is RankClass.EVIDENCED
+    assert facts["sibling"].rank_class is RankClass.EVIDENCED
+    batch = take(order, held, 12, cohort=None, traversed=())
+    assert "origin" in batch.keys and "small" in batch.keys
+    assert "sited" not in batch.keys and "sibling" not in batch.keys
+    bare = dict(facts)
+    bare["origin"] = UnitFacts(static_index=200, service=Service.SERVED,
+                               crash=Crash.BLAMED)
+    order2 = rank(bare)
+    held2 = [k for k in order2 if bare[k].rank_class is RankClass.HELD]
+    batch2 = take(order2, held2, 12, cohort=None, traversed=())
+    assert bare["origin"].rank_class is RankClass.EVIDENCED
+    assert "origin" not in batch2.keys
+
+
 def test_the_classes():
     """`EVIDENCED` is "something no prompt has asked this unit": owed
     evidence, a fault site, or no body ever served. A chain inference alone
@@ -661,6 +703,8 @@ def test_the_classes():
         return UnitFacts(static_index=0, **kw)  # type: ignore[arg-type]
 
     assert f(service=Service.NEVER, held_tests=2).rank_class is RankClass.HELD
+    assert f(service=Service.SERVED, culprit=True).rank_class is RankClass.HELD
+    assert f(service=Service.SERVED, crash=Crash.BLAMED).rank_class is RankClass.EVIDENCED
     assert f(service=Service.SERVED, owed_tier=1).rank_class is RankClass.EVIDENCED
     assert f(service=Service.SERVED, crash=Crash.SITED).rank_class is RankClass.EVIDENCED
     assert f(service=Service.SERVED, crash=Crash.CHAIN).rank_class is RankClass.OTHER

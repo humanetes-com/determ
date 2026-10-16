@@ -19,10 +19,11 @@ from pipeline_core.application.reconstruct.crash_settler import (
 )
 from pipeline_core.domain.crash_settlement import (
     SettlementOutcome,
+    occurrence_of_frame,
     occurrence_of_line,
     settle_step,
 )
-from pipeline_core.domain.crash_site import site_from_frames
+from pipeline_core.domain.crash_site import CrashFrame, CrashSite, site_from_frames
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.test_results import TestStateReading, parse_binary_results
 
@@ -82,6 +83,41 @@ def test_a_frame_names_one_occurrence_of_a_shared_name() -> None:
     spans = [(0, 15), (16, 31)]
     assert occurrence_of_line(spans, text, 2) == 0
     assert occurrence_of_line(spans, text, 5) == 1
+    # A recovered frame has no line. One occurrence is that body; a shared
+    # name stays unresolved. A positive line is unchanged.
+    assert occurrence_of_frame([(0, 15)], "fn f() {\n    a\n}\n", 0) == 0
+    assert occurrence_of_frame(spans, text, 0) is None
+    assert occurrence_of_frame(spans, text, 2) == 0
+    assert occurrence_of_frame(spans, text, 5) == 1
+
+
+def _line0(fn: str) -> CrashSite:
+    return CrashSite(
+        binary_label="tests/t.rs", test_name="t1", signal="SIGSEGV",
+        frames=(CrashFrame("src/lib.rs", 2, "read", "read"),),
+        origin_frames=(CrashFrame("src/lib.rs", 0, fn, fn),),
+        origin_capable=True)
+
+
+def test_a_recovered_frame_stubs_the_only_occurrence(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _settler(root, [_PASS], [[_line0("make_a")], []])
+    got = s.settle("capture", {READ}, _baseline())
+    assert got.outcome is SettlementOutcome.SETTLED, got.reason
+    text = (root / "src" / "lib.rs").read_text()
+    assert "bad_a" not in text and "bad_b" in text and "real" in text
+
+
+def test_a_recovered_frame_of_a_shared_name_is_not_put_back(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    path = root / "src" / "lib.rs"
+    path.write_text(path.read_text() + "\nfn make_a() {\n    other\n}\n")
+    before = path.read_text()
+    s = _settler(root, [_PASS], [[_line0("make_a")], []])
+    got = s.settle("capture", {READ}, _baseline())
+    assert got.outcome is SettlementOutcome.UNSETTLED
+    assert "could not be put back" in got.reason
+    assert path.read_text() == before
 
 
 # ---- the loop ----

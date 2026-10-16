@@ -467,5 +467,10 @@ def test_repair_truncated_generics_rewrites_only_an_open_trailing_bracket() -> N
     # Balanced: untouched, `)` or not.
     assert repair_truncated_generics("Foofor(A,B)") == "Foofor(A,B)"
     assert repair_truncated_generics("DebugforError") == "DebugforError"
-    # Open depth but no trailing closer to rewrite: returned as is.
-    assert repair_truncated_generics("Foofor<T") == "Foofor<T"
+    # A list still open at the end is closed. A header whose last `>`
+    # never arrived (`Holder<T`) used to come back unchanged and the
+    # router dropped it (run `14235-bf24f931`, 2026-10-16).
+    assert repair_truncated_generics("Foofor<T") == "Foofor<T>"
+    # A shorter argument list is a different header.
+    assert repair_truncated_generics("Foofor<A,B") == "Foofor<A,B>"
+    assert repair_truncated_generics("Foofor<A,B") != "Foofor<A,B,C>"

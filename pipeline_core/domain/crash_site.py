@@ -659,6 +659,50 @@ def first_test_file_after_destructor(
     return None
 
 
+def _line_calls(line: str, family: frozenset[str]) -> list[str]:
+    """Calls on one source line, in source order.
+
+    A non-empty family counts only its members (the catalog match). An
+    empty family counts every ``.name(`` / ``::name(`` call. A bare call
+    is not one: the faulting line's adapters are not the conversion."""
+    if family:
+        return [m.group(1) for m in _CONVERSION_CALL_RE.finditer(line)
+                if m.group(1) in family]
+    from pipeline_core.domain.language_driver import _called_idents
+    return _called_idents(line)
+
+
+def _name_from_binding(
+    lines: Sequence[str], family: frozenset[str],
+) -> tuple[str | None, int] | None:
+    """The call the faulting line's value was bound to.
+
+    The last line is the fault. Exactly one earlier line whose bindings
+    intersect the names that line reads is the binder, and exactly one
+    call on that line is the name: ``(name, index)``. Two such lines, or
+    one line that calls two fns, is ``(None, 0)`` — nobody, and the caller
+    does not fall through. No such line, or a binder that calls nothing,
+    is None: the caller falls through to the window's unique-name gate.
+    """
+    from pipeline_core.domain.example_setup import binds, uses
+    if len(lines) < 2:
+        return None
+    fault_names = uses(lines[-1])
+    binders = [i for i, line in enumerate(lines[:-1])
+               if binds(line) & fault_names]
+    if len(binders) > 1:
+        return (None, 0)
+    if not binders:
+        return None
+    index = binders[0]
+    calls = _line_calls(lines[index], family)
+    if len(calls) > 1:
+        return (None, 0)
+    if not calls:
+        return None
+    return (calls[0], index)
+
+
 def recover_owner_from_caller_source(
     origin_raw: list[dict[str, object]],
     access_raw: list[dict[str, object]],
@@ -676,7 +720,11 @@ def recover_owner_from_caller_source(
     line, located by ``named_by``) when given, else over ``source_window``
     (the access-side window of the enclosing test fn, whose own
     coordinates supply ``named_by`` — the binding line, not the faulting
-    access). Empty family or no unique name: None, and blame is unchanged.
+    access). On a window, the name the faulting line reads is resolved
+    first (:func:`_name_from_binding`): the line that bound it, when that
+    line calls one fn. Two binders or two calls on that line name nobody.
+    No binding falls through to the unique-name gate. Empty family or no
+    unique name: None, and blame is unchanged.
 
     ``file_rel`` of the recovered frame: the origin's in-crate destructor
     file when the origin has one (the shape every recorded UAF has — the
@@ -706,7 +754,14 @@ def recover_owner_from_caller_source(
         name = (crate_fn_named_on_source_line(source_line, family)
                 if family else drv.unique_called_name(source_line))
     elif source_window is not None and source_window.lines:
-        if family:
+        bound = _name_from_binding(source_window.lines, family)
+        if bound is not None and bound[0] is None:
+            return None
+        if bound is not None:
+            name = bound[0]
+            named_by = (source_window.file_rel,
+                        source_window.line_no(bound[1]))
+        elif family:
             hit = crate_fn_named_in_source_window_at(
                 source_window.lines, family)
             name = hit[0] if hit is not None else None
@@ -997,6 +1052,11 @@ class CrashSite:
     # the fault address through the arguments each frame received — a
     # debugger measurement, not a sanitizer's origin stack.
     origin_traced: bool = False
+    # How many `#N` lines the sanitizer printed under its origin introducer
+    # (`AsanReport.origin_stack_lines`). Zero on a debugger site and on a
+    # report that carried no free or allocation stack. The localizer
+    # supersedes a traced site only when this is non-zero.
+    origin_stack_lines: int = 0
 
     @property
     def fault(self) -> FaultClass:
@@ -1562,6 +1622,7 @@ def site_from_frames(
     source_loc: tuple[str, int] | None = None,
     source_window: SourceWindow | None = None,
     abort: AbortReading | None = None,
+    origin_stack_lines: int = 0,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
@@ -1616,7 +1677,8 @@ def site_from_frames(
         frames=_crate_frames(raw_frames, crate_file_prefix, max_frames),
         origin_frames=origin,
         raw_report=raw_report, origin_capable=origin_capable, cycle=cycle,
-        abort=abort, origin_traced=traced)
+        abort=abort, origin_traced=traced,
+        origin_stack_lines=origin_stack_lines)
 
 
 def asan_stack_excerpt(report: str, *, max_access: int = 24,
@@ -2058,15 +2120,18 @@ def crash_evidence_by_locator(
 def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     """Each site's origin-blamed locator, with no family union.
 
-    Dispatch and the MUST need the family (:func:`blamed_locators`). The
-    retrigger's filled-body gate and OWNS grade need the observed origin
-    only: a filled recovered conversion plus an undeclared sibling must
-    stay a fill, not a type re-author. Chain-derived sites contribute
-    nothing: `chain_derived_site` builds with `frames=()` and
-    `origin_frames=()`, so `CrashSite.blamed` — and therefore
-    `blamed_locator` — is None for every `PROVENANCE_CHAIN` site by
-    construction; a non-None locator here is always frame-derived, with
-    no need to re-check `provenance`."""
+    The schedule and the family instruction read the widened set
+    (:func:`blamed_locators`). Dispatch's held batch reads this set plus
+    the exhaustion cycle (:func:`blocker_culprit_tests`): holding the
+    widened set would admit every family name at the file under a driver
+    whose conversion family is non-empty. The retrigger's filled-body
+    gate and OWNS grade need the observed origin only: a filled recovered
+    conversion plus an undeclared sibling must stay a fill, not a type
+    re-author. Chain-derived sites contribute nothing:
+    `chain_derived_site` builds with `frames=()` and `origin_frames=()`,
+    so `CrashSite.blamed` — and therefore `blamed_locator` — is None for
+    every `PROVENANCE_CHAIN` site by construction; a non-None locator
+    here is always frame-derived, with no need to re-check `provenance`."""
     return frozenset(
         loc for s in sites
         if s.fault is not FaultClass.EXHAUSTION
@@ -2351,8 +2416,30 @@ def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
     """Everything a sweep's crash sites convict: the origin blame with its
     family (:func:`reader_blamed_locators`) plus the cycle of every stack
     exhaustion (:func:`exhaustion_culprit_locators`). The set the refill
-    stamp, the schedule and the dispatch grade read."""
+    stamp, the schedule and the dispatch grade (`Crash.BLAMED`) read.
+    The held batch does not: it reads :func:`blocker_culprit_tests`."""
     return reader_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+
+
+def blocker_culprit_tests(
+    sites: tuple[CrashSite, ...],
+) -> dict[FnLocator, frozenset[str]]:
+    """Culprits the dispatch batch admits ahead of the cap, each with the
+    tests whose crash convicted it.
+
+    The set is the observed origin (:func:`origin_blamed_locators`) plus
+    every exhaustion-cycle member (:func:`exhaustion_culprit_locators`).
+    :func:`blamed_tests` widens an origin that sits in the driver's
+    conversion family to every family name at that file. Those siblings
+    stay on the schedule and on the family instruction. They are not held
+    here. Under a driver whose family is empty the locators match
+    :func:`blamed_locators`. Under one whose family names several
+    conversions, holding the widened set would fill a batch with bodies
+    the crash did not run. A culprit with an empty test set is still a
+    key: membership admits it, and the count orders it."""
+    keep = origin_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+    return {loc: tests for loc, tests in blamed_tests(sites).items()
+            if loc in keep}
 
 
 def blamed_tests(
