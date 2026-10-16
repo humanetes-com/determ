@@ -1129,7 +1129,17 @@ def latest_by_unit(entries: Iterable[LedgerEntry]) -> dict[LedgerKey, LedgerEntr
             best[e.key] = e
             continue
         if e.body_sha == cur.body_sha:
-            # Same body, later word about it — including a refutation.
+            # Same body, later word about it — including a refutation. Except
+            # that a word which says nothing cannot take a refutation back:
+            # a crash settlement refutes the body it puts back to a stub, and
+            # the next sweep, finding that body no longer on the tree, writes
+            # `unmeasured` about it (`classify`); under "later word wins" the
+            # re-seed would then splice the body the crash convicted back
+            # onto the stub (run `1057870-b427a3a2`'s dangling constructor).
+            if (cur.state is BodyState.REFUTED
+                    and not cur.refutation_superseded
+                    and e.state in (BodyState.UNMEASURED, BodyState.LANDED)):
+                continue
             best[e.key] = e
             continue
         if cur.state is BodyState.PROVEN and e.state is not BodyState.PROVEN:

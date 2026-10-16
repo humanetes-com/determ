@@ -12,10 +12,11 @@ tests' `monkeypatch.setenv` still flips it.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 
 from pipeline_core.application.reconstruct import cargo_runner
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
 
 RunCargo = Callable[..., "tuple[int, str]"]
@@ -62,6 +63,7 @@ def gate(
     introduced_stubs: bool = False,
     observe: Callable[[RegressionComparison], None] | None = None,
     hollow_before: int | None = None,
+    written: Collection[FnLocator] = (),
 ) -> tuple[RegressionComparison, str] | None:
     """``observe`` receives the comparison the gate measures, on every path.
 
@@ -74,4 +76,4 @@ def gate(
         run_cargo, test_cmd, cwd, env, base,
         enabled=unified_on and _guard_on(), timeout=timeout, guard=guard,
         stub_free=stub_free, introduced_stubs=introduced_stubs,
-        observe=observe, hollow_before=hollow_before)
+        observe=observe, hollow_before=hollow_before, written=written)

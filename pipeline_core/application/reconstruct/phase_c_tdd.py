@@ -36,6 +36,13 @@ from pipeline_core.application.reconstruct.body_reseed import (
 )
 from pipeline_core.application.reconstruct.cargo_runner import oracle_test_source
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
+from pipeline_core.application.reconstruct.crash_settler import (
+    CrashSettler,
+    CrashSettlerDeps,
+)
+from pipeline_core.application.reconstruct.crash_settler import (
+    bind as bind_crash_settler,
+)
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
 from pipeline_core.application.reconstruct.macro_invariants import defined_macro_names
 from pipeline_core.application.reconstruct.site_revert import (
@@ -88,6 +95,8 @@ from pipeline_core.domain.body_ledger import (
     standing_on_tree,
     tests_creditable_to_locator,
 )
+from pipeline_core.domain.body_standing import bind as bind_body_standing
+from pipeline_core.domain.body_standing import is_proven_text, proven_units
 from pipeline_core.domain.candidate_tiers import (
     DEFAULT_MISSES,
     LADDER,
@@ -281,6 +290,7 @@ from pipeline_core.domain.refine import (
     LoopState,
 )
 from pipeline_core.domain.retro_gate import bind_crate_names
+from pipeline_core.domain.rust_scan import is_hollow_body
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
     attributed_units_for_session,
@@ -335,7 +345,7 @@ from pipeline_core.domain.zero_payoff import (
     unpaid_streak,
     zero_payoff_streak,
 )
-from pipeline_core.ports.fill_engine import FillPassPort
+from pipeline_core.ports.fill_engine import FillPassPort, LocalizeCrashesPort
 
 
 class FilterTestTargets(Protocol):
@@ -467,7 +477,7 @@ class PhaseCTddDeps:
     # Crash localizer: (sweep_output, test_cmd, workspace_root, env) ->
     # tuple[CrashSite, ...] — gdb fast path + ASAN fallback. None disables
     # localization (no CRASH_EVIDENCE prompts, no crash-first frontier).
-    localize_crashes: Callable[..., tuple[Any, ...]] | None = None
+    localize_crashes: LocalizeCrashesPort | None = None
     # One-time retro evidence migration: (project_dir) -> (cleared, retired).
     # Clears exhaustion verdicts + retires guidance recorded under the old
     # crash-confounded whole-run gate. None disables.
@@ -3046,6 +3056,37 @@ def run_phase_c_tdd(
         _sweep_view = _sweep_view_of(output, _measure.failed, _oracle.vanished,
                                      _rec.reconciled,
                                      held_=_held_of(output, _oracle.vanished))
+        # The bodies on this tree that have evidence they are right
+        # (`body_standing`): what the prompt readers may show as the crate's
+        # own way of doing things, and what a crash settlement never puts
+        # back to a stub. Rebound at every sweep.
+        if deps.enumerate_fns is not None and deps.tree_writer is not None:
+            try:
+                _recs_p = deps.enumerate_fns(target_src_dir) or []
+                _bodies_p = unit_bodies(_recs_p, {
+                    FnLocator(str(r.get("file") or ""),
+                              str(r.get("fn_name") or "")) for r in _recs_p})
+                _stand_p = standing_on_tree(_ledger_entries(), {
+                    LedgerKey(project_dir.name, cluster.name, u.file,
+                              u.fn_name): body_sha(b)
+                    for u, b in _bodies_p.items()})
+                _units_p = proven_units(
+                    [FnLocator(k.file, k.fn_name) for k, e in _stand_p.items()
+                     if e.state is BodyState.PROVEN],
+                    {bare_test_name(t): us
+                     for t, us in test_reverse_map.items()},
+                    passed=_sweep_view.passed, died=_sweep_view.aborted,
+                    intact=_rec.reconciled)
+                bind_body_standing({u: _bodies_p[u] for u in _units_p
+                                    if u in _bodies_p}, known=_bodies_p)
+                deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: "
+                         f"{len(_units_p)} of {len(_bodies_p)} unit(s) proven "
+                         "on this tree (ledger or a passing attributed test); "
+                         "only these are shown as the crate's own idioms.")
+            except Exception as exc:  # noqa: BLE001 — a reading never ends a sweep
+                bind_body_standing(None)
+                deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: not "
+                         f"read ({type(exc).__name__}: {exc})")
         if _ledger_rows and deps.ledger_append is not None:
             _judged: list[LedgerEntry] = [
                 _grade_landing(_row, _ledger_before or _sweep_view, _sweep_view)
@@ -7006,9 +7047,18 @@ def run_phase_c_tdd(
                 recs_now = deps.enumerate_fns(target_src_dir) or []
                 # The batch, plus whatever the wave's routes say they kept.
                 scope = _keys | kept_hint
+                bodies_now_w = unit_bodies(recs_now, scope)
                 landed_now = changed_units(
                     {k: v for k, v in _before.items() if k in scope},
-                    unit_bodies(recs_now, scope))
+                    bodies_now_w)
+                # A unit that went back to a stub during the fill (a crash
+                # settlement put the culprit back, a peel restored it) landed
+                # no body: a row for it would grade the stub at the sweep.
+                landed_now = frozenset(
+                    k for k in landed_now
+                    if not (bodies_now_w.get(k)
+                            and all(is_hollow_body(b)
+                                    for b in bodies_now_w[k])))
                 if not landed_now:
                     return 0
                 items_w, file_of_w, fps_w = _layout_ctx(_epoch)
@@ -7206,6 +7256,64 @@ def run_phase_c_tdd(
                 found.update(site.culprit_locators)
             return frozenset(found)
 
+        # The one place a crash under a write is settled against an unproven
+        # body outside it (`crash_settler`); every route's gate calls it.
+        def _settle_localize(captured: str,
+                             exclude: Collection[str]) -> tuple[Any, ...]:
+            if deps.localize_crashes is None:
+                return ()
+            return tuple(deps.localize_crashes(
+                captured, test_cmd, target_src_dir, cluster_env,
+                exclude=exclude))
+
+        def _settle_run_suite() -> str | None:
+            _rc_s, _out_s = deps.run_cargo(
+                test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
+            return None if _rc_s == -1 else _out_s
+
+        def _settle_is_proven(loc: FnLocator) -> bool:
+            # The same reading the prompt readers take (`body_standing`): a
+            # body on the tree the sweep found proven is never put back. Any
+            # one of the unit's bodies counts — a frame names one occurrence,
+            # and refusing is the side that loses nothing.
+            if deps.tree_writer is None:
+                return False
+            return any(is_proven_text(loc, b) for b in
+                       deps.tree_writer.bodies(loc, target_src_dir))
+
+        def _settle_record(locs: Sequence[FnLocator],
+                           sites: Sequence[Any], *,
+                           _iter: int = iter_n,
+                           _epoch: int = _destruction_epoch) -> None:
+            if deps.ledger_append is None or deps.enumerate_fns is None:
+                return
+            items_s, file_of_s, fps_s = _layout_ctx(_epoch)
+            tests_s = sorted({str(s.test_name) for s in sites if s.test_name})
+            rows_s = [
+                replace(r, verdict_delta=tuple(
+                    (t, "crash_origin") for t in tests_s))
+                for r in rows_for_units(
+                    [(u.file, u.fn_name) for u in locs],
+                    deps.enumerate_fns(target_src_dir) or [],
+                    project=project_dir.name, cluster=cluster.name,
+                    state=BodyState.REFUTED, items=items_s,
+                    file_of=file_of_s, file_fp=fps_s, run_id=deps.run_id,
+                    iteration=_iter, epoch=_epoch,
+                    oracle_fp=_oracle_fp(_iter))]
+            if rows_s:
+                deps.ledger_append(project_dir, rows_s)
+                if _ledger_cache is not None:
+                    _ledger_cache.extend(rows_s)
+
+        def _settle_emit(ev: str, data: Mapping[str, Any], *,
+                         _iter: int = iter_n) -> None:
+            deps.emit(ev, data={"cluster": cluster.name, "iter": _iter, **data})
+
+        _crash_settler = CrashSettler(CrashSettlerDeps(
+            localize=_settle_localize, run_suite=_settle_run_suite,
+            is_proven=_settle_is_proven, src_dir=target_src_dir,
+            record_settled=_settle_record, log=deps.log, emit=_settle_emit))
+
         _fill_crash: tuple[BaseException, str] | None = None
         # The joint ask's candidate bodies go on the tree before the fill,
         # each function's prior body remembered. A rejected or crashed joint
@@ -7252,6 +7360,9 @@ def run_phase_c_tdd(
             return sorted(back, key=lambda loc_: (loc_.file, loc_.fn_name))
 
         _frontier_built: FailureFrontier | None = None
+        # Every route's test gate reads the settler bound here
+        # (`crash_settler.bound`), so no route can judge a crash without it.
+        bind_crash_settler(_crash_settler)
         try:
             with collect_stream_meta() as _fill_meta:
                 sub = deps.task2_fill_fns_one_by_one(
@@ -7367,6 +7478,7 @@ def run_phase_c_tdd(
             _fill_crash = (_fill_exc, traceback.format_exc())
         finally:
             fill_phase_clock.disarm()
+            bind_crash_settler(None)
         if _fill_crash is not None:
             _exc_c, _tb_c = _fill_crash
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cluster_failed "

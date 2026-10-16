@@ -37,6 +37,10 @@ from typing import Any
 from pipeline_core.application.reconstruct.attribution import (
     admit_format_siblings_for_file,
 )
+from pipeline_core.application.reconstruct.crash_localizer import crash_keys
+from pipeline_core.application.reconstruct.crash_settler import (
+    bound as bound_crash_settler,
+)
 from pipeline_core.application.reconstruct.peel_revert import (
     LandedBody,
     PeelResult,
@@ -531,8 +535,23 @@ def run_slice_session(
                 rejected.append(f"`{r.unit.fn_name}` in {r.unit.file}: splice refused ({reason})")
         return rejected, pre
 
-    def _read(raw: list[str]) -> tuple[TurnReading, TestStateReading | None]:
+    def _read(raw: list[str], written: frozenset[FnLocator],
+              ) -> tuple[TurnReading, TestStateReading | None]:
         after = ports.measure_suite(raw)
+        # A test process that died under this change set is settled by the
+        # fill's bound settler (`crash_settler`) before the turn is read, the
+        # same rule the per-fn and joint gates apply: a culprit outside the
+        # change set and unproven goes back to a stub, and the suite is read
+        # again. A later restore of this turn's files puts those bodies back
+        # with the rest of the pre-image.
+        _settler = bound_crash_settler()
+        if (after is not None and baseline is not None
+                and _settler is not None and written
+                and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
+            if _settler.settle(raw[-1] if raw else "", written, baseline,
+                               tag=f"{label} ").settled:
+                raw.clear()
+                after = ports.measure_suite(raw)
         if after is None or baseline is None:
             return TurnReading(targets=tuple(
                 TargetStatus(t, False, "(suite inconclusive)") for t in slice_.tests)), after
@@ -728,7 +747,8 @@ def run_slice_session(
                           f"({', '.join(dropped)}); the remaining "
                           f"{len(cs.routed)} compile and are judged.")
             raw: list[str] = []
-            reading, after = _read(raw)
+            reading, after = _read(raw, frozenset(
+                FnLocator(r.unit.file, r.unit.fn_name) for r in cs.routed))
             failing = [t.test for t in reading.targets if not t.passing]
             if after is None or baseline is None:
                 # Inconclusive suite: keep nothing from this turn.

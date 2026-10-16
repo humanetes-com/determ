@@ -125,6 +125,7 @@ class Cargo(Protocol):
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
         baseline: TestStateReading | None, *, stub_free: bool = False,
         introduced_stubs: bool = False, hollow_before: int | None = None,
+        written: Collection[FnLocator] = (),
     ) -> tuple[RegressionComparison, str] | None: ...
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = ...) -> str: ...
@@ -306,6 +307,34 @@ class ImplFillPath(Protocol):
         fill_premise: Mapping[str, Any] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
     ) -> ClusterFillResult: ...
+
+
+class RegressionGatePort(Protocol):
+    """The global non-regression gate as every fill route calls it
+    (`regression_guard.gate` bound by the composition root). Typed so a
+    keyword a route passes and the gate does not take fails mypy, not the
+    run: ``written`` arrived 2026-10-16 with the crash settlement
+    (`crash_settler`), which needs the units the caller's write put on the
+    tree."""
+
+    def __call__(
+        self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
+        baseline: TestStateReading | None, /, *, stub_free: bool = ...,
+        introduced_stubs: bool = ..., hollow_before: int | None = ...,
+        written: Collection[FnLocator] = ...,
+    ) -> tuple[RegressionComparison, str] | None: ...
+
+
+class LocalizeCrashesPort(Protocol):
+    """`crash_localizer.localize_crashes` bound to its adapters by the
+    composition root: ``(capture, test command, tree, env) -> sites``.
+    ``exclude`` names the native crashes (`crash_localizer.crash_key`) the
+    caller already saw before the change it judges."""
+
+    def __call__(
+        self, sweep_output: str, test_cmd: str, workspace_root: Path,
+        env: dict[str, str], /, *, exclude: Collection[str] = ...,
+    ) -> tuple[Any, ...]: ...
 
 
 class FillPassPort(Protocol):

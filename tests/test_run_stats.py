@@ -120,22 +120,76 @@ def test_a_store_failure_stops_recording_without_raising(run) -> None:
     rec.finish()                         # no exception reaches the pipeline
 
 
-def test_workspace_tree_id_ignores_target_and_follows_content(tmp_path) -> None:
-    ws = tmp_path / "ws"
+def _git(ws, *args: str) -> None:
+    subprocess.run(["git", "-C", str(ws), "-c", "user.email=t@t", "-c", "user.name=t",
+                    *args], check=True, capture_output=True)
+
+
+def _restore_point(ws, *, leftover: str):
+    """A workspace reset to one commit, with build output a previous run left
+    behind untracked under a nested target/ the root-only ignore misses."""
     (ws / "src").mkdir(parents=True)
     (ws / "src" / "lib.rs").write_text("fn a() {}\n")
-    (ws / ".gitignore").write_text("target/\n")
-    subprocess.run(["git", "init", "-q", str(ws)], check=True)
+    (ws / ".gitignore").write_text("/target/\n")
+    _git(ws.parent, "init", "-q", str(ws))
+    _git(ws, "add", "-A")
+    _git(ws, "commit", "-q", "-m", "restore point")
+    junk = ws / "cluster" / "target" / "debug"
+    junk.mkdir(parents=True)
+    (junk / "lib.d").write_text(leftover)
+
+
+def test_two_runs_from_one_restore_point_share_an_origin(tmp_path) -> None:
+    # The claim the phase-cost baseline rests on: a from-scratch restart from
+    # the same restore tag is comparable however much the previous run left
+    # behind. The pre-fix probe hashed untracked files too and gave every run
+    # its own origin (28 origins for 28 runs on the live store, 2026-10-15).
+    a, b = tmp_path / "a", tmp_path / "b"
+    _restore_point(a, leftover="built at 10:00")
+    _restore_point(b, leftover="built at 11:30, other flags")
+    assert rsr.workspace_tree_id(a) == rsr.workspace_tree_id(b)
+
+
+def test_origin_follows_tracked_content_and_deletion_read_only(tmp_path) -> None:
+    ws = tmp_path / "ws"
+    _restore_point(ws, leftover="x")
+    before = rsr.workspace_tree_id(ws)
+    git_state = sorted((p.name, p.stat().st_mtime_ns)
+                       for p in (ws / ".git").rglob("*") if p.is_file())
+    (ws / "src" / "lib.rs").write_text("fn a() { 1; }\n")
+    modified = rsr.workspace_tree_id(ws)
+    assert modified != before
+    (ws / "src" / "lib.rs").unlink()
+    assert rsr.workspace_tree_id(ws) not in (before, modified)
+    # Read-only: neither the object store nor the index was written.
+    assert sorted((p.name, p.stat().st_mtime_ns)
+                  for p in (ws / ".git").rglob("*") if p.is_file()) == git_state
+
+
+def test_origin_without_git_walks_the_sources(tmp_path) -> None:
+    ws = tmp_path / "plain"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "lib.rs").write_text("fn a() {}\n")
     before = rsr.workspace_tree_id(ws)
     (ws / "target").mkdir()
     (ws / "target" / "junk.rs").write_text("x")
     assert rsr.workspace_tree_id(ws) == before
-    objects = sorted(p.name for p in (ws / ".git" / "objects").rglob("*"))
     (ws / "src" / "lib.rs").write_text("fn a() { 1; }\n")
     assert rsr.workspace_tree_id(ws) != before
-    # Read-only: nothing was hashed into the workspace's object store.
-    assert sorted(p.name for p in (ws / ".git" / "objects").rglob("*")) == objects
     assert rsr.workspace_tree_id(tmp_path / "missing") == "absent"
+
+
+def test_each_measured_sweep_is_recorded_with_the_calls_before_it(run) -> None:
+    store, rec, _ = run
+    with phases.phase_scope("t2a", module="anyhow", cluster="stable"):
+        _call()
+        _call()
+        log_mod.emit("phase_c.tdd.iter", data={"cluster": "stable", "iter": 1,
+                                               "pass_count": 33, "oracle_static": 146})
+        _call()
+        log_mod.emit("phase_c.tdd.iter", data={"cluster": "stable", "iter": 2, "rc": 101})
+    (row,) = store.sweeps(["r1"])
+    assert (row.cluster, row.iter, row.pass_count, row.llm_calls) == ("stable", 1, 33, 2)
 
 
 def test_code_identity_moves_with_the_extractor_not_the_monitor(tmp_path) -> None:

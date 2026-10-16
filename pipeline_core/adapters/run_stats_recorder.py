@@ -7,13 +7,17 @@ workspace. It owns three things the pure fold cannot:
 * the run's identity — `resolve_code_identity` (the code that decides what a
   run does, the pre-run stamp and HEAD as landmarks) and the configuration
   (`RunConfig.from_env`, captured at launch, not after the run);
-* the run's ORIGIN — the workspace content at the first top-level phase that
-  actually runs (`workspace_tree_id`). A fresh run starts from the clone; a
-  resume starts from whatever its restore point left. Two runs of a phase are
-  comparable only from the same origin: everything after the first
-  model-written phase differs run to run, so a per-phase input tree would
-  never match, while the origin fixes the distribution those phases are drawn
-  from;
+* the run's ORIGIN — the restore point the workspace stood at when the first
+  top-level phase that actually runs entered (`workspace_tree_id`). A fresh
+  run starts from the restore tag; a resume starts from whatever its restore
+  point left. Two runs of a phase are comparable only from the same origin:
+  everything after the first model-written phase differs run to run, so a
+  per-phase input tree would never match, while the origin fixes the
+  distribution those phases are drawn from;
+* the sweeps — every `phase_c.tdd.iter` that measured, as one
+  `domain.sweep_trajectory.SweepRow` with the clock and the model calls at
+  that reading. The fill phase seldom closes inside a process, so its phase
+  sample cannot say how the score climbed; the sweeps can;
 * the cargo boundary — a `sys.addaudithook` on `subprocess.Popen`, the one
   place every spawned process passes, which emits `cargo.spawn` (classified
   by `domain.phase_cost.classify_cargo`) in the spawning thread's context, so
@@ -46,6 +50,7 @@ from ..domain.phase_cost import (
     classify_cargo,
 )
 from ..domain.phase_registry import PHASE_ENTER
+from ..domain.sweep_trajectory import sweep_of
 from ..log import emit, log
 from .run_stats_store import SQLiteRunStatsStore
 
@@ -87,32 +92,59 @@ def resolve_code_identity(root: Path, *, commit: str | None = None) -> CodeIdent
                         commit=commit if commit and commit != "unknown" else None)
 
 
+def _git(project_dir: Path, *args: str) -> bytes:
+    # GIT_OPTIONAL_LOCKS=0: a read must not refresh the workspace's index
+    # under the pipeline's own git operations.
+    return subprocess.run(
+        ["git", "-C", str(project_dir), *args], capture_output=True, timeout=60,
+        check=True, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}).stdout
+
+
 def workspace_tree_id(project_dir: Path) -> str:
-    """Content identity of the workspace: every file git would track (tracked
-    plus untracked-not-ignored, so `target/` is out), path and bytes, read
-    only — nothing is written into the workspace's object store. No git:
-    the `*.rs` and `Cargo.toml` files under the directory. Missing: `absent`."""
+    """The restore point the workspace stands at: the tree of its HEAD commit,
+    folded with the bytes of every TRACKED file that differs from it (a
+    deleted one as a marker). Read only — nothing is written into the
+    workspace's object store or index.
+
+    Untracked files are not part of a restore point and are left out. They
+    were in, and no two runs ever shared an origin: of the 28 live runs
+    recorded 2026-10-04 → 10-15, 28 distinct origins, four of them
+    from-scratch restarts from the same restore tag. A restore resets the
+    tracked files and leaves untracked ones behind, and on `anyhow`
+    (2026-10-15) 231 of them were build output under a cluster tree's
+    nested `target/`, which the workspace's root-only ignore does not cover —
+    different after every build, so every run compared to nothing and the
+    health tab printed `not_comparable` for every phase.
+
+    No git, or no commit yet: the `*.rs` and `Cargo.toml` files under the
+    directory (`target/` out). Missing: `absent`."""
     if not project_dir.is_dir():
         return "absent"
-    files: list[str] = []
     if (project_dir / ".git").exists():
         try:
-            out = subprocess.run(
-                ["git", "-C", str(project_dir), "ls-files", "-co",
-                 "--exclude-standard", "-z"],
-                capture_output=True, timeout=60, check=True).stdout
-            files = [f for f in out.decode("utf-8", "replace").split("\0") if f]
-        except (OSError, subprocess.SubprocessError):
-            files = []
-    if not files:
-        files = [str(p.relative_to(project_dir)) for p in project_dir.rglob("*")
-                 if p.is_file() and "target" not in p.relative_to(project_dir).parts
-                 and (p.suffix == ".rs" or p.name == "Cargo.toml")]
-    entries: list[tuple[str, bytes]] = []
-    for rel in files:
+            tree = _git(project_dir, "rev-parse", "HEAD^{tree}").decode().strip()
+            changed = [f for f in _git(project_dir, "diff", "--name-only", "-z",
+                                       "--no-renames", "HEAD")
+                       .decode("utf-8", "replace").split("\0") if f]
+        except (OSError, subprocess.SubprocessError, UnicodeDecodeError):
+            tree = ""
+        if tree:
+            entries: list[tuple[str, bytes]] = [("HEAD^{tree}", tree.encode())]
+            for rel in sorted(changed):
+                try:
+                    entries.append((rel, (project_dir / rel).read_bytes()))
+                except OSError:
+                    entries.append((rel, b"\0deleted"))
+            return combine_source_hashes(entries)
+    files = [str(p.relative_to(project_dir)) for p in project_dir.rglob("*")
+             if p.is_file() and "target" not in p.relative_to(project_dir).parts
+             and ".git" not in p.relative_to(project_dir).parts
+             and (p.suffix == ".rs" or p.name == "Cargo.toml")]
+    walked: list[tuple[str, bytes]] = []
+    for rel in sorted(files):
         with suppress(OSError):
-            entries.append((rel, (project_dir / rel).read_bytes()))
-    return combine_source_hashes(entries) if entries else "empty"
+            walked.append((rel, (project_dir / rel).read_bytes()))
+    return combine_source_hashes(walked) if walked else "empty"
 
 
 # ── the cargo boundary ──────────────────────────────────────────────────────
@@ -232,6 +264,11 @@ class RunStatsRecorder:
             # is not the tree the run worked from.
             self._store.set_origin(self._run_id, self._probe())
         sample = self._fold.feed(record)
+        sweep = sweep_of(record, run_id=self._run_id,
+                         run_started=self._started_at.isoformat(timespec="milliseconds"),
+                         llm_calls=self._fold.run_work.llm_calls)
+        if sweep is not None:
+            self._store.add_sweep(sweep)
         if sample is None:
             return
         if sample.top_level:

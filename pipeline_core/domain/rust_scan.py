@@ -584,13 +584,13 @@ def stubbed_fn_names(text: str) -> frozenset[str]:
         body_open = text.find("{", k, end)
         if body_open != -1 and not mask[body_open]:
             close = _matching_brace(text, mask, body_open)
-            if close is not None and _is_hollow_body(text[body_open + 1:close - 1]):
+            if close is not None and is_hollow_body(text[body_open + 1:close - 1]):
                 out.add(name)
         i = max(end, i + 2)
     return frozenset(out)
 
 
-def _is_hollow_body(body: str) -> bool:
+def is_hollow_body(body: str) -> bool:
     """True when `body` carries no code but an `unimplemented!()`."""
     core = strip_line_block_comments(body).strip().rstrip(";").strip()
     return core in ("unimplemented!()", "::core::unimplemented!()")

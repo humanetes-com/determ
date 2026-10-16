@@ -20,7 +20,7 @@ __main__).
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -37,6 +37,7 @@ from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
+from pipeline_core.ports.fill_engine import RegressionGatePort
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -200,7 +201,7 @@ class CargoFillAdapter:
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
     test_regression_baseline_fn: Callable[..., TestStateReading | None] | None = None
-    test_regression_gate_fn: Callable[..., tuple[RegressionComparison, str] | None] | None = None
+    test_regression_gate_fn: RegressionGatePort | None = None
     check_diag_fn: Callable[..., tuple[int, str, list[Any]]] | None = None
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
@@ -242,13 +243,15 @@ class CargoFillAdapter:
                              *, stub_free: bool = False,
                              introduced_stubs: bool = False,
                              hollow_before: int | None = None,
+                             written: Collection[FnLocator] = (),
                              ) -> tuple[RegressionComparison, str] | None:
         if self.test_regression_gate_fn is None:
             return None
         return self.test_regression_gate_fn(test_cmd, cwd, env, baseline,
                                             stub_free=stub_free,
                                             introduced_stubs=introduced_stubs,
-                                            hollow_before=hollow_before)
+                                            hollow_before=hollow_before,
+                                            written=written)
 
     def focus_errors(self, output: str, file_rel: str,
                      max_chars: int | None = None) -> str:

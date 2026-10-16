@@ -34,6 +34,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .body_standing import mark_unverified
 from .context_guard import TRIM_MARKER
 from .rust_fn_headers import fn_headers
 from .rust_lex import code_mask
@@ -52,9 +53,17 @@ def file_block(path: str, text: str, *, view: FileView, attrs: str = "") -> str:
 
     `view` is required, so a writer cannot render a file without deciding
     what it is. `attrs` carries writer-specific attributes (`editable="…"`)
-    verbatim, already formatted with a leading space."""
+    verbatim, already formatted with a leading space. A filled body the
+    sweep's reading does not find proven is marked
+    (`body_standing.mark_unverified`): after strip every filled body is a
+    model's answer, and run `1057870-b427a3a2` (2026-10-15) showed a
+    never-measured `NonNull::dangling()` call to every later prompt of its
+    file as the crate's own code."""
     if view is FileView.UNKNOWN:
         raise ValueError("a writer must declare whole or part")
+    # Every fill prompt shows a crate file through here, so here is where a
+    # filled body with no evidence is marked as such (`body_standing`).
+    text = mark_unverified(path, text)
     return (f'<FILE path="{path}" view="{view.value}"{attrs}>\n'
             f'{text.rstrip(chr(10))}\n</FILE>')
 

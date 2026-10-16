@@ -8,7 +8,11 @@ redirects the event log redirects this too). Two tables:
   `unfinished` (`ended` NULL) at start and closed at a normal exit, so a
   signalled run honestly stays unfinished;
 * `phase_samples` — one row per closed phase or step (outcome not
-  `skipped`), with its wall time and work counters.
+  `skipped`), with its wall time and work counters;
+* `sweeps` — one row per TDD sweep that measured (`domain.sweep_trajectory`):
+  the score, the denominator, and the clock and call count at the reading.
+  The fill phase rarely closes inside one process, so this is the only
+  per-run record of how its score climbed.
 
 The pipeline is the only writer; the monitor and tools open it read-only.
 WAL journaling lets a reader poll while the run writes. Append-only by use:
@@ -26,6 +30,7 @@ from typing import Any
 
 from ..domain.phase_cost import WORK_FIELDS, PhaseKey, PhaseSample, PhaseWork
 from ..domain.phase_cost_baseline import RunRecord, SampleRow
+from ..domain.sweep_trajectory import SweepRow
 
 RUN_STATS_DB_NAME = "run_stats.db"
 
@@ -63,7 +68,25 @@ CREATE TABLE IF NOT EXISTS phase_samples (
     source TEXT NOT NULL DEFAULT 'live',
     {_WORK_COLS}
 );
+CREATE TABLE IF NOT EXISTS sweeps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    phase TEXT NOT NULL DEFAULT '',
+    cluster TEXT NOT NULL DEFAULT '',
+    iter INTEGER NOT NULL,
+    ts TEXT NOT NULL,
+    at_ms INTEGER NOT NULL,
+    llm_calls INTEGER NOT NULL DEFAULT 0,
+    pass_count INTEGER NOT NULL,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    oracle_static INTEGER NOT NULL DEFAULT 0,
+    frontier INTEGER NOT NULL DEFAULT 0,
+    stall INTEGER NOT NULL DEFAULT 0,
+    improved INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'live'
+);
 CREATE INDEX IF NOT EXISTS phase_samples_run ON phase_samples(run_id);
+CREATE INDEX IF NOT EXISTS sweeps_run ON sweeps(run_id);
 CREATE INDEX IF NOT EXISTS runs_crate ON runs(crate, started);
 """
 
@@ -167,6 +190,21 @@ class SQLiteRunStatsStore:
              sample.scope, sample.parent_scope, sample.started, sample.wall_ms,
              sample.outcome, source, *sample.work.as_dict().values()))
 
+    def add_sweep(self, row: SweepRow, *, source: str = "live") -> None:
+        self._write(
+            "INSERT INTO sweeps (run_id, phase, cluster, iter, ts, at_ms, llm_calls, "
+            "pass_count, fail_count, oracle_static, frontier, stall, improved, source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row.run_id, row.phase, row.cluster, row.iter, row.ts, row.at_ms,
+             row.llm_calls, row.pass_count, row.fail_count, row.oracle_static,
+             row.frontier, row.stall, int(row.improved), source))
+
+    def has_sweeps(self, run_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute("SELECT 1 FROM sweeps WHERE run_id = ? LIMIT 1",
+                                     (run_id,)).fetchone()
+        return row is not None
+
     def has_run(self, run_id: str) -> bool:
         with self._lock:
             row = self._conn.execute("SELECT 1 FROM runs WHERE run_id = ?",
@@ -217,6 +255,56 @@ class SQLiteRunStatsStore:
                           outcome=r["outcome"], wall_ms=int(r["wall_ms"] or 0),
                           work=PhaseWork.from_mapping(dict(r)))
                 for r in rows]
+
+
+    def runs_with_sweeps(self, crate: str | None = None, *,
+                         limit: int = 6) -> list[StoredRun]:
+        """The `limit` most recently started runs that recorded a sweep,
+        newest first. A store written before the table existed has none."""
+        if not self._has_table("sweeps"):
+            return []
+        sql = ("SELECT * FROM runs WHERE run_id IN (SELECT DISTINCT run_id FROM sweeps)"
+               + (" AND crate = ?" if crate is not None else "")
+               + " ORDER BY started DESC LIMIT ?")
+        params: tuple[Any, ...] = (crate, limit) if crate is not None else (limit,)
+        return [_stored_run(r) for r in self._query(sql, params)]
+
+    def sweeps(self, run_ids: Iterable[str]) -> list[SweepRow]:
+        ids = list(run_ids)
+        if not ids or not self._has_table("sweeps"):
+            return []
+        marks = ", ".join("?" for _ in ids)
+        rows = self._query(
+            f"SELECT * FROM sweeps WHERE run_id IN ({marks}) ORDER BY id", ids)
+        return [SweepRow(run_id=r["run_id"], phase=r["phase"], cluster=r["cluster"],
+                         iter=int(r["iter"]), ts=r["ts"], at_ms=int(r["at_ms"]),
+                         llm_calls=int(r["llm_calls"]), pass_count=int(r["pass_count"]),
+                         fail_count=int(r["fail_count"]),
+                         oracle_static=int(r["oracle_static"]),
+                         frontier=int(r["frontier"]), stall=int(r["stall"]),
+                         improved=bool(r["improved"]))
+                for r in rows]
+
+    def entry_phases(self, run_ids: Iterable[str]) -> dict[str, str]:
+        """run_id -> the first top-level phase the run actually ran. No
+        skipped phase is stored, so the earliest top-level sample is where
+        the run entered: a from-scratch restart at augmentation, a resume at
+        the phase it resumed. A run with no closed top-level phase is absent."""
+        ids = list(run_ids)
+        if not ids:
+            return {}
+        marks = ", ".join("?" for _ in ids)
+        rows = self._query(
+            f"SELECT run_id, phase FROM phase_samples WHERE run_id IN ({marks}) "
+            "AND parent_scope IS NULL ORDER BY started, id", ids)
+        out: dict[str, str] = {}
+        for r in rows:
+            out.setdefault(r["run_id"], r["phase"])
+        return out
+
+    def _has_table(self, name: str) -> bool:
+        return bool(self._query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)))
 
 
 def _stored_run(r: sqlite3.Row) -> StoredRun:

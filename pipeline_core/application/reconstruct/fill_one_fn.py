@@ -276,7 +276,8 @@ class FillOneFn:
             ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
-            stub_free=ctx.stub_free, hollow_before=_hollow_before)
+            stub_free=ctx.stub_free, hollow_before=_hollow_before,
+            written=(FnLocator(rel_file, fn_name),))
             if _rc == 0 else None)
         if _rc != 0 or _regr is not None:
             _why = ("no longer compiles here" if _regr is None
@@ -1290,7 +1291,8 @@ class FillOneFn:
                     # (`judge_refill`): an attributed test that now fails at
                     # an earlier line is fewer assertions passed, and is not
                     # kept here either.
-                    if (_crash_evidence and _attempt_baseline_test is not None
+                    if (_crash_evidence and _u2_fail_sig is not None
+                            and _attempt_baseline_test is not None
                             and judge_refill(
                                 _evidence.tests, _attempt_baseline_test,
                                 _v).non_regression):
@@ -1441,7 +1443,10 @@ class FillOneFn:
                 _regr = self.cargo.test_regression_gate(
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
                     _attempt_baseline_test, stub_free=ctx.stub_free,
-                    hollow_before=_attempt_hollow_before)
+                    hollow_before=_attempt_hollow_before,
+                    written=(FnLocator(rel_file, fn_name), *(
+                        FnLocator(u.file, u.fn_name)
+                        for u, _pre in joint.live)))
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
                     _u2_fail_sig = _cmp.signature

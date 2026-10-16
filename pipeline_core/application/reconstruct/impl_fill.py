@@ -342,6 +342,7 @@ from pipeline_core.domain.verdict import (
     ValidityVector,
     VerdictRecord,
 )
+from pipeline_core.ports.fill_engine import RegressionGatePort
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -521,7 +522,7 @@ class ImplFillDeps:
     bound_methods_section_for: Callable[..., str]
     u2_test_gate: U2TestGate
     test_regression_baseline: Callable[..., TestStateReading | None]
-    test_regression_gate: Callable[..., tuple[RegressionComparison, str] | None]
+    test_regression_gate: RegressionGatePort
     # The transcript model call (`AskClient.ask_turns`): every fill route
     # talks to the model through a `UnitConversation` on it, and so does the
     # red-slice session.
@@ -2787,7 +2788,8 @@ def prepare_impl_fill(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
                     stub_free=stub_free,
                     introduced_stubs=bool(_peel_reverted),
-                    hollow_before=_hollow_before)
+                    hollow_before=_hollow_before,
+                    written=[FnLocator(file_rel, b.fn_name) for b in _landed])
                     if rc == 0 else None)
                 if (rc == 0 and not _peel_refuse_keep
                         and (not _u2_reject or _bank is not None
@@ -3979,7 +3981,8 @@ def prepare_impl_fill(
                 # attempts skip it (tests can't run; deferred to the TDD loop).
                 _regr = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
-                    stub_free=stub_free, hollow_before=_hollow_before)
+                    stub_free=stub_free, hollow_before=_hollow_before,
+                    written=[FnLocator(block.file, n) for n in _impl_spliced])
                     if rc == 0 else None)
                 if _regr is not None:
                     _cmp, _regr_detail = _regr
@@ -4938,7 +4941,9 @@ def prepare_impl_fill(
                         check_cmd, target_src_dir, cluster_env)
                     _sv_regr = (_test_regression_gate(
                         tdd_test_cmd, target_src_dir, cluster_env, _sv_base,
-                        stub_free=stub_free)
+                        stub_free=stub_free,
+                        written=[FnLocator(block.file, m.fn_name) for m in (
+                            *block.stub_members, *block.refill_members)])
                         if _sv_rc == 0 else None)
                     if _sv_rc != 0 or _sv_regr is not None:
                         _sv_txn.rollback()
@@ -5617,7 +5622,9 @@ def prepare_impl_fill(
                                          target_src_dir, cluster_env)
                 _pair_regr = _test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
-                    stub_free=stub_free, hollow_before=_pair_hollow_before)
+                    stub_free=stub_free, hollow_before=_pair_hollow_before,
+                    written=[FnLocator(*_u.rsplit("::", 1))
+                             for _u, _sig, _body, _c in _pair_landed])
                 if _pair_regr is not None:
                     _rcmp, _rdetail = _pair_regr
                     attempts.remember_bodies({

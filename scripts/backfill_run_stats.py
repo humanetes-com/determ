@@ -18,14 +18,25 @@ WHY THIS EXISTS
   fingerprint and the same origin, and says `not_comparable` (backfilled)
   instead of guessing.
 
+  The sweeps (`domain.sweep_trajectory`) — each TDD iteration's score, clock
+  and model-call count — are read from `logs/events.jsonl`, whose
+  `phase_c.tdd.iter` events carry them for every run since the event grew a
+  `pass_count`. They are what the health tab's score-climb section and
+  `tools/perf_ledger.py sweeps` render; a run with no row yet is opened as
+  `backfill` with HEAD from the event's `pipeline_sha`.
+
 USAGE
   .venv/bin/python scripts/backfill_run_stats.py [--logs logs] [--dry-run]
 
-  Idempotent: a run id already in the store is skipped, so a live run is
-  never overwritten and a second backfill adds nothing.
+  Idempotent: a run id already in the store is skipped for phases, and a
+  sweep already stored (same run, cluster, timestamp) is skipped, so a live
+  run is never overwritten and a second backfill adds nothing. Re-running it
+  during a run recorded by older code imports that run's newer sweeps.
+  Streams the whole event log once (350 MB on 2026-10-15, about a minute).
 
 HOW TO INTERPRET
-  The summary prints, per crate, the runs and `ok` phase samples imported,
+  `sweeps: N row(s) from M run(s)` is what the score-climb view gained.
+  The summary then prints, per crate, the runs and `ok` phase samples imported,
   then the per-phase `ok` sample count and median wall over the imported
   rows, per HEAD. A phase with one or two samples per HEAD is the reason the
   record could not answer "did this change make t0c slower" by itself.
@@ -54,6 +65,11 @@ from pipeline_core.domain.phase_cost import (  # noqa: E402
     PhaseWork,
     RunConfig,
     work_delta,
+)
+from pipeline_core.domain.sweep_trajectory import (  # noqa: E402
+    SWEEP_EVENT,
+    SweepRow,
+    sweep_of,
 )
 
 
@@ -100,6 +116,65 @@ def _run_work(events: Path, run_ids: set[str]) -> dict[str, PhaseWork]:
             if delta is not None:
                 work[rid].add(delta)
     return work
+
+
+def _sweeps(events: Path) -> tuple[list[SweepRow], dict[str, dict[str, str]]]:
+    """Every measured sweep in events.jsonl, with each run's start, crate and
+    HEAD from its `pipeline.start`. The model-call count at a sweep is the
+    `llm.request` events of that run seen before it, as the live recorder
+    counts them."""
+    rows: list[SweepRow] = []
+    runs: dict[str, dict[str, str]] = {}
+    calls: dict[str, int] = defaultdict(int)
+    if not events.exists():
+        return rows, runs
+    with events.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"run_id"' not in line:
+                continue
+            is_req = '"llm.request"' in line
+            if not (is_req or '"pipeline.start"' in line or f'"{SWEEP_EVENT}"' in line):
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            rid = rec.get("run_id")
+            if not isinstance(rid, str) or not rid:
+                continue
+            ev = rec.get("event")
+            if ev == "llm.request":
+                calls[rid] += 1
+            elif ev == "pipeline.start":
+                runs.setdefault(rid, {"started": str(rec.get("ts") or ""),
+                                      "crate": str(rec.get("product") or "unknown"),
+                                      "head": str(rec.get("pipeline_sha") or "")})
+            elif rid in runs:
+                row = sweep_of(rec, run_id=rid, run_started=runs[rid]["started"],
+                               llm_calls=calls[rid])
+                if row is not None:
+                    rows.append(row)
+    return rows, runs
+
+
+def _import_sweeps(store: SQLiteRunStatsStore | None, events: Path) -> None:
+    rows, runs = _sweeps(events)
+    have: set[tuple[str, str, str]] = set()
+    if store:
+        have = {(r.run_id, r.cluster, r.ts) for r in store.sweeps({r.run_id for r in rows})}
+    fresh = [r for r in rows if (r.run_id, r.cluster, r.ts) not in have]
+    for rid in sorted({r.run_id for r in fresh}):
+        if store and not store.has_run(rid):
+            meta = runs[rid]
+            store.open_run(run_id=rid, crate=meta["crate"], code_key=None,
+                           tree_stamp=None, commit=meta["head"] or None,
+                           config_fp=None, config=None, started=meta["started"],
+                           source="backfill")
+    if store:
+        for r in fresh:
+            store.add_sweep(r, source="backfill")
+    print(f"sweeps: {len(fresh)} row(s) from {len({r.run_id for r in fresh})} run(s) "
+          f"imported from {events.name} ({len(rows) - len(fresh)} already stored)")
 
 
 def main() -> int:
@@ -171,6 +246,8 @@ def main() -> int:
             wall = metrics.get("wall_min")
             store.set_run_work(rid, PhaseWork(llm_calls=int(metrics.get("llm_calls") or 0)),
                                wall_ms=int(wall * 60000) if wall else None)
+
+    _import_sweeps(store, logs / "events.jsonl")
 
     for crate in sorted(run_count):
         rows = imported[crate]

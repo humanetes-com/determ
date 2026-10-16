@@ -14,13 +14,17 @@ from __future__ import annotations
 import os
 import shlex
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
+from pipeline_core.application.reconstruct.crash_localizer import crash_keys
+from pipeline_core.application.reconstruct.crash_settler import (
+    bound as bound_crash_settler,
+)
 from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
@@ -34,7 +38,7 @@ from pipeline_core.domain.assertion_position import (
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.cluster_env import world_of_env
 from pipeline_core.domain.enums import ProcessFailure
-from pipeline_core.domain.models import Diagnostic, FnSite
+from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_isolation import (
     IsolatedTest,
@@ -359,6 +363,7 @@ def test_regression_gate(
     introduced_stubs: bool = False,
     observe: Callable[[RegressionComparison], None] | None = None,
     hollow_before: int | None = None,
+    written: Collection[FnLocator] = (),
 ) -> tuple[RegressionComparison, str] | None:
     """Global non-regression gate (the monotone ratchet). A fill is a REGRESSION
     if it turns a previously-passing test red, crashes a previously-completing
@@ -408,6 +413,13 @@ def test_regression_gate(
     same cycle the night before at iters 9→10 of `334902-2774708c`. Two
     judges, two rules, one iteration lost per cycle. None (a caller that did
     not measure) means the exemption cannot apply.
+
+    ``written`` — the units the caller's write put on the tree. When a test
+    process the baseline did not see die dies under the write, the fill's
+    bound settler (`crash_settler.bound`) may settle it against an unproven
+    body outside ``written`` before anything below reads the comparison; the
+    comparison is then taken again on the settled tree. Empty: no settlement
+    (a caller that cannot name its write).
     """
     if not (enabled and test_cmd and baseline is not None):
         return None
@@ -421,6 +433,23 @@ def test_regression_gate(
     if after is None:
         return None  # crate not compiling now ⇒ can't judge; defer to TDD loop
     cmp = compare_readings(baseline, after)
+    _settler = bound_crash_settler()
+    if (_settler is not None and written and _raw
+            and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
+        _settlement = _settler.settle(_raw[-1], written, baseline)
+        if _settlement.settled:
+            guard("phase-c/regr_crash_settled",
+                  "a test process died under the write on a culprit outside "
+                  "it: " + ", ".join(f"{u.file}::{u.fn_name}"
+                                     for u in _settlement.stubbed_locators)
+                  + " went back to stub(s); re-measuring")
+            _raw_s: list[str] = []
+            _after_s = measure_test_state(run_cargo_fn, test_cmd, cwd,
+                                          env or {}, timeout=timeout,
+                                          raw_sink=_raw_s)
+            if _after_s is not None:
+                after, _raw = _after_s, _raw_s
+                cmp = compare_readings(baseline, after)
     # Attach what the reddened tests printed, from the same capture the
     # comparison was read from — the detail used to name the tests and drop
     # their `left` / `right` (`regressed_test_outputs` carries the instance).
@@ -601,7 +630,8 @@ def render_hang_detail(test: str, binary: str, timeout: int) -> str:
 
 
 def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
-                     err_cap: int, panics: CrashPanics) -> str:
+                     err_cap: int, panics: CrashPanics, *,
+                     localized: str = "") -> str:
     """Prompt feedback for a body under which the test process ABORTED.
 
     Stated as the primary finding, not a footnote: these tests are not failing
@@ -620,7 +650,16 @@ def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
     abort while unwinding. For the second the fault is the FIRST panic, and
     telling the model to re-derive the body against memory faults was a
     wrong-body steer on a right body (the live `ptr.rs::new` comment of run
-    `2585062-494e630e` carries exactly that text over the textbook body)."""
+    `2585062-494e630e` carries exactly that text over the textbook body).
+
+    A death with no panic printed is a signal, and the capture alone does
+    not say whose memory it was. Until 2026-10-16 this branch said "it is
+    undefined behaviour" in the writer's body and forbade re-sending it; run
+    `1057870-b427a3a2` gave that text to a correct accessor four attempts
+    running while the constructor above it handed it `NonNull::dangling()`.
+    The class and the culprit are the localizer's to state: ``localized`` is
+    the fault-class renderer's reading of the re-run (`Settlement.render`),
+    and without one this branch states only what the capture shows."""
     names = ", ".join(sorted(aborted))
     head = (
         "Your body ABORTED the test process. These test(s) produced a verdict "
@@ -655,16 +694,19 @@ def _render_u2_abort(aborted: frozenset[str], scoped: TestRunReport,
             "body still reaches a stub of its own. Replace every "
             "`unimplemented!()` / `todo!()` this body can reach with a real "
             "body.")
+    elif localized:
+        body = (
+            "No panic was located in the aborted binar"
+            f"{'ies' if len(panics.sections) > 1 else 'y'}: the process was "
+            "killed by a signal. Re-run under the debugger:\n\n" + localized)
     else:
         body = (
             "No panic was located in the aborted binar"
-            f"{'ies' if len(panics.sections) > 1 else 'y'}, so this is not a "
-            "panic in a destructor: it is undefined behaviour — an unsafe "
-            "block reading/writing memory that does not hold what it "
-            "claims.\n\n"
-            "Re-derive the body from the types. Do not re-send the previous "
-            "body with a different helper call — the fault is what the body "
-            "does to memory, not which API it names.")
+            f"{'ies' if len(panics.sections) > 1 else 'y'}: the process was "
+            "killed by a signal, and the debugger did not reproduce it, so "
+            "which function produced the memory it read is not known. The "
+            "crate functions this test reaches are the candidates, this body "
+            "among them.")
     out = head + body
     if scoped.failures:
         excerpt = FailureExcerpt(
@@ -711,6 +753,7 @@ def u2_test_gate(
     err_cap: int,
     guard: Callable[[str, str], None],
     baseline: TestStateReading | None = None,
+    settle: bool = True,
 ) -> U2Verdict:
     """The SINGLE reusable test-acceptance gate, called by every
     fill loop (per-fn, per-impl, post-merge) at the point a unit compiles.
@@ -736,6 +779,10 @@ def u2_test_gate(
     never had a verdict from one whose verdict this body destroyed, so an
     aborting body reads as "no failures" and is accepted — see
     :func:`self_aborted_tests`.
+
+    ``settle`` — whether a native crash under the write may be settled by
+    the fill's bound settler (`crash_settler.bound`); False only for the
+    gate's own re-judgement after a settlement.
 
     `unit_sites` is what this unit owns as container-qualified :class:`FnSite`
     identities (per-fn: that one fn; per-impl: the block's stub members;
@@ -865,9 +912,37 @@ def u2_test_gate(
                 for n, s in zip(sorted(_aborted),
                                 _sites * len(_aborted), strict=False))
             return U2Verdict.accept_external_only(_pairs, frozenset(_aborted))
+        # A process that died with no panic printed is re-run under the
+        # debugger and settled (`crash_settler`): when its measured culprit
+        # is an unproven body outside this write, that body goes back to a
+        # stub, the write stands, and the gate judges it again on the settled
+        # tree. Otherwise the reject carries the crash as the localizer read
+        # it.
+        _settled_text = ""
+        _settler = bound_crash_settler()
+        if (_settler is not None and settle and baseline is not None
+                and not (_panics.crate_panics or _panics.stub_sites)):
+            _settlement = _settler.settle(
+                out or "",
+                {FnLocator(s.file, s.fn_name) for s in unit_sites},
+                baseline)
+            if _settlement.settled:
+                guard("phase-c/u2_crash_settled",
+                      f"{sorted(_aborted)} died on a culprit outside this "
+                      "write: "
+                      + ", ".join(f"{u.file}::{u.fn_name}"
+                                  for u in _settlement.stubbed_locators)
+                      + " went back to stub(s); judging the write again")
+                return u2_test_gate(
+                    run_cargo_fn, fn_tests, unit_sites, test_cmd,
+                    target_src_dir, cluster_env, structure=structure,
+                    enabled=enabled, timeout=timeout, err_cap=err_cap,
+                    guard=guard, baseline=baseline, settle=False)
+            _settled_text = _settlement.render()
         return U2Verdict.reject(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
-            _render_u2_abort(_aborted, scoped, err_cap, _panics),
+            _render_u2_abort(_aborted, scoped, err_cap, _panics,
+                             localized=_settled_text),
             sites=scoped.failures, aborted=frozenset(_aborted), crash=_panics,
             external_stub_sites=stub_sites_outside(
                 _panics.stub_sites, frozenset(unit_sites), _locate),

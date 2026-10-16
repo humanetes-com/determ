@@ -993,6 +993,10 @@ class CrashSite:
     # What the in-flight test's own process announced when it aborted
     # (`abort_cause`), when the capture isolated it; None otherwise.
     abort: AbortReading | None = None
+    # `origin_frames` is the frame `traced_origin_index` found by following
+    # the fault address through the arguments each frame received — a
+    # debugger measurement, not a sanitizer's origin stack.
+    origin_traced: bool = False
 
     @property
     def fault(self) -> FaultClass:
@@ -1222,7 +1226,14 @@ def _render_invalid_memory(site: CrashSite) -> str:
     ]
     lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
               for i, fr in enumerate(site.frames)]
-    if site.origin_frames:
+    if site.origin_frames and site.origin_traced:
+        # The debugger's trace (`traced_origin_index`): the faulting frame
+        # was handed the address; this frame produced it.
+        lines.append("The faulting frame was HANDED the address it read; "
+                     "the address was produced by:")
+        lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+                  for i, fr in enumerate(site.origin_frames)]
+    elif site.origin_frames:
         lines.append("The invalid memory it reads was CREATED by:")
         lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
                   for i, fr in enumerate(site.origin_frames)]
@@ -1467,12 +1478,81 @@ def _crate_frames(
     return tuple(frames)
 
 
+# The signals whose `siginfo` reports the address the access faulted on.
+# SIGABRT (a runtime abort) and SIGILL carry none; their `si_addr` slot is
+# another union member.
+_FAULT_ADDRESS_SIGNALS = ("SIGSEGV", "SIGBUS")
+
+
+def carries_fault_address(signal: str) -> bool:
+    return any(s in signal.upper() for s in _FAULT_ADDRESS_SIGNALS)
+
+
+def _received_address(rec: Mapping[str, object], addr: int) -> bool:
+    """Whether a frame was HANDED the faulting address: one of its
+    arguments holds a pointer whose pointee spans it. ``ptr_args`` is the
+    debugger's flattening of the frame's arguments to `[value, pointee
+    size]` pairs (a pointer, or the pointer field of a wrapper struct)."""
+    for pair in rec.get("ptr_args") or ():  # type: ignore[attr-defined]
+        try:
+            value, size = int(pair[0]), int(pair[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if value <= addr < value + max(size, 1):
+            return True
+    return False
+
+
+def traced_origin_index(
+    raw_frames: Sequence[Mapping[str, object]],
+    fault_addr: int | None,
+    crate_file_prefix: str = "src/",
+) -> int | None:
+    """The frame that PRODUCED the address a memory fault read, traced
+    through the arguments each frame received; None when it cannot be told.
+
+    A debugger stack names where the fault happened, not who made the bad
+    pointer, and the faulting frame is routinely a correct reader. Run
+    `1057870-b427a3a2` (2026-10-15): a one-line accessor that reads the
+    first field of the pointee it is handed was convicted four attempts
+    running, because the constructor above it handed it
+    `NonNull::dangling()`; the accessor's frame received address 0x8 as its
+    argument, the constructor's frame received nothing that spans it.
+
+    The rule walks outward from the faulting frame while each frame was
+    handed an argument spanning the fault address. The first frame that was
+    not handed it produced it: either it computed the address itself (the
+    faulting frame, when nothing it received spans the address) or it
+    passed a pointer it made. When that frame is outside the crate, the
+    nearest crate frame further out is taken (a crate fn that called a
+    library routine on arguments it chose); when no crate frame is further
+    out, the address came from the test or the runtime and nothing in the
+    crate is named.
+
+    What it does not see. A pointer loaded from memory (a field of a valid
+    pointee holding a stale pointer) is produced, by this rule, by the frame
+    that loaded it, not by whoever stored it; that is the origin-capable
+    sanitizer's question. Frames whose arguments the debugger could not read
+    break the chain at that frame."""
+    if fault_addr is None or not raw_frames:
+        return None
+    i = 0
+    while i < len(raw_frames) and _received_address(raw_frames[i], fault_addr):
+        i += 1
+    for j in range(i, len(raw_frames)):
+        file_ = str(raw_frames[j].get("file") or "")
+        if file_.startswith(crate_file_prefix) and raw_frames[j].get("func"):
+            return j
+    return None
+
+
 def site_from_frames(
     binary_label: str,
     test_name: str | None,
     signal: str,
     raw_frames: list[dict[str, object]],
     *,
+    fault_addr: int | None = None,
     origin_raw_frames: list[dict[str, object]] | None = None,
     crate_file_prefix: str = "src/",
     max_frames: int = 6,
@@ -1505,6 +1585,18 @@ def site_from_frames(
     """
     origin_raw = origin_raw_frames or []
     origin = _crate_frames(origin_raw, crate_file_prefix, max_frames)
+    # A debugger stop carries no origin stack, but it can carry the fault
+    # address and each frame's pointer arguments (`traced_origin_index`).
+    # Only for an invalid-memory fault: a stub's abort or an overflow is
+    # sited where it happened.
+    traced = False
+    if (not origin_raw and fault_addr is not None
+            and carries_fault_address(signal or "")
+            and fault_class(signal or "", abort) is FaultClass.INVALID_MEMORY):
+        idx = traced_origin_index(raw_frames, fault_addr, crate_file_prefix)
+        if idx is not None:
+            origin = _crate_frames([raw_frames[idx]], crate_file_prefix, 1)
+            traced = bool(origin)
     cycle: StackCycle | None = None
     if fault_class(signal or "", abort) is FaultClass.EXHAUSTION:
         # The whole faulting stack, not the innermost `max_frames`: a period
@@ -1524,7 +1616,7 @@ def site_from_frames(
         frames=_crate_frames(raw_frames, crate_file_prefix, max_frames),
         origin_frames=origin,
         raw_report=raw_report, origin_capable=origin_capable, cycle=cycle,
-        abort=abort)
+        abort=abort, origin_traced=traced)
 
 
 def asan_stack_excerpt(report: str, *, max_access: int = 24,

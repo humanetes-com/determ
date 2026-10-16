@@ -859,13 +859,17 @@ def test_u2_gate_names_the_units_own_first_panic_when_drop_then_aborts(tmp_path:
     assert "undefined behaviour" not in v.detail
     assert v.crash is not None and v.crash.runtime_aborts == 1
     assert v.external_stub_sites == frozenset({("src/error.rs", 2)})
-    # A silent abort keeps the undefined-behaviour text and carries no
-    # evidence (stamped-empty downstream: the body's own).
+    # A silent abort is still a reject that carries no stub evidence, but
+    # its text claims no class and no culprit the capture does not show:
+    # run `1057870-b427a3a2` gave "undefined behaviour ... do not re-send"
+    # to a correct accessor whose caller handed it a dangling pointer.
     seg = _gate(_const_run_cargo(101, "running 2 tests\ntest a ... \n"
                                       "(signal: 11, SIGSEGV)"),
                 {"a", "b"}, baseline=_judged(["a", "b"]))
     assert seg.decision is U2Decision.REJECT
-    assert "undefined behaviour" in seg.detail
+    assert "killed by a signal" in seg.detail
+    assert "undefined behaviour" not in seg.detail
+    assert "Do not re-send" not in seg.detail
     assert seg.external_stub_sites == frozenset() and seg.crash is not None
     assert seg.crash.stub_sites == frozenset()
 

@@ -444,15 +444,6 @@
     "prev_test_output",
     "source_context"
   ],
-  "test_regression_gate": [
-    "hollow_before",
-    "stub_free"
-  ],
-  "test_regression_gate_fn": [
-    "hollow_before",
-    "introduced_stubs",
-    "stub_free"
-  ],
   "types_section_for_fix": [
     "file_rel",
     "file_text"

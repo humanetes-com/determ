@@ -17,7 +17,7 @@ import os as _os
 import subprocess as _subprocess_mod
 import sys
 import time as _time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -892,7 +892,7 @@ from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
-from pipeline_core.ports.fill_engine import FillPassPort
+from pipeline_core.ports.fill_engine import FillPassPort, RegressionGatePort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
@@ -1032,7 +1032,7 @@ class Helpers:
     # Task-1 collaborators (Task1Deps construction):
     # Impl-fill collaborators (ImplFillDeps construction):
     test_regression_baseline: Callable[..., Any]
-    test_regression_gate: Callable[..., Any]
+    test_regression_gate: RegressionGatePort
     per_impl_max_stubs: int
     converge_in_cluster: Callable[..., Any]
     count_relevant_notes: Callable[..., Any]
@@ -2831,10 +2831,11 @@ def build_app(
         log=ports.log)
 
     def _localize_crashes(sweep_output: str, test_cmd: str,
-                          workspace_root: Path,
-                          env: dict[str, str]) -> tuple[Any, ...]:
+                          workspace_root: Path, env: dict[str, str], /, *,
+                          exclude: Collection[str] = ()) -> tuple[Any, ...]:
         return _app_localize_crashes(
-            _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env)
+            _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env,
+            exclude=exclude)
 
     _run_id = (run_context or {}).get("run_id") or ""
     return App(

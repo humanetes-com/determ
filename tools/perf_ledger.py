@@ -26,6 +26,9 @@ Usage:
                                               # code identities (the health tab)
     .venv/bin/python tools/perf_ledger.py phases --history t0c
                                               # every recorded run of a phase
+    .venv/bin/python tools/perf_ledger.py sweeps [--runs 6]
+                                              # the recent runs' score climbs
+                                              # (the health tab's middle section)
 
 The code identity and the configuration of a run the pipeline recorded itself
 (`logs/run_stats.db`, written from launch) are read from that record, so an
@@ -239,6 +242,12 @@ def cmd_phases(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sweeps(args: argparse.Namespace) -> int:
+    from pipeline_core.monitor.sweep_view import sweep_lines
+    print("\n".join(sweep_lines(EVENTS, runs=args.runs, crate=args.crate)))
+    return 0
+
+
 def _phase_history(phase: str) -> int:
     """Every recorded run of `phase` (live and backfilled), oldest first."""
     from pipeline_core.adapters.run_stats_store import SQLiteRunStatsStore
@@ -290,6 +299,11 @@ def main() -> int:
     p_ph.add_argument("--history", metavar="PHASE", default=None,
                       help="list every recorded run of one phase id instead")
     p_ph.set_defaults(fn=cmd_phases)
+    p_sw = sub.add_parser("sweeps", help="the recent runs' score climbs, sweep by "
+                                         "sweep (what the health tab shows)")
+    p_sw.add_argument("--runs", type=int, default=6)
+    p_sw.add_argument("--crate", default=None)
+    p_sw.set_defaults(fn=cmd_sweeps)
     args = ap.parse_args()
     return int(args.fn(args))
 

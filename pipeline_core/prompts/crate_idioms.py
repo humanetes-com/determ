@@ -1,7 +1,7 @@
 """`<CRATE_IDIOMS>` prompt section — pure crate-pattern mining, relocated out of pipeline.py.
 
 The strongest reconstruction signal for a stub is how the SAME crate already does
-things in its other (already-filled) fns: recurring `Self::name(args)` constructors,
+things in its other (already-filled, and proven on this tree) fns: recurring `Self::name(args)` constructors,
 fn-pointer dispatch `(vtable.method)(this)`, single-line `unsafe { … }` chains, and
 non-trivial `Struct { … }` literal construction. `extract_crate_idioms` scans the
 file's filled bodies, ranks the highest-signal idioms (biased toward symbols the
@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.models import ImplBlock
+from pipeline_core.domain.body_standing import is_proven_text
+from pipeline_core.domain.models import FnLocator, ImplBlock
 from pipeline_core.domain.rust_idents import identifier_tokens, mask_identifiers
 from pipeline_core.domain.rust_idioms import (
     fn_pointer_field_calls,
@@ -31,9 +32,20 @@ from pipeline_core.domain.rust_idioms import (
 def extract_filled_fn_bodies(
     impl_blocks: list[ImplBlock], file_rel: str,
 ) -> list[dict[str, Any]]:
-    """Return [{fn_name, container, body}] for every FILLED fn in `file_rel`,
-    pulled from the impl block records. Free fns are dropped (they have no
-    container). Used by `extract_crate_idioms` to scan for patterns."""
+    """Return [{fn_name, container, body}] for every PROVEN filled fn in
+    `file_rel`, pulled from the impl block records. Free fns are dropped
+    (they have no container). Used by `extract_crate_idioms` to scan for
+    patterns.
+
+    Proven, not merely filled. After strip every filled body is a model's
+    answer, and the section built from these presents them as "patterns this
+    file already uses — MATCH these". Run `1057870-b427a3a2` (2026-10-15):
+    a constructor kept while its tests could not run called an accessor on
+    `NonNull::dangling()`; that line reached all 19 later prompts of the file
+    as an idiom and the next constructor copied it. A body is mined only when
+    the sweep's reading says it is proven on this tree
+    (`body_standing.is_proven_text`); with no reading bound, nothing is
+    mined — an unread tree vouches for no body."""
     out: list[dict[str, Any]] = []
     for b in impl_blocks:
         if b.file != file_rel:
@@ -43,6 +55,8 @@ def extract_filled_fn_bodies(
                 continue
             body = m.body_text.strip()
             if not body:
+                continue
+            if not is_proven_text(FnLocator(file_rel, m.fn_name), m.body_text):
                 continue
             out.append({
                 "fn_name": m.fn_name,

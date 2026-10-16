@@ -24,7 +24,7 @@ concrete frames), and the exhaustion gate (crash evidence voids a prior
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,12 +46,14 @@ from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.test_outcome import abort_readings
 from pipeline_core.domain.test_results import (
+    BinaryResult,
     native_crashes,
     parse_binary_results,
 )
 
 # adapter signatures (composition injects the concrete fns)
-GdbLocalize = Callable[..., "tuple[str, list[dict[str, object]]] | None"]
+GdbLocalize = Callable[
+    ..., "tuple[str, list[dict[str, object]], int | None] | tuple[str, list[dict[str, object]]] | None"]
 AsanSweep = Callable[..., "tuple[int, str] | None"]
 
 
@@ -259,6 +261,18 @@ def _asan_sites(
     return tuple(sites)
 
 
+def crash_key(label: str, test: str | None) -> str:
+    """One native crash's identity: the binary, and under test isolation the
+    one test whose process died (a binary can hold a crash that predates a
+    change beside one the change caused)."""
+    return f"{label}::{test}" if test else label
+
+
+def crash_keys(binaries: Sequence[BinaryResult]) -> frozenset[str]:
+    """:func:`crash_key` of every native crash a reading shows."""
+    return frozenset(crash_key(b.label, t) for b, t in native_crashes(binaries))
+
+
 def localize_crashes(
     deps: CrashLocalizerDeps,
     sweep_output: str,
@@ -267,6 +281,7 @@ def localize_crashes(
     env: dict[str, str],
     *,
     max_binaries: int = 3,
+    exclude: Collection[str] = (),
 ) -> tuple[CrashSite, ...]:
     """Localize every crashed binary visible in ``sweep_output`` (capped).
 
@@ -281,11 +296,16 @@ def localize_crashes(
 
     Returns () when nothing crashed or nothing could be localized — callers
     must treat an empty result on a shrunken oracle as "unlocalized", never
-    as health."""
+    as health.
+
+    ``exclude`` holds :func:`crash_key` of the native crashes the caller
+    already saw before the change it is judging; they are not re-run, so the
+    binary cap is spent on the crashes the change could have caused."""
     # `native_crashes` is the one definition of what a crash is; an isolated
     # abort names its test exactly, so gdb re-runs that one test
     # (`test_filter`) instead of the whole binary.
-    crashed = native_crashes(parse_binary_results(sweep_output))
+    crashed = [c for c in native_crashes(parse_binary_results(sweep_output))
+               if crash_key(c[0].label, c[1]) not in exclude]
     if not crashed:
         return ()
     considered = crashed[:max_binaries]
@@ -313,10 +333,19 @@ def localize_crashes(
                if test_filter else deps.gdb_localize(exe, workspace_root, env))
         if got is None:
             continue
-        signal, frames = got
+        # The adapter adds the fault address as a third element; a two-tuple
+        # (an adapter or double that does not read it) traces nothing.
+        signal, frames = got[0], got[1]
+        fault_addr = got[2] if len(got) > 2 else None
         site = site_from_frames(
-            b.label, b.dangling, signal, frames,
+            b.label, b.dangling, signal, frames, fault_addr=fault_addr,
             abort=causes.get(b.dangling or ""))
+        if site.origin_traced:
+            deps.log("  [phase-c/crash-localizer] "
+                     f"{site.signal} in {b.label}: the faulting address was "
+                     "handed down to the faulting frame; it was produced in "
+                     + ", ".join(f"{f.file_rel}::{f.fn_name} (line {f.line})"
+                                 for f in site.origin_frames))
         if site.frames:
             sites.append(site)
     if deps.asan_sweep is None:

@@ -1438,3 +1438,68 @@ def test_three_new_containers_do_not_collapse_to_one_blame() -> None:
     assert stray.blamed == frozenset()
     assert all(stray.blames(blamed, "src/error.rs", "new", c)
                for c in ("impl A", "impl B", "impl C"))
+
+
+# ---- the frame that produced a faulting address (2026-10-15) ----
+#
+# Run `1057870-b427a3a2`: the faulting frame was a correct reader handed
+# `NonNull::dangling()` by the frame above it. The shapes below are
+# invented; the recorded instance is the real-gdb integration test
+# `test_the_localizer_names_the_frame_that_produced_the_address`.
+
+from pipeline_core.domain.crash_site import traced_origin_index  # noqa: E402
+
+
+def _fr(func: str, file: str, *ptrs: tuple[int, int]) -> dict[str, object]:
+    return {"func": func, "file": file, "line": 1,
+            "ptr_args": [list(p) for p in ptrs]}
+
+
+def test_a_handed_address_is_traced_to_the_frame_that_passed_it() -> None:
+    frames = [_fr("crate::reader", "src/a.rs", (0x8, 56)),
+              _fr("crate::maker", "src/b.rs", (0x5555_0000, 1)),
+              _fr("tests::t", "tests/t.rs")]
+    assert traced_origin_index(frames, 0x8) == 1
+    site = site_from_frames("tests/t.rs", "t", "SIGSEGV", frames,
+                            fault_addr=0x8)
+    assert site.origin_traced
+    assert site.blamed is not None and site.blamed.fn_name == "maker"
+
+
+def test_an_address_the_reader_computed_names_the_reader() -> None:
+    frames = [_fr("crate::reader", "src/a.rs", (0x5555_0000, 16)),
+              _fr("crate::maker", "src/b.rs")]
+    assert traced_origin_index(frames, 0x1000_0000_0000) == 0
+
+
+def test_an_address_handed_in_by_the_test_names_nothing_in_the_crate() -> None:
+    frames = [_fr("crate::reader", "src/a.rs", (0x8, 56)),
+              _fr("tests::t", "tests/t.rs")]
+    assert traced_origin_index(frames, 0x8) is None
+    site = site_from_frames("tests/t.rs", "t", "SIGSEGV", frames,
+                            fault_addr=0x8)
+    assert not site.origin_traced
+    # Unchanged from before the trace: the faulting frame stands.
+    assert site.blamed is not None and site.blamed.fn_name == "reader"
+
+
+def test_a_library_frame_that_produced_it_names_its_crate_caller() -> None:
+    frames = [_fr("core::ptr::read", "/rustc/x/ptr.rs"),
+              _fr("crate::caller", "src/a.rs", (0x5555_0000, 8))]
+    assert traced_origin_index(frames, 0x7) == 1
+
+
+def test_no_fault_address_traces_nothing() -> None:
+    frames = [_fr("crate::reader", "src/a.rs", (0x8, 56)),
+              _fr("crate::maker", "src/b.rs")]
+    assert traced_origin_index(frames, None) is None
+    site = site_from_frames("tests/t.rs", "t", "SIGSEGV", frames)
+    assert site.blamed is not None and site.blamed.fn_name == "reader"
+
+
+def test_a_stub_abort_is_never_traced() -> None:
+    frames = [_fr("crate::reader", "src/a.rs", (0x8, 56)),
+              _fr("crate::maker", "src/b.rs")]
+    site = site_from_frames("tests/t.rs", "t", "SIGABRT", frames,
+                            fault_addr=0x8)
+    assert not site.origin_traced

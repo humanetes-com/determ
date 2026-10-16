@@ -393,6 +393,59 @@ names rather than the shape. On any of them, stop. A stall fix that names
 no leftover and still branches on a language construct (Debug, Drop, Hash)
 is Hard Rule 11's catalog clause, not a pass of this section.
 
+## "Generic" is a claim with two checks — the word is not written until both are shown
+
+The two sections around this one define a generic fix in two halves: the
+STEER half (the mechanism names no crate, test, unit or language
+construct) and the CLASS half (every consumer of the fact is named, and no
+consumer, existing or new, can recreate the defect by omitting a call).
+The steer half is cheap to check by reading the diff. The class half needs
+work outside the diff, and it is the half that gets skipped: the session
+runs the steer check, passes it, and writes "generic" as if both had run.
+The rules were already in this file when that happened. What was missing
+is a gate on the WORD, so this section puts one there.
+
+**The rule, checkable.** A reply, a plan or a tracker entry may not call a
+proposed fix "generic", "general", "class-closing", "closes the class" or
+"cannot recur" unless the same text carries:
+
+1. the FACT the defect lives in, named as a state or a value (for example
+   "a body kept while its tests could not run"), not as the function that
+   fired;
+2. the CONSUMER LIST of that fact: the command that enumerated it (a grep
+   of the type, the state, the store field, quoted) and every reader it
+   found, each marked covered by the fix or not;
+3. the WRITER: the one function every producer of the fact goes through,
+   and why a new producer cannot skip it (the type will not build, the
+   store refuses the row). "The sites that fired now call it" does not
+   count.
+
+If any of the three is missing, write "steer-free; class not checked"
+instead of "generic", and run the check before shipping. A fix whose
+consumer list shows uncovered readers is the cheap form under "The most
+correct fix, never the cheapest" and is planned as such, not described as
+general.
+
+**The tell.** A fix that changes exactly the consumers that showed up in
+the run's log. The log shows the consumers that FIRED, never all of them.
+When the touched set equals the observed set, the enumeration has not been
+done.
+
+**The instance, 2026-10-15, run `1057870-b427a3a2`.** The 47-pass lock
+was a constructor kept "blocked by still-stubbed sibling" that called an
+accessor on a dangling pointer, plus an idiom miner that taught that call
+to every later prompt. The first plan fixed the idiom miner and the
+in-fill crash text, the two consumers that fired, and the reply called it
+"three generic fixes" because none of them named a symbol. One question
+from the user ("will we face the same in 360?") was enough to show the
+class half had never run. The fact was the provisional keep. Its consumer
+list (reseed, the same-fill withhold, the floor's declined set, retro
+notes, dispatch, the idiom miner) had never been enumerated. The ledger
+showed 71 such bodies on that augmentation, 0 ever proven and 67 never
+graded again. The plan was rewritten around the state the same afternoon.
+The rewrite took one grep and one ledger query; nothing new had to be
+learned. The cost was the word arriving before the check.
+
 ## Hard Rule 11 — no original source after strip; the fill crate is never the fix; the pipeline does not name a language
 
 The original crate is read once, pre-strip, to bake artifacts and augment

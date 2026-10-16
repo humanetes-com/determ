@@ -4,7 +4,8 @@ TUI can show findings without re-reading the whole log every frame.
 The findings are the log-segment detectors (`domain.run_health.analyze`) plus
 the phase-cost ones (`monitor.phase_cost_view`): a phase this code made more
 expensive than the earlier codes did, and a phase running past their p90. The
-phase-cost table follows the findings."""
+recent runs' score climbs (`monitor.sweep_view`) follow the findings, then the
+phase-cost table."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from pathlib import Path
 from pipeline_core.domain import model_notes as _mn
 from pipeline_core.domain.run_health import HealthFinding, analyze
 from pipeline_core.monitor.phase_cost_view import phase_cost_report
+from pipeline_core.monitor.sweep_view import sweep_lines
 
 _TTL_S = 60.0
 _cache: tuple[float, list[str]] = (0.0, [])
@@ -55,7 +57,12 @@ def health_lines(log_path: str | Path, project_dir: str | Path,
             pass
     findings = analyze(seg, notes)
     table: list[str] = []
+    climbs: list[str] = []
     if events_log is not None:
+        try:
+            climbs = sweep_lines(events_log)
+        except Exception as exc:  # an unreadable store must not blank the tab
+            climbs = [f"Score climb: unreadable ({type(exc).__name__}: {exc})"]
         try:
             report = phase_cost_report(events_log, running=running)
             findings += report.findings
@@ -63,6 +70,8 @@ def health_lines(log_path: str | Path, project_dir: str | Path,
         except Exception as exc:  # an unreadable store must not blank the tab
             table = [f"Phase cost: unreadable ({type(exc).__name__}: {exc})"]
     out = _finding_lines(findings) or ["no findings — run looks healthy"]
+    if climbs:
+        out += ["", *climbs]
     if table:
         out += ["", *table]
     _cache = (now, out)

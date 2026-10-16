@@ -489,3 +489,258 @@ def test_a_self_calling_fill_is_refused_by_the_gate_and_the_keep(
     missing = frozenset({"builds"} - (report.passed
                                       | {f.test_name for f in report.failures}))
     assert self_aborted_tests(missing, base.judged_names) == frozenset()
+
+
+# ---- a correct reader handed a fabricated pointer (2026-10-15) ----
+#
+# Run `1057870-b427a3a2`: an accessor that reads the first field of the
+# pointee it is handed was convicted four attempts running, because the
+# constructor above it handed it `NonNull::dangling()`. gdb names the
+# faulting frame only; the localizer now reads the fault address and each
+# frame's pointer arguments (`traced_origin_index`) and names the frame that
+# produced the address. The invented crate has both shapes: `make` hands a
+# dangling pointer to the correct `read_tag`; `make_far` hands a valid
+# pointer to `read_far`, which computes an address far outside it.
+
+_TRACE_LIB = """use core::ptr::NonNull;
+
+static N: u32 = 7;
+
+#[repr(C)]
+pub struct Item {
+    pub tag: &'static u32,
+    pub n: u32,
+}
+
+pub fn read_tag(p: NonNull<Item>) -> u32 {
+    unsafe { *(*p.as_ptr()).tag }
+}
+
+pub fn make() -> u32 {
+    read_tag(NonNull::dangling())
+}
+
+pub fn read_far(p: NonNull<Item>) -> u32 {
+    unsafe { *((p.as_ptr() as *const u8).wrapping_add(1usize << 44) as *const u32) }
+}
+
+pub fn make_far() -> u32 {
+    let it = Item { tag: &N, n: 1 };
+    read_far(NonNull::from(&it))
+}
+"""
+
+_TRACE_TESTS = """#[test]
+fn handed_dangling() {
+    assert_eq!(trace::make(), 7);
+}
+
+#[test]
+fn computed_far() {
+    assert_eq!(trace::make_far(), 7);
+}
+"""
+
+
+def _trace_sites(root: Path, monkeypatch: pytest.MonkeyPatch,
+                 gdb_localize):
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "trace")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(_TRACE_LIB)
+    (root / "tests" / "trace.rs").write_text(_TRACE_TESTS)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "trace")
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    logs: list[str] = []
+    # One crashed binary per isolated test: `max_binaries` covers both.
+    sites = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=gdb_localize, asan_sweep=None,
+                           log=logs.append),
+        out, _CMD, root, env, max_binaries=4)
+    return {s.test_name: s for s in sites}, logs
+
+
+def test_the_localizer_names_the_frame_that_produced_the_address(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    by_test, logs = _trace_sites(tmp_path / "t", monkeypatch,
+                                 localize_crashed_binary)
+    handed = by_test.get("handed_dangling")
+    far = by_test.get("computed_far")
+    assert handed is not None and far is not None, (by_test, logs)
+    # Premise of the rule: the faulting frame is the reader in both.
+    assert handed.frames[0].fn_name == "read_tag", handed.frames
+    assert far.frames[0].fn_name == "read_far", far.frames
+    # The reader was handed the dangling address: its producer is named.
+    assert handed.origin_traced
+    assert handed.blamed is not None and handed.blamed.fn_name == "make"
+    # The reader computed the address itself: the reader is named.
+    assert far.blamed is not None and far.blamed.fn_name == "read_far"
+
+
+def test_negative_control_without_the_fault_address_the_reader_is_blamed(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+
+    def _two_tuple(*a, **kw):
+        got = localize_crashed_binary(*a, **kw)
+        return None if got is None else (got[0], got[1])
+    by_test, logs = _trace_sites(tmp_path / "t", monkeypatch, _two_tuple)
+    handed = by_test.get("handed_dangling")
+    assert handed is not None, (by_test, logs)
+    assert not handed.origin_traced
+    assert handed.blamed is not None and handed.blamed.fn_name == "read_tag"
+
+
+# ---- the settlement end to end (2026-10-16) ----
+#
+# The same run's lock, with the real runner, debugger, extractor and the
+# shared U2 gate: `read` (the write) is a correct reader; `make_a` and
+# `make_b` are kept callers that hand it `NonNull::dangling()`, in two test
+# binaries; only `make_a`'s test is aimed at the write, so `make_b` shows up
+# only when the settler re-runs the whole suite. Before the write `read` is a
+# stub and both callers' tests stop there.
+
+_SETTLE_LIB = """use core::ptr::NonNull;
+
+static N: u32 = 7;
+
+#[repr(C)]
+pub struct Item {
+    pub tag: &'static u32,
+}
+
+pub fn read(p: NonNull<Item>) -> u32 {
+    BODY
+}
+
+pub fn make_a() -> u32 {
+    read(NonNull::dangling())
+}
+
+pub fn make_b() -> u32 {
+    read(NonNull::dangling())
+}
+
+pub fn good() -> u32 {
+    let it = Item { tag: &N };
+    read(NonNull::from(&it))
+}
+"""
+
+_SETTLE_A = """#[test]
+fn a_made() {
+    assert_eq!(settle::make_a(), 7);
+}
+
+#[test]
+fn a_good() {
+    assert_eq!(settle::good(), 7);
+}
+"""
+
+_SETTLE_B = """#[test]
+fn b_made() {
+    assert_eq!(settle::make_b(), 7);
+}
+"""
+
+_EXTRACTOR = (Path(__file__).resolve().parents[2] / "tools"
+              / "skeleton_extractor" / "target" / "release"
+              / "skeleton-extractor")
+
+
+def _settle_crate(root: Path, body: str) -> None:
+    (root / "src").mkdir(parents=True, exist_ok=True)
+    (root / "tests").mkdir(exist_ok=True)
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "settle")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(_SETTLE_LIB.replace("BODY", body))
+    (root / "tests" / "a.rs").write_text(_SETTLE_A)
+    (root / "tests" / "b.rs").write_text(_SETTLE_B)
+
+
+def _settle_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
+                 bind_settler: bool):
+    from pipeline_core.adapters.extractor import CliExtractor
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.adapters.structure import CliStructureReader
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.application.reconstruct.cargo_runner import u2_test_gate
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    from pipeline_core.domain.models import FnSite
+    assert _EXTRACTOR.exists(), "build the release extractor (bash pre_run.sh)"
+    root = tmp_path / "s"
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "settle")
+    env["RUST_BACKTRACE"] = "0"
+
+    def _run(cmd: str, cwd: Path, env_: dict[str, str], timeout: int = 600):
+        return run_cargo(CargoCli(), cmd, cwd, env_, timeout=timeout)
+    _settle_crate(root, "unimplemented!()")
+    baseline = TestStateReading(parse_binary_results(
+        _run(_CMD, root, env)[1]))
+    (root / "src" / "lib.rs").write_text(
+        _SETTLE_LIB.replace("BODY", "unsafe { *(*p.as_ptr()).tag }"))
+    recorded: list = []
+    logs: list[str] = []
+    settler = crash_settler.CrashSettler(crash_settler.CrashSettlerDeps(
+        localize=lambda cap, excl: localize_crashes(
+            CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                               asan_sweep=None, log=logs.append),
+            cap, _CMD, root, env, exclude=excl, max_binaries=4),
+        run_suite=lambda: _run(_CMD, root, env)[1],
+        is_proven=lambda _u: False, src_dir=root,
+        record_settled=lambda locs, _s: recorded.append(sorted(locs)),
+        log=logs.append))
+    crash_settler.bind(settler if bind_settler else None)
+    try:
+        verdict = u2_test_gate(
+            _run, {"a_made", "a_good"},
+            frozenset({FnSite("src/lib.rs", "read", "")}), _CMD, root, env,
+            structure=CliStructureReader(CliExtractor(_EXTRACTOR)),
+            enabled=True, timeout=600, err_cap=4000,
+            guard=lambda *_: None, baseline=baseline)
+    finally:
+        crash_settler.bind(None)
+    return verdict, (root / "src" / "lib.rs").read_text(), recorded, logs
+
+
+def test_a_crash_under_a_correct_reader_settles_on_its_callers(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_report import U2Decision
+    verdict, lib, recorded, logs = _settle_gate(
+        tmp_path, monkeypatch, bind_settler=True)
+    # The write stands: its aimed test now stops in a stub outside it.
+    assert verdict.decision is U2Decision.ACCEPT_EXTERNAL_ONLY, (
+        verdict.detail, logs)
+    assert "unsafe { *(*p.as_ptr()).tag }" in lib
+    # Both callers went back, the one off the aimed binary's stack included.
+    assert lib.count("::core::unimplemented!()") == 2, lib
+    assert "read(NonNull::dangling())" not in lib
+    assert [str(u.fn_name) for u in recorded[0]] == ["make_a", "make_b"]
+
+
+def test_negative_control_without_a_settler_the_reader_is_rejected(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_report import U2Decision
+    verdict, lib, _recorded, _logs = _settle_gate(
+        tmp_path, monkeypatch, bind_settler=False)
+    assert verdict.decision is U2Decision.REJECT
+    assert "a_made" in verdict.aborted
+    assert lib.count("read(NonNull::dangling())") == 2

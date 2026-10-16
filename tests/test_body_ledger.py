@@ -436,6 +436,25 @@ def test_the_standing_claim_is_the_latest_word_but_proven_outranks_unmeasured() 
         "two different unmeasured bodies: the later row is the standing claim")
 
 
+def test_a_word_that_measured_nothing_does_not_take_a_refutation_back() -> None:
+    """A crash settlement refutes the body it puts back to a stub; the next
+    sweep, finding that body off the tree, writes `unmeasured` about it. The
+    refutation must stand, or the re-seed splices the convicted body back
+    (run `1057870-b427a3a2`, 2026-10-15). A later MEASURED word still wins."""
+    refuted = _entry(state=BodyState.REFUTED,
+                     verdict_delta=(("t", "crash_origin"),))
+    later = replace(refuted, state=BodyState.UNMEASURED, verdict_delta=())
+    assert latest_by_unit([refuted, later])[_KEY] is refuted
+    assert not plan_reseed([refuted, later], wanted=[_KEY],
+                           file_fp={_KEY.file: "fp-original"},
+                           sig_sha={_KEY: refuted.sig_sha},
+                           oracle_fp=_ORACLE).take
+    proven = replace(refuted, state=BodyState.PROVEN)
+    assert latest_by_unit([refuted, proven])[_KEY] is proven
+    # Negative control: the same body's later word read without the rule.
+    assert later.reseedable
+
+
 def test_the_plan_answers_only_about_the_units_it_was_asked_about() -> None:
     """The line between this store and a dispatch decider: it never adds a unit
     to anything, it answers about the stub set it is handed."""

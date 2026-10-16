@@ -491,6 +491,13 @@ class PhaseCFillEngine:
         # (an undispatched frontier fn is refused, not judged).
         _dispatched: set[FnLocator] = set()
         _reverted: set[FnLocator] = set()
+        # Units whose per-fn fill LANDED (the target, or a joint extra it
+        # wrote). The per-fn route's report is read from it: a dispatched
+        # unit that is not here came back with its pre-fill body, and was
+        # reported "kept" until 2026-10-16 — run `1057870-b427a3a2` fill 2
+        # withheld the reverted `vtable` from the file run as "an earlier run
+        # of this fill kept a body for".
+        _landed_fn: set[FnLocator] = set()
         # Units the impl/file pass dispatched but never got an answer for
         # (see `ClusterFillResult.answer_lost_fns`). A per-fn attempt below
         # supersedes the loss for its unit.
@@ -568,6 +575,7 @@ class PhaseCFillEngine:
             dispatch_ranks=dispatch_ranks,
             behaviour_specs=behaviour_specs, cfg_dead=_cfg_dead,
             is_cfg_dead=_is_cfg_dead, dispatched=_dispatched,
+            landed_fn=_landed_fn,
             reverted=_reverted, answer_lost=_answer_lost,
             landed_before=(_prepared_fill.landed if _prepared_fill is not None
                            else (lambda: 0)),
@@ -708,6 +716,7 @@ class PhaseCFillEngine:
         claim_refusal: Callable[..., str] | None = None,
         claim_release: Callable[[], None] | None = None,
         crash_sites: CrashSites | None = None,
+        _landed_fn: set[FnLocator] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -1081,6 +1090,8 @@ class PhaseCFillEngine:
                             _answer_lost.discard(
                                 FnLocator(res.file, res.fn_name))
                         if res.filled:
+                            if _landed_fn is not None:
+                                _landed_fn.add(FnLocator(res.file, res.fn_name))
                             fns_filled += 1
                             progress_this_pass += 1
                             _fills_landed_total += 1
@@ -1097,6 +1108,8 @@ class PhaseCFillEngine:
                         for _extra in res.joint:
                             _dispatched.add(_extra)
                             _answer_lost.discard(_extra)
+                            if _landed_fn is not None:
+                                _landed_fn.add(_extra)
                         if res.error:
                             errors.append(res.error)
 
@@ -1646,6 +1659,7 @@ class _PerFnRoute:
             kw["tdd_frontier_keys"] = set(run.targets)
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])
+        before_landed = frozenset(kw["landed_fn"])
         self.result = eng._per_fn_passes(
             project_dir=kw["project_dir"], target_src_dir=kw["target_src_dir"],
             tests_dir_files=kw["tests_dir_files"], module_name=kw["module_name"],
@@ -1665,12 +1679,14 @@ class _PerFnRoute:
             landed_before=kw["landed_before"], claim=clock.may_claim,
             heal_file=kw["heal_file"],
             claim_refusal=clock.refusal, claim_release=clock.release,
-            crash_sites=kw.get("crash_sites"))
+            crash_sites=kw.get("crash_sites"),
+            _landed_fn=kw["landed_fn"])
         res = self.result
         disp = frozenset(kw["dispatched"]) - before_disp
-        rev = frozenset(kw["reverted"]) - before_rev
+        kept = frozenset(kw["landed_fn"]) - before_landed
+        rev = (frozenset(kw["reverted"]) - before_rev) | (disp - kept)
         return RouteRunReport(
-            model_calls=res.attempts, kept=frozenset(disp - rev),
+            model_calls=res.attempts, kept=frozenset(kept - rev),
             reverted=frozenset(rev), dispatched=frozenset(disp),
             classes={k: v for k, v in (res.fill_classes or FillClassHistogram()
                                        ).as_dict().items() if v},
