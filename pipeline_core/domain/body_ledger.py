@@ -277,6 +277,13 @@ class LedgerEntry:
     # 4 proven` for one keep that moved the test, because every landed unit
     # attributed to a test that turned green between two sweeps was credited.
     kept_green: tuple[str, ...] | None = None
+    # The crash a settlement refuted this body on, as the localizer read it
+    # (`Settlement.render`). Its reader is the stub's next prompt
+    # (`latest_crash_refutation`): before the field the refutation's only
+    # reader was the reseed gate, and run `757853-e28f1a7d` (2026-10-16)
+    # re-wrote the refuted double drop three times on a prompt that said
+    # only that the fn was a stub. "" on every other row.
+    crash_evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -298,6 +305,8 @@ class LedgerEntry:
             **({"comparator": self.comparator} if self.comparator else {}),
             **({"kept_green": list(self.kept_green)}
                if self.kept_green is not None else {}),
+            **({"crash_evidence": self.crash_evidence}
+               if self.crash_evidence else {}),
         }
 
     @staticmethod
@@ -352,6 +361,7 @@ class LedgerEntry:
                 comparator=str(raw.get("comparator") or ""),
                 kept_green=(None if raw.get("kept_green") is None else tuple(
                     str(t) for t in raw.get("kept_green") or ())),
+                crash_evidence=str(raw.get("crash_evidence") or ""),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -1349,3 +1359,24 @@ def plan_reseed(
         else:
             plan.skipped.append((key, decision.reason))
     return plan
+
+
+#: The verdict-delta kind a crash settlement stamps on the bodies it refutes.
+CRASH_ORIGIN = "crash_origin"
+
+
+def latest_crash_refutation(
+    entries: Iterable[LedgerEntry], file: str, fn_name: str, *,
+    oracle_fp: str,
+) -> LedgerEntry | None:
+    """The last row a crash settlement refuted this unit's body with, under
+    this oracle, when it carries the crash it was refuted on. A row graded
+    under another oracle describes other tests and is not told."""
+    hit: LedgerEntry | None = None
+    for e in entries:
+        if (e.key.file == file and e.key.fn_name == fn_name
+                and e.state is BodyState.REFUTED and e.crash_evidence
+                and e.oracle_fp == oracle_fp
+                and any(k == CRASH_ORIGIN for _t, k in e.verdict_delta)):
+            hit = e
+    return hit

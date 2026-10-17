@@ -16,9 +16,13 @@ from pipeline_core.application.reconstruct.crash_settler import (
     STUB_BODY,
     CrashSettler,
     CrashSettlerDeps,
+    JudgedWrite,
+    bind,
+    withdraw_crashing_bodies,
 )
 from pipeline_core.domain.crash_settlement import (
     SettlementOutcome,
+    held_stub_evidence,
     occurrence_of_frame,
     occurrence_of_line,
     settle_step,
@@ -202,3 +206,157 @@ def test_a_later_round_that_blames_the_write_gives_every_stub_back(
     got = s.settle("capture", {READ}, _baseline())
     assert got.outcome is SettlementOutcome.OWN
     assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+# ---- a crash whose culprit is a body of the write ----
+#
+# Run `757853-e28f1a7d` (2026-10-16, iter 4): a four-body file-first write
+# read `pass 59 -> 64` and was restored whole because one of its bodies was
+# the double drop the sanitizer named. The shapes are invented: the write
+# put `bad_a` into `make_a` and `bad_b` into `make_b`; before it they held
+# `old_a` / `old_b`.
+
+_PRIOR = _LIB.replace("bad_a", "old_a").replace("bad_b", "old_b")
+
+
+def _write(size: int = 2, written=(MAKE_A, MAKE_B)) -> JudgedWrite:
+    return JudgedWrite(frozenset(written), {"src/lib.rs": _PRIOR}, size=size)
+
+
+def test_a_culprit_that_is_part_of_the_write_goes_back_to_its_prior_text(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    recorded: list = []
+    write = _write()
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []],
+                 recorded=recorded)
+    got = s.settle("capture", write, _baseline())
+    assert got.outcome is SettlementOutcome.NARROWED, got.reason
+    assert got.changed_tree
+    text = (root / "src" / "lib.rs").read_text()
+    # The culprit holds what it held before the write; the rest stands.
+    assert "old_a" in text and "bad_a" not in text and "bad_b" in text
+    assert STUB_BODY not in text
+    assert write.withdrawn_names == ("make_a",)
+    assert write.evidence
+    # The refutation is the written body the stack ran.
+    assert recorded == [[MAKE_A]]
+
+
+def test_negative_control_a_write_that_cannot_be_narrowed_is_convicted_whole(
+        tmp_path: Path) -> None:
+    # The pre-change shape: the settlement is handed bare locators, so the
+    # culprit's OWN step convicts the write and nothing is put back.
+    root = _tree(tmp_path)
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []])
+    got = s.settle("capture", {MAKE_A, MAKE_B}, _baseline())
+    assert got.outcome is SettlementOutcome.OWN
+    assert [f.fn_name for f in got.own] == ["make_a"]
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+def test_a_culprit_that_is_the_whole_write_convicts_it(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    write = _write(size=1, written=(MAKE_A,))
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []])
+    got = s.settle("capture", write, _baseline())
+    assert got.outcome is SettlementOutcome.OWN
+    assert write.withdrawn == []
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+def test_a_withdrawn_body_the_crash_still_names_gives_everything_back(
+        tmp_path: Path) -> None:
+    # The pre-write text crashes the same way: the write did not cause it,
+    # and nothing here explains it.
+    root = _tree(tmp_path)
+    write = _write()
+    s = _settler(root, [_PASS],
+                 [[_site("t1", "make_a", 6)], [_site("t1", "make_a", 6)]])
+    got = s.settle("capture", write, _baseline())
+    assert got.outcome is SettlementOutcome.UNSETTLED
+    assert "already back" in got.reason
+    assert write.withdrawn == []
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+def test_a_withdrawal_and_a_stub_outside_the_write_settle_together(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    write = _write(written=(READ, MAKE_A))
+    recorded: list = []
+    s = _settler(root, [_PASS, _PASS],
+                 [[_site("t1", "make_a", 6)], [_site("t2", "make_b", 10)], []],
+                 recorded=recorded)
+    got = s.settle("capture", write, _baseline())
+    assert got.outcome is SettlementOutcome.SETTLED, got.reason
+    text = (root / "src" / "lib.rs").read_text()
+    assert "old_a" in text and "bad_b" not in text and text.count(STUB_BODY) == 1
+    assert write.withdrawn_names == ("make_a",)
+    assert recorded == [[MAKE_B, MAKE_A]]
+
+
+def test_a_withdrawal_needs_the_bodies_prior_text(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    write = JudgedWrite(frozenset({MAKE_A, MAKE_B}), {}, size=2)
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []])
+    got = s.settle("capture", write, _baseline())
+    assert got.outcome is SettlementOutcome.OWN
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+# ---- before the gates ----
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def settle(self, capture, written, baseline, *, tag=""):
+        self.calls.append(written)
+        return None
+
+
+_CRASHED = ("     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 2 tests\n"
+            "test other ... ok\ntest t1 ... ")
+
+
+def test_the_pre_gate_reading_settles_only_a_new_crash() -> None:
+    rec = _Recorder()
+    bind(rec)  # type: ignore[arg-type]
+    try:
+        write = _write()
+
+        def _measure(text: str):
+            def _m(sink: list[str]):
+                sink.append(text)
+                return TestStateReading(parse_binary_results(text))
+            return _m
+
+        assert withdraw_crashing_bodies(
+            write, _measure(_PASS), _baseline()) is None
+        assert rec.calls == []
+        withdraw_crashing_bodies(write, _measure(_CRASHED), _baseline())
+        assert rec.calls == [write]
+        # A single body's culprit is the write: nothing to narrow, no reading.
+        rec.calls.clear()
+        withdraw_crashing_bodies(_write(size=1, written=(MAKE_A,)),
+                                 _measure(_CRASHED), _baseline())
+        assert rec.calls == []
+    finally:
+        bind(None)
+
+
+
+def test_a_stub_the_settlement_made_is_told_what_its_body_did() -> None:
+    # Run `757853-e28f1a7d` (2026-10-16): after iter 3 put
+    # `into_boxed_dyn_error` back to a stub, the iter-4 prompt said only that
+    # the fn was a stub holding three tests, and the reply wrote the same
+    # double drop three times. The invented body here frees twice.
+    told = held_stub_evidence(3, "let b = self.take();\ndrop(b);\ndrop(b)",
+                              "free(): double free detected", 3)
+    assert "3 failing test(s) stop" in told
+    assert "drop(b)" in told and "double free" in told
+    assert "iteration 3" in told and "Do not write that body again." in told
+    # Negative control: a stub no settlement made says only that it is one.
+    plain = held_stub_evidence(3)
+    assert "put back" not in plain and plain.endswith("Give it a real body.")

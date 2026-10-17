@@ -346,6 +346,23 @@ def test_a_report_with_no_origin_leaves_the_traced_site_standing() -> None:
     assert any("printed no origin stack" in m for m in logged)
 
 
+def test_a_report_with_no_origin_supersedes_an_untraced_site() -> None:
+    """The trace is what stands, not any debugger site: an untraced
+    SIGSEGV names only its innermost frame, so the sanitized site of the
+    same binary replaces it even when that report printed no origin.
+    Negative control: the traced frames of the previous test keep gdb."""
+    untraced = ("SIGSEGV", [
+        {"func": "crate::read", "file": "src/lib.rs", "line": 3},
+        {"func": "crate::make", "file": "src/lib.rs", "line": 9}])
+    deps, calls = _deps(gdb_result=untraced, asan_result=(101, _ASAN_SEGV))
+    (site,) = _run(deps)
+    assert calls["asan"] == ["cargo test"]
+    assert site.origin_capable and not site.origin_traced
+    traced_deps, _ = _deps(gdb_result=_TRACED_GDB, asan_result=(101, _ASAN_SEGV))
+    (traced,) = _run(traced_deps)
+    assert traced.origin_traced and not traced.origin_capable
+
+
 def test_a_segv_the_debugger_did_not_report_is_kept() -> None:
     deps, _ = _deps(gdb_result=None, asan_result=(101, _ASAN_SEGV))
     (site,) = _run(deps)
@@ -582,10 +599,11 @@ def test_three_reports_become_three_sites(tmp_path: Path) -> None:
 def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: Path) -> None:
     """The iter-4 shape exactly: three binaries crashed, two of them with an
     AddressSanitizer report, and `tests/test_context.rs` aborted on a panic
-    in a destructor with no report at all. The SEGV in `tests/error_gen_3.rs`
-    printed no free stack, so the debugger site of that binary stands; the
-    use-after-free that printed one replaces gdb for its own binary. The
-    SIGABRT for `tests/test_context.rs` survives as the third site — it is
+    in a destructor with no report at all. gdb's untraced SIGSEGV for
+    `tests/error_gen_3.rs` is superseded by that label's sanitized site
+    even though the SEGV printed no free stack: an untraced debugger site
+    names only its innermost frame. The use-after-free replaces gdb for
+    its own binary. The SIGABRT for `tests/test_context.rs` survives as the third site — it is
     not "a downstream reader" of a fault in another process."""
     sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=True)
 
@@ -608,8 +626,8 @@ def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: 
     assert set(by_label) == {
         "tests/error_gen_3.rs", "tests/test_downcast.rs", "tests/test_context.rs"}
     segv = by_label["tests/error_gen_3.rs"]
-    assert not segv.origin_capable and segv.signal == "SIGSEGV", (
-        "a report that printed no origin leaves the debugger site standing")
+    assert segv.origin_capable, (
+        "the sanitized site replaced gdb's untraced site for the same binary")
     assert segv.origin_stack_lines == 0
     assert segv.blamed_locator == FnLocator(
         "src/error.rs", "reallocate_into_boxed_dyn_error_without_backtrace")

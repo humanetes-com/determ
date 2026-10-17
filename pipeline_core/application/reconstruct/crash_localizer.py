@@ -44,6 +44,7 @@ from pipeline_core.domain.crash_site import (
 )
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.oracle_immutability import is_oracle_path
+from pipeline_core.domain.rust_scan import declared_fn_names
 from pipeline_core.domain.test_outcome import abort_readings
 from pipeline_core.domain.test_results import (
     BinaryResult,
@@ -70,6 +71,19 @@ def _read_lines(workspace_root: Path, file_rel: str) -> list[str] | None:
         return path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return None
+
+
+def _declared_reader(
+    workspace_root: Path,
+) -> Callable[[str], frozenset[str] | None]:
+    """Fn names a crate file declares, read from the tree under test, or
+    None when the file cannot be read. The window's binding rule counts
+    only calls to these: a call the anchor file does not declare
+    (``to_string``) is not a body the crash can blame."""
+    def declared(file_rel: str) -> frozenset[str] | None:
+        lines = _read_lines(workspace_root, file_rel)
+        return None if lines is None else declared_fn_names("\n".join(lines))
+    return declared
 
 
 def _caller_source_line(
@@ -163,7 +177,8 @@ def _site_for_report(
         raw_report=asan_stack_excerpt(report.text), origin_capable=True,
         source_line=source_line, source_loc=source_loc,
         source_window=source_window,
-        origin_stack_lines=report.origin_stack_lines)
+        origin_stack_lines=report.origin_stack_lines,
+        declared_in=_declared_reader(workspace_root))
     if site.origin_unattributed:
         # Say WHICH starvation this is — the verdict alone left "no origin
         # stack at all", "unsymbolized raw addresses" and "symbolized but
@@ -290,10 +305,10 @@ def localize_crashes(
     but its backtrace names only the faulting frame. For an invalid-memory
     fault the sanitized sweep runs even when the debugger traced an origin:
     a pointer loaded from memory is produced, by that trace, by the frame
-    that loaded it. A sanitized site supersedes that trace only when it
-    printed an origin stack (`origin_stack_lines`). A report that printed
-    none leaves the trace standing. A sanitized site for a binary the
-    debugger did not report is kept either way. gdb's result is also kept
+    that loaded it. A sanitized site supersedes the debugger site of its
+    binary, except that a TRACED debugger site stands against a report that
+    printed no origin stack (`origin_stack_lines`). A sanitized site for a
+    binary the debugger did not report is kept either way. gdb's result is also kept
     for every binary the sanitizer did not report (no nightly, sanitizer
     unsupported, crash not reproducible under instrumentation, or — live on
     run `1577437-c93d5c26` iter 4 — `tests/test_context.rs` aborting on a
@@ -380,28 +395,31 @@ def localize_crashes(
     if not asan:
         return tuple(sites)
     # Each test binary is its own process and its own heap. A sanitized site
-    # supersedes the gdb site of the SAME binary only when it printed an
-    # origin stack: that stack is the free or the allocation the debugger
-    # cannot see. A report that printed none (a SEGV) does not refute a
-    # trace, so the debugger site stands. A sanitized site for a binary the
-    # debugger did not report is kept either way — it is the only evidence
-    # for that binary. `halt_on_error` stops one process, cargo starts the
+    # supersedes the gdb site of the SAME binary: it carries the free or the
+    # allocation the debugger cannot see, or, for a SEGV, the source-side
+    # recovery an innermost frame does not have. A sanitized site for a
+    # binary the debugger did not report is kept either way — it is the
+    # only evidence for that binary. `halt_on_error` stops one process, cargo starts the
     # next, and the three incomplete binaries of run `1577437-c93d5c26`
     # were three separate faults. The previous consolidation dropped every
     # other memory-fault backtrace as a "downstream reader of the same
     # corruption" — a one-heap premise that is false across processes.
-    gdb_labels = {s.binary_label for s in sites}
-    bearing = {s.binary_label for s in asan if s.origin_stack_lines > 0}
-    kept = [s for s in sites if s.binary_label not in bearing]
-    kept_asan = [s for s in asan
-                 if s.origin_stack_lines > 0 or s.binary_label not in gdb_labels]
+    # The one exception is a TRACED debugger site against a report with no
+    # origin stack: the trace followed the fault address to the frame that
+    # produced it, and a SEGV report has nothing to set against that. An
+    # untraced debugger site names only its innermost frame, so a
+    # sanitized site of the same binary supersedes it, origin or not.
+    stands = ({s.binary_label for s in sites if s.origin_traced}
+              - {a.binary_label for a in asan if a.origin_stack_lines > 0})
+    asan_labels = {a.binary_label for a in asan} - stands
+    kept = [s for s in sites if s.binary_label not in asan_labels]
+    kept_asan = [a for a in asan if a.binary_label not in stands]
     superseded = len(sites) - len(kept)
     if superseded:
         deps.log(f"  [phase-c/crash-localizer] {superseded} gdb backtrace(s) "
-                 "superseded by the sanitized site of the same binary; "
-                 f"{len(kept)} kept for binaries the sanitizer did not report.")
-    stood = [s for s in kept if s.binary_label in
-             {a.binary_label for a in asan if a.origin_stack_lines <= 0}]
+                 "superseded by the sanitized site of the same binary.")
+    stood = [s for s in kept if s.binary_label in stands
+             and any(a.binary_label == s.binary_label for a in asan)]
     if stood:
         deps.log(f"  [phase-c/crash-localizer] {len(stood)} sanitized "
                  "report(s) printed no origin stack; the traced site of "

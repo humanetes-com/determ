@@ -40,6 +40,10 @@ from pipeline_core.application.reconstruct.context import (
     crash_block_mark,
     crash_block_stands,
 )
+from pipeline_core.application.reconstruct.crash_settler import (
+    JudgedWrite,
+    withdraw_crashing_bodies,
+)
 from pipeline_core.application.reconstruct.fill_reading import (
     last_comparison,
     note_kept,
@@ -64,6 +68,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     PeelResult,
     peel_file_first,
     peel_keep_allowed,
+    split_withdrawn,
 )
 from pipeline_core.application.reconstruct.pull_resolver import (
     PullSources,
@@ -2555,6 +2560,66 @@ def prepare_impl_fill(
                         "spliced": spliced_now,
                         "planned": len(stub_names) + len(refill_names),
                         "banked": False})
+                # A test process that dies under this write is settled BEFORE
+                # any gate reads it, with the write passed as one the
+                # settlement may narrow: a body of the reply the crash names
+                # goes back to its pre-write text (the crash peel), the rest
+                # is judged below exactly as a compile peel's survivors are,
+                # and the withdrawn names are retried with the crash that
+                # named them. Run `757853-e28f1a7d` (2026-10-16, iter 4):
+                # this route read `pass 59 -> 64` and `59 -> 65` on two
+                # attempts and restored both whole, because one of the four
+                # bodies (`into_boxed_dyn_error`) was the double drop the
+                # sanitizer named; the retry asked for all four again with no
+                # stack. One more whole-suite reading per compiling attempt of
+                # two or more bodies.
+                _crash_peeled: tuple[str, ...] = ()
+                _crash_err = ""
+                if rc == 0 and len(_landed) > 1 and tdd_test_cmd:
+                    _jw = JudgedWrite(
+                        frozenset(FnLocator(file_rel, b.fn_name)
+                                  for b in _landed),
+                        {file_rel: _pre.text("replace")}, size=len(_landed))
+                    withdraw_crashing_bodies(
+                        _jw,
+                        lambda sink: _test_regression_baseline(
+                            tdd_test_cmd, target_src_dir, cluster_env, sink),
+                        _baseline_test, tag=f"{glabel} ")
+                    if _jw.withdrawn:
+                        _kept_c, _gone_c = split_withdrawn(
+                            _landed,
+                            locus=lambda b: (file_rel, b.fn_name),
+                            text=lambda b: b.body,
+                            withdrawn=[(f.file_rel, f.fn_name)
+                                       for f in _jw.withdrawn],
+                            file_text=lambda _f: file_path.read_text(
+                                encoding="utf-8", errors="replace"))
+                        _landed = list(_kept_c)
+                        spliced_now = len(_landed)
+                        _crash_peeled = tuple(b.fn_name for b in _gone_c)
+                        _crash_err = _jw.evidence
+                        _note_reverted(file_rel, _crash_peeled)
+                        _log(f"  [phase-c/file] {glabel}: PEELED "
+                             f"{len(_crash_peeled)} body(ies) a test process "
+                             f"crashed on ({', '.join(sorted(_crash_peeled))})"
+                             f" — the remaining {spliced_now} are judged below "
+                             "as usual.")
+                        _emit("phase_c.file.fill.peeled", data={
+                            "cluster": cluster_name, "file": file_rel,
+                            "group": glabel, "cause": "crash",
+                            "reverted": sorted(_crash_peeled),
+                            "kept": spliced_now, "rounds": 1})
+                        for _n in sorted(_crash_peeled):
+                            _verdict_row(
+                                f"{file_rel}::{_n}", Disposition.REVERT,
+                                "crashed the test process (the crash "
+                                "settlement named this body)",
+                                outcome=GateOutcome.NEGATIVE,
+                                attempt=_attempt,
+                                validity=ValidityVector(binary_completed=False),
+                                model_calls=_attempt, route="file")
+                _crash_retry = (bool(_crash_peeled)
+                                and _attempt < _FILE_FIRST_MAX_ATTEMPTS)
                 _u2_file: U2Verdict | None = None
                 if rc == 0:
                     # Stubs AND re-fills. A behavioral re-fill block has no stub
@@ -2675,14 +2740,15 @@ def prepare_impl_fill(
                 # cannot see the new cost) and the rest of the iteration
                 # would run at the dropped score. Run `1160135-7b10cdfa`:
                 # two constructors peeled, ten accessors kept, pass 83 → 23.
-                _peel_refuse_keep = bool(_peel_reverted) and not peel_keep_allowed(
+                _put_back = (*_peel_reverted, *_crash_peeled)
+                _peel_refuse_keep = bool(_put_back) and not peel_keep_allowed(
                     snapshot,
                     file_path.read_text(encoding="utf-8", errors="replace"),
-                    _peel_reverted)
+                    _put_back)
                 if _peel_refuse_keep:
                     if _crash_keep_file or _nonregr_keep_file:
                         _log(f"  [phase-c/file] {glabel}: peel restored "
-                             f"{list(_peel_reverted)}; hollow did not shrink "
+                             f"{list(_put_back)}; hollow did not shrink "
                              "— unmeasurable keep refused, reverting to the "
                              "pre-attempt file.")
                     _crash_keep_file = False
@@ -2787,7 +2853,7 @@ def prepare_impl_fill(
                 _regr_file = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
                     stub_free=stub_free,
-                    introduced_stubs=bool(_peel_reverted),
+                    introduced_stubs=bool(_peel_reverted or _crash_peeled),
                     hollow_before=_hollow_before,
                     written=[FnLocator(file_rel, b.fn_name) for b in _landed])
                     if rc == 0 else None)
@@ -2920,7 +2986,7 @@ def prepare_impl_fill(
                         if n not in {b.fn_name for b in _landed})
                     if _text_retry and _attempt >= _FILE_FIRST_MAX_ATTEMPTS:
                         _text_retry = frozenset()
-                    if _peel_retry or _text_retry:
+                    if _peel_retry or _text_retry or _crash_retry:
                         # The kept remainder is judged and banked; NOW retry
                         # the peeled names with the diagnostic that blamed
                         # them. The re-read snapshot carries the accepted
@@ -2928,21 +2994,32 @@ def prepare_impl_fill(
                         # judged state, never the pre-fill one.
                         _peeled = (frozenset(_peel_reverted) if _peel_retry
                                    else frozenset())
+                        _crashed = (frozenset(_crash_peeled) if _crash_retry
+                                    else frozenset())
                         _log(f"  [phase-c/file] {glabel}: retrying "
-                             + (f"the {len(_peeled)} peeled name(s) with the "
-                                "pre-peel diagnostic" if _peeled else "")
-                             + (" and " if _peeled and _text_retry else "")
-                             + (f"{len(_text_retry)} name(s) refused for "
-                                "their own text with the parser's diagnostic"
-                                if _text_retry else "")
+                             + " and ".join(x for x in (
+                                 f"the {len(_peeled)} peeled name(s) with the "
+                                 "pre-peel diagnostic" if _peeled else "",
+                                 f"the {len(_crashed)} name(s) a test process "
+                                 "crashed on with the crash that named them"
+                                 if _crashed else "",
+                                 f"{len(_text_retry)} name(s) refused for "
+                                 "their own text with the parser's diagnostic"
+                                 if _text_retry else "") if x)
                              + " (kept remainder judged and kept).")
                         prior_error = "\n\n".join(
                             x for x in (
                                 _peel_err if _peeled else "",
+                                _crash_err if _crashed else "",
                                 *(_text_refused[n] for n in sorted(_text_retry)))
                             if x)
+                        if _crashed and not (_peeled or _text_retry):
+                            # The excerpt is the localizer's crash reading,
+                            # which carries the stack the CRASHED lead-in
+                            # tells the model not to re-emit.
+                            _file_kind = LastErrorKind.CRASHED
                         _revert_cls = None
-                        _retry_names = _peeled | _text_retry
+                        _retry_names = _peeled | _crashed | _text_retry
                         _kept_names = sorted(
                             {b.fn_name for b in _landed} - _retry_names)
                         _retry_note = (
@@ -2953,6 +3030,11 @@ def prepare_impl_fill(
                                + ", ".join(f"`{n}`" for n in sorted(_peeled))
                                + " were peeled back: the diagnostic below "
                                "blamed them." if _peeled else "")
+                            + (" The bodies for "
+                               + ", ".join(f"`{n}`" for n in sorted(_crashed))
+                               + " crashed the test process and were put "
+                               "back to their previous text: the crash below "
+                               "names them." if _crashed else "")
                             + (" The bodies for "
                                + ", ".join(f"`{n}`" for n in sorted(_text_retry))
                                + " were refused for their own text before "
@@ -3019,6 +3101,12 @@ def prepare_impl_fill(
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
                     _file_kind = LastErrorKind.COMPILE
+                if _crash_err:
+                    # The crash peel had named bodies of this reply before
+                    # the remainder was reverted too: the whole-group retry
+                    # carries that crash beside the remainder's own reason.
+                    prior_error = "\n\n".join(
+                        x for x in (prior_error, _crash_err) if x)
                 if _text_refused:
                     # The reverted reply also had bodies the splicer refused
                     # for their own text; the whole-group retry is told why.

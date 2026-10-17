@@ -2279,3 +2279,129 @@ def test_a_partial_file_first_keeps_the_rest_and_retries_the_refused_name(
     c_ws, c_prompts = _file_first_run(monkeypatch, tmp_path / "control",
                                       [one_cast, retry], delete_the_call=True)
     assert not any("ambiguous `+` in a type" in p for p in c_prompts)
+
+
+# --- the crash peel: a crash the settlement pins on one body of the reply ----
+#
+# Run `757853-e28f1a7d` (2026-10-16, iter 4): a four-body `src/error.rs`
+# file-first read `pass 59 -> 64` and then `59 -> 65`, and was restored whole
+# both times, because one body (`into_boxed_dyn_error`) was the double drop
+# the sanitizer named. The settlement had that culprit; nothing read it. The
+# shape here is invented: `kind`'s answer crashes `kind_works`' process,
+# `name`'s answer is right.
+
+def _isolated_crash_out() -> str:
+    # The shape the live crash took: under test isolation an aborted test is
+    # re-run alone and rebuilt as a FAILED entry of a completed section.
+    from pipeline_core.domain.test_isolation import (
+        IsolatedStatus,
+        IsolatedTest,
+        render_isolated_section,
+    )
+    return ("     Running tests/t.rs (target/debug/deps/t-1)\n\n"
+            + render_isolated_section([
+                IsolatedTest("name_works", IsolatedStatus.PASSED, ""),
+                IsolatedTest("kind_works", IsolatedStatus.ABORTED,
+                             "free(): double free detected in tcache 2\n"
+                             "(exit status -6)")]))
+
+
+_CRASH_OUT = _isolated_crash_out()
+_GREEN_OUT = ("     Running tests/t.rs (target/debug/deps/t-1)\n\n"
+              "running 2 tests\ntest name_works ... ok\n"
+              "test kind_works ... ok\n\n"
+              "test result: ok. 2 passed; 0 failed; 0 ignored\n")
+_BASE_OUT = ("     Running tests/t.rs (target/debug/deps/t-1)\n\n"
+             "running 2 tests\ntest name_works ... FAILED\n"
+             "test kind_works ... FAILED\n\nfailures:\n\n"
+             "---- name_works stdout ----\n"
+             "thread 'name_works' panicked at lib.rs:10:9:\nnot implemented\n"
+             "---- kind_works stdout ----\n"
+             "thread 'kind_works' panicked at lib.rs:5:9:\nnot implemented\n"
+             "\nfailures:\n    name_works\n    kind_works\n\n"
+             "test result: FAILED. 0 passed; 2 failed; 0 ignored\n")
+
+
+def _crash_peel_case(monkeypatch, tmp_path, *, settle: bool):
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+
+    ws = _setup(monkeypatch, tmp_path)
+    lib = ws / "src" / "lib.rs"
+    lib.write_text(IMPL_LIB_TWO)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _two_blocks())
+    install_cluster_scan(monkeypatch, stub_records=lambda *a, **k: [])
+    prompts: list[str] = []
+    replies = [RESPONSE_TWO,
+               '<FN name="kind" block="impl Foo">self.tag + 2</FN>']
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies.pop(0) if len(replies) > 1 else replies[0]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+
+    def _run_out():
+        text = lib.read_text()
+        if "self.tag\n" in text or "self.tag }" in text:
+            return (101, _CRASH_OUT)       # `kind`'s first answer is on the tree
+        if "unimplemented!()" in text:
+            return (101, _BASE_OUT)
+        return (0, _GREEN_OUT)
+
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=_run_out)
+    site = CrashSite(
+        binary_label="tests/t.rs", test_name="kind_works", signal="SIGSEGV",
+        frames=(CrashFrame("lib.rs", 10, "name", "name"),),
+        origin_frames=(CrashFrame("lib.rs", 0, "kind", "kind"),),
+        origin_capable=True)
+    rounds = iter([[site], []])
+    recorded: list = []
+    settler = crash_settler.CrashSettler(crash_settler.CrashSettlerDeps(
+        localize=lambda _cap, _ex: next(rounds, []),
+        run_suite=lambda: _run_out()[1], is_proven=lambda _u: False,
+        src_dir=ws / "src",
+        record_settled=lambda locs, _s: recorded.append(list(locs)),
+        log=lambda _m: None))
+    crash_settler.bind(settler if settle else None)
+    try:
+        pipeline._phase_c_fill_impl_blocks(
+            project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+            module_name="m", cluster_name="t", cluster=None,
+            check_cmd="cargo check", cluster_env={}, fr_path=None,
+            tdd_test_cmd="cargo test",
+            tdd_frontier_keys={FnLocator("lib.rs", "kind"),
+                               FnLocator("lib.rs", "name")},
+            tdd_frontier_tests=FailureFrontier.of_direct({
+                FnLocator("lib.rs", "kind"): {"kind_works"},
+                FnLocator("lib.rs", "name"): {"name_works"}}))
+    finally:
+        crash_settler.bind(None)
+    return lib.read_text(), prompts, recorded
+
+
+def test_a_crash_pinned_on_one_body_peels_it_and_keeps_the_rest(
+        monkeypatch, tmp_path):
+    text, prompts, recorded = _crash_peel_case(monkeypatch, tmp_path,
+                                               settle=True)
+    # `name` stood through the crash; `kind` was retried alone, with the crash.
+    assert "self.tag + 1" in text and "self.tag + 2" in text
+    assert len(prompts) == 2
+    assert "kind" in prompts[1]
+    assert "crashed the test process" in prompts[1]
+    assert recorded == [[FnLocator("lib.rs", "kind")]]
+
+
+def test_negative_control_without_the_crash_peel_the_reply_goes_back_whole(
+        monkeypatch, tmp_path, capsys):
+    # No settler bound: the pre-change judgment, and the live log's line
+    # (`reverted (U2 test failure (no strict improvement; aborted: …))`). The
+    # crash convicts the whole reply, the right `name` goes back with `kind`,
+    # and the retry does not say which body crashed.
+    text, prompts, recorded = _crash_peel_case(monkeypatch, tmp_path,
+                                               settle=False)
+    assert recorded == []
+    assert ("reverted (U2 test failure (no strict improvement; aborted: "
+            "kind_works))") in capsys.readouterr().out
+    assert "self.tag + 1" not in text       # `name`'s right answer was lost
+    assert "crashed the test process" not in "".join(prompts[1:])

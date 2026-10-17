@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.peel_revert import (
     PeelRefusal,
     PeelResult,
     peel_to_compiling,
+    split_withdrawn,
 )
 
 
@@ -304,3 +305,44 @@ def test_peel_keep_refused_when_hollow_did_not_shrink() -> None:
         "fn deref_mut() {\n    1\n}\n"
         "fn object_downcast() {\n    2\n}\n")
     assert peel_keep_allowed(filled, filled, ["deref_mut"]) is True
+
+
+# ---- the crash peel's split ----
+#
+# A crash settlement names the bodies it put back by (file, fn); the route
+# holds its own records. Run `757853-e28f1a7d` (2026-10-16, iter 4) is the
+# instance the split exists for; the shapes here are invented.
+
+def _split(bodies: list[LandedBody], withdrawn: list[tuple[str, str]],
+           on_tree: str) -> tuple[list[str], list[str]]:
+    kept, gone = split_withdrawn(
+        bodies, locus=lambda b: ("src/a.rs", b.fn_name),
+        text=lambda b: b.body, withdrawn=withdrawn,
+        file_text=lambda _f: on_tree)
+    return ([f"{b.fn_name}:{b.container}" for b in kept],
+            [f"{b.fn_name}:{b.container}" for b in gone])
+
+
+def test_the_one_body_under_a_withdrawn_name_is_the_one_withdrawn() -> None:
+    bodies = [LandedBody("f", "impl A", body="x"),
+              LandedBody("g", "impl A", body="y")]
+    assert _split(bodies, [("src/a.rs", "f")], "") == (["g:impl A"], ["f:impl A"])
+
+
+def test_two_impls_under_one_name_are_told_apart_by_the_tree() -> None:
+    bodies = [LandedBody("fmt", "impl Debug for A", body="write_a()"),
+              LandedBody("fmt", "impl Display for A", body="write_b()"),
+              LandedBody("g", "impl A", body="y")]
+    # The Display body's text is gone from the file: that occurrence went back.
+    kept, gone = _split(bodies, [("src/a.rs", "fmt")], "fn fmt { write_a() }")
+    assert gone == ["fmt:impl Display for A"]
+    assert kept == ["fmt:impl Debug for A", "g:impl A"]
+
+
+def test_the_split_withdraws_exactly_the_settlement_s_count() -> None:
+    bodies = [LandedBody("fmt", "impl X", body="same"),
+              LandedBody("fmt", "impl Y", body="same")]
+    # Identical texts: the tree cannot tell them apart, so one is taken in
+    # order rather than none or both.
+    kept, gone = _split(bodies, [("src/a.rs", "fmt")], "same")
+    assert len(kept) == 1 and len(gone) == 1

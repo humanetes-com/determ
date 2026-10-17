@@ -34,13 +34,13 @@ from pipeline_core.domain.assertion_position import TestKey, TestOutcomes, compa
 from pipeline_core.domain.attribution import locator_of, site_label
 from pipeline_core.domain.fill_schedule import RouteRun
 from pipeline_core.domain.impl_routing import named_container, norm_src_rel
-from pipeline_core.domain.rust_idents import container_identity
 from pipeline_core.domain.last_error import (
     kind_of_compiled_run,
     last_error_prefix,
     resolve_kind,
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
+from pipeline_core.domain.rust_idents import container_identity
 
 NOTES_OPEN = "<NOTES>"
 NOTES_CLOSE = "</NOTES>"
@@ -754,13 +754,17 @@ def route_change_set(
             rejected.append(f"`{name}`: not in this session's editable set")
             continue
         if block:
-            matched = []
-            for c in cands:
-                cont = records[c].container
-                named, _amb = named_container(
-                    block, [(cont, container_identity(cont))])
-                if named is not None:
-                    matched.append(c)
+            # One question over every candidate at once, so the matcher's
+            # own precedence holds: the header as written, then its
+            # canonical identity, then exactly one trait-path suffix.
+            # Asked one candidate at a time, `impl Write for X` named both
+            # `impl Write for X` and `impl io::Write for X`. Cfg twins share
+            # one container text, so both stay matched and stay ambiguous.
+            conts = list(dict.fromkeys(records[c].container for c in cands))
+            named, _amb = named_container(
+                block, [(c, container_identity(c)) for c in conts])
+            matched = ([c for c in cands if records[c].container == named]
+                       if named is not None else [])
             if not matched:
                 # Fall back to the file-unique name when the header names
                 # nothing. A name declared once has one body to write.
@@ -1050,6 +1054,7 @@ def _indent(text: str, pad: str = "    ") -> str:
 def render_test_turn(
     reading: TurnReading, rejected: Sequence[str] = (), *,
     dropped: Sequence[str] = (), dropped_diagnostics: str = "",
+    crashed: Sequence[str] = (), crash_evidence: str = "",
     coverage_note: str = "", restored_note: str = "",
 ) -> str:
     """The verdict turn: every target's state, every newly-red sibling with
@@ -1066,7 +1071,12 @@ def render_test_turn(
     `restored_note` (:func:`render_restored_note`) says the tree was put
     back to the best judged state because this turn was worse than it —
     the verdicts above still describe THIS change set, which is what the
-    model has to learn from."""
+    model has to learn from.
+
+    `crashed` names the bodies of this change set that a test process
+    crashed on, which the crash settlement put back to their previous text
+    before judging the rest (`crash_settler.JudgedWrite`); `crash_evidence`
+    is that crash as the localizer read it."""
     lines: list[str] = []
     if reading.clean:
         lines.append("RESULT: the change set compiled, every target test "
@@ -1075,7 +1085,18 @@ def render_test_turn(
         if dropped:
             lines.append("  (bodies the compiler blamed were dropped first: "
                          + ", ".join(dropped) + ")")
+        if crashed:
+            lines.append("  (bodies a test process crashed on were dropped "
+                         "first: " + ", ".join(crashed) + ")")
         return "\n".join(lines)
+    if crashed:
+        lines.append(
+            f"CRASH: {len(crashed)} body(ies) crashed the test process and "
+            "were DROPPED (the tree keeps their previous text); the remaining "
+            "bodies of the change set are on the tree and judged below. "
+            "Dropped: " + ", ".join(crashed) + ". The crash:")
+        if crash_evidence:
+            lines.append(_indent(crash_evidence))
     if dropped:
         lines.append(
             f"COMPILER: {len(dropped)} body(ies) did not compile and were DROPPED "

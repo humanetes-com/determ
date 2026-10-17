@@ -1517,17 +1517,26 @@ def _cell_window(lines: list[str]):
                         lines=tuple(lines))
 
 
-def _recover(lines: list[str]):
+_CELL_DECLARED = frozenset({
+    "make", "repack", "wrap", "other", "msg",
+    "into_boxed_dyn_error",
+    "reallocate_into_boxed_dyn_error_without_backtrace", "downcast"})
+
+
+def _recover(lines: list[str], declared: frozenset[str] | None = _CELL_DECLARED):
     from pipeline_core.domain.crash_site import recover_owner_from_caller_source
+    reader = None if declared is None else (
+        lambda rel: declared if rel == "src/cell.rs" else None)
     return recover_owner_from_caller_source(
-        [], _BOX_ACCESS, None, source_window=_cell_window(lines))
+        [], _BOX_ACCESS, None, source_window=_cell_window(lines),
+        declared_in=reader)
 
 
 def test_the_fault_line_resolves_through_the_name_it_reads() -> None:
     """Two calls in the window. The fault reads `boxed`, bound on the line
     that calls `repack`. The frame is line 0, anchored at the test file's
-    crate file. Two binders, or two calls on the binding line, name
-    nobody even when the window's unique call would be `repack`."""
+    crate file. A later `let` shadows an earlier one, so the nearest
+    binder names. Two declared calls on the binding line name nobody."""
     lines = [
         "fn test_take() {",
         "    let cell = make();",
@@ -1541,10 +1550,10 @@ def test_the_fault_line_resolves_through_the_name_it_reads() -> None:
             "    let boxed = cell.repack(other.wrap());",
             '    assert_eq!(boxed.to_string(), "io");',
         ])
-        two_binders = _recover([
+        shadowed = _recover([
             "fn test_take() {",
-            "    let boxed = cell.repack();",
-            "    let boxed = cell.repack();",
+            "    let boxed = cell.wrap();",
+            "    let boxed = boxed.repack();",
             '    assert_eq!(boxed.to_string(), "io");',
         ])
         no_binding = _recover([
@@ -1558,12 +1567,73 @@ def test_the_fault_line_resolves_through_the_name_it_reads() -> None:
             "    cell.repack();",
             "    assert_eq!(1, 2);",
         ])
+        unreadable = _recover(lines, declared=None)
     assert frame is not None
     assert frame.fn_name == "repack" and frame.line == 0
     assert frame.file_rel == "src/cell.rs"
     assert frame.named_by == ("tests/cell_gen_1.rs", 3)
-    assert two_calls is None and two_binders is None and no_binding is None
+    assert two_calls is None and no_binding is None
+    assert shadowed is not None and shadowed.fn_name == "repack"
+    assert shadowed.named_by == ("tests/cell_gen_1.rs", 3)
     assert one_call is not None and one_call.fn_name == "repack"
+    # No declared names to count with: the binding rule does not run and
+    # the window's unique-name gate sees `make` and `repack`.
+    assert unreadable is None
+
+
+def test_a_faulting_line_that_calls_a_declared_fn_names_nobody() -> None:
+    """The recorded shape of `tests/error_gen_1.rs:31-33`
+    (`asan-20261015T120750691462.txt`): the fault is on the line that calls
+    the conversion, whose receiver a constructor bound one line above. The
+    text cannot say whether the fault ran in the call or in its receiver.
+    Negative control: when the faulting line's call is not a declared fn,
+    the binding is followed and names the constructor — the outcome the
+    rule that skipped the faulting line's own call produced on the
+    recorded report."""
+    lines = [
+        "fn test_reallocate_into_boxed_dyn_error_without_backtrace() {",
+        '    let err = Error::msg("original");',
+        "    let boxed = err.reallocate_into_boxed_dyn_error_without_backtrace();",
+    ]
+    with using_driver(GenericLanguageDriver()):
+        own = _recover(lines)
+        control = _recover(lines, declared=frozenset({"msg"}))
+    assert own is None
+    assert control is not None and control.fn_name == "msg"
+
+
+def test_an_origin_crate_frame_outranks_the_access_window() -> None:
+    """A free stack that ran a crate fn names the body that freed. The
+    recorded 2026-10-15 reports carried the conversion on their free stack
+    and the window's guess replaced it. A destructor alone is the victim,
+    and the window is still read. Negative control: no origin frame, and
+    the window names the binder."""
+    window = _cell_window([
+        "fn test_take() {",
+        "    let cell = make();",
+        "    let boxed = cell.repack();",
+        '    assert_eq!(boxed.to_string(), "io");',
+    ])
+    reader = lambda rel: _CELL_DECLARED  # noqa: E731
+    conv = [{"func": "cell::Cell::wrap", "file": "src/cell.rs", "line": 12}]
+    dtor = [{"func": "<cell::Cell as core::ops::drop::Drop>::drop",
+             "file": "src/cell.rs", "line": 40}]
+    with using_driver(GenericLanguageDriver()):
+        named = site_from_frames(
+            "tests/cell_gen_1.rs", "t", "AddressSanitizer: heap-use-after-free",
+            _BOX_ACCESS, origin_raw_frames=conv, origin_capable=True,
+            source_window=window, declared_in=reader)
+        victim = site_from_frames(
+            "tests/cell_gen_1.rs", "t", "AddressSanitizer: heap-use-after-free",
+            _BOX_ACCESS, origin_raw_frames=dtor, origin_capable=True,
+            source_window=window, declared_in=reader)
+        bare = site_from_frames(
+            "tests/cell_gen_1.rs", "t", "AddressSanitizer: SEGV",
+            _BOX_ACCESS, origin_capable=True,
+            source_window=window, declared_in=reader)
+    assert named.blamed is not None and named.blamed.fn_name == "wrap"
+    assert victim.blamed is not None and victim.blamed.fn_name == "repack"
+    assert bare.blamed is not None and bare.blamed.fn_name == "repack"
 
 
 def test_a_catalog_window_still_names_the_bound_family_call() -> None:

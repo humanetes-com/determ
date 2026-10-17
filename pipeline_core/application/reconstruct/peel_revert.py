@@ -72,6 +72,7 @@ __all__ = [
     "peel_file_first",
     "peel_keep_allowed",
     "peel_to_compiling",
+    "split_withdrawn",
 ]
 
 
@@ -294,3 +295,42 @@ def peel_file_first(
         landed=landed, implicated_now=_implicated,
         reapply=_reapply, recheck=_recheck, max_rounds=max_rounds)
     return result, state["rc"], state["out"], state["diags"]
+
+
+def split_withdrawn[B](
+    bodies: Sequence[B],
+    *,
+    locus: Callable[[B], tuple[str, str]],
+    text: Callable[[B], str],
+    withdrawn: Sequence[tuple[str, str]],
+    file_text: Callable[[str], str],
+) -> tuple[list[B], list[B]]:
+    """``(kept, withdrawn)``: which of a route's own written bodies a crash
+    settlement took back off the tree (`crash_settler.JudgedWrite`).
+
+    The settlement names occurrences by ``(file, fn_name)``; the route holds
+    its bodies by its own record. One written body under that name is the
+    one withdrawn. Two impls written under one name are told apart by the
+    tree: the withdrawn one's text is no longer in the file (it holds its
+    pre-write text again). A count left over after that is taken in order,
+    so the split always withdraws exactly as many bodies as the settlement
+    did. The crash peel's counterpart of :func:`peel_to_compiling`: the kept
+    bodies are judged by the route's gates, the withdrawn ones retried with
+    the crash that named them."""
+    want: dict[tuple[str, str], int] = {}
+    for k in withdrawn:
+        want[k] = want.get(k, 0) + 1
+    out_idx: set[int] = set()
+    for k, n in want.items():
+        cands = [i for i, b in enumerate(bodies) if locus(b) == k]
+        if len(cands) <= n:
+            out_idx.update(cands)
+            continue
+        on_tree = file_text(k[0])
+        gone = [i for i in cands if text(bodies[i]).strip()
+                and text(bodies[i]).strip() not in on_tree]
+        pick = gone[:n] + [i for i in cands if i not in gone][:max(0, n - len(gone))]
+        out_idx.update(pick)
+    kept = [b for i, b in enumerate(bodies) if i not in out_idx]
+    gone_b = [b for i, b in enumerate(bodies) if i in out_idx]
+    return kept, gone_b

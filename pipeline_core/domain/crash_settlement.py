@@ -29,6 +29,16 @@ tree, and a stub would lose them. A body whose standing is anything else has
 no evidence a stub can lose, which is what makes putting it back safe; the
 caller still re-measures the whole suite and gives the stubs back when any
 test that passed before the write is lost.
+
+OWN is a verdict on one body, not on the write. When the write is several
+bodies and the culprit is a proper subset of them, the caller that can say
+what each body replaced (`crash_settler.JudgedWrite`) withdraws the culprits
+back to their pre-write text and the rest of the write is judged without
+them (NARROWED). Run `757853-e28f1a7d` (2026-10-16, iter 4): a four-body
+`src/error.rs` file-first read `pass 59 -> 64`, then `59 -> 65`, and was
+restored whole both times because one of the four, `into_boxed_dyn_error`,
+was the double drop the sanitizer named; the settlement had that culprit and
+nothing read it.
 """
 from __future__ import annotations
 
@@ -52,6 +62,10 @@ class SettlementOutcome(StrEnum):
     SETTLED = "settled"
     """The culprits went back to stubs, the suite no longer crashes on a new
     binary, and no test that passed before the write was lost."""
+    NARROWED = "narrowed"
+    """The write's own culprits went back to their pre-write text, nothing
+    outside it was put back, and the suite no longer crashes on a new binary:
+    the rest of the write is judged as written."""
 
 
 _SETTLEABLE = frozenset({FaultClass.INVALID_MEMORY, FaultClass.EXHAUSTION})
@@ -163,3 +177,44 @@ def occurrence_of_line(
         if start <= offset <= end and (best is None or end - start < best_len):
             best, best_len = i, end - start
     return best
+
+
+def refuted_crash_note(body: str, evidence: str, iteration: int,
+                       *, max_body: int = 1500) -> str:
+    """What the next writer of a stub is told about the body a crash
+    settlement took off it: the body, and the crash as the localizer read it.
+
+    The settlement's refutation is a ledger row whose only reader was the
+    reseed gate. Run `757853-e28f1a7d` (2026-10-16): iter 3 settled on
+    `into_boxed_dyn_error` and put it back to a stub; the iter-4 prompt's
+    CRASH_EVIDENCE said only that the fn was a stub holding three tests, and
+    the reply wrote the same double drop three times."""
+    shown = body.strip()
+    if len(shown) > max_body:
+        shown = shown[:max_body].rstrip() + "\n// …"
+    lines = [
+        f"A body of this fn was put back to this stub at iteration "
+        f"{iteration}: a test process crashed on it. That body was:",
+        shown,
+    ]
+    if evidence.strip():
+        lines += ["The crash it caused, as the localizer read it:",
+                  evidence.strip()]
+    lines.append("Do not write that body again.")
+    return "\n".join(lines)
+
+
+def held_stub_evidence(held_tests: int, refuted_body: str = "",
+                       refuted_evidence: str = "",
+                       refuted_iteration: int = 0) -> str:
+    """CRASH_EVIDENCE for a still-stubbed fn that holds ``held_tests``
+    failing tests at its `unimplemented!()`, and — when a crash settlement
+    made it a stub — what the body it took off did (`refuted_crash_note`)."""
+    text = (f"This fn is still a stub, and {held_tests} failing "
+            "test(s) stop at its `unimplemented!()` before they check "
+            "anything else. No other body can move those tests until "
+            "this one exists. Give it a real body.")
+    if refuted_body.strip():
+        text += "\n\n" + refuted_crash_note(
+            refuted_body, refuted_evidence, refuted_iteration)
+    return text

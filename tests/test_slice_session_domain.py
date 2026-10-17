@@ -243,6 +243,34 @@ def test_a_header_missing_its_last_closer_routes_and_a_shorter_list_does_not() -
     assert "ambiguous" in cs.rejected[0]
 
 
+def test_the_header_is_matched_once_over_every_candidate() -> None:
+    """`impl Write for X` is the file's own header; `impl io::Write for X`
+    names it only by a trait-path suffix. One matcher call over both picks
+    the header as written. Negative control: asked of the suffix candidate
+    alone, the matcher names it, so a per-candidate loop matched both and
+    rejected the body as ambiguous."""
+    from pipeline_core.domain.impl_routing import named_container
+    from pipeline_core.domain.rust_idents import container_identity
+    plain = FnSite("src/cell.rs", "write_fmt", "impl Write for Sink")
+    io = FnSite("src/cell.rs", "write_fmt", "impl io::Write for Sink")
+    recs = {
+        plain: FnRecord(file="src/cell.rs", fn_name="write_fmt",
+                        container="impl Write for Sink",
+                        sig_text="fn write_fmt(&mut self)"),
+        io: FnRecord(file="src/cell.rs", fn_name="write_fmt",
+                     container="impl io::Write for Sink",
+                     sig_text="fn write_fmt(&mut self)"),
+    }
+    cs = route_change_set(
+        [{"fn_name": "write_fmt", "block": "impl Write for Sink", "body": "A"}],
+        recs)
+    assert [r.unit for r in cs.routed] == [plain]
+    alone, _ = named_container(
+        "impl Write for Sink",
+        [("impl io::Write for Sink", container_identity("impl io::Write for Sink"))])
+    assert alone == "impl io::Write for Sink"
+
+
 def test_a_body_given_twice_keeps_the_first() -> None:
     cs = route_change_set([
         {"fn_name": "render", "block": "", "body": "B1", "where_clause": None},
@@ -594,3 +622,18 @@ def test_a_hung_binary_renders_as_a_hang_and_regresses_at_any_gain() -> None:
     assert reading.regressed and not reading.clean
     assert not TurnReading(targets=(TargetStatus("t_a", True),),
                            crashed=("tests/bin_b.rs",), pass_delta=5).regressed
+
+
+def test_a_turn_says_which_bodies_crashed_and_were_dropped() -> None:
+    # Run `757853-e28f1a7d` (2026-10-16): the crash settlement can now take
+    # one body of a change set back off the tree; the turn has to say which,
+    # and carry the crash, or the next turn re-sends it.
+    reading = TurnReading(targets=(TargetStatus("t_a", False, "boom"),))
+    text = render_test_turn(reading, crashed=["make_a"],
+                            crash_evidence="SIGSEGV in t_a\n  at make_a")
+    assert "CRASH: 1 body(ies) crashed the test process" in text
+    assert "make_a" in text and "SIGSEGV in t_a" in text
+    clean = render_test_turn(TurnReading(targets=(TargetStatus("t_a", True),)),
+                             crashed=["make_a"])
+    assert "KEPT" in clean and "crashed on were dropped first: make_a" in clean
+    assert "CRASH:" not in render_test_turn(reading)

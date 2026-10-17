@@ -77,6 +77,7 @@ from pipeline_core.domain.attribution import (
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.body_ledger import (
     COMPARATOR_VERSION,
+    CRASH_ORIGIN,
     BodyState,
     LedgerEntry,
     LedgerKey,
@@ -88,6 +89,7 @@ from pipeline_core.domain.body_ledger import (
     judgment_attributed,
     kept_green_of,
     latest_by_unit,
+    latest_crash_refutation,
     raw_bodies_of,
     rebuy_by_grade,
     rebuy_hits,
@@ -134,9 +136,11 @@ from pipeline_core.domain.crash_scope import (
     crash_culprits_by_test,
     scope_to_crash_culprits,
 )
+from pipeline_core.domain.crash_settlement import held_stub_evidence
 from pipeline_core.domain.crash_site import (
     CrashSites,
     blamed_locators,
+    blocker_culprit_tests,
     callee_subjects,
     chain_derived_site,
     crash_evidence_by_locator,
@@ -147,7 +151,6 @@ from pipeline_core.domain.crash_site import (
     faulting_stack_sites,
     memory_blamed_locators,
     observed_cycle_sites,
-    blocker_culprit_tests,
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
@@ -4376,11 +4379,15 @@ def run_phase_c_tdd(
             for _site in sorted(_stub_hold.blockers):
                 _held_tests = _stub_hold.held_by(_site)
                 _loc = locator_of(_site)
-                crash_texts.setdefault(_loc, (
-                    f"This fn is still a stub, and {len(_held_tests)} failing "
-                    "test(s) stop at its `unimplemented!()` before they check "
-                    "anything else. No other body can move those tests until "
-                    "this one exists. Give it a real body."))
+                # A stub a crash settlement made says so: the body it held
+                # and the crash it caused (`latest_crash_refutation`).
+                _refuted = latest_crash_refutation(
+                    _ledger_entries(), _loc.file, _loc.fn_name,
+                    oracle_fp=_oracle_fp(iter_n))
+                crash_texts.setdefault(_loc, held_stub_evidence(
+                    len(_held_tests),
+                    *(("\n\n".join(_refuted.bodies), _refuted.crash_evidence,
+                       _refuted.iteration) if _refuted is not None else ())))
                 frontier.setdefault(_loc, set()).update(_held_tests)
             deps.log(
                 f"  {tag} [phase-c/crash] iter {iter_n}: "
@@ -7301,9 +7308,14 @@ def run_phase_c_tdd(
                 return
             items_s, file_of_s, fps_s = _layout_ctx(_epoch)
             tests_s = sorted({str(s.test_name) for s in sites if s.test_name})
+            # The crash itself rides with the refutation, so the stub's next
+            # prompt can say what the body it held did (`refuted_crash_note`).
+            evidence_s = "\n\n".join(
+                str(s.render_evidence()) for s in list(sites)[:2])
             rows_s = [
                 replace(r, verdict_delta=tuple(
-                    (t, "crash_origin") for t in tests_s))
+                    (t, CRASH_ORIGIN) for t in tests_s),
+                    crash_evidence=evidence_s)
                 for r in rows_for_units(
                     [(u.file, u.fn_name) for u in locs],
                     deps.enumerate_fns(target_src_dir) or [],

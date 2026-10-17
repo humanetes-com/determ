@@ -28,6 +28,7 @@ from pipeline_core.domain.body_ledger import (
     body_sha,
     classify,
     latest_by_unit,
+    latest_crash_refutation,
     oracle_fingerprint,
     plan_reseed,
     rebuy_by_grade,
@@ -1253,3 +1254,36 @@ def test_a_test_two_kept_units_share_is_credited_to_neither() -> None:
     assert credited_green([unrec, row], {a: {"t"}, b: {"other"}})[a] == {"t"}
     wave = WaveKept({a, b}, [row, unrec])
     assert kept_green_of(wave, a, {a: {"t"}, b: {"other"}}) == ("t",)
+
+
+# ---- a crash settlement's refutation carries the crash ----
+#
+# Run `757853-e28f1a7d` (2026-10-16): iter 3 refuted `into_boxed_dyn_error`'s
+# double drop and stubbed it; the iter-4 prompt did not say so and the reply
+# wrote it again three times. The row now carries the crash, and the stub's
+# prompt reads it.
+
+def test_a_refutation_s_crash_survives_the_index() -> None:
+    e = _entry(state=BodyState.REFUTED, crash_evidence="SIGSEGV in t1",
+               verdict_delta=(("t1", "crash_origin"),))
+    back = LedgerEntry.from_dict(json.loads(json.dumps(e.to_dict())))
+    assert back is not None and back.crash_evidence == "SIGSEGV in t1"
+    # Absent on every other row, and on rows written before the field.
+    assert "crash_evidence" not in _entry().to_dict()
+
+
+def test_the_stub_is_told_the_last_crash_refutation_under_its_oracle() -> None:
+    crash = _entry(state=BodyState.REFUTED, crash_evidence="double free",
+                   verdict_delta=(("t1", "crash_origin"),), iteration=3)
+    later = replace(crash, crash_evidence="use after free", iteration=4)
+    other_oracle = replace(crash, oracle_fp="oracle-B", iteration=5)
+    regressed = _entry(state=BodyState.REFUTED, crash_evidence="",
+                       verdict_delta=(("t1", "regressed"),), iteration=6)
+    rows = [crash, later, other_oracle, regressed]
+    got = latest_crash_refutation(rows, "src/error.rs", "new", oracle_fp=_ORACLE)
+    assert got is later
+    assert latest_crash_refutation(
+        rows, "src/error.rs", "other", oracle_fp=_ORACLE) is None
+    # A refutation with no crash recorded (any other refuting grade) is not one.
+    assert latest_crash_refutation(
+        [regressed], "src/error.rs", "new", oracle_fp=_ORACLE) is None

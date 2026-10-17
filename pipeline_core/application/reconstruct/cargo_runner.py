@@ -437,7 +437,7 @@ def test_regression_gate(
     if (_settler is not None and written and _raw
             and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
         _settlement = _settler.settle(_raw[-1], written, baseline)
-        if _settlement.settled:
+        if _settlement.changed_tree:
             guard("phase-c/regr_crash_settled",
                   "a test process died under the write on a culprit outside "
                   "it: " + ", ".join(f"{u.file}::{u.fn_name}"
@@ -926,7 +926,7 @@ def u2_test_gate(
                 out or "",
                 {FnLocator(s.file, s.fn_name) for s in unit_sites},
                 baseline)
-            if _settlement.settled:
+            if _settlement.changed_tree:
                 guard("phase-c/u2_crash_settled",
                       f"{sorted(_aborted)} died on a culprit outside this "
                       "write: "

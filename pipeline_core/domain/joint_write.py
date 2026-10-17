@@ -121,13 +121,25 @@ def _split_label(name: str) -> tuple[str, str]:
     return m.group("name"), m.group("container").strip()
 
 
-def _block_matches(block: str, container: str) -> bool:
+def _block_records(
+    block: str, recs: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """The records whose container the reply header names.
+
+    No header (or the free-fns spelling) names the records with no
+    container. Otherwise one :func:`named_container` call over every
+    record's container, so its precedence (as written, canonical identity,
+    then one trait-path suffix) decides among them; cfg twins share a
+    container text and are all returned."""
     b = _norm(block)
     if not b or b.lower() == FREE_FNS:
-        return not container
+        return [r for r in recs if not str(r.get("container", ""))]
+    conts = list(dict.fromkeys(str(r.get("container", "")) for r in recs))
     named, _amb = named_container(
-        block, [(container, container_identity(container))])
-    return named is not None
+        block, [(c, container_identity(c)) for c in conts])
+    if named is None:
+        return []
+    return [r for r in recs if str(r.get("container", "")) == named]
 
 
 def admit_joint(
@@ -192,11 +204,9 @@ def admit_joint(
             named = coupled_named
         else:
             named = [r for r in here_all if str(r.get("fn_name", "")) == name]
-            by_block = [r for r in coupled_named
-                        if _block_matches(block, str(r.get("container", "")))]
+            by_block = _block_records(block, coupled_named)
             if (block and by_block and not spelled
-                    and not any(_block_matches(block, str(r.get("container", "")))
-                                for r in named)):
+                    and not _block_records(block, named)):
                 # The header names a coupled body, not this file's
                 # same-named function.
                 named = by_block
@@ -208,8 +218,7 @@ def admit_joint(
                                       if coupled_recs else "")))
             continue
         if len(named) > 1:
-            named = [r for r in named
-                     if _block_matches(block, str(r.get("container", "")))]
+            named = _block_records(block, named)
             if len(named) != 1:
                 refused.append((shown, "ambiguous — name the impl block it "
                                        "belongs to in `block`"))

@@ -7,6 +7,7 @@ survive peel even when net pass rose.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.slice_session import (
@@ -603,3 +604,90 @@ def test_a_regressed_turn_that_gained_keeps_only_its_changed_bodies(tmp_path):
         slice_=SessionSlice(tests=("t_target",), units=(_FMT, _RENDER)),
         records=_RECS, turn0="turn0", max_turns=1)
     assert out.candidate_bodies == {"src/lib.rs::fmt": "NEW_FMT(f)"}
+
+
+def test_a_body_the_crash_settlement_withdraws_is_dropped_and_the_rest_judged(
+        tmp_path):
+    """Run `757853-e28f1a7d` (2026-10-16): a settlement that named one body
+    of a multi-body write had nowhere to say so, and the write was restored
+    whole. The session hands its change set to the settlement as a
+    `JudgedWrite`; a body the settlement withdraws back to its pre-turn text
+    is dropped from the change set, the rest is judged, and the next turn
+    is told which body crashed and how. Negative control: a settlement that
+    convicts the change set whole (OWN) changes nothing and the turn is
+    judged on the crashing reading."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.application.reconstruct.crash_settler import (
+        JudgedWrite,
+        Settlement,
+    )
+    from pipeline_core.domain.crash_settlement import SettlementOutcome
+    from pipeline_core.domain.crash_site import CrashFrame
+
+    root = _tree(tmp_path)
+    crashed = TestStateReading(binaries=(BinaryResult(
+        label="unit", completed=False, passed=frozenset(),
+        failed=frozenset(), dangling="t_a"),))
+    baseline = _reading(set(), {"t_a"})
+    green = _reading({"t_a"}, set())
+    asked: list[str] = []
+    seen: list[object] = []
+
+    def measure(raw):
+        raw.append("capture")
+        lib = (root / "src" / "lib.rs").read_text()
+        ren = (root / "src" / "render.rs").read_text()
+        if lib == "SESSION_LIB" and ren == "SESSION_REN":
+            return baseline
+        if lib == "NEW_FMT":
+            return crashed
+        return green
+
+    class _Settler:
+        def __init__(self, narrow: bool) -> None:
+            self.narrow = narrow
+
+        def settle(self, capture, written, base, *, tag=""):
+            seen.append(written)
+            if not (self.narrow and isinstance(written, JudgedWrite)):
+                return Settlement(SettlementOutcome.OWN)
+            (root / "src" / "lib.rs").write_text(written.prior["src/lib.rs"])
+            written.withdrawn.append(CrashFrame("src/lib.rs", 0, "fmt", "fmt"))
+            written.evidence = "SIGSEGV in t_a: fmt read freed memory"
+            return Settlement(SettlementOutcome.NARROWED)
+
+    reply = ('<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>'
+             '<FN name="render" block="impl Renderer">NEW_REN</FN>')
+
+    def ask(m: object) -> str:
+        asked.append(str(m))
+        return reply
+
+    def _run(narrow: bool):
+        (root / "src" / "lib.rs").write_text("SESSION_LIB")
+        (root / "src" / "render.rs").write_text("SESSION_REN")
+        crash_settler.bind(_Settler(narrow))  # type: ignore[arg-type]
+        try:
+            ports = replace(_ports(measure=measure, ask=ask),
+                            enumerate_bodies=lambda: {
+                                _FMT: (root / "src" / "lib.rs").read_text(),
+                                _RENDER: (root / "src" / "render.rs").read_text()})
+            return run_slice_session(
+                ports, target_src_dir=root, cluster_name="t",
+                slice_=SessionSlice(tests=("t_a",), units=(_FMT, _RENDER)),
+                records=_RECS, turn0="turn0", max_turns=1)
+        finally:
+            crash_settler.bind(None)
+
+    out = _run(narrow=True)
+    jw = seen[-1]
+    assert isinstance(jw, JudgedWrite) and jw.size == 2
+    assert jw.prior == {"src/lib.rs": "SESSION_LIB", "src/render.rs": "SESSION_REN"}
+    assert out.kept == frozenset({_RENDER})
+    assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+    assert (root / "src" / "render.rs").read_text() == "NEW_REN"
+
+    seen.clear()
+    out = _run(narrow=False)
+    assert out.kept == frozenset()
+    assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"

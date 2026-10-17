@@ -156,6 +156,26 @@ def test_a_header_missing_its_last_closer_is_admitted() -> None:
     assert not longer.admitted
 
 
+def test_the_joint_header_is_matched_once_over_every_record() -> None:
+    """Two records share the name; one header is the file's own spelling,
+    the other names it only by a trait-path suffix. One matcher call picks
+    the header as written. Asked per record, both matched and the block was
+    refused as ambiguous."""
+    recs = list(_RECS) + [
+        {"file": "src/a.rs", "fn_name": "write_fmt",
+         "container": "impl Write for Gauge",
+         "sig_text": "fn write_fmt(&mut self)", "cfg_predicates": []},
+        {"file": "src/a.rs", "fn_name": "write_fmt",
+         "container": "impl io::Write for Gauge",
+         "sig_text": "fn write_fmt(&mut self)", "cfg_predicates": []},
+    ]
+    adm = admit_joint(
+        [_block("write_fmt", "impl Write for Gauge")],
+        target_file="src/a.rs", target_name="build",
+        target_container="impl Gauge", records=recs)
+    assert [u.container for u in adm.admitted] == ["impl Write for Gauge"]
+
+
 # ---- the unit writes, keeps and reverts the set as one ----
 
 

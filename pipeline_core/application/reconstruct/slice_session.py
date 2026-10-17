@@ -39,12 +39,16 @@ from pipeline_core.application.reconstruct.attribution import (
 )
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
 from pipeline_core.application.reconstruct.crash_settler import (
+    JudgedWrite,
+)
+from pipeline_core.application.reconstruct.crash_settler import (
     bound as bound_crash_settler,
 )
 from pipeline_core.application.reconstruct.peel_revert import (
     LandedBody,
     PeelResult,
     peel_to_compiling,
+    split_withdrawn,
 )
 from pipeline_core.application.reconstruct.pull_resolver import RequestAnswerer
 from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
@@ -535,7 +539,7 @@ def run_slice_session(
                 rejected.append(f"`{r.unit.fn_name}` in {r.unit.file}: splice refused ({reason})")
         return rejected, pre
 
-    def _read(raw: list[str], written: frozenset[FnLocator],
+    def _read(raw: list[str], written: Collection[FnLocator],
               ) -> tuple[TurnReading, TestStateReading | None]:
         after = ports.measure_suite(raw)
         # A test process that died under this change set is settled by the
@@ -549,7 +553,7 @@ def run_slice_session(
                 and _settler is not None and written
                 and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
             if _settler.settle(raw[-1] if raw else "", written, baseline,
-                               tag=f"{label} ").settled:
+                               tag=f"{label} ").changed_tree:
                 raw.clear()
                 after = ports.measure_suite(raw)
         if after is None or baseline is None:
@@ -747,8 +751,33 @@ def run_slice_session(
                           f"({', '.join(dropped)}); the remaining "
                           f"{len(cs.routed)} compile and are judged.")
             raw: list[str] = []
-            reading, after = _read(raw, frozenset(
-                FnLocator(r.unit.file, r.unit.fn_name) for r in cs.routed))
+            # The change set as a write the crash settlement may narrow: a
+            # body of it that a test process crashed on goes back to its
+            # pre-turn text and the rest is judged, as the peel above does
+            # for a body the compiler blamed.
+            _jw = JudgedWrite(
+                frozenset(FnLocator(r.unit.file, r.unit.fn_name)
+                          for r in cs.routed),
+                {f: img.text("replace") for f, img in pre.items()},
+                size=len(cs.routed))
+            reading, after = _read(raw, _jw)
+            crashed: list[str] = []
+            crash_ev = ""
+            if _jw.withdrawn:
+                _kept_r, _gone_r = split_withdrawn(
+                    cs.routed,
+                    locus=lambda r: (r.unit.file, r.unit.fn_name),
+                    text=lambda r: r.body,
+                    withdrawn=[(f.file_rel, f.fn_name) for f in _jw.withdrawn],
+                    file_text=lambda f: (target_src_dir / f).read_text(
+                        encoding="utf-8", errors="replace"))
+                crashed = [r.unit.fn_name for r in _gone_r]
+                crash_ev = _jw.evidence
+                cs = ChangeSet(tuple(_kept_r), cs.rejected)
+                ports.log(f"  [phase-c/session] {label}: turn {turns} — "
+                          f"WITHDREW {len(crashed)} body(ies) a test process "
+                          f"crashed on ({', '.join(crashed)}); the remaining "
+                          f"{len(cs.routed)} are judged.")
             failing = [t.test for t in reading.targets if not t.passing]
             if after is None or baseline is None:
                 # Inconclusive suite: keep nothing from this turn.
@@ -903,6 +932,7 @@ def run_slice_session(
                         "what the failing assertions see.")
             pending = (render_test_turn(
                 reading, rejected, dropped=dropped, dropped_diagnostics=dropped_diag,
+                crashed=crashed, crash_evidence=crash_ev,
                 coverage_note=note, restored_note=restored_note)
                 + "\n" + render_budget_turn(max_turns - turns))
     except BaseException:

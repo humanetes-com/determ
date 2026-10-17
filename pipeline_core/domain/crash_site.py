@@ -659,48 +659,87 @@ def first_test_file_after_destructor(
     return None
 
 
-def _line_calls(line: str, family: frozenset[str]) -> list[str]:
-    """Calls on one source line, in source order.
+def _declared_calls(
+    line: str, family: frozenset[str], declared: frozenset[str],
+) -> list[str]:
+    """Distinct calls on one source line, in source order, to a fn the
+    anchor file declares.
 
     A non-empty family counts only its members (the catalog match). An
     empty family counts every ``.name(`` / ``::name(`` call. A bare call
-    is not one: the faulting line's adapters are not the conversion."""
+    is not one. A name the file does not declare (``to_string``,
+    ``unwrap``) is std's or the test's, not a body this crash can blame."""
     if family:
-        return [m.group(1) for m in _CONVERSION_CALL_RE.finditer(line)
-                if m.group(1) in family]
-    from pipeline_core.domain.language_driver import _called_idents
-    return _called_idents(line)
+        found = [m.group(1) for m in _CONVERSION_CALL_RE.finditer(line)
+                 if m.group(1) in family]
+    else:
+        from pipeline_core.domain.language_driver import _called_idents
+        found = _called_idents(line)
+    out: list[str] = []
+    for name in found:
+        if name in declared and name not in out:
+            out.append(name)
+    return out
 
 
 def _name_from_binding(
-    lines: Sequence[str], family: frozenset[str],
+    lines: Sequence[str], family: frozenset[str], declared: frozenset[str],
 ) -> tuple[str | None, int] | None:
     """The call the faulting line's value was bound to.
 
-    The last line is the fault. Exactly one earlier line whose bindings
-    intersect the names that line reads is the binder, and exactly one
-    call on that line is the name: ``(name, index)``. Two such lines, or
-    one line that calls two fns, is ``(None, 0)`` — nobody, and the caller
-    does not fall through. No such line, or a binder that calls nothing,
-    is None: the caller falls through to the window's unique-name gate.
-    """
+    The last line is the fault. When that line itself calls a fn the
+    anchor file declares, the text cannot say whether the fault ran inside
+    that call or inside the value it was handed: ``(None, 0)``, nobody,
+    and the caller does not fall through. Otherwise the nearest earlier
+    line that binds a name the fault reads (and does not bind itself) is
+    the binder — the nearest, because a later `let` shadows an earlier
+    one. Exactly one declared call on that line is the name:
+    ``(name, index)``. Two is nobody. No binder, or a binder that calls
+    nothing the file declares, is None: the caller falls through to the
+    window's unique-name gate.
+
+    Three use-after-free reports of 2026-10-15
+    (`asan-20261015T120750691462.txt` `error_gen_1.rs`,
+    `asan-20261015T172115843898.txt` `error_gen_2.rs` and
+    `error_gen_4.rs`) fault on ``let boxed = err.<conversion>();``. A
+    rule that skipped the faulting line's own call followed ``err`` to
+    its constructor and named ``msg`` or ``new``."""
     from pipeline_core.domain.example_setup import binds, uses
-    if len(lines) < 2:
+    if not lines:
         return None
-    fault_names = uses(lines[-1])
-    binders = [i for i, line in enumerate(lines[:-1])
-               if binds(line) & fault_names]
-    if len(binders) > 1:
+    fault = lines[-1]
+    if _declared_calls(fault, family, declared):
         return (None, 0)
-    if not binders:
-        return None
-    index = binders[0]
-    calls = _line_calls(lines[index], family)
-    if len(calls) > 1:
-        return (None, 0)
-    if not calls:
-        return None
-    return (calls[0], index)
+    fault_names = uses(fault) - binds(fault)
+    for index in range(len(lines) - 2, -1, -1):
+        if not binds(lines[index]) & fault_names:
+            continue
+        calls = _declared_calls(lines[index], family, declared)
+        if len(calls) > 1:
+            return (None, 0)
+        if not calls:
+            return None
+        return (calls[0], index)
+    return None
+
+
+def _anchor_file(
+    origin_raw: Sequence[Mapping[str, object]], named_file: str | None,
+) -> str:
+    """The crate file a recovered frame is placed in, or "".
+
+    The origin's in-crate destructor file when the origin has one (the
+    conversion and the destructor live in one file on every recorded
+    use-after-free); otherwise the crate file the naming test file
+    answers for (:func:`crate_file_for_test_file`)."""
+    for rec in origin_raw:
+        file_ = str(rec.get("file") or "")
+        func = str(rec.get("func") or "")
+        if file_.startswith("src/") and _raw_is_destructor(func):
+            return file_
+    if named_file:
+        return crate_file_for_test_file(named_file) or ""
+    return ""
 
 
 def recover_owner_from_caller_source(
@@ -710,6 +749,7 @@ def recover_owner_from_caller_source(
     *,
     named_by: tuple[str, int] | None = None,
     source_window: SourceWindow | None = None,
+    declared_in: Callable[[str], frozenset[str] | None] | None = None,
 ) -> CrashFrame | None:
     """Name the conversion the caller source called, gated by the family.
 
@@ -721,10 +761,13 @@ def recover_owner_from_caller_source(
     (the access-side window of the enclosing test fn, whose own
     coordinates supply ``named_by`` — the binding line, not the faulting
     access). On a window, the name the faulting line reads is resolved
-    first (:func:`_name_from_binding`): the line that bound it, when that
-    line calls one fn. Two binders or two calls on that line name nobody.
-    No binding falls through to the unique-name gate. Empty family or no
-    unique name: None, and blame is unchanged.
+    first (:func:`_name_from_binding`), counting only calls to fns the
+    anchor file declares (``declared_in``, the anchor's fn names, or None
+    when it cannot be read): the nearest line that bound it, when that
+    line calls one such fn. A faulting line that calls one itself, or a
+    binder that calls two, names nobody. No binding, or no declared names
+    to count with, falls through to the unique-name gate. Empty family or
+    no unique name: None, and blame is unchanged.
 
     ``file_rel`` of the recovered frame: the origin's in-crate destructor
     file when the origin has one (the shape every recorded UAF has — the
@@ -754,7 +797,11 @@ def recover_owner_from_caller_source(
         name = (crate_fn_named_on_source_line(source_line, family)
                 if family else drv.unique_called_name(source_line))
     elif source_window is not None and source_window.lines:
-        bound = _name_from_binding(source_window.lines, family)
+        anchor = _anchor_file(origin_raw, source_window.file_rel)
+        declared = (declared_in(anchor) if declared_in is not None and anchor
+                    else None)
+        bound = (_name_from_binding(source_window.lines, family, declared)
+                 if declared is not None else None)
         if bound is not None and bound[0] is None:
             return None
         if bound is not None:
@@ -784,15 +831,8 @@ def recover_owner_from_caller_source(
         return None
     if name is None:
         return None
-    dest_file = ""
-    for rec in origin_raw:
-        file_ = str(rec.get("file") or "")
-        func = str(rec.get("func") or "")
-        if file_.startswith("src/") and _raw_is_destructor(func):
-            dest_file = file_
-            break
-    if not dest_file and named_by is not None:
-        dest_file = crate_file_for_test_file(named_by[0]) or ""
+    dest_file = _anchor_file(
+        origin_raw, named_by[0] if named_by is not None else None)
     if not dest_file:
         return None
     return CrashFrame(file_rel=dest_file, line=0, fn_name=name, symbol=name,
@@ -1623,6 +1663,7 @@ def site_from_frames(
     source_window: SourceWindow | None = None,
     abort: AbortReading | None = None,
     origin_stack_lines: int = 0,
+    declared_in: Callable[[str], frozenset[str] | None] | None = None,
 ) -> CrashSite:
     """Build a :class:`CrashSite` from debugger frame records
     (``{"file": …, "line": …, "func": …}``), keeping only frames whose file
@@ -1664,10 +1705,20 @@ def site_from_frames(
         # of three fns needs two periods to be seen as one.
         cycle = repeating_cycle(authorable_frames(_crate_frames(
             raw_frames, crate_file_prefix, len(raw_frames) or 1)))
-    if source_line or source_window is not None:
+    # The access-side window is read only when the origin names no in-crate
+    # body other than a destructor: a free stack that ran a crate fn names
+    # the body that freed, and a guess from the test's text must not
+    # outrank it. A destructor alone is the victim, which is what the
+    # caller-source recovery exists for. Three use-after-free reports of
+    # 2026-10-15 named the conversion on their free stack and lost it to
+    # the window's binding rule.
+    named_origin = any(not _raw_is_destructor(f.symbol or f.fn_name)
+                       for f in origin)
+    window = None if named_origin else source_window
+    if source_line or window is not None:
         recovered = recover_owner_from_caller_source(
             origin_raw, raw_frames, source_line, named_by=source_loc,
-            source_window=source_window)
+            source_window=window, declared_in=declared_in)
         if recovered is not None:
             origin = (recovered,) + tuple(
                 f for f in origin if f.fn_name != recovered.fn_name)
