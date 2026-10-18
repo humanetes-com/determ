@@ -20,7 +20,7 @@ import shutil
 import time
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +52,7 @@ from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
+from ...domain.crash_site import blocker_culprit_tests
 from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH
 from ...domain.dispatch_rank import (
     Service,
@@ -77,6 +78,7 @@ from ...domain.models import (
     ClusterFillResult,
     FnLocator,
 )
+from ...domain.pipeline_crash import ClusterScore, PipelineCodeCrash, PipelineCrash
 from ...domain.plateau import plateau_exit_disabled, plateau_exit_due
 from ...domain.reference_floor import (
     ReferenceMeasurement,
@@ -1095,6 +1097,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
     # composition). Counts only; its return is not read here. None: no
     # reading.
     agreement: Callable[..., object] | None = None
+    # `(sweep_output, test_cmd, crate_root, env) -> crash sites`, the TDD
+    # driver's localizer (`crash_localizer.localize_crashes`, bound in
+    # composition). The post-merge loop reads it when a merged sweep has
+    # binaries that died, so a culprit is held in its batch the way task2a
+    # holds it. None: the loop ranks without crash facts, as before.
+    localize_crashes: Callable[[str, str, Path, dict[str, str]], tuple[Any, ...]] | None = None
 
     def _sync_layout_into_tree(self, tag: str, project_dir: Path, cluster: Any,
                                filled_dir: Path,
@@ -1600,9 +1608,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                                  f"task2a/{module} / per-cluster reconstruction (0/{len(clusters)})")
 
             def _run_one_cluster(cluster: BuildCluster,
-                                 donor_dirs: list[Path]) -> dict[str, Any]:
+                                 donor_dirs: list[Path], *,
+                                 score_only: bool) -> dict[str, Any]:
                 tag = f"[{cluster.name}]"
-                self.tel.log(f"\n  {tag} === cluster start ===")
+                self.tel.log(f"\n  {tag} === cluster start ==="
+                             + (" (scored only)" if score_only else ""))
                 try:
                     res = self._generate_one_cluster(
                         project_dir=project_dir,
@@ -1613,6 +1623,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         functional_req=functional_req,
                         donor_dirs=donor_dirs,
                         donor_clusters={c.name: c for c in clusters},
+                        score_only=score_only,
                     )
                 except Exception as _ce:
                     # The traceback is the only record of WHICH call raised:
@@ -1624,7 +1635,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         "cluster": cluster.name,
                         "exception": f"{type(_ce).__name__}: {_ce}",
                         "traceback": _tb})
-                    res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}"}
+                    res = {"ok": False, "reason": f"exception: {type(_ce).__name__}: {_ce}",
+                           "crash": PipelineCrash(
+                               cluster=cluster.name,
+                               exception=f"{type(_ce).__name__}: {_ce}",
+                               traceback=_tb)}
                 if not res.get("ok"):
                     self.tel.log(f"  {tag} cluster aborted: {res.get('reason', 'unknown')}")
                 return {"cluster": cluster.name, **res}
@@ -1654,6 +1669,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # `donor_dirs`, so a skipped cluster keeps seeding the ones after it
             # — the seed is read off the tree, never off the run that made it.
             donor_dirs: list[Path] = []
+            # The first pipeline-code exception of this loop. From then on a
+            # cluster is read by its entry sweep and filled by nothing, and
+            # the merge and the post-merge wave do not run
+            # (`domain/pipeline_crash.py`).
+            _pipeline_crash: PipelineCrash | None = None
+            _scores: list[ClusterScore] = []
             for _ci, cluster in enumerate(clusters):
                 _fd = project_dir / ".skeleton-filled" / cluster.name
                 _ckey = f"task2a/{module}/{cluster.name}"
@@ -1677,13 +1698,37 @@ class StaticSkeletonTask2Generator(Task2Generator):
                                       cluster=cluster.name, module=module)
                         continue
                 self.tel.set_current(project_dir, f"task2a/{module} / {_position}")
+                _scoring = _pipeline_crash is not None
                 with phase_scope("t2a", cluster=cluster.name, module=module) as _ph:
-                    _summary = _run_one_cluster(cluster, list(donor_dirs))
+                    _summary = _run_one_cluster(cluster, list(donor_dirs),
+                                                score_only=_scoring)
                     if not _summary.get("ok"):
                         _ph.close("error")
                 cluster_summaries.append(_summary)
                 _pc = _summary.get("phase_c")
                 _crash = str(getattr(_pc, "crashed", None) or "")
+                _scores.append(ClusterScore(
+                    cluster=cluster.name,
+                    passed=len(getattr(_pc, "ran_tests", ()) or ())
+                    - len(getattr(_pc, "failed_tests", ()) or ()),
+                    failed=tuple(sorted(getattr(_pc, "failed_tests", ()) or ())),
+                    how=("crashed" if _crash or _summary.get("crash")
+                         else "scored only" if _scoring and _pc is not None
+                         else "not scored" if _scoring else "filled")))
+                if _pipeline_crash is None:
+                    _escaped = _summary.get("crash")
+                    if isinstance(_escaped, PipelineCrash):
+                        _pipeline_crash = _escaped
+                    elif _crash:
+                        _pipeline_crash = PipelineCrash(
+                            cluster=cluster.name, exception=_crash,
+                            traceback=str(getattr(_pc, "crash_traceback", "")
+                                          or "(the driver logged it)"))
+                    if _pipeline_crash is not None and _ci + 1 < len(clusters):
+                        self.tel.log(
+                            f"  [skeleton] {_pipeline_crash.health_line()} "
+                            f"Scoring {len(clusters) - _ci - 1} remaining "
+                            "cluster(s) by their entry sweep.")
                 if _pc is not None and getattr(_pc, "ran_tests", None):
                     _save_cluster_evidence(
                         project_dir, cluster.name,
@@ -1710,6 +1755,10 @@ class StaticSkeletonTask2Generator(Task2Generator):
                         f"{len(getattr(_pc, 'exhausted_fns', ()))} fn(s) were "
                         "tried and could not be made to pass; the evidence is "
                         "carried to whatever repairs the merged tree.")
+                if _summary.get("scored_only"):
+                    # Read, never filled: not done, not exhausted, no marker,
+                    # and not a donor (nothing in it was written this run).
+                    continue
                 if _summary.get("ok") and _fd.exists():
                     donor_dirs.append(_fd)
                     # Only a cluster whose Phase A→D returned ok is checkpointed:
@@ -1744,7 +1793,22 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # unfinished one.
             _unfinished = [s.get("cluster") for s in cluster_summaries
                            if getattr(s.get("phase_c"), "baseline_broken", False)
-                           or getattr(s.get("phase_c"), "crashed", "")]
+                           or getattr(s.get("phase_c"), "crashed", "")
+                           or s.get("scored_only") or s.get("crash")]
+            if _pipeline_crash is not None:
+                # Every cluster is scored; the merge, task2c and task3 would
+                # build on trees a crash left unfilled. The orchestrator turns
+                # this into the HEALTH line and a failed exit.
+                self.tel.log(f"  [skeleton] task2a/{module}: NOT marking done; "
+                             "the merge, task2c and task3 are skipped.")
+                self.tel.emit("task2a.pipeline_crash", data={
+                    "cluster": _pipeline_crash.cluster,
+                    "exception": _pipeline_crash.exception,
+                    "traceback": _pipeline_crash.traceback,
+                    "scores": [{"cluster": c.cluster, "passed": c.passed,
+                                "failed": list(c.failed), "how": c.how}
+                               for c in _scores]})
+                raise PipelineCodeCrash(_pipeline_crash, tuple(_scores))
             if _unfinished:
                 self.tel.log(f"  [skeleton] task2a/{module}: NOT marking done — "
                              f"cluster(s) {', '.join(str(c) for c in _unfinished)} "
@@ -1894,8 +1958,13 @@ class StaticSkeletonTask2Generator(Task2Generator):
         functional_req: str,
         donor_dirs: list[Path] | None = None,
         donor_clusters: dict[str, Any] | None = None,
+        score_only: bool = False,
     ) -> dict[str, Any]:
         """Run Phase A + B + C + D for a single cluster, returning a stats dict.
+
+        ``score_only``: an earlier cluster's fill raised a pipeline exception.
+        The tree is seeded and swept once; no repair loop, fill or validate
+        pass runs, so no model call is made (`domain/pipeline_crash.py`).
 
         All artifacts land under `.skeleton/{cluster}/` (skeleton + groups +
         failure dumps) and `.skeleton-filled/{cluster}/src/` (filled output).
@@ -1947,7 +2016,11 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 self.tel.log(f"  {tag} [skeleton-A] cargo +nightly check timed out.")
             else:
                 self.tel.log(f"  {tag} [skeleton-A] retry with +nightly: rc={rc}")
-        if rc not in (-1, 0):
+        if rc not in (-1, 0) and score_only:
+            self.tel.log(f"  {tag} [skeleton-A] cargo check FAILED; scored only, "
+                         "so the skeleton is not repaired (the repair loop "
+                         "calls the model).")
+        elif rc not in (-1, 0):
             self.tel.log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
             _skel_sources = list((skeleton_dir / "src").rglob("*.rs"))
             ok, _ = self.fill.generate_fix_loop(
@@ -2003,6 +2076,14 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if not dst.exists():
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+
+        # The tree is a crate before anything builds it. Every check below (the
+        # layout sync, the ownership backfill's compile gate, the pre-pass heal)
+        # runs cargo with this directory as its working directory, and cargo
+        # with no manifest here climbs to the workspace's and builds the
+        # stripped shell instead.
+        self._establish_crate_root(tag, project_dir, cluster, filled_dir,
+                                   _cargo_toml)
 
         # The seed above copies only files that do not exist yet, which is right
         # for BODIES (the fill loop owns them) and wrong for the private LAYOUT:
@@ -2207,84 +2288,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
             "check_cmd": _heal_cmd,
         })
 
-        # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
-        # task0c commits these as cluster-specific unit-test specs; the bake step
-        # emits only the structural skeleton. Without this propagation Phase C
-        # runs cargo test against integration tests only and gen_tests are
-        # invisible. `.broken` suffixes (left over from the legacy reattach
-        # quarantine path) are treated as live — they were renamed because earlier
-        # LLM-regenerated source didn't satisfy them, not because they are broken
-        # in themselves.
-        _proj_src = project_dir / "src"
         _filled_src = filled_dir / "src"
-        if _proj_src.exists() and _filled_src.exists():
-            _gt_allow_line, _ = self.gentests.derive_prelude(project_dir)
-            # Gate each sibling by the cfg of the cluster that GENERATED it
-            # (origin), not the current cluster — `cluster_cfg_attr(cluster)` is
-            # always-active in its own build and gives no protection, so a
-            # nightly-only test would compile (and E0658) in stable/no_core.
-            # Origin cfg excludes it there and keeps it only where it belongs.
-            # Fallback to current cluster if the manifest is missing (older runs).
-            _gt_origin = self.gentests.load_origin(project_dir)
-            _gt_cur_attr = self.clusters.cluster_cfg_attr(cluster)
-            _gt_propagated = 0
-            for gt in sorted(_proj_src.iterdir()):
-                if not gt.is_file():
-                    continue
-                _parsed = parse_gen_tests_filename(gt.name)  # structured parse
-                if not _parsed:
-                    continue
-                _parent_stem, _pass_n = _parsed
-                # Skip + quarantine undeclared orphans (on disk but absent
-                # from a non-empty origin manifest) — they were never coverage-
-                # validated and must not be resurrected under a guessed gate.
-                if not self.gentests.propagate_or_quarantine_sibling(
-                        gt, _gt_origin, _parent_stem, _pass_n, tag):
-                    continue
-                _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
-                _dst = _filled_src / _dst_name
-                _parent_path = _filled_src / f"{_parent_stem}.rs"
-                if not _parent_path.exists():
-                    continue
-                try:
-                    _body = gt.read_text(encoding="utf-8")
-                except Exception as _e:
-                    self.tel.log(f"  {tag} [skeleton-C] gen_tests read failed {gt.name}: {_e}")
-                    continue
-                if not self.scan.rust_delimiters_balanced(_body):
-                    continue
-                if not _dst.exists() or _dst.read_text(encoding="utf-8") != _body:
-                    _dst.write_text(_body, encoding="utf-8")
-                _ptext = _parent_path.read_text(encoding="utf-8")
-                if not self.gentests.has_decl(_ptext, _pass_n):
-                    _gt_attr = _gt_origin.get(
-                        f"{_parent_stem}.gen_tests_{_pass_n}", _gt_cur_attr)
-                    _decl = self.gentests.build_decl(
-                        _dst_name, _pass_n, _gt_allow_line,
-                        cluster_cfg_attr=_gt_attr,
-                    )
-                    _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
-                    _gt_propagated += 1
-            if _gt_propagated:
-                self.tel.log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
-                             f"gen_tests decl(s) into filled tree.")
 
         phase_step("t2a.fill", cluster=cluster.name)
         c_result: ClusterFillResult | dict[str, Any]
         if per_fn_mode:
             self.tel.log(f"  {tag} [skeleton-C] per-fn mode (Flavour B): scanning stubs...")
-            # Make filled_dir a runnable crate root so cargo check/test work:
-            # copy Cargo.toml + symlink tests/. Idempotent.
-            if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
-                shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
-            _proj_tests = project_dir / "tests"
-            _filled_tests = filled_dir / "tests"
-            if _proj_tests.exists() and not _filled_tests.exists():
-                try:
-                    os.symlink(_proj_tests, _filled_tests)
-                except OSError as e:
-                    self.tel.log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
-
             # Deterministic cluster-leak guard. A gen_test that belongs to another
             # cluster (e.g. nightly's `request_ref`) must not be ACTIVE in this
             # cluster. With correct origin gating it is cfg-excluded and invisible
@@ -2363,7 +2372,17 @@ class StaticSkeletonTask2Generator(Task2Generator):
                     tag=tag,
                     heal_file=lambda rel: self._heal_rel(
                         project_dir, filled_dir, skeleton_dir, cluster.name, rel),
+                    score_only=score_only,
                 )
+                if score_only:
+                    return {"ok": True, "phase_c": c_result, "phase_d": None,
+                            "validates": False, "scored_only": True}
+            elif score_only:
+                self.tel.log(f"  {tag} [skeleton-C] scored only is a TDD-driver "
+                             "reading; the fn-walk driver has no entry sweep, "
+                             "so this cluster is not scored.")
+                return {"ok": False, "reason": "not scored (fn-walk driver)",
+                        "scored_only": True}
             else:
                 c_result = self.fill.fill_fns_one_by_one(
                     project_dir=project_dir,
@@ -2388,6 +2407,12 @@ class StaticSkeletonTask2Generator(Task2Generator):
             if self.agreement is not None:
                 self.agreement(project_dir=project_dir, tree_dir=filled_dir, module=module,
                                cluster=cluster, where="task2a", stubs=c_result.remaining)
+        elif score_only:
+            self.tel.log(f"  {tag} [skeleton-C] scored only is a TDD-driver "
+                         "reading; the grouped driver has no entry sweep, so "
+                         "this cluster is not scored.")
+            return {"ok": False, "reason": "not scored (grouped driver)",
+                    "scored_only": True}
         else:
             # Phase B — grouping (cached per cluster).
             groups_path = skeleton_dir / "groups.json"
@@ -2435,8 +2460,6 @@ class StaticSkeletonTask2Generator(Task2Generator):
                          f"{d_result['stubs_remaining']} remaining.")
 
         # Per-cluster intermediate validation: cargo check the filled output.
-        if _cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
-            shutil.copy(_cargo_toml, filled_dir / "Cargo.toml")
         # End-of-cluster validation with a fix-loop. The per-fn check
         # catches errors as they happen, but bodies that pass at splice-time can
         # still break integration when all fills are in place (cross-fn semantic
@@ -2836,6 +2859,92 @@ class StaticSkeletonTask2Generator(Task2Generator):
             log=self.tel.log, emit=self.tel.emit)
         return heal_file(project_dir, rel, "merged",
                          deps).point is not RestorePoint.NONE
+
+    def _establish_crate_root(self, tag: str, project_dir: Path,
+                              cluster: BuildCluster, filled_dir: Path,
+                              cargo_toml: Path) -> None:
+        """Make ``filled_dir`` the crate cargo builds: its own manifest, the
+        workspace ``tests/`` behind a symlink, and the gen_tests siblings with
+        their declarations. Idempotent.
+
+        Called where the seed establishes the tree, before the first cargo
+        command on it. It used to run at the start of the fill, after the
+        ownership backfill's compile gate and the pre-pass heal, so on a fresh
+        tree both built the workspace crate above it: eight `reverted 0` heal
+        rounds and `STILL BROKEN` on every fresh cluster entry, and a backfill
+        gate that read the tree as already broken and so could never roll
+        back (replayed 2026-10-17 on checkpoint `18fb6a03d6`)."""
+        if cargo_toml.exists() and not (filled_dir / "Cargo.toml").exists():
+            shutil.copy(cargo_toml, filled_dir / "Cargo.toml")
+        _proj_tests = project_dir / "tests"
+        _filled_tests = filled_dir / "tests"
+        if _proj_tests.exists() and not _filled_tests.exists():
+            try:
+                os.symlink(_proj_tests, _filled_tests)
+            except OSError as e:
+                self.tel.log(f"  {tag} [skeleton-C] tests symlink failed: {e}")
+
+        # Propagate gen_tests siblings from project_dir/src/ into filled_dir/src/.
+        # task0c commits these as cluster-specific unit-test specs; the bake step
+        # emits only the structural skeleton. Without this propagation Phase C
+        # runs cargo test against integration tests only and gen_tests are
+        # invisible. `.broken` suffixes (left over from the legacy reattach
+        # quarantine path) are treated as live — they were renamed because earlier
+        # LLM-regenerated source didn't satisfy them, not because they are broken
+        # in themselves.
+        _proj_src = project_dir / "src"
+        _filled_src = filled_dir / "src"
+        if _proj_src.exists() and _filled_src.exists():
+            _gt_allow_line, _ = self.gentests.derive_prelude(project_dir)
+            # Gate each sibling by the cfg of the cluster that GENERATED it
+            # (origin), not the current cluster — `cluster_cfg_attr(cluster)` is
+            # always-active in its own build and gives no protection, so a
+            # nightly-only test would compile (and E0658) in stable/no_core.
+            # Origin cfg excludes it there and keeps it only where it belongs.
+            # Fallback to current cluster if the manifest is missing (older runs).
+            _gt_origin = self.gentests.load_origin(project_dir)
+            _gt_cur_attr = self.clusters.cluster_cfg_attr(cluster)
+            _gt_propagated = 0
+            for gt in sorted(_proj_src.iterdir()):
+                if not gt.is_file():
+                    continue
+                _parsed = parse_gen_tests_filename(gt.name)  # structured parse
+                if not _parsed:
+                    continue
+                _parent_stem, _pass_n = _parsed
+                # Skip + quarantine undeclared orphans (on disk but absent
+                # from a non-empty origin manifest) — they were never coverage-
+                # validated and must not be resurrected under a guessed gate.
+                if not self.gentests.propagate_or_quarantine_sibling(
+                        gt, _gt_origin, _parent_stem, _pass_n, tag):
+                    continue
+                _dst_name = f"{_parent_stem}.gen_tests_{_pass_n}.rs"
+                _dst = _filled_src / _dst_name
+                _parent_path = _filled_src / f"{_parent_stem}.rs"
+                if not _parent_path.exists():
+                    continue
+                try:
+                    _body = gt.read_text(encoding="utf-8")
+                except Exception as _e:
+                    self.tel.log(f"  {tag} [skeleton-C] gen_tests read failed {gt.name}: {_e}")
+                    continue
+                if not self.scan.rust_delimiters_balanced(_body):
+                    continue
+                if not _dst.exists() or _dst.read_text(encoding="utf-8") != _body:
+                    _dst.write_text(_body, encoding="utf-8")
+                _ptext = _parent_path.read_text(encoding="utf-8")
+                if not self.gentests.has_decl(_ptext, _pass_n):
+                    _gt_attr = _gt_origin.get(
+                        f"{_parent_stem}.gen_tests_{_pass_n}", _gt_cur_attr)
+                    _decl = self.gentests.build_decl(
+                        _dst_name, _pass_n, _gt_allow_line,
+                        cluster_cfg_attr=_gt_attr,
+                    )
+                    _parent_path.write_text(_ptext.rstrip() + _decl, encoding="utf-8")
+                    _gt_propagated += 1
+            if _gt_propagated:
+                self.tel.log(f"  {tag} [skeleton-C] propagated {_gt_propagated} "
+                             f"gen_tests decl(s) into filled tree.")
 
     def _backfill_tree(self, tree_dir: Path, donor_dirs: list[Path],
                        donor_clusters: dict[str, Any] | None = None, *,
@@ -3553,17 +3662,24 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 continue
 
             # The one rank (`domain/dispatch_rank`): this loop has no held,
-            # crash, owed or service facts, so its frontier ranks on the
-            # unclaimed streak over the frontier's own order. It keeps no
-            # service record, so every unit is stated never served: one
-            # class, the same order as before the class rule read service.
+            # owed or service facts, so its frontier ranks on the unclaimed
+            # streak over the frontier's own order. It keeps no service
+            # record, so every unit is stated never served. A culprit the
+            # localizer convicts for a binary that died is held ahead of the
+            # cap with the tests its crash stopped, as in task2a: without it
+            # a merged tree's crash origin could rank past the cap (task2a's
+            # was rank 17 of 12 on run `14235-bf24f931` iter 3).
+            _culprit_tests = self._post_merge_culprits(
+                tag, iter_n, output, test_cmd, project_dir, gap, eligible)
             _ordered = rank({
                 k: UnitFacts(static_index=i, service=Service.NEVER,
-                             unclaimed=_unclaimed.get(k, 0))
+                             unclaimed=_unclaimed.get(k, 0),
+                             culprit=k in _culprit_tests,
+                             blocked_tests=len(_culprit_tests.get(k, ())))
                 for i, k in enumerate(eligible)})
             if _pass_cohort is None:
                 _pass_cohort = tuple(_ordered)
-            _batch = take(_ordered, (), _dispatch_cap,
+            _batch = take(_ordered, frozenset(_culprit_tests), _dispatch_cap,
                           cohort=_pass_cohort, traversed=_pass_attempted)
             _batch_keys = set(_batch.keys)
             _batch_eligible = {k: eligible[k] for k in _batch.keys}
@@ -3687,6 +3803,35 @@ class StaticSkeletonTask2Generator(Task2Generator):
         if best_pass > 0:
             restore_merged_best_tree(project_dir)
         return measured_any
+
+    def _post_merge_culprits(
+        self, tag: str, iter_n: int, output: str, test_cmd: str,
+        project_dir: Path, gap: Any, eligible: Mapping[FnLocator, Any],
+    ) -> dict[FnLocator, frozenset[str]]:
+        """The frontier units the localizer convicts for this merged sweep's
+        dead binaries, each with the tests its crash stopped. Empty when no
+        localizer is bound, no binary died, or the localizer fails (the
+        rank then reads no crash facts, as before)."""
+        if self.localize_crashes is None or not gap:
+            return {}
+        try:
+            sites = tuple(self.localize_crashes(
+                output, test_cmd, project_dir, self.cargo.env()))
+        except Exception as exc:  # noqa: BLE001 — a reading, never a stop
+            self.tel.log(f"  {tag} post-merge iter {iter_n}: crash "
+                         f"localization failed ({type(exc).__name__}: {exc})")
+            return {}
+        got = {k: v for k, v in blocker_culprit_tests(sites).items()
+               if k in eligible}
+        if got:
+            self.tel.log(
+                f"  {tag} post-merge iter {iter_n}: "
+                f"{len(got)} crash culprit(s) held in the batch: "
+                + ", ".join(f"{k.file}::{k.fn_name} ({len(v)})"
+                            for k, v in sorted(got.items(),
+                                               key=lambda kv: (kv[0].file,
+                                                               kv[0].fn_name))))
+        return got
 
     @staticmethod
     def _frontier_from_silent_binaries(

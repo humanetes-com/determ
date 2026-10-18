@@ -754,7 +754,6 @@ from pipeline_core.domain.coverage_annotation import (
 )
 from pipeline_core.domain.enums import (
     Backend,
-    LanguageDriverKind,
     PhaseCDriver,
     PhaseCMode,
     Task1Backend,
@@ -814,6 +813,7 @@ from pipeline_core.domain.impl_block_ranges import (
     render_impl_block as _render_impl_block,
 )
 from pipeline_core.domain.impl_routing import impl_block_id as _impl_block_id
+from pipeline_core.domain.language_driver import GenericLanguageDriver as _GenericLanguageDriver
 from pipeline_core.domain.language_driver import bind as _bind_language_driver
 from pipeline_core.domain.language_driver import language_driver as _language_driver
 from pipeline_core.domain.llm_output import extract_files as _extract_files
@@ -898,9 +898,6 @@ from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
 )
-from pipeline_core.prompts.language_catalog import (
-    driver_from_kind as _language_driver_from_kind,
-)
 from pipeline_core.prompts.output_format import FILE_FORMAT_INSTRUCTION
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
 from pipeline_core.prompts.per_impl import (
@@ -919,9 +916,15 @@ from pipeline_core.prompts.skeleton_index import (
 from pipeline_core.prompts.whole_file_fix import build_whole_file_fix_prompt as _build_wff
 from pipeline_core.settings import Settings
 
-_bind_language_driver(_language_driver_from_kind(
-    LanguageDriverKind.coerce(
-        _os.getenv("LANGUAGE_DRIVER"), LanguageDriverKind.GENERIC)))
+# The catalog driver was deleted 2026-10-17 (original-derived guidance one
+# env flip from a prompt). A launch that still asks for it is refused, not
+# silently given the generic driver; the tag `catalog-driver-last` holds it.
+if (_os.getenv("LANGUAGE_DRIVER") or "generic").strip().lower() != "generic":
+    raise RuntimeError(
+        f"LANGUAGE_DRIVER={_os.getenv('LANGUAGE_DRIVER')!r}: only `generic` "
+        "exists; the catalog driver was removed (restore it from the git tag "
+        "catalog-driver-last into a branch for an A/B)")
+_bind_language_driver(_GenericLanguageDriver())
 
 # Model self-correction notes — prompt-section caps (see CLAUDE.md "The model
 # authors its own anti-hallucination notes").
@@ -2356,6 +2359,9 @@ def build_app(
             save_layout_records=save_layout_records,
             reference_measurement=_reference,
             agreement=_measure_agreement,
+            # Resolved at call time: `_localize_crashes` is bound further
+            # down this function, before any generator is built.
+            localize_crashes=lambda *a, **k: _localize_crashes(*a, **k),
             blueprint_deps=BlueprintDeps(
                 ask=lambda *a, **k: helpers.ask_raw(*a, **k),
                 log=ports.log, emit=ports.emit,

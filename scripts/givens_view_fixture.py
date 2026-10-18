@@ -30,6 +30,14 @@ HOW TO INTERPRET THE OUTPUT. One line per claim, `ok` or `FAIL`:
   (f) view lines               — total lines of the rendered view, index
       included, against the lines on disk; how many are Given steps (step
       lines and setup doc strings) and how many are the index.
+  (g) doc strings under a Given — Given/And steps followed by a rust doc
+      string in the rendered view; the claim is 0 (`on disk:` prints the
+      same count on the files the last bake wrote: 232 on the 2026-10-04
+      stable view).
+  (i) setups in the index      — `## ` headings under `# Setups` against
+      the distinct setup texts of the book; the claim is equal.
+  (D) phrases quoting code     — stored phrases `quotes_fixture_code`
+      refuses against their root's text (11 of 17 on 2026-10-04).
 `on disk:` is the negative control: the same counts over the files the last
 bake wrote. If those files were written by this code the two readings agree
 and the control says nothing; it bites only against a pre-change view.
@@ -46,7 +54,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pipeline_core.application.behaviour_book_build import feature_files  # noqa: E402
 from pipeline_core.domain.behaviour import BehaviourSuite, example_given  # noqa: E402
-from pipeline_core.domain.behaviour_book import GIVENS_INDEX_NAME  # noqa: E402
+from pipeline_core.domain.behaviour_book import (  # noqa: E402
+    GIVENS_INDEX_NAME,
+    given_roots,
+    quotes_fixture_code,
+)
 from pipeline_core.domain.example_setup import helper_key_parts  # noqa: E402
 
 
@@ -110,6 +122,23 @@ def main() -> int:
     print(f"(f) view lines: {lines} ({sum(_given_lines(t) for t in features.values())} in Given "
           f"steps, {index.count(chr(10))} in the index)")
 
+    # Entry 309's amendment (2026-10-17): no code under any Given, each
+    # distinct setup once in the index, and the stored phrases that
+    # transcribe their fixture's code.
+    doc_under_given = sum(_doc_under_given(t) for t in features.values())
+    setups_in_index = index.split("# Setups")[1].split("# Observers")[0].count("\n## ") \
+        if "# Setups" in index else 0
+    distinct_setups = len({s.setup.strip() for s in suite.specs if s.setup.strip()})
+    roots_all = {r.key: r for r in given_roots(suite.specs)}
+    phrased = dict(suite.givens)
+    quoting = sorted(k for k, ph in phrased.items()
+                     if k in roots_all and quotes_fixture_code(ph, roots_all[k].text))
+    ok_g = doc_under_given == 0
+    print(f"(g) doc strings under a Given: {doc_under_given}  {'ok' if ok_g else 'FAIL'}")
+    print(f"(i) setups in the index: {setups_in_index} of {distinct_setups} distinct setup(s)")
+    print(f"(D) stored phrases that quote their fixture's code: {len(quoting)} of "
+          f"{len(phrased)}: {', '.join(quoting[:8])}")
+
     disk = project / ".skeleton" / f"_features_{a.cluster}"
     if disk.is_dir():
         old = {p.name: p.read_text(encoding="utf-8") for p in sorted(disk.iterdir()) if p.is_file()}
@@ -118,11 +147,20 @@ def main() -> int:
         via_names = sorted({s.via for s in shown if s.via})
         via_texts = [_flat(t) for k, t in table.items() if helper_key_parts(k)[1] in via_names]
         via_copies = sum(_flat(f).count(t) for f in old_features.values() for t in via_texts)
+        print(f"on disk: doc strings under a Given: "
+              f"{sum(_doc_under_given(t) for t in old_features.values())}")
         print(f"on disk: {len(old)} file(s), {sum(t.count(chr(10)) for t in old.values())} line(s), "
               f"{sum(_given_lines(t) for t in old_features.values())} in Given steps, "
               f"helper text in .feature: {old_pasted} of {len(texts)}, "
               f"asserting-helper texts printed: {via_copies}")
-    return 0 if ok_a and ok_b and ok_c else 1
+    return 0 if ok_a and ok_b and ok_c and ok_g else 1
+
+
+def _doc_under_given(text: str) -> int:
+    """Given/And steps followed directly by a rust doc string."""
+    lines = text.splitlines()
+    return sum(1 for a, b in zip(lines, lines[1:], strict=False)
+               if a.strip().startswith(("Given", "And")) and b.strip() == '"""rust')
 
 
 if __name__ == "__main__":

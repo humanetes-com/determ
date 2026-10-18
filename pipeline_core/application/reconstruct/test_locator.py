@@ -21,7 +21,7 @@ from pipeline_core.domain.rust_scan import count_macro_calls, count_word
 _GENERIC_FN_NAMES = {
     "new", "fmt", "source", "clone", "default", "drop", "next",
     "from", "into", "deref", "deref_mut", "as_ref", "as_mut",
-    "hash", "eq", "cmp", "partial_cmp", "from_str", "anyhow_kind",
+    "hash", "eq", "cmp", "partial_cmp", "from_str",
     "provide",
 }
 

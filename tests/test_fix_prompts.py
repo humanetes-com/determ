@@ -10,7 +10,6 @@ from __future__ import annotations
 import dataclasses
 
 from pipeline_core.domain.installable_fns import ProducerBypass
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.last_error import RED_HEAD_MARK, LastErrorKind, last_error_prefix
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -21,7 +20,6 @@ from pipeline_core.prompts.fix_prompts import (
     build_tdd_stub_fill_prompt,
     restrict_fill_plan,
 )
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 def test_fn_fix_prompt_exact() -> None:
@@ -195,11 +193,9 @@ def test_file_fill_plan_never_renders_a_header_with_no_functions() -> None:
 
 def test_file_fill_plan_line_avoids_the_name_colon_shape() -> None:
     # `<header>: fn` invited name="Error: root_cause", which splices nowhere.
-    with using_driver(catalog_driver()):
-        out = _file_fill([BlockFillPlan("impl Error", ("root_cause",))])
+    out = _file_fill([BlockFillPlan("impl Error", ("root_cause",))])
     assert "impl Error: root_cause" not in out
     assert "in `impl Error` -> write: root_cause" in out
-    assert 'RIGHT: <FN name="root_cause" block="impl Error">' in out
 
 
 def test_file_fill_states_inference_as_re_check_and_carries_the_evidence() -> None:
@@ -260,61 +256,9 @@ def test_file_fill_plan_renders_the_call_form_only_for_a_generic_self() -> None:
     assert "PRODUCER" not in bare_line
 
 
-def test_file_fill_plan_concrete_self_gets_the_chain_recipe_not_the_producer_bypass() -> None:
-    """Error::context at stub/refill time is the CHAIN TABLE recipe, even
-    when a bypass entry is present. producer_bypasses keyed on constructs_type
-    of a body peel had already restored to unimplemented, so the bypass never
-    reached this unit on run 1383168-eb151d09. The signature recipe must
-    outrank BUILD THE PER-TYPE TABLE (which named the same wrapper but
-    waited on escalation). construct_from_context is named only as a do-not.
-    """
-    from pipeline_core.domain.construction_recipe import CHAIN_TABLE_RECIPE
-    with using_driver(catalog_driver()):
-        out = _file_fill([BlockFillPlan(
-            "impl Error", (), ("context",),
-            bypass=(ProducerBypass(
-                fn_name="context", container="impl Error",
-                wrapper="ContextError", producer="construct_from_context",
-                producer_file="src/error.rs", same_file=True,
-                erases_generic=False),))])
-        line = next(ln for ln in out.splitlines()
-                    if ln.startswith("  in `impl Error`"))
-        assert CHAIN_TABLE_RECIPE in line
-        assert "BUILD THE PER-TYPE TABLE" not in line
-        assert "REWRITE TO INVOKE" not in line
-        assert "rewrite it to call `construct_from_context`" not in line
-        assert "Do not call `construct_from_context`" in line
-        assert "ContextError" in line
-        assert line.rstrip().endswith("context")
-        stub = _file_fill([BlockFillPlan("impl Error", ("context",), ())])
-        stub_line = next(ln for ln in stub.splitlines()
-                         if ln.startswith("  in `impl Error`"))
-        assert CHAIN_TABLE_RECIPE in stub_line
-        assert "write:" not in stub_line
-
-
-def test_file_fill_plan_stub_construct_from_boxed_gets_wrap_the_box() -> None:
-    """construct_from_boxed was never a bypass target. The recipe fires on
-    a stub-only plan and never instructs calling construct_from_std."""
-    from pipeline_core.domain.construction_recipe import WRAP_BOX_RECIPE
-    with using_driver(catalog_driver()):
-        out = _file_fill([BlockFillPlan("impl Error", ("construct_from_boxed",), ())])
-    line = next(ln for ln in out.splitlines()
-                if ln.startswith("  in `impl Error`"))
-    assert WRAP_BOX_RECIPE in line
-    assert "write:" not in line
-    assert "rewrite it to call `construct_from_std`" not in line
-    assert "Do not call `construct_from_std`" in line
-    assert line.rstrip().endswith("construct_from_boxed")
-
-
 def test_file_fill_generic_recipe_keys_on_sig_not_crate_wrappers() -> None:
     """Plan rewrite: a Cell wrap/identity sig pays the shape instruction
     without BoxedError / ContextError. Without sigs generic pays nothing."""
-    from pipeline_core.domain.construction_recipe import (
-        CHAIN_TABLE_RECIPE,
-        WRAP_BOX_RECIPE,
-    )
     wrap_sig = (
         "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
         "trace: Option<Trace>) -> Self")
@@ -325,7 +269,6 @@ def test_file_fill_generic_recipe_keys_on_sig_not_crate_wrappers() -> None:
                      if ln.startswith("  in `impl Cell`"))
     assert "unsized" in wrap_line
     assert "BoxedError" not in wrap_line
-    assert WRAP_BOX_RECIPE not in wrap_line
     assert wrap_line.rstrip().endswith("from_payload")
     bare = _file_fill([BlockFillPlan("impl Cell", ("from_payload",), ())])
     bare_line = next(ln for ln in bare.splitlines()
@@ -338,7 +281,6 @@ def test_file_fill_generic_recipe_keys_on_sig_not_crate_wrappers() -> None:
                       if ln.startswith("  in `impl Cell`"))
     assert "erased identity type" in ident_line
     assert "ContextError" not in ident_line
-    assert CHAIN_TABLE_RECIPE not in ident_line
 
 
 def test_file_fill_plan_call_and_table_forms_in_one_prompt_stay_split() -> None:
@@ -409,19 +351,18 @@ def test_file_fill_plan_recipe_outranks_bypass_and_escalated_for_context() -> No
     """A fn both ESCALATED and a bypass AND a signature recipe gets the
     recipe: the compile-time shape is what a stub can actually follow.
     The other escalated member keeps the measured-grade line."""
-    from pipeline_core.domain.construction_recipe import CHAIN_TABLE_RECIPE
-    with using_driver(catalog_driver()):
-        out = _file_fill([BlockFillPlan(
-            "impl Error", (), ("context", "construct_from_std"),
-            escalated=("context", "construct_from_std"),
-            bypass=(ProducerBypass(
-                fn_name="context", container="impl Error",
-                wrapper="ContextError", producer="construct_from_context",
-                producer_file="src/error.rs", same_file=True,
-                erases_generic=False),))])
+    out = _file_fill([BlockFillPlan(
+        "impl Error", (), ("context", "construct_from_std"),
+        escalated=("context", "construct_from_std"),
+        sigs=(("context", "fn context<C>(self, context: C) -> Self"),),
+        bypass=(ProducerBypass(
+            fn_name="context", container="impl Error",
+            wrapper="ContextError", producer="construct_from_context",
+            producer_file="src/error.rs", same_file=True,
+            erases_generic=False),))])
     line = next(ln for ln in out.splitlines()
                 if ln.startswith("  in `impl Error`"))
-    assert CHAIN_TABLE_RECIPE in line
+    assert "erased identity type" in line
     assert "BUILD THE PER-TYPE TABLE" not in line
     assert "REWRITE (the fns that consume" in line
     rewrite = line.split("REWRITE (the fns that consume")[1]

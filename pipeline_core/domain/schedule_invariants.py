@@ -48,7 +48,12 @@ reason (and, for a hold, the runs it waited on). On that:
   run, opened or deferred. Run `486447-5207101c` (2026-10-07, fill 6):
   `src/ensure.rs::render` was admitted for six failing `ensure!` tests and
   every slice carrying it was hollow or parked, so nothing wrote it and no
-  deferral said why.
+  deferral said why. Measured 2026-10-17 over every recorded hit since
+  2026-10-12 joined to its sweep's `phase_c.dispatch.rank` batch: 214 of
+  214 were owners the rank left past the dispatch cap, 0 were in the batch
+  with no candidate. The check therefore reads the rank's starvation of an
+  owner, which the rank's own bound answers (a served owner with an
+  unasked fingerprint, `dispatch_rank`), not a routing hole.
 
 These name no test, unit, trait or crate: the inputs are the schedule's own
 decisions, the hollow stubs and the blamed locators. The same checker runs in
@@ -180,7 +185,8 @@ def violations(decided: Sequence[Decided], *,
         out.append(ScheduleViolation(
             "owner_unrouted",
             f"{o.file}::{o.fn_name} is a measured coverage owner still on "
-            "the frontier, and no candidate run writes it"))
+            "the frontier, and no candidate run writes it (the dispatch "
+            "batch left it past the cap, or a planner dropped it)"))
 
     if not opened and any(d.reason != "nothing_aimed" for d in deferred):
         out.append(ScheduleViolation(

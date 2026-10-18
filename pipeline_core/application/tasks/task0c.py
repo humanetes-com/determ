@@ -1339,6 +1339,11 @@ class Task0cFileHistory:
     # function. Read against the next measurement: a label still among the
     # unexecuted targets is "those files ran and it has 0 executions".
     committed_for: dict[str, list[str]] = field(default_factory=dict)
+    # Site label -> what each charged attempt aimed at that function did
+    # (`committed`, `reverted`, `compile_failed`, `no_tests`), seeded from
+    # the record's `PendingFn.outcomes` and appended per visit, so the next
+    # prompt states a reverted aim (`test_evidence.still_unexecuted`).
+    fn_outcomes: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1727,7 +1732,9 @@ def _run_phase_c(
         _unexecuted_fns = _render_unexecuted_fns(_raw_text, _file_fn_targets, ctx.facts, ctx.reach)
         # Committed blocks aimed at a function this measurement still counts
         # at 0: the files ran and it has 0 executions (no cause is claimed).
-        _unexec_note = still_unexecuted(hist.committed_for, [t.label for t in _file_fn_targets])
+        _unexec_note = still_unexecuted(hist.committed_for,
+                                        [t.label for t in _file_fn_targets],
+                                        hist.fn_outcomes)
         _unexecuted_fns = _with_note(_unexecuted_fns, _unexec_note)
         _what_worked = file_what_worked.get(rel_path, "")
         if _what_worked:
@@ -1998,7 +2005,9 @@ project-specific import paths, type construction patterns, and hard constraints.
                 behaviours=_behaviours_section,
                 unexecuted_fns=_with_note(
                     _render_unexecuted_fns(_raw_text, _sub_targets, ctx.facts, ctx.reach),
-                    still_unexecuted(hist.committed_for, [t.label for t in _sub_targets])),
+                    still_unexecuted(hist.committed_for,
+                                     [t.label for t in _sub_targets],
+                                     hist.fn_outcomes)),
             )
             return _render_prompt(_ssecs, _sub_status,
                                   _cluster_rules=_scope_rules(_sub_targets, _sub_lines),
@@ -2467,6 +2476,10 @@ project-specific import paths, type construction patterns, and hard constraints.
 
         # Quick per-file coverage snapshot after a successful append.
         _qcov_after: int | None = None
+        # This visit's own verdict (`_visit_gain`): the quick-cov count before
+        # its block, and whether a no-line block was kept for its pins.
+        _visit_prev_qcov: int | None = None
+        _kept_for_pins = False
         if _block_committed:
             _qcov_result = _quick_file_coverage(project_dir, module_name, rel_path)
             if _qcov_result is not None:
@@ -2486,6 +2499,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                 # coverage. _pass_n is recomputed from disk on the next
                 # generation attempt, so the slot is naturally reused.
                 _prev_qcov = file_last_qcov.get(rel_path)
+                _visit_prev_qcov = _prev_qcov
                 file_last_qcov[rel_path] = _qcov
                 _pinned_now = _file_pinned_now.get(rel_path, frozenset())
                 if (_prev_qcov is not None and _qcov <= _prev_qcov
@@ -2495,6 +2509,7 @@ project-specific import paths, type construction patterns, and hard constraints.
                     _log(f"  [{module_name}] {rel_path} — block added no line coverage "
                          f"(was {_prev_qcov}, now {_qcov}) but pins {len(_pinned_now)} "
                          f"behaviour(s) — kept.")
+                    _kept_for_pins = True
                 elif _prev_qcov is not None and _qcov <= _prev_qcov:
                     file_failed_blocks.setdefault(rel_path, []).append(block)
                     _log(f"  [{module_name}] {rel_path} — block produced no coverage "
@@ -2508,6 +2523,12 @@ project-specific import paths, type construction patterns, and hard constraints.
                     file_last_qcov[rel_path] = _prev_qcov  # restore tracker too
         for _lbl, _files in _pass_committed_for.items():
             hist.committed_for.setdefault(_lbl, []).extend(_files)
+        # What this visit's block did for each function it aimed at, so the
+        # NEXT visit's note states it (a reverted aim included).
+        for _t in _file_fn_targets:
+            _why_t = _fn_outcomes.get(_t.site) if _t.site in _fn_pass else None
+            if _why_t:
+                hist.fn_outcomes.setdefault(_t.label, []).append(_why_t)
 
         # Inner quick-retry: if quick-cov didn't reach 100% on a stalled or
         # few-lines-remaining file, immediately try a second focused generation
@@ -2606,23 +2627,49 @@ project-specific import paths, type construction patterns, and hard constraints.
                     break
             _emit("task0c.quick_retry_done", file=rel_path)  # clear the retry counter
 
-        # Per-file stall detection: track whether uncovered line count improved.
-        prev_best = file_best_uncov.get(rel_path, len(uncov_lines) + 1)
-        if len(uncov_lines) < prev_best:
-            newly_covered = file_prev_uncov_lines.get(rel_path, set()) - uncov_lines
+        # Per-file stall detection, on THIS visit's own outcome. The verdict
+        # used to compare the uncovered set measured BEFORE this visit, so
+        # visit k judged visit k-1, a failure reached the prompt two visits
+        # late, and a first visit (no entry, default len + 1) was always
+        # "progress": run `857717-812ee44c` (2026-10-10) told attempt 2
+        # "Previous attempt covered 1 more line(s)" after attempt 1's block
+        # had been reverted for covering nothing. Progress is a measured gain
+        # of this visit's block (or a block kept for the observables it
+        # pins); with no measurement of its own, lines that moved since an
+        # earlier visit (other files' tests) still count, a first visit not.
+        _visit_gain = (None if _visit_prev_qcov is None or _qcov_after is None
+                       else (_qcov_after - _visit_prev_qcov if _block_committed
+                             else 0))
+        prev_best = file_best_uncov.get(rel_path, len(uncov_lines))
+        _seen_before = rel_path in file_best_uncov
+        _moved_outside = (_visit_gain is None and _seen_before
+                          and len(uncov_lines) < prev_best)
+        # A measured failure of this visit's own block: it ran and gained no
+        # line (reverted), or it did not compile. A visit with no block, or
+        # a block the quick reading did not measure, is no verdict on a first
+        # visit (absence of evidence), and on later visits falls back to the
+        # uncovered-set comparison as before.
+        _measured_fail = (_visit_gain == 0 or (
+            not _block_committed
+            and any(_st == "compile_failed" for _ls, _st in _aimed_blocks)))
+        if not ((_visit_gain is not None and _visit_gain > 0) or _kept_for_pins
+                or _moved_outside or _measured_fail or _seen_before):
             file_best_uncov[rel_path] = len(uncov_lines)
+        elif (_visit_gain is not None and _visit_gain > 0) or _kept_for_pins \
+                or _moved_outside:
+            file_best_uncov[rel_path] = min(len(uncov_lines), prev_best)
             file_stall_counts[rel_path] = 0
             file_giveup_counts[rel_path] = 0   # progress resets the give-up streak
             file_loops.setdefault(rel_path, LoopState()).record(
                 Attempt(metric=float(-len(uncov_lines)), improved=True))
-            # Capture what worked so next attempt can reuse the same patterns.
-            if _old_block:
+            # Capture what worked: THIS visit's block, and only when its own
+            # measured gain is what the progress was. A gain from outside
+            # (another file's tests) writes nothing.
+            if _visit_gain is not None and _visit_gain > 0 and block:
                 _condensed_working = without_model_comments(
-                    _condense_rust_to_signatures(_old_block, "gen_tests.rs"))
-                _covered_sample = sorted(newly_covered)[:8]
-                _covered_note = (f" Lines newly covered: {_covered_sample}." if _covered_sample else "")
+                    _condense_rust_to_signatures(block, "gen_tests.rs"))
                 file_what_worked[rel_path] = (
-                    f"Previous attempt covered {prev_best - len(uncov_lines)} more line(s).{_covered_note} "
+                    f"Previous attempt covered {_visit_gain} more line(s). "
                     f"Reuse these construction patterns:\n{_condensed_working[:_WORKING_CAP]}"
                 )
             file_retrospectives.pop(rel_path, None)  # stale retrospective no longer valid
@@ -3096,6 +3143,8 @@ def task0c_augment_module(
         for _p in _fn_record.pending:
             if _p.committed_in:
                 _hist.committed_for[site_label(_p.target.site)] = list(_p.committed_in)
+            if _p.outcomes:
+                _hist.fn_outcomes[site_label(_p.target.site)] = list(_p.outcomes)
     # Track concrete attempts that compiled but added zero coverage to the
     # targeted lines. Fed to the deep retrospective so the classifier can see
     # which strategies the LLM has already tried — and revise its TESTABLE

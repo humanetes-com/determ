@@ -1010,7 +1010,8 @@ class VLLMTransport(_BaseTransport):
                 time.sleep(5)
 
 
-def _persist_trace(result: str, thinking: str, suffix: str) -> None:
+def _persist_trace(result: str, thinking: str, suffix: str, *,
+                   prefix: str = "") -> None:
     """Write `thinking` to `logs/thinking/<sha256(result)><suffix>`, first
     writer wins. `result` is the string the call returned — the one
     `llm.response` records — so a reader reaches the trace from the event."""
@@ -1021,7 +1022,7 @@ def _persist_trace(result: str, thinking: str, suffix: str) -> None:
         _think_dir = os.path.join(_LOG_DIR, "thinking")
         os.makedirs(_think_dir, exist_ok=True)
         _sha = _hl.sha256(result.encode("utf-8", "replace")).hexdigest()
-        _tp = os.path.join(_think_dir, f"{_sha}{suffix}")
+        _tp = os.path.join(_think_dir, f"{prefix}{_sha}{suffix}")
         if not os.path.exists(_tp):
             with open(_tp, "w", encoding="utf-8", errors="replace") as _tf:
                 _tf.write(thinking)
@@ -1032,6 +1033,16 @@ def _persist_trace(result: str, thinking: str, suffix: str) -> None:
 def _persist_thinking(result: str, thinking: str) -> None:
     """Persist the model's reasoning keyed by the response sha (callers read WHY)."""
     _persist_trace(result, thinking, ".txt")
+
+
+def _persist_paired_thinking(prompt_sha: str, result: str,
+                             thinking: str) -> None:
+    """Persist the main trace as `<prompt sha>.<response sha>.txt`: one
+    file per call, where `<response sha>.txt` is shared by every identical
+    reply and keeps its first writer."""
+    if not prompt_sha:
+        return
+    _persist_trace(result, thinking, ".txt", prefix=f"{prompt_sha}.")
 
 
 def _persist_followup_thinking(result: str, thinking: str) -> None:
@@ -1060,6 +1071,7 @@ def _make_hooks() -> Hooks:
         dbg=_dbg,
         persist_thinking=_persist_thinking,
         persist_followup_thinking=_persist_followup_thinking,
+        persist_paired_thinking=_persist_paired_thinking,
         emit=lambda event, data: _emit_event(event, data=data),
     )
 

@@ -19,13 +19,10 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 
 from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective, example_code, then_value_text
-from pipeline_core.domain.installable_fns import fn_decl_shape
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
-    impl_self_type,
-    impl_trait_name,
 )
 from pipeline_core.domain.rust_scan import contains_word
 
@@ -363,85 +360,6 @@ class IdentityMustUnit:
 IdentityMustInput = IdentityMustUnit | FnRecord
 
 
-# Catalog-driver admission: Display/Debug by trait name, or a fmt::Result
-# return. The generic driver uses the return-type check alone and never
-# reads this set. Kept so LANGUAGE_DRIVER=catalog is the pre-2026-09-09
-# path, not a delete.
-_FORMAT_TRAITS = frozenset({"Display", "Debug"})
-
-# The type identity `when` texts name (`Error::msg`, `err.is::<&str>()`).
-# Not "any Self return" — that is Own/Ref/Buf.
-_IDENTITY_SUBJECT = "Error"
-
-
-def _return_type(sig: str) -> str:
-    shape = fn_decl_shape(sig)
-    return shape[2] if shape is not None else ""
-
-
-def catalog_is_formatting(container: str, sig: str) -> bool:
-    """Catalog-driver formatting test: the Display/Debug name-set, else
-    a `fmt::Result` return (inherent display/debug, Write).
-
-    Production admission goes through :func:`language_driver`. This
-    function is the catalog implementation; the generic driver does not
-    call it.
-    """
-    trait = impl_trait_name(container) or ""
-    if trait in _FORMAT_TRAITS:
-        return True
-    return "fmt::Result" in _return_type(sig)
-
-
-def _is_formatting(container: str, sig: str) -> bool:
-    """Bound-driver formatting test (generic: return type; catalog: name-set)."""
-    return language_driver().is_formatting(container, sig)
-
-
-def catalog_constructs_identity_subject(
-        name: str, container: str, sig: str) -> bool:
-    """Catalog-driver identity constructor: return type or Self is Error.
-
-    Production aiming goes through :func:`language_driver`. This function
-    is the catalog table; the generic driver harvests the subject type
-    from the suite's ``when`` and does not call it.
-    """
-    if "downcast" in name or catalog_is_formatting(container, sig):
-        return False
-    ret = _return_type(sig)
-    if ret == _IDENTITY_SUBJECT:
-        return True
-    self_ty = impl_self_type(container) or ""
-    return ret == "Self" and self_ty == _IDENTITY_SUBJECT
-
-
-def constructs_identity_subject(name: str, container: str, sig: str) -> bool:
-    """Catalog table. Production aiming uses language_driver()."""
-    return catalog_constructs_identity_subject(name, container, sig)
-
-
-def catalog_identity_must_admits(name: str, container: str, sig: str) -> bool:
-    """Catalog-driver identity-MUST admission, including a downcast name.
-
-    Production aiming goes through :func:`language_driver`. The generic
-    driver drops the name token and keys on TypeId-plus-Option plus the
-    harvested subject type.
-    """
-    if catalog_is_formatting(container, sig):
-        return False
-    if "downcast" in name:
-        return True
-    ret = _return_type(sig)
-    if "TypeId" in sig and ret.startswith("Option"):
-        return True
-    return catalog_constructs_identity_subject(name, container, sig)
-
-
-def identity_must_admits(name: str, container: str, sig: str) -> bool:
-    """Catalog table. Production aiming uses language_driver()."""
-    return catalog_identity_must_admits(name, container, sig)
-
-
 def identity_subject_from_when(when: str) -> str:
     """Last path segment of a ``Type::`` call in ``when``, else ``""``.
 
@@ -485,7 +403,7 @@ def coerce_identity_unit(item: IdentityMustInput) -> IdentityMustUnit:
 
     A bare name used to become ``IdentityMustUnit(name=str(item))`` with
     empty container/sig and was silently refused by
-    :func:`identity_must_admits` (fail-closed, but the checker could not
+    the bound driver's ``identity_must_admits`` (fail-closed, but the checker could not
     see it). Callers that bypass the checker get TypeError, not an empty
     instruction.
     """
@@ -530,7 +448,7 @@ def select_identity_must(
     """IDENTITY / TRAIT_OBJECT_IDENTITY specs a fill of these units must
     satisfy, unique Then, at most `cap`.
 
-    `units` is the aimed path: only units :func:`identity_must_admits`
+    `units` is the aimed path: only units the bound driver's ``identity_must_admits``
     keeps contribute names. A constructor admitted with no spec hits
     falls back to non-flood identity leaves so a solo
     `construct_from_display` still gets `&str` — admission is not a Then;

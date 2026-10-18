@@ -280,13 +280,16 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
            hollow: Mapping[str, frozenset[FnLocator]] | None = None,
            oracle_fp: str = "o",
            sticky_reverts: bool = False,
-           labelled: bool = True) -> tuple[FillExecution, list[str]]:
+           labelled: bool = True,
+           defer_reasked: bool = False) -> tuple[FillExecution, list[str]]:
     """Run the recorded fill's candidates through the executor. Returns the
     execution and the labels in the order the routes were opened.
     `sticky_reverts=True` replays recorded attempts under the pre-fix
     bookkeeping (a revert mark no keep clears); `labelled=False` reads
     each row off the whole tick window rather than the run's own label —
-    each the negative control of its sentence."""
+    each the negative control of its sentence. The replayed attempts carry
+    no verdicts (every run reads flat), so the within-fill re-ask deferral
+    is off unless a test asks for it (`defer_reasked`)."""
     opened = [] if opened is None else opened
     log = [] if log is None else log
     by_kind = candidate_runs(fix)
@@ -308,7 +311,8 @@ def replay(fix: Mapping[str, Any], *, scheduled: bool = True,
         scheduled=scheduled, parallelism=1,
         unmeasurable_tests=frozenset(unmeasurable_tests),
         crash_blamed=(dict(crash_blamed) if isinstance(crash_blamed, Mapping)
-                      else frozenset(crash_blamed)))
+                      else frozenset(crash_blamed)),
+        defer_reasked=defer_reasked)
     out = execute_fill(routes,
                        hollow=hollow_of(fix) if hollow is None else hollow,
                        bodies_sha=lambda _t: "b", deps=deps)

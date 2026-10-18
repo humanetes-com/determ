@@ -128,12 +128,14 @@ from pipeline_core.domain.coverage_slice import (
 from pipeline_core.domain.coverage_slice import (
     records_standing_in,
     red_dead_units,
+    screen_unentered_convictions,
     unowned_among,
     unreached_by_test,
     withhold_unmeasured,
 )
 from pipeline_core.domain.crash_scope import (
     crash_culprits_by_test,
+    scope_convicting,
     scope_to_crash_culprits,
 )
 from pipeline_core.domain.crash_settlement import held_stub_evidence
@@ -154,7 +156,6 @@ from pipeline_core.domain.crash_site import (
     origin_blamed_locators,
     placeholder_pointer_subjects,
     read_placeholder_pointer_fault,
-    reader_blamed_locators,
     vanish_is_stub_confounded,
     vanished_subject_fns,
 )
@@ -871,6 +872,10 @@ def run_phase_c_tdd(
     # (excision, best tree, git ancestor, skeleton) for a file the
     # boundary check finds unparseable. None: the boundary only reports.
     heal_file: Callable[[str], bool] | None = None,
+    # An earlier cluster's fill raised a pipeline exception: take the entry
+    # sweep's reading, report its red list, fill nothing (`domain/
+    # pipeline_crash.py`).
+    score_only: bool = False,
 ) -> ClusterFillResult:
     """TDD-scoped Phase C driver.
 
@@ -2035,6 +2040,7 @@ def run_phase_c_tdd(
     _cluster_done = False
     _close_kind = ""
     _crashed = ""
+    _crash_tb = ""
     _bet_restored = False
 
     def _restore_abandoned_bet(how: str) -> None:
@@ -3027,6 +3033,23 @@ def run_phase_c_tdd(
         if not _rec.reconciled:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: VERDICT MISMATCH — "
                      f"{_rec.note}. Score claims from this sweep are unsafe.")
+        if score_only:
+            # Before the localizer, the attribution and every route: the
+            # entry sweep is the whole reading, and nothing after it may
+            # spend a model call or write a body.
+            _close_kind = "score_only"
+            deps.log(
+                f"  {tag} [phase-c/tdd] iter {iter_n}: SCORED ONLY — an "
+                "earlier cluster's fill raised a pipeline exception, so this "
+                f"cluster is read by its entry sweep and filled by nothing: "
+                f"pass={pass_count} fail={fail_count} "
+                f"oracle={_measure.oracle_size}; red: "
+                f"{', '.join(sorted(last_failed)) or 'none'}.")
+            deps.emit("phase_c.tdd.score_only", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count, "fail_count": fail_count,
+                "failed": sorted(last_failed)})
+            break
         _prov = {"tree_sha": _measure.tree_sha, "oracle_size": _measure.oracle_size,
                  "oracle_static": _expected_count,
                  "passed": sorted(_measure.passed)[:200],
@@ -4283,7 +4306,7 @@ def run_phase_c_tdd(
                 # frame that reads a value someone else made, so its members
                 # have no "producer one call away" (their callees are the
                 # other members).
-                _reader_blamed = reader_blamed_locators(_sites)
+                _reader_blamed = origin_blamed_locators(_sites)
                 if _reader_blamed and deps.enumerate_fns is not None:
                     _recs = deps.enumerate_fns(target_src_dir) or []
                     _placeholder = read_placeholder_pointer_fault(output)
@@ -6118,6 +6141,7 @@ def run_phase_c_tdd(
             exempt=_holds.units)
         _not_ranked.note(_scope.dropped, "crash_scoped")
         if _scope.blocked:
+            convicting = scope_convicting(convicting, _scope)
             ordered = list(_scope.ordered)
             for _loc, _ts in ordered:
                 if _loc in eligible:
@@ -6255,6 +6279,15 @@ def run_phase_c_tdd(
         # Held, owed, crash-sited and never-served units are untouched
         # (`asked_unchanged`).
         _own_fp_now = _unit_ask_fps(_facts, eligible, _disp_recs)
+        # A served unit a red test aims at, not yet asked under the
+        # fingerprint it would be asked under now, is evidence the rank must
+        # reach (`UnitFacts.unasked`).
+        for _k in list(_facts):
+            _fp_k = _own_fp_now.get(_k, "")
+            if (_fp_k and eligible.get(_k)
+                    and _facts[_k].service is not Service.NEVER
+                    and not _asks.unit_asked(unit_key(_k), _fp_k)):
+                _facts[_k] = replace(_facts[_k], unasked=True)
         _spent_asks = asked_unchanged(
             _facts, [k for k in _facts
                      if _asks.unit_asked(unit_key(k), _own_fp_now.get(k, ""))]
@@ -7421,7 +7454,10 @@ def run_phase_c_tdd(
                         dispatch_including_pairs(
                             _elig_fill, frontier_keys, _attr.pairs,
                             convicting),
-                        convicting,
+                        # A conviction the sweep's coverage reading refutes
+                        # (the test measured entering other bodies, never
+                        # this one) does not judge the unit.
+                        screen_unentered_convictions(convicting),
                         # The sweep's own words per failing test (panic site +
                         # assertion), so a re-fill prompt can show WHY the test
                         # failed instead of asserting that it did.
@@ -7524,6 +7560,7 @@ def run_phase_c_tdd(
                 "traceback": _tb_c})
             _close_kind = "crashed"
             _crashed = f"{type(_exc_c).__name__}: {_exc_c}"
+            _crash_tb = _tb_c
             break
         # What the engine ACTUALLY dispatched. The frontier is what the
         # driver asked for; the engine narrows it (the impl route defers
@@ -8385,7 +8422,10 @@ def run_phase_c_tdd(
         # without this the distinction is lost at the boundary and whatever
         # repairs the merged tree starts from a bare failing-test name. A
         # crash is neither: it spent no budget (`crashed`).
-        exhausted=bool(last_failed) and not _cluster_done and not _crashed,
+        exhausted=(bool(last_failed) and not _cluster_done and not _crashed
+                   and not score_only),
         exhausted_fns=tuple(sorted(permanently_exhausted)),
         crashed=_crashed,
+        crash_traceback=_crash_tb,
+        scored_only=score_only,
     )

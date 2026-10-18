@@ -37,8 +37,6 @@ from pipeline_core.domain.behaviour_probe import (
     value_bearing_reason,
 )
 from pipeline_core.domain.behaviour_select import behaviour_class_name
-from pipeline_core.domain.language_driver import using_driver
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 def _probe(**kw: str) -> CapturedProbe:
@@ -196,15 +194,6 @@ def test_display_probes_do_not_cover_exact_format_for_the_probe_ask() -> None:
     assert "EXACT_FORMAT" in names
 
 
-def test_debug_probes_cover_exact_format_for_the_probe_ask() -> None:
-    from pipeline_core.domain.behaviour_probe import probe_coverage_class
-
-    dbgs = [captured_spec(cfg_cluster="s", probe=_probe(observe="debug"), n=i, stdout="v") for i in range(5)]
-    with using_driver(catalog_driver()):
-        names = [c for c, _ in class_targets(dbgs, probe_coverage_class, max_targets=3)]
-    assert "EXACT_FORMAT" not in names
-
-
 def test_the_recorded_stable_suite_asks_exact_format_under_probe_coverage() -> None:
     """Plan fixture, computed on the recorded suite (not a hand list of five
     units). Today's `class_targets` + `behaviour_class_name` omits
@@ -226,22 +215,6 @@ def test_the_recorded_stable_suite_asks_exact_format_under_probe_coverage() -> N
     ]
     asked = [c for c, _ in class_targets(suite.specs, probe_coverage_class, max_targets=4)]
     assert "EXACT_FORMAT" in asked
-
-
-def test_class_prompts_off_restores_display_or_debug() -> None:
-    """BEHAVIOUR_PIN_ENV_DEBUG=0 is the pre-2026-09-02 ask. On is Debug-only.
-
-    Catalog-driver pin. Generic class prompts ignore the switch and do
-    not name a render.
-    """
-    from pipeline_core.domain.behaviour_probe import catalog_class_prompts
-
-    on = catalog_class_prompts(pin_env_debug=True)
-    off = catalog_class_prompts(pin_env_debug=False)
-    assert "never Display" in on["EXACT_FORMAT"]
-    assert "Display, Debug, or the alternate" in off["EXACT_FORMAT"]
-    assert "never Display" not in off["EXACT_FORMAT"]
-    assert on["IDENTITY"] == off["IDENTITY"]
 
 
 # --- the env guard ----------------------------------------------------------
@@ -385,22 +358,6 @@ def test_the_perturbation_flips_the_observable_env_keys() -> None:
     assert perturbed_env({"RUST_BACKTRACE": "full"})["RUST_BACKTRACE"] == "0"
 
 
-def test_a_display_observe_is_rejected_for_an_exact_format_ask() -> None:
-    from pipeline_core.domain.behaviour_probe import (
-        CapturedProbe,
-        exact_format_ask_rejects,
-        fills_non_format_class,
-    )
-
-    display = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="display")
-    debug = CapturedProbe(name="x", given='let e = anyhow!("x");', when="e", observe="debug")
-    ident = CapturedProbe(name="x", given="let e = Error::new(E);", when="e.is::<E>()", observe="display")
-    with using_driver(catalog_driver()):
-        assert exact_format_ask_rejects(display) is not None
-        assert exact_format_ask_rejects(debug) is None
-        assert fills_non_format_class(ident) and exact_format_ask_rejects(ident) is None
-
-
 def test_a_twin_is_narrowed_to_what_the_capture_and_the_replay_share() -> None:
     """The twin's Then is cut back to the text the probe binary's render and
     the test binary's render share; the rest belongs to the rendering
@@ -474,3 +431,21 @@ def test_a_prefix_then_replays_as_starts_with_and_a_longer_render() -> None:
     assert ObservableOutcome.from_dict(d).prefix
     assert "prefix" not in spec.then.to_dict()
     assert not ObservableOutcome.from_dict(spec.then.to_dict()).prefix
+
+
+def test_an_exact_format_block_needs_an_observe_tag_and_nothing_more() -> None:
+    """Any named render can pin a render that moves (a Display probe that
+    moved under the env flip counts); an empty tag names nothing and is
+    refused. A block answering another class is never refused here."""
+    from pipeline_core.domain.behaviour_probe import (
+        CapturedProbe,
+        exact_format_ask_rejects,
+    )
+    display = CapturedProbe(name="x", given="let v = make();", when="v", observe="display")
+    empty = CapturedProbe(name="x", given="let v = make();", when="v", observe=" ")
+    option = CapturedProbe(name="x", given="let v = make();", when="v.get().is_none()",
+                           observe="")
+    assert exact_format_ask_rejects(display) is None
+    reason = exact_format_ask_rejects(empty)
+    assert reason is not None and "got empty" in reason
+    assert exact_format_ask_rejects(option) is None

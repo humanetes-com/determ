@@ -1,13 +1,12 @@
-"""Generic vs catalog language driver — the fill model is the language expert.
+"""The language driver — the fill model is the language expert.
 
-Plan: LANGUAGE_DRIVER=generic (default) injects no std-trait tutorial, no
-Display/Debug name-set backup, no standard derive set, no Send/Sync
-tutorial, and a fmt-only follow default. The catalog implementations stay
-on disk; CatalogLanguageDriver is the A/B that calls them. When generic
-is bound those functions are not called.
-
-Negative control: the same call sites under CatalogLanguageDriver still
-produce the pre-2026-09-09 tables.
+The one driver injects no std-trait tutorial, no Display/Debug name-set
+backup, no standard derive set, no Send/Sync tutorial, and a fmt-only
+follow default; its recipes and licences key on signature and stack
+shape, never on a crate's names. The catalog driver that held the
+pre-2026-09-09 tables was removed on 2026-10-17 (git tag
+``catalog-driver-last``); `LANGUAGE_DRIVER` set to anything else is a
+refusal at composition.
 """
 from __future__ import annotations
 
@@ -28,7 +27,6 @@ from pipeline_core.domain.language_driver import (
     GenericLanguageDriver,
     bind,
     language_driver,
-    using_driver,
 )
 from pipeline_core.domain.models import FnRecord, ImplBlock
 from pipeline_core.domain.private_surface import (
@@ -36,7 +34,6 @@ from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
 )
 from pipeline_core.prompts.context import PerFnSections, PerImplSections
-from pipeline_core.prompts.language_catalog import catalog_driver, driver_from_kind
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
 from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt, build_per_fn_prompt
 from pipeline_core.prompts.per_impl import build_per_impl_prompt
@@ -82,19 +79,9 @@ def test_default_bound_driver_is_generic() -> None:
     assert isinstance(language_driver(), GenericLanguageDriver)
 
 
-def test_driver_from_kind_selects_catalog_only_for_catalog() -> None:
-    assert driver_from_kind(LanguageDriverKind.GENERIC).name == "generic"
-    assert driver_from_kind(LanguageDriverKind.CATALOG).name == "catalog"
-    # coerce fallback is generic (unknown token must not resurrect the catalog).
-    assert LanguageDriverKind.coerce("nope", LanguageDriverKind.GENERIC) is (
-        LanguageDriverKind.GENERIC)
-
-
 def test_settings_language_driver_defaults_generic(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LANGUAGE_DRIVER", raising=False)
     assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
-    monkeypatch.setenv("LANGUAGE_DRIVER", "catalog")
-    assert Settings.from_env().language_driver is LanguageDriverKind.CATALOG
     monkeypatch.setenv("LANGUAGE_DRIVER", "GENERIC")
     assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
     monkeypatch.setenv("LANGUAGE_DRIVER", "not-a-driver")
@@ -119,13 +106,7 @@ def test_generic_driver_source_does_not_name_the_catalog() -> None:
         assert banned not in src, banned
 
 
-def test_generic_never_calls_trait_contract_for(monkeypatch: pytest.MonkeyPatch) -> None:
-    from pipeline_core.prompts import sections
-
-    def boom(_container: str) -> str:
-        raise AssertionError("catalog trait_contract_for was called")
-
-    monkeypatch.setattr(sections, "trait_contract_for", boom)
+def test_generic_trait_contract_is_empty() -> None:
     assert language_driver().trait_contract("impl Display for X") == ""
     assert language_driver().trait_contract("impl Hash for K") == ""
     prompt = build_per_fn_prompt(
@@ -139,15 +120,7 @@ def test_generic_never_calls_trait_contract_for(monkeypatch: pytest.MonkeyPatch)
     assert "<TRAIT_CONTRACT>" not in prompt
 
 
-def test_generic_never_calls_catalog_is_formatting(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    from pipeline_core.domain import behaviour_select as bs
-
-    def boom(_container: str, _sig: str) -> bool:
-        raise AssertionError("catalog_is_formatting was called")
-
-    monkeypatch.setattr(bs, "catalog_is_formatting", boom)
-    monkeypatch.setattr(bs, "_FORMAT_TRAITS", frozenset({"should-not-be-read"}))
+def test_generic_is_formatting_reads_the_return_type() -> None:
     drv = language_driver()
     # Write returning fmt::Result is formatting without naming Display/Debug.
     assert drv.is_formatting(
@@ -161,17 +134,10 @@ def test_generic_never_calls_catalog_is_formatting(
         "impl Hash for K", "fn hash<H: Hasher>(&self, state: &mut H)")
 
 
-def test_generic_never_reads_layout_catalog_rules(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    from pipeline_core.prompts import layout_authoring as la
-
-    monkeypatch.setattr(la, "_DERIVED_TRAIT_RULE", "SHOULD-NOT-APPEAR-DERIVE")
-    monkeypatch.setattr(la, "_AUTOTRAIT_RULE", "SHOULD-NOT-APPEAR-AUTOTRAIT")
+def test_generic_layout_prompt_carries_no_derive_or_autotrait_tutorial() -> None:
     assert language_driver().derived_trait_rule() == ""
     assert language_driver().autotrait_rule() == ""
     p = _layout_prompt()
-    assert "SHOULD-NOT-APPEAR-DERIVE" not in p
-    assert "SHOULD-NOT-APPEAR-AUTOTRAIT" not in p
     assert "TRAITS THE TESTS CALL MUST BE DERIVED" not in p
     assert "When in doubt" not in p
     assert "#[derive(Debug, Default, Clone, PartialEq, Eq)]" not in p
@@ -194,12 +160,7 @@ def test_generic_layout_prompt_still_surfaces_a_harvested_autotrait_pin() -> Non
 
 def test_generic_builders_omit_trait_contract_for_known_and_unknown_traits() -> None:
     """Plan: no TRAIT_CONTRACT section for a known std trait or an unknown
-    one. Negative control of the catalog: the catalog function still
-    returns Display::fmt for the same container (the table is not deleted)."""
-    from pipeline_core.prompts.sections import trait_contract_for
-
-    assert "Display::fmt" in trait_contract_for("impl Display for X")
-    assert "From<T>::from" in trait_contract_for("impl<T> From<T> for X")
+    one."""
     for container, fn_name, sig in (
         ("impl Display for X", "fmt",
          "fn fmt(&self, f: &mut Formatter) -> fmt::Result"),
@@ -243,85 +204,21 @@ def test_generic_fix_prompt_omits_trait_contract() -> None:
     assert "<TRAIT_CONTRACT>" not in p
 
 
-def test_catalog_driver_is_the_tables() -> None:
-    """Negative control: catalog still produces the pre-generic payloads."""
-    with using_driver(catalog_driver()):
-        drv = language_driver()
-        assert drv.name == "catalog"
-        assert "Display::fmt" in drv.trait_contract("impl Display for X")
-        assert "From<T>::from" in drv.trait_contract("impl<T> From<T> for X")
-        assert drv.trait_contract("impl UnknownTrait for X") == ""
-        # Display with no parsed fmt::Result return is formatting under
-        # the name-set backup — that is the catalog the generic path drops.
-        assert drv.is_formatting(
-            "impl Display for X", "fn fmt(&self, f: &mut Formatter)")
-        assert drv.format_follow_default() == ("fmt", "debug")
-        assert "TRAITS THE TESTS CALL MUST BE DERIVED" in drv.derived_trait_rule()
-        assert "#[derive(Debug, Default, Clone, PartialEq, Eq)]" in (
-            drv.derived_trait_rule())
-        assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" in (
-            drv.autotrait_rule())
-
-
-def test_catalog_builders_inject_trait_contract() -> None:
-    with using_driver(catalog_driver()):
-        p = build_per_fn_prompt(
-            file_text="fn fmt() { unimplemented!() }",
-            fn_name="fmt",
-            sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
-            test_blocks=[],
-            module_name="demo", cluster_name="stable",
-            file_rel="src/x.rs", fr_path=None,
-            sections=_fn_sections("impl Display for X"))
-        assert "<TRAIT_CONTRACT>" in p
-        assert "Display::fmt" in p
-        stub = FnRecord(
-            file="src/x.rs", fn_name="fmt",
-            container="impl Display for X",
-            sig_text="fn fmt(&self, f: &mut Formatter) -> fmt::Result",
-            has_unimplemented_body=True)
-        impl_p = build_per_impl_prompt(
-            ImplBlock(file="src/x.rs", container="impl Display for X",
-                      members=(stub,), stub_members=(stub,)),
-            [], [], "demo", "stable", _impl_sections(), fr_path=None)
-        assert "<TRAIT_CONTRACT>" in impl_p
-        assert "Display::fmt" in impl_p
-
-
-def test_catalog_layout_prompt_still_carries_the_tutorials() -> None:
-    with using_driver(catalog_driver()):
-        p = _layout_prompt()
-        assert "TRAITS THE TESTS CALL MUST BE DERIVED" in p
-        assert "#[derive(Debug, Default, Clone, PartialEq, Eq)]" in p
-        assert "AUTO-TRAITS ARE PART OF THE FROZEN PUBLIC API" in p
-        assert "unsafe impl Send for Handle {}" in p
-
-
 def test_format_follow_default_generic_is_fmt_only() -> None:
-    """Plan: omitted methods follow `fmt` only. Catalog still follows
-    fmt|debug (the pre-complement hop). A Qual::debug body is empty
-    under generic and named under catalog."""
+    """Plan: omitted methods follow `fmt` only. A Qual::debug body is
+    empty; naming a second method was the removed catalog's hop."""
     from pipeline_core.application.reconstruct.attribution import (
         _format_impl_calls,
     )
     body = "\n        Inner::debug(self.inner.by_ref(), f)\n    "
     assert language_driver().format_follow_default() == ("fmt",)
     assert _format_impl_calls(body) == frozenset()
-    with using_driver(catalog_driver()):
-        assert language_driver().format_follow_default() == ("fmt", "debug")
-        assert _format_impl_calls(body) == {("Inner", "debug")}
+    assert _format_impl_calls(body, ("fmt", "debug")) == {("Inner", "debug")}
     display_body = "\n        Inner::display(self.inner.by_ref(), f)\n    "
     assert _format_impl_calls(display_body, ("fmt", "debug")) == frozenset()
 
 
-def test_using_driver_restores_the_previous_driver() -> None:
-    assert language_driver().name == "generic"
-    with using_driver(catalog_driver()):
-        assert language_driver().name == "catalog"
-    assert language_driver().name == "generic"
-
-
-# --- generic pays from shape; catalog keeps today's table ---
+# --- the driver pays from shape ---
 
 
 def test_generic_class_prompts_do_not_name_a_render_or_a_std_trait() -> None:
@@ -366,23 +263,13 @@ def test_generic_exact_format_observe_accepts_display_and_covers_env_movers() ->
     assert probe_coverage_class(still) == ""
 
 
-def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> None:
-    from pipeline_core.prompts import sections
-
-    def boom_summary() -> str:
-        raise AssertionError("catalog gotchas_summary was called")
-
-    def boom_detail(_excerpt: str) -> str:
-        raise AssertionError("catalog gotchas_for_error was called")
-
-    monkeypatch.setattr(sections, "gotchas_summary", boom_summary)
-    monkeypatch.setattr(sections, "gotchas_for_error", boom_detail)
+def test_generic_gotchas_are_the_in_scope_gate_only() -> None:
     assert language_driver().gotchas_summary() == ""
     assert language_driver().gotchas_for_error("error[E0133]") == ""
     assert language_driver().gotchas_for_error(
         "warning: unexpected `cfg` condition name: `probe_flag`\n"
         "  = note: expected values for `feature` are: `std`") == ""
-    # A missing-field note pays the in-scope gate without calling the table.
+    # A missing-field note pays the in-scope gate.
     gate = language_driver().gotchas_for_error(
         "error[E0609]: no field `inner` on type `Cell`")
     assert "You may not add a new top-level item" in gate
@@ -397,15 +284,7 @@ def test_generic_never_calls_gotchas_tables(monkeypatch: pytest.MonkeyPatch) -> 
         "<RUST_GOTCHAS>\n</RUST_GOTCHAS>" in prompt)
 
 
-def test_generic_never_calls_catalog_construction_recipe(
-        monkeypatch: pytest.MonkeyPatch) -> None:
-    from pipeline_core.domain import construction_recipe as cr
-
-    def boom(_name: str, _container: str) -> str:
-        raise AssertionError("catalog_construction_recipe was called")
-
-    monkeypatch.setattr(cr, "catalog_construction_recipe", boom)
-    monkeypatch.setattr(cr, "construction_recipe", boom)
+def test_generic_construction_recipe_wraps_only_beside_another_arg() -> None:
     wrap = language_driver().construction_recipe(
         "from_payload", "impl Cell",
         "fn from_payload(error: Box<dyn StdError + Send + Sync>, "
@@ -461,9 +340,6 @@ def test_generic_identity_subject_is_harvested_from_when() -> None:
         identity_subject_from_when,
         select_identity_must,
     )
-    from pipeline_core.domain.behaviour_select import (
-        identity_must_admits as catalog_admits,
-    )
     assert identity_subject_from_when("Counter::new()") == "Counter"
     assert identity_subject_from_when("crate::Error::msg") == "Error"
     pin = BehaviourSpec(
@@ -480,10 +356,6 @@ def test_generic_identity_subject_is_harvested_from_when() -> None:
         "fn fmt(&self, f: &mut Formatter) -> fmt::Result", "Counter")
     assert not drv.constructs_identity_subject(
         "new", "impl Own < T >", "fn new(ptr: NonNull<T>) -> Self", "Counter")
-    # Catalog still pins Error constructors (the A/B).
-    assert catalog_admits(
-        "construct_from_display", "impl Error",
-        "fn construct_from_display<M>(error: M) -> Self")
     picked = select_identity_must(
         (pin,), units=(IdentityMustUnit(
             "new", "impl Counter", "fn new() -> Self"),))
@@ -507,7 +379,6 @@ def test_generic_vtable_dispatch_is_wrapper_shape_not_a_crate_type() -> None:
 
 def test_generic_conversion_license_is_box_dyn_or_a_crate_type() -> None:
     drv = language_driver()
-    assert drv.conversion_family() == frozenset()
     assert drv.access_licenses_conversion(
         "drop_glue::<Box<dyn core::error::Error + Send>>")
     assert drv.access_licenses_conversion(
@@ -522,21 +393,12 @@ def test_generic_conversion_license_is_box_dyn_or_a_crate_type() -> None:
     assert drv.unique_called_name(
         "    let boxed = err.take_box();") == "take_box"
     assert drv.unique_called_name("    let x = 1;") is None
-    # Catalog unique-name is family-gated: downcast_ref is not a conversion.
-    # Generic recovers the first call; the family exclusion is the A/B.
     assert drv.unique_called_name(
         "    let _ = err.downcast_ref::<MyErr>();") == "downcast_ref"
-    with using_driver(catalog_driver()):
-        assert language_driver().unique_called_name(
-            "    let _ = err.downcast_ref::<MyErr>();") is None
-        assert language_driver().unique_called_name(
-            "    let boxed = err.take_box();") is None
     must = drv.ownership_transfer_must(("convert",))
     assert "original owner must not drop" in must
     assert "ManuallyDrop" not in must
     assert drv.ownership_transfer_must(()) == ""
-    assert not drv.is_destructor_fn_name("object_drop")
-    assert not drv.is_destructor_fn_name("drop")
 
 
 def test_generic_prompt_examples_do_not_name_this_crate() -> None:
@@ -547,41 +409,8 @@ def test_generic_prompt_examples_do_not_name_this_crate() -> None:
     assert "impl Inner" in tags
     ex = drv.sig_change_example("slot")
     assert "ErrorImpl" not in ex
-    assert "Own<T>" in ex
+    assert "Own<" not in ex
     assert "slot" in ex
-
-
-def test_catalog_driver_keeps_the_pre_generic_tables() -> None:
-    """Negative control: catalog still produces today's table."""
-    from pipeline_core.domain.construction_recipe import WRAP_BOX_RECIPE
-    from pipeline_core.domain.crash_site import (
-        CONVERSION_FAMILY,
-        OWNERSHIP_TRANSFER_MUST,
-    )
-    with using_driver(catalog_driver()):
-        drv = language_driver()
-        assert "never Display" in drv.class_prompts(pin_env_debug=True)[
-            "EXACT_FORMAT"]
-        assert "std::error::Error" in drv.class_prompts(pin_env_debug=True)[
-            "TRAIT_OBJECT_IDENTITY"]
-        assert drv.exact_format_observe_ok("debug")
-        assert not drv.exact_format_observe_ok("display")
-        assert "E0133" in drv.gotchas_for_error(
-            "error[E0133]: call to unsafe function") or (
-            "unsafe" in drv.gotchas_for_error(
-                "error[E0133]: call to unsafe function").lower())
-        assert drv.gotchas_summary()
-        assert drv.construction_recipe(
-            "construct_from_boxed", "impl Error") == WRAP_BOX_RECIPE
-        assert drv.conversion_family() == CONVERSION_FAMILY
-        assert drv.is_destructor_fn_name("object_drop")
-        assert drv.ownership_transfer_must(("downcast",)) == (
-            OWNERSHIP_TRANSFER_MUST)
-        assert "ErrorImpl::provide" in drv.file_fill_tag_examples()
-        assert "Own<ErrorImpl>" in drv.sig_change_example("provide")
-        assert "ErrorVTable" in drv.vtable_fast_exit_guidance()
-        assert drv.is_vtable_dispatch(
-            "unsafe fn error(this: Ref<ErrorImpl>) -> u8", "impl ErrorImpl")
 
 
 _CRATE_GOTCHA_RECIPES = (
@@ -634,51 +463,6 @@ def test_generic_gotchas_for_error_is_the_in_scope_gate_not_a_crate_recipe() -> 
     assert drv.gotchas_summary() == ""
 
 
-def test_catalog_gotchas_still_name_this_crate() -> None:
-    """Negative control: catalog DETAIL still carries today's crate recipes."""
-    with using_driver(catalog_driver()):
-        drv = language_driver()
-        summary = drv.gotchas_summary()
-        assert "Own<T>" in summary
-        assert "wrapper.as_ptr()" in summary
-        assert "Error::msg" in summary
-        field = drv.gotchas_for_error(
-            "error[E0609]: no field `inner` on type `Cell`")
-        assert "ErrorImpl<E>" in field
-        assert "object_" in field
-        method = drv.gotchas_for_error(
-            "error[E0599]: no method named `foo` found for struct `Hold<Node>`")
-        assert "vtable.object_downcast" in method
-        assert "anyhow's" in method
-        assert "Own<T>" in method
-        value = drv.gotchas_for_error(
-            "error[E0425]: cannot find value `SHARED` in this scope")
-        assert "ADHOC_VTABLE" in value
-        assoc = drv.gotchas_for_error(
-            "error[E0599]: no function or associated item named `new` found "
-            "for struct `Pair<A, B>`")
-        assert "ContextValue { context" in assoc
-        dup = drv.gotchas_for_error(
-            "error[E0201]: duplicate definitions with name `as_ref`")
-        assert "impl AsRef<dyn StdError + Send + Sync> for Error" in dup
-        sig = drv.gotchas_for_error(
-            "error[E0053]: method `as_ref` has an incompatible type for trait")
-        assert "fn(&Error)" in sig
-        unsized = drv.gotchas_for_error(
-            "error[E0277]: the size for values of type `T` cannot be known "
-            "at compile time\ndoesn't have a size known at compile-time")
-        assert "Mut<'a, T>" in unsized
-        fmt = drv.gotchas_for_error(
-            "error[E0433]: failed to resolve: could not find `format` in `core`")
-        assert "anyhow APIs" in fmt
-        assert "Error::msg" in fmt
-        cfg = drv.gotchas_for_error(
-            "warning: unexpected `cfg` condition name: `probe_flag`\n"
-            "  = note: expected values for `feature` are: `std`")
-        assert "error_generic_member_access" in cfg
-        assert '#[cfg(feature = "error_generic_member_access")]' in cfg
-
-
 def test_generic_fix_prompt_on_missing_field_carries_the_gate_not_a_crate_field() -> None:
     """The live builder: a Cell missing-field note gets the in-scope gate
     and the Cell type record. Catalog on the same note still teaches
@@ -705,7 +489,3 @@ def test_generic_fix_prompt_on_missing_field_carries_the_gate_not_a_crate_field(
     assert "object_" not in p
     assert "ErrorImpl" not in p
     assert "ADHOC_VTABLE" not in p
-    with using_driver(catalog_driver()):
-        cat = build_per_fn_fix_prompt(**kwargs)
-    assert "object_" in cat
-    assert "ErrorImpl<E>" in cat

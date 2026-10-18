@@ -126,7 +126,7 @@ def test_fill_3_of_the_97_run_ranks_unmeasurable_runs_as_rebuy_flat() -> None:
 
     With unmeasurable = failed names whose binary did not complete, and
     crash_blamed = the locator crash.localized carried: runs disjoint from
-    that locator rank rebuy_flat; under a budget they are deferred; runs
+    that locator rank at weight 0 as `unmeasurable`; under a budget they are deferred; runs
     that contain it stay ordered. No pass_count.
     """
     fix = load_fill("1212998-d61fbd2c_iter3")
@@ -157,7 +157,9 @@ def test_fill_3_of_the_97_run_ranks_unmeasurable_runs_as_rebuy_flat() -> None:
     staying = [s for s in ranked.ordered if s.run.targets & blamed]
     flat = [s for s in ranked.ordered if not (s.run.targets & blamed)]
     assert staying and all(s.reason == "never_served" for s in staying)
-    assert flat and all(s.reason == "rebuy_flat" and s.weight == 0 for s in flat)
+    # Weight 0 like a flat re-buy, named for what it is: nothing here was
+    # bought flat (census P38 read the old label as a flat body).
+    assert flat and all(s.reason == "unmeasurable" and s.weight == 0 for s in flat)
     # Computed on this fixture: error.rs file + impl + per-fn contain the
     # blamed locator; the other ten (context/ensure/fmt/kind/ptr file+impl)
     # do not.

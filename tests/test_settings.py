@@ -61,8 +61,6 @@ def test_legacy_hard_cap_aliases(monkeypatch):
 def test_language_driver_defaults_generic(monkeypatch):
     monkeypatch.delenv("LANGUAGE_DRIVER", raising=False)
     assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
-    monkeypatch.setenv("LANGUAGE_DRIVER", "catalog")
-    assert Settings.from_env().language_driver is LanguageDriverKind.CATALOG
     monkeypatch.setenv("LANGUAGE_DRIVER", "0")
     assert Settings.from_env().language_driver is LanguageDriverKind.GENERIC
 

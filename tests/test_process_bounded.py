@@ -52,3 +52,22 @@ def test_run_bounded_kills_the_group_and_plain_run_leaves_the_background() -> No
     finally:
         with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
             os.killpg(pgid, signal.SIGKILL)
+
+
+def test_a_cargo_command_in_a_directory_with_no_manifest_is_refused(
+        tmp_path: Path) -> None:
+    """Cargo climbs to an ancestor manifest; the cluster trees sit inside the
+    workspace crate, so a tree checked before it had its own `Cargo.toml`
+    built the stripped workspace shell (run `412606-f903acb4`'s entry,
+    replayed 2026-10-17). Nothing is started."""
+    from pipeline_core.adapters.process import cargo_manifest_refusal
+    r = run_bounded(["cargo", "check"], cwd=tmp_path, env=None, timeout=5)
+    assert r.returncode == -1 and r.failure is ProcessFailure.NO_MANIFEST
+    assert r.pgid is None and "NOT A CRATE ROOT" in r.stderr
+    assert cargo_manifest_refusal(["/usr/bin/cargo", "+nightly", "test"], tmp_path)
+    # Not refused: a manifest here, a named manifest, a program that is not cargo.
+    assert cargo_manifest_refusal(
+        ["cargo", "check", "--manifest-path", "x/Cargo.toml"], tmp_path) is None
+    assert cargo_manifest_refusal(["./target/debug/deps/t-1"], tmp_path) is None
+    (tmp_path / "Cargo.toml").write_text("[package]\n")
+    assert cargo_manifest_refusal(["cargo", "check"], tmp_path) is None

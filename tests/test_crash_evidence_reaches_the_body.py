@@ -38,11 +38,8 @@ there.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-
-import pytest
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.dispatch_rank import Crash, Service, UnitFacts, rank, take
@@ -57,15 +54,7 @@ from pipeline_core.domain.refill_evidence import (
     render_refill_evidence,
 )
 from pipeline_core.prompts.fix_prompts import BlockFillPlan, _plan_line
-from pipeline_core.prompts.language_catalog import catalog_driver
 from pipeline_core.prompts.sections import format_impl_block_for_prompt
-
-
-@pytest.fixture(autouse=True)
-def _catalog_driver() -> Iterator[None]:
-    """This module pins the catalog conversion-family MUST and widening."""
-    with using_driver(catalog_driver()):
-        yield
 
 FIXTURE = (Path(__file__).parent / "fixtures" / "dispatch"
            / "crash_cursor_1519852_2026-08-30.json")
@@ -326,17 +315,13 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     """Run `1790133-2181e509`'s error.rs file-first prompt named `drop` on the
     crashed line. `into_boxed_dyn_error` was in CRASH_EVIDENCE and not on the
     write list. Once blamed, `_plan_line` (the live builder's instruction
-    slot) must carry the ownership MUST. A `drop` crash must not — that body
-    already forgets, and the MUST on it would re-instruct the innocent
-    destructor.
+    slot) must carry the ownership MUST. Negative control: the same body
+    crashed by a fault of no memory class carries no MUST.
     """
-    drop_plan = BlockFillPlan(header="impl Drop for Error {",
-                              refills=("drop",), crashed=("drop",),
-                              memory_crashed=("drop",))
-    drop_line = _plan_line(drop_plan)
-    assert "A TEST BINARY CRASHED INSIDE THIS BODY" in drop_line
-    assert "self must not drop" not in drop_line, (
-        "negative control: a destructor crash must not grow the conversion MUST")
+    overflow = BlockFillPlan(header="impl Error {",
+                             refills=("into_boxed_dyn_error",),
+                             crashed=("into_boxed_dyn_error",))
+    assert "must not drop" not in _plan_line(overflow)
 
     conv = BlockFillPlan(header="impl Error {",
                          refills=("into_boxed_dyn_error",),
@@ -345,8 +330,7 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
     line = _plan_line(conv)
     assert "into_boxed_dyn_error" in line
     assert "MUST:" in line
-    assert "self must not drop" in line
-    assert "let own = self.inner" in line
+    assert "must not drop" in line
 
     # `downcast` is a by-value copy of inner too (run `1577437-c93d5c26`'s
     # iter-1 reply wrote `let own = self.inner;` with no forget in it while
@@ -356,7 +340,7 @@ def test_the_plan_line_for_a_conversion_crash_forbids_self_dropping() -> None:
                        crashed=("downcast",), memory_crashed=("downcast",))
     dc_line = _plan_line(dc)
     assert "A TEST BINARY CRASHED INSIDE THIS BODY" in dc_line
-    assert "self must not drop" in dc_line
+    assert "must not drop" in dc_line
 
 
 def test_a_stack_overflow_plan_carries_no_ownership_claim() -> None:
@@ -373,7 +357,7 @@ def test_a_stack_overflow_plan_carries_no_ownership_claim() -> None:
                                       "object_boxed"),
                              crashed=("from_boxed", "into_boxed_dyn_error"),
                              aimed=("object_boxed",))
-    for drv in (GenericLanguageDriver(), catalog_driver()):
+    for drv in (GenericLanguageDriver(),):
         with using_driver(drv):
             line = _plan_line(overflow)
             assert "A TEST BINARY CRASHED INSIDE THIS BODY" in line
@@ -390,41 +374,6 @@ def test_a_stack_overflow_plan_carries_no_ownership_claim() -> None:
             memory = replace(overflow,
                              memory_crashed=("into_boxed_dyn_error",))
             assert "must not drop" in _plan_line(memory)
-
-
-def test_a_family_member_aimed_beside_a_crashed_conversion_is_listed_crashed() -> None:
-    """Run `1577437-c93d5c26`'s iter-1 `src/error.rs` file-first prompt (sha
-    `9cc1333b…`): `into_boxed_dyn_error` CRASHED with the MUST, `object_boxed`
-    AIMED as "callee of the faulting frame — re-derive the erased layout".
-    The reply forgot self in the first and moved the payload into a fresh
-    `Box::new` in the second. A family member next to a crashed family
-    member is the same ownership defect: it is listed CRASHED with the MUST,
-    not AIMED. A non-family aimed callee (`vtable`) keeps the AIMED line,
-    and with no crashed family member nothing is promoted."""
-    plan = BlockFillPlan(
-        header="impl Error {",
-        refills=("reallocate_into_boxed_dyn_error_without_backtrace",
-                 "object_boxed", "vtable"),
-        crashed=("reallocate_into_boxed_dyn_error_without_backtrace",),
-        memory_crashed=("reallocate_into_boxed_dyn_error_without_backtrace",),
-        aimed=("object_boxed", "vtable"))
-    line = _plan_line(plan)
-    crash_part, _, rest = line.partition("; REWRITE — A TEST BINARY CRASHED and")
-    assert "A TEST BINARY CRASHED INSIDE THIS BODY" in crash_part
-    assert "object_boxed" in crash_part
-    assert "self must not drop" in crash_part
-    assert "object_boxed" not in rest, "one name, one instruction"
-    assert "callee of the faulting frame" in rest and "vtable" in rest
-
-    unpromoted = BlockFillPlan(
-        header="impl Error {", refills=("drop", "object_boxed"),
-        crashed=("drop",), memory_crashed=("drop",), aimed=("object_boxed",))
-    before = _plan_line(unpromoted)
-    _, _, aimed_part = before.partition("; REWRITE — A TEST BINARY CRASHED and")
-    assert "object_boxed" in aimed_part, (
-        "negative control: a `drop` crash promotes no family member — there "
-        "is no crashed conversion to share the contract with")
-    assert "self must not drop" not in before
 
 
 def test_a_re_offered_unit_does_not_hold_the_traversal_open() -> None:

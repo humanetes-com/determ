@@ -37,7 +37,8 @@ from typing import Any
 
 from pipeline_core.domain.enums import ProcessFailure
 
-__all__ = ["BoundedRun", "group_members", "kill_live_groups", "run_bounded"]
+__all__ = ["BoundedRun", "cargo_manifest_refusal", "group_members",
+           "kill_live_groups", "run_bounded"]
 
 _PR_SET_PDEATHSIG = 1
 _LIVE: set[int] = set()
@@ -174,6 +175,32 @@ def _arm_handlers() -> None:
             pass
 
 
+def cargo_manifest_refusal(argv: Sequence[str], cwd: Path) -> str | None:
+    """Why ``argv`` must not run in ``cwd``, or None when it may.
+
+    Cargo looks for `Cargo.toml` in its working directory and then in every
+    ancestor, so a cargo command run in a directory with no manifest of its
+    own builds whatever crate sits above it, and reports that crate's errors
+    as if they were this tree's. The cluster trees live inside the workspace,
+    whose `src/lib.rs` is a one-line shell after strip: on every fresh
+    cluster entry the seed's compile gate and the pre-pass heal ran before
+    the tree had its manifest, built the shell, and logged `STILL BROKEN …
+    unresolved import anyhow::anyhow` on a tree that compiles (replayed
+    2026-10-17 on checkpoint `18fb6a03d6`, the entry of run
+    `412606-f903acb4`). A command that names its manifest is left alone;
+    so is anything that is not cargo (test binaries run through the same
+    runners)."""
+    if not argv or Path(str(argv[0])).name != "cargo":
+        return None
+    if any(str(a) == "--manifest-path" or str(a).startswith("--manifest-path=")
+           for a in argv):
+        return None
+    if (Path(cwd) / "Cargo.toml").is_file():
+        return None
+    return (f"NOT A CRATE ROOT: {cwd} has no Cargo.toml, so cargo would build "
+            "an ancestor crate; refused")
+
+
 def run_bounded(
     cmd: Sequence[str],
     *,
@@ -184,11 +211,15 @@ def run_bounded(
     """Run ``cmd`` in a new session; on timeout kill the whole group.
 
     When this returns after a timeout, no process of the group it started
-    is alive. ``failure`` is TIMEOUT or BINARY_MISSING; a normally-exited
-    process (including rc != 0) has ``failure is None``.
+    is alive. ``failure`` is TIMEOUT, BINARY_MISSING or NO_MANIFEST (a cargo
+    command :func:`cargo_manifest_refusal` refuses; nothing is started); a
+    normally-exited process (including rc != 0) has ``failure is None``.
     """
-    _arm_handlers()
     argv = [str(c) for c in cmd]
+    refusal = cargo_manifest_refusal(argv, cwd)
+    if refusal is not None:
+        return BoundedRun(-1, "", refusal, failure=ProcessFailure.NO_MANIFEST)
+    _arm_handlers()
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), env=dict(env) if env is not None else None,

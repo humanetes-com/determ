@@ -1467,6 +1467,7 @@ def prepare_impl_fill(
         them, and a body the reply writes for one anyway is not spliced."""
         file_path = target_src_dir / file_rel
         if not file_path.exists():
+            _log(f"  [phase-c/file] {file_rel}: not on disk — nothing to fill.")
             return
         plan = _file_fill_plan(
             file_rel, fblocks,
@@ -1475,11 +1476,16 @@ def prepare_impl_fill(
         if plan.groups is None:
             if plan.wanted:
                 _fill_block_group(file_rel, fblocks, file_rel, withheld)
+            else:
+                _log(f"  [phase-c/file] {file_rel}: no stub or re-fill "
+                     "member left in the planned blocks — nothing to ask.")
             return
         if not plan.groups:
-            # Decided — and logged — at plan time by `_file_route_admits`,
-            # so this run was never scheduled; reached only when the file's
-            # blocks changed between the plan and the run.
+            # Decided at plan time by `_file_route_admits`, so this run was
+            # never scheduled; reached only when the file's blocks changed
+            # between the plan and the run.
+            _log(f"  [phase-c/file] {file_rel}: over the fn bound with no "
+                 "test-welded group since the plan — nothing to ask.")
             return
         _sizes = ", ".join(str(n) for n in plan.sizes)
         _log(f"  [phase-c/file] {file_rel}: {plan.wanted} fn(s) exceeds "
@@ -1511,6 +1517,8 @@ def prepare_impl_fill(
         refill_names = [m.fn_name for b in fblocks for m in b.refill_members]
         wanted = [*stub_names, *refill_names]
         if not wanted:
+            _log(f"  [phase-c/file] {glabel}: no stub or re-fill member in "
+                 "this group — nothing to ask.")
             return
         _pull_file.file = file_rel
         attempts.note_dispatched(FnLocator(file_rel, n) for n in wanted)
@@ -3446,6 +3454,11 @@ def prepare_impl_fill(
         # bytes are what every revert of this block restores.
         _block_pre = capture(file_path, None)
         snapshot = _block_pre.text()
+        # Members a kept attempt left refused for their own text, retried
+        # alone with the parser's words; and whether this block has been
+        # counted filled already (a retry keep must not count it twice).
+        _partial_retry: list[str] = []
+        _block_counted = [False]
         # LAST_ERROR window is recomputed from the tree cargo just compiled
         # (inside each attempt), not snapshotted here: a splice that grows a
         # body shifts siblings past a frozen `line_hi`, and a header /
@@ -3779,7 +3792,7 @@ def prepare_impl_fill(
                             kind=last_error_kind,
                             excerpt=with_blamed_type_api(
                                 last_error_excerpt or "", _crate_type_records),
-                            targets=tuple(_block_target_names),
+                            targets=tuple(_partial_retry or _block_target_names),
                             output=_impl_output,
                             note=(sibling_rejected_note(_steer.shared)
                                   if _steer.contradicts else ""),
@@ -3828,7 +3841,7 @@ def prepare_impl_fill(
             budgeted attempts and the maximal last-resort attempt."""
             nonlocal fns_filled_total, impls_filled, last_error_excerpt, \
                 members_filled_this_block, block_already_complete, \
-                last_metric, last_error_kind
+                last_metric, last_error_kind, _block_pre
             _last_regr_reverted[0] = False
             _last_crash_sites[0] = None
             # Hold the global splice+cargo lock while we mutate and check.
@@ -3878,6 +3891,10 @@ def prepare_impl_fill(
                              f"raw_canon={_db.attr_canon!r} "
                              f"target_canon={target_canon!r}")
                 spliced_now = 0
+                # This attempt's pre-write text of the block's file: what a
+                # crash peel puts a withdrawn body back to.
+                _attempt_pre_text = file_path.read_text(
+                    encoding="utf-8", errors="replace")
                 _impl_spliced: list[str] = []
                 # (name, signature, body, container) of every body this
                 # attempt landed, for the keep's ignored-input decline.
@@ -3886,6 +3903,7 @@ def prepare_impl_fill(
                 # What each refusal that judges the reply's TEXT tells the
                 # next turn (`splice_feedback.reply_refusal_feedback`).
                 _reply_feedback: list[str] = []
+                _text_refused_names: list[str] = []
                 # Refill members are already-filled (not `unimplemented!()`) —
                 # the splice must be told to overwrite a non-stub body for
                 # exactly these fn names, same as the per-fn refill path's
@@ -3950,6 +3968,7 @@ def prepare_impl_fill(
                             _sp, unit=fn_data["fn_name"], file_rel=block.file)
                         if _fb is not None:
                             _reply_feedback.append(_fb)
+                            _text_refused_names.append(fn_data["fn_name"])
                 if spliced_now == 0:
                     # every routed body refused as target_not_stub
                     # ⇒ the members are already filled — the block is
@@ -4013,6 +4032,51 @@ def prepare_impl_fill(
                     if _rep is not None:
                         rc, cargo_out, diagnostics = _rep
                 _last_full_out[0] = cargo_out  # `full_error` pull source
+                # The crash peel, as on the file route: a test process that
+                # dies under this write is settled before the gates read it,
+                # and a body of this reply the crash names goes back to its
+                # pre-write text while the rest is judged below. Without it a
+                # block was restored whole on a crash one of its bodies made:
+                # on run `757853-e28f1a7d` (2026-10-16, iter 4) this route's
+                # `into_boxed_dyn_error` attempt aborted the same binaries the
+                # file route's peel had just narrowed to that one body.
+                if rc == 0 and len(_impl_spliced) > 1 and tdd_test_cmd:
+                    _jw_i = JudgedWrite(
+                        frozenset(FnLocator(block.file, n)
+                                  for n in _impl_spliced),
+                        {block.file: _attempt_pre_text},
+                        size=len(_impl_spliced))
+                    withdraw_crashing_bodies(
+                        _jw_i,
+                        lambda sink: _test_regression_baseline(
+                            tdd_test_cmd, target_src_dir, cluster_env, sink),
+                        _baseline_test, tag=f"{block_id} ")
+                    _gone_i = sorted({f.fn_name for f in _jw_i.withdrawn
+                                      if f.file_rel == block.file})
+                    if _gone_i:
+                        _impl_spliced = [n for n in _impl_spliced
+                                         if n not in _gone_i]
+                        _impl_landed = [t for t in _impl_landed
+                                        if t[0] not in _gone_i]
+                        spliced_now = len(_impl_spliced)
+                        _note_reverted(block.file, _gone_i)
+                        _log(f"  [phase-c/impl] {block_id}: PEELED "
+                             f"{len(_gone_i)} body(ies) a test process "
+                             f"crashed on ({', '.join(_gone_i)}) — the "
+                             f"remaining {spliced_now} are judged below as "
+                             "usual.")
+                        _emit("phase_c.impl.fill.peeled", data={
+                            "cluster": cluster_name, "file": block.file,
+                            "container": block.container, "cause": "crash",
+                            "reverted": _gone_i, "kept": spliced_now})
+                        for _n in _gone_i:
+                            _verdict_row(
+                                f"{block.file}::{_n}", Disposition.REVERT,
+                                "crashed the test process (the crash "
+                                "settlement named this body)",
+                                outcome=GateOutcome.NEGATIVE,
+                                attempt=fix_attempt,
+                                validity=ValidityVector(binary_completed=False))
                 _u2_impl: U2Verdict | None = None
                 if rc == 0:
                     # Shared gate: accept the block only if its
@@ -4243,9 +4307,11 @@ def prepare_impl_fill(
                             "blocking_fns": sorted(
                                 f"{s.file}::{s.fn_name}" for s in _u2_impl.blocking_fns),
                             "unjudged": sorted(_u2_impl.no_verdict)})
-                    members_filled_this_block = spliced_now
+                    members_filled_this_block += spliced_now
                     fns_filled_total += spliced_now
-                    impls_filled += 1
+                    if not _block_counted[0]:
+                        _block_counted[0] = True
+                        impls_filled += 1
                     block_outcomes.append(UnitOutcome(
                         landed=True,
                         blocked_by=(tuple(sorted(_u2_impl.blocking_fns))
@@ -4309,6 +4375,28 @@ def prepare_impl_fill(
                             "members_failed": 0,
                             "fix_attempts": fix_attempt,
                         })
+                    _still = [n for n in dict.fromkeys(_text_refused_names)
+                              if n not in _impl_spliced]
+                    if _still:
+                        # Some bodies of this reply were refused for their
+                        # own text while the rest were kept. The kept state
+                        # is the block's restore point from here, and the
+                        # refused members are asked again alone with the
+                        # parser's words (the file and pair routes do the
+                        # same since 2026-10-06; this route dropped them with
+                        # no feedback turn).
+                        _block_pre = capture(file_path, None)
+                        _partial_retry[:] = _still
+                        last_error_excerpt = "\n\n".join(_reply_feedback)
+                        last_error_kind = LastErrorKind.COMPILE
+                        _log(f"  [phase-c/impl] {block_id}: {len(_still)} "
+                             "member(s) of the kept reply were refused for "
+                             f"their text ({', '.join(_still)}) — asked again "
+                             "with the parser's diagnostic.")
+                        return FixOutcome(
+                            "failed",
+                            err_sig=frozenset(f"splice:{n}" for n in _still),
+                            metric=FixProgress(len(_still), len(_still)))
                     return FixOutcome("accepted")
                 # Keep-while-red: keep a NON-REGRESSING fill even when the crate
                 # doesn't fully compile — it adds no error beyond baseline and

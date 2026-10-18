@@ -313,5 +313,25 @@ def test_controller_persists_thinking_via_hook():
     assert persisted == {"r": "what", "t": "why"}
 
 
+def test_two_calls_with_one_reply_keep_two_paired_traces(tmp_path, monkeypatch):
+    """`<response sha>.txt` is shared by every identical reply and keeps its
+    first writer: a 41-char request reply held another call's reasoning (run
+    `1430425-193a8f28`). The paired file is one per call. Control: the
+    response-sha file holds only the first call's reasoning."""
+    from pipeline_core.adapters import llm_transports as lt
+    monkeypatch.setattr(lt, "_LOG_DIR", str(tmp_path))
+    hooks = Hooks(persist_thinking=lt._persist_thinking,
+                  persist_paired_thinking=lt._persist_paired_thinking)
+    ctrl = LLMController(hooks, default_sentinel=SENTINEL)
+    for prompt, why in (("p1", "first reason"), ("p2", "second reason")):
+        t = FakeTransport([[Delta(reasoning=why), Delta(content="same reply")]])
+        ctrl.run(t, system=None, prompt=prompt, model="m", max_tokens=SENTINEL)
+    files = sorted((tmp_path / "thinking").iterdir())
+    paired = [f for f in files if f.name.count(".") == 2]
+    shared = [f for f in files if f.name.count(".") == 1]
+    assert sorted(f.read_text() for f in paired) == ["first reason", "second reason"]
+    assert [f.read_text() for f in shared] == ["first reason"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

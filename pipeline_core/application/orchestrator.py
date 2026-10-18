@@ -36,6 +36,7 @@ from pipeline_core.domain.generation import GenerationRequest
 from pipeline_core.domain.measurement import code_identity
 from pipeline_core.domain.models import BuildCluster, FnLocator, FnSite
 from pipeline_core.domain.oracle_guard import OracleDrift
+from pipeline_core.domain.pipeline_crash import PIPELINE_CODE_CRASH_EXIT, PipelineCodeCrash
 from pipeline_core.domain.reference_floor import orphaned_stubs
 from pipeline_core.domain.run_state import RunPlan
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -85,8 +86,10 @@ class StubVerdict:
     unreached_evidence: tuple[str, ...] = ()
     executed_upstream: frozenset[FnLocator] = frozenset()
     dead_in_tree: tuple[FnLocator, ...] = ()
-    # Labels of the `dead_in_tree` sites the original's suite executed.
+    # Labels of the `dead_in_tree` sites the original's suite executed, and of
+    # the rest: the two lines the end gate prints them on.
     dead_executed_upstream: tuple[str, ...] = ()
+    dead_unexecuted: tuple[str, ...] = ()
 
 
 def classify_remaining_stubs(
@@ -163,6 +166,8 @@ def classify_remaining_stubs(
         dead_in_tree=tuple(FnLocator(s.file, s.fn_name) for s in dead),
         dead_executed_upstream=tuple(
             site_label(s) for s in dead if s in executed),
+        dead_unexecuted=tuple(
+            site_label(s) for s in dead if s not in executed),
         unreachable=tuple(unreachable),
         upstream_hollow=tuple(FnLocator(s.file, s.fn_name) for s in reachable
                               if (s.file, s.fn_name) not in orphaned_keys),
@@ -241,20 +246,30 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
             "them could have been verified. Not counted against this run:")
         for line in verdict.unreached_evidence:
             log(f"    {line}")
-    if verdict.dead_in_tree:
-        log(f"\nNOTE: {len(verdict.dead_in_tree)} fn(s) remain "
+    # Decided 2026-10-17: a crate-private body no rebuilt caller and no
+    # oracle test reaches does not count against green, and one the
+    # original's suite executed is said on its own named line, never folded
+    # into the note. "Private" is rustc's: an exported fn is never reported
+    # dead, and the reading counts the in-crate test modules as callers
+    # (`adapters/dead_code.py`), so a public stub or a reached one stays in
+    # `orphaned` and fails the run below.
+    if verdict.dead_unexecuted:
+        log(f"\nNOTE: {len(verdict.dead_unexecuted)} fn(s) remain "
             "unimplemented!() and the compiler reports them NEVER USED in "
-            "every baked cluster that compiles them — nothing this crate "
-            "exposes reaches them, so no test can enter them and no fill for "
-            "them could have been judged. Not counted against this run:")
-        for loc in verdict.dead_in_tree:
-            log(f"    {loc.file}::{loc.fn_name}")
-        if verdict.dead_executed_upstream:
-            log(f"  ‼ {len(verdict.dead_executed_upstream)} of them the "
-                "ORIGINAL's suite executed at augmentation: a body the "
-                "original reaches and this tree cannot. The call path to it "
-                "was not reconstructed — check that no behaviour went with "
-                "it: " + ", ".join(verdict.dead_executed_upstream))
+            "every baked cluster that compiles them, by the crate and by its "
+            "own tests — nothing reaches them, so no fill for them could have "
+            "been judged. Not counted against this run:")
+        for label in verdict.dead_unexecuted:
+            log(f"    {label}")
+    if verdict.dead_executed_upstream:
+        log(f"\nUNREACHED PRIVATE BODY, EXECUTED BY THE ORIGINAL: "
+            f"{len(verdict.dead_executed_upstream)} fn(s) remain "
+            "unimplemented!(); no rebuilt caller and no oracle test reaches "
+            "them, and the original's suite executed them at augmentation. "
+            "The call path to them was not reconstructed. Not counted "
+            "against this run:")
+        for label in verdict.dead_executed_upstream:
+            log(f"    {label}")
     if verdict.orphaned:
         log(f"\nWARNING: all tests passed, but {len(verdict.orphaned)} fn(s) "
             "are STILL unimplemented!() — reachable under a baked cfg-set and "
@@ -933,7 +948,24 @@ def check_oracle_seal(deps: RunDeps, project_dir: Path,
 def run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     """The deterministic per-module reconstruction run, extracted verbatim from
     pipeline.py:main. `main` now only parses args, resolves `root`, builds
-    `RunDeps`, and calls here."""
+    `RunDeps`, and calls here.
+
+    A pipeline-code exception in a cluster's fill ends the run here, after
+    task2a has scored every cluster: the `HEALTH ‼` line, each cluster's red
+    list, the traceback, and a failed exit (`domain/pipeline_crash.py`)."""
+    try:
+        _run_pipeline(deps, plan, root)
+    except PipelineCodeCrash as crash:
+        for line in crash.report():
+            deps.log(line)
+        deps.emit("pipeline.code_crash", data={
+            "cluster": crash.crash.cluster,
+            "exception": crash.crash.exception,
+            "traceback": crash.crash.traceback})
+        sys.exit(PIPELINE_CODE_CRASH_EXIT)
+
+
+def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     workspace_dir = root / deps.WORKSPACE_DIR
 
     if plan.repo:

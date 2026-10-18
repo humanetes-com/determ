@@ -176,8 +176,11 @@ def test_rows_are_written_and_a_flat_rebuy_is_deferred_next_fill(tmp_path: Path)
                   kind=RouteKind.PER_FN, label="per-fn", targets=frozenset({_STUB}),
                   stubs_in_targets=frozenset({_STUB}))], calls=calls)]
     hollow = {"t_hollow": frozenset({_STUB})}
+    # Both runs must execute here (this test's subject is the next fill's
+    # re-buy), so the within-fill re-ask deferral is off.
     first = execute_fill(routes, hollow=hollow, bodies_sha=lambda _t: "same",
-                         deps=_deps(tmp_path, log, events, budget=60))
+                         deps=replace(_deps(tmp_path, log, events, budget=60),
+                                      defer_reasked=False))
     assert [r.outcome for r in first.rows] == [RunOutcome.FLAT, RunOutcome.FLAT]
     stored = RouteLedgerStore(tmp_path).load("p", "c")
     assert len(stored) == 2 and stored[0].label == "file src/x.rs"
@@ -201,7 +204,8 @@ def test_rows_are_written_and_a_flat_rebuy_is_deferred_next_fill(tmp_path: Path)
     other.mkdir()
     calls.clear()
     execute_fill(routes, hollow=hollow, bodies_sha=lambda _t: "same",
-                 deps=_deps(other, log, events, budget=60))
+                 deps=replace(_deps(other, log, events, budget=60),
+                              defer_reasked=False))
     calls.clear()
     held = execute_fill([*routes, fresh], hollow=hollow,
                         bodies_sha=lambda _t: "same",
@@ -751,3 +755,37 @@ def test_two_carved_pieces_of_one_file_never_share_a_wave(
     assert len([c for c in calls if c.startswith("file src/p.rs [")]) == 2
     assert peak["src/p.rs"] == 1
     assert overlap, "the other file's run still shares a wave"
+
+
+def test_a_run_that_re_asks_what_this_fill_asked_flat_is_deferred(
+        tmp_path: Path) -> None:
+    """Run `14235-bf24f931` iter 3: the impl route spent 34.4 min and 7 calls
+    re-asking the units the file route had just asked and reverted, under
+    the same evidence; every shadowed re-ask since 2026-10-13 (15 runs,
+    175 min) paid nothing. A non-session run every target of which this fill
+    already asked flat is deferred `asked_this_fill`. Control: with the
+    deferral off it runs, as the shadow line used to record."""
+    fill_reading.reset_last_comparison()
+    log: list[str] = []
+    events: list[tuple[str, dict]] = []
+    flat = RouteRunReport(model_calls=2, kept=frozenset({_STUB}),
+                          dispatched=frozenset({_STUB}))
+    calls: list[str] = []
+    routes = [_Route(RouteKind.FILE, [_file()], calls=calls, report=flat),
+              _Route(RouteKind.PER_FN, [RouteRun(
+                  kind=RouteKind.PER_FN, label="per-fn", targets=frozenset({_STUB}),
+                  stubs_in_targets=frozenset({_STUB}))], calls=calls)]
+    got = execute_fill(routes, hollow={}, bodies_sha=lambda _t: "same",
+                       deps=_deps(tmp_path, log, events))
+    by = {r.label: r for r in got.rows}
+    assert by["per-fn"].outcome is RunOutcome.DEFERRED
+    assert by["per-fn"].reason == "asked_this_fill"
+    assert any("per-fn DEFERRED asked_this_fill" in m for m in log)
+
+    fill_reading.reset_last_comparison()
+    log2: list[str] = []
+    got2 = execute_fill(routes, hollow={}, bodies_sha=lambda _t: "other",
+                        deps=replace(_deps(tmp_path / "c", log2, []),
+                                     defer_reasked=False))
+    assert {r.label: r.outcome for r in got2.rows}["per-fn"] is not \
+        RunOutcome.DEFERRED

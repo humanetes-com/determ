@@ -136,14 +136,31 @@ def test_a_copy_in_another_binary_counts() -> None:
     now: dict[str, PremiseEntry] = {
         "t": (False, ("at", "tests/a.rs", "3", "+", "fn|src/x.rs|b|"),
               False)}
-    assert standing_in(now, {"t"}, {("src/x.rs", "b")}) == ("t",)
-    assert standing_in(now, {"t"}, {("src/x.rs", "c")}) == ()
+    assert standing_in(now, {("src/x.rs", "b")}) == ("t",)
+    assert standing_in(now, {("src/x.rs", "c")}) == ()
 
 
 def test_a_passing_test_supports_nothing() -> None:
     now: dict[str, PremiseEntry] = {
         "t": (True, ("fn", "src/x.rs", "b", ""), False)}
-    assert standing_in(now, None, {("src/x.rs", "b")}) == ()
+    assert standing_in(now, {("src/x.rs", "b")}) == ()
+
+
+def test_a_test_the_claim_was_not_planned_on_stands_it() -> None:
+    """Run `14235-bf24f931` fill 1's shape: the claim on `b` was planned on
+    t1, a keep moved t1 to another unit and moved t2 (planned on nothing
+    here) to its first failure inside `b`. The claim stands. Control: the
+    same keep with t2 moved anywhere else refuses it, as before."""
+    plan: dict[str, PremiseEntry] = {
+        "t1": (False, ("fn", "src/x.rs", "a", ""), False),
+        "t2": (False, ("fn", "src/y.rs", "f", ""), False),
+    }
+    now = {"t1": (False, ("fn", "src/x.rs", "d", ""), False),
+           "t2": (False, ("fn", "src/x.rs", "b", "mod m"), False)}
+    claim = (frozenset({"t1"}), frozenset({_loc("src/x.rs::b")}))
+    assert not _gate(plan, now)(*claim)
+    elsewhere = {**now, "t2": (False, ("fn", "src/z.rs", "g", ""), False)}
+    assert _gate(plan, elsewhere)(*claim)
 
 
 def test_the_clock_asks_with_the_runs_units_unless_a_claim_names_its_own(
@@ -161,3 +178,52 @@ def test_the_clock_asks_with_the_runs_units_unless_a_claim_names_its_own(
     clock.may_claim()
     clock.may_claim({"t"}, {_loc("src/x.rs::b")})
     assert asked == [run_units, frozenset({_loc("src/x.rs::b")})]
+
+
+def test_a_unit_refused_on_premise_last_fill_is_not_refused_again() -> None:
+    """Since 2026-10-01 eight units were refused on premise in consecutive
+    fills (`src/ensure.rs::render` and `as_str` on `14235-bf24f931` fills 3
+    and 4): the re-plan chose them again and another run's keep moved their
+    planned tests first again. A unit the previous fill refused on premise
+    stands this time. Control: without the record it is refused."""
+    plan: dict[str, PremiseEntry] = {
+        "t1": (False, ("fn", "src/x.rs", "a", ""), False)}
+    now = {"t1": (False, ("fn", "src/x.rs", "d", ""), False)}
+    claim = (frozenset({"t1"}), frozenset({_loc("src/x.rs::b")}))
+    gate = _GroundGate(FillExecutionDeps(
+        log=lambda _m: None, emit=lambda *_a, **_k: None,
+        check_stop=lambda _c: None, ledger=None, project="p", cluster="c",
+        run_id="r", iteration=2, oracle_fp="o",
+        premise=plan, ground_now=lambda: now),
+        frozenset({_loc("src/x.rs::b")}))
+    fill_reading.note_kept(0)
+    assert not gate(*claim)
+    assert _gate(plan, now)(*claim)
+
+
+def test_the_previous_fill_is_the_newest_earlier_one_and_only_its_premise_drops(
+        ) -> None:
+    from pipeline_core.domain.fill_schedule import (
+        RouteKind,
+        RouteLedgerRow,
+        RunOutcome,
+        premise_refused_last_fill,
+    )
+
+    def row(run: str, it: int, started: str,
+            filtered: tuple[tuple[str, str, str], ...]) -> RouteLedgerRow:
+        return RouteLedgerRow(
+            kind=RouteKind.PER_FN, label="per-fn", targets=(), bodies_sha="",
+            oracle_fp="o", outcome=RunOutcome.FLAT, run_id=run, iteration=it,
+            cluster="c", started=started, filtered=filtered)
+
+    rows = [
+        row("r1", 3, "2026-10-16T05:00:00", (("src/x.rs", "old", "premise"),)),
+        row("r2", 1, "2026-10-16T06:00:00", (("src/x.rs", "b", "premise"),
+                                              ("src/x.rs", "s", "share"))),
+        row("r2", 2, "2026-10-16T07:00:00", (("src/x.rs", "now", "premise"),)),
+    ]
+    got = premise_refused_last_fill(rows, cluster="c", run_id="r2", iteration=2)
+    assert got == {_loc("src/x.rs::b")}
+    assert premise_refused_last_fill(rows, cluster="other", run_id="r2",
+                                     iteration=2) == frozenset()

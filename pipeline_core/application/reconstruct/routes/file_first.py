@@ -68,9 +68,15 @@ class FileRoute:
         return out
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        # Every return that opens nothing says why: run `1057870-b427a3a2`
+        # fill 2 printed `EMPTY after 0.0 min (0 call(s))` for a 12-unit
+        # file run and no line located the exit.
         file_rel = run.files[0] if run.files else ""
         unit = next(((f, bs) for f, bs in self._units_now() if f == file_rel), None)
         if unit is None:
+            self._log(f"  [phase-c/file] {file_rel}: opens nothing — the file "
+                      "has no stub or re-fill block left to plan (an earlier "
+                      "run of this fill wrote them, or the plan is stale).")
             return RouteRunReport(empty=True)
         blocks, withheld = list(unit[1]), frozenset[str]()
         if run.parent:
@@ -78,8 +84,13 @@ class FileRoute:
             # units as re-buys this fill.
             blocks, withheld = narrow_blocks_to(unit[1], run.targets)
             if not blocks:
+                self._log(f"  [phase-c/file] {file_rel}: opens nothing — no "
+                          "block of the file holds the carved targets.")
                 return RouteRunReport(empty=True)
-        if not clock.may_claim():
+        why = clock.refusal()
+        if why:
+            self._log(f"  [phase-c/file] {file_rel}: opens nothing — the "
+                      f"claim was refused ({why}).")
             return RouteRunReport(empty=True)
         snap = self._snapshot()
         try:

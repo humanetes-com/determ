@@ -575,16 +575,6 @@ def split_env_worlds(
     return orig, classified(twin, default_cluster=spec.cfg_cluster)
 
 
-# Observe tags that pin an env-moving render. Display does not: a message
-# string is the same under RUST_BACKTRACE=0 and =1.
-_EXACT_FORMAT_OBSERVE = frozenset({"debug", "alt_debug"})
-_EXACT_FORMAT_PROBE_KINDS = frozenset(
-    {
-        OutcomeKind.DEBUG_STRING,
-        OutcomeKind.ALT_DEBUG_STRING,
-        OutcomeKind.CHAIN_SEQUENCE,
-    }
-)
 
 
 def fills_non_format_class(probe: CapturedProbe) -> bool:
@@ -598,25 +588,19 @@ def fills_non_format_class(probe: CapturedProbe) -> bool:
     return ".is_none()" in when or ".is_some()" in when
 
 
-def catalog_exact_format_observe_ok(observe: str) -> bool:
-    """Catalog-driver EXACT_FORMAT observe: debug / alt_debug only."""
-    return (observe or "").strip().lower() in _EXACT_FORMAT_OBSERVE
-
-
 def exact_format_ask_rejects(probe: CapturedProbe) -> str | None:
     """Why this block may not stand in for an EXACT_FORMAT ask, else None.
 
-    Catalog refuses a Display observe. Generic accepts any non-empty
-    observe — a Display probe that moved under the env flip counts."""
+    The bound driver accepts any non-empty observe — a Display probe that
+    moved under the env flip counts."""
     if fills_non_format_class(probe):
         return None
     obs = (probe.observe or "").strip().lower()
     if language_driver().exact_format_observe_ok(obs):
         return None
     return (
-        "EXACT_FORMAT ask requires observe debug or alt_debug; "
-        f"got {obs or 'empty'} — Display does not pin a render that moves "
-        "with the environment"
+        "EXACT_FORMAT ask requires an observe tag naming the render; "
+        f"got {obs or 'empty'}"
     )
 
 
@@ -707,19 +691,6 @@ CLASS_PROMPTS: Mapping[str, str] = {
     "OPTION_SEMANTICS": "when an optional observable is present and when it is absent",
 }
 
-# Pre-2026-09-02 EXACT_FORMAT ask. Harvest Display then covers the class, so
-# the probe never requests a Debug that would move with RUST_BACKTRACE.
-_EXACT_FORMAT_PROMPT_LEGACY = (
-    "an exact rendering — Display, Debug, or the alternate `{:#?}` Debug, which differ from each other"
-)
-
-
-def catalog_class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
-    """Catalog-driver class-ask phrasing (Debug-only EXACT_FORMAT when on)."""
-    out = dict(CLASS_PROMPTS)
-    if not pin_env_debug:
-        out["EXACT_FORMAT"] = _EXACT_FORMAT_PROMPT_LEGACY
-    return out
 
 
 def class_prompts(*, pin_env_debug: bool) -> dict[str, str]:
@@ -849,13 +820,6 @@ def probe_coverage_class(spec: BehaviourSpec) -> str:
         if not language_driver().exact_format_probe_covers(spec):
             return ""
     return name
-
-
-def catalog_exact_format_probe_covers(spec: object) -> bool:
-    """Catalog-driver coverage: Debug / alternate-Debug / chain Then only."""
-    then = getattr(spec, "then", None)
-    kind = then.kind if then is not None else None
-    return kind in _EXACT_FORMAT_PROBE_KINDS
 
 
 def probe_spec(

@@ -27,11 +27,9 @@ from pipeline_core.domain.compile_probe import CompileProbe
 from pipeline_core.domain.enums import FillUnit, FixStrategy
 from pipeline_core.domain.fix_report import FixKind, FixReport
 from pipeline_core.domain.fix_session import FixSession
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator, FnRecord, ImplBlock
 from pipeline_core.domain.reconstruction import SpliceOutcome
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 
 class _Model:
@@ -239,7 +237,7 @@ def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) ->
     pin = BehaviourSpec(
         behaviour_id="pin",
         setup="",
-        when='err.is::<&str>()',
+        when='Error::msg("x").is::<&str>()',
         then=ObservableOutcome.type_identity("&str", True),
         subkind=BehaviourSubKind.OUTCOME,
         fence=FenceDirective.RUN,
@@ -274,14 +272,13 @@ def test_one_shot_behavior_prompt_carries_aimed_identity_must(tmp_path: Path) ->
         assert model.prompts, fn
         return model.prompts[0]
 
-    with using_driver(catalog_driver()):
-        ctor = _run(
-            "src/error.rs",
-            "impl Error {\n"
-            "    fn construct_from_adhoc<M>(error: M) -> Self { wrap() }\n"
-            "}\n",
-            "construct_from_adhoc", "impl Error",
-            "fn construct_from_adhoc<M>(error: M) -> Self")
+    ctor = _run(
+        "src/error.rs",
+        "impl Error {\n"
+        "    fn construct_from_adhoc<M>(error: M) -> Self { wrap() }\n"
+        "}\n",
+        "construct_from_adhoc", "impl Error",
+        "fn construct_from_adhoc<M>(error: M) -> Self")
     assert "MUST:" in ctor
     assert "`is::<&str>()`" in ctor
     assert "never a wrapper's" in ctor

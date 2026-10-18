@@ -30,10 +30,14 @@ one file and one write, kept because the authored splicers need exactly that.
 """
 from __future__ import annotations
 
+import itertools
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
+
+from pipeline_core.domain.rust_fn_headers import locate_all_fns
 
 # A `(path) -> parses?` predicate. Production binding is the syn extractor via
 # the StructureReader port; never brace-counting (syn is the standard parser).
@@ -50,6 +54,9 @@ class PreImage:
     path: Path
     data: bytes | None
     parsed: bool | None
+    #: When it was taken, on the clock the kept-edit journal shares
+    #: (:func:`note_kept_edit`). 0 for a pre-image built by hand.
+    seq: int = 0
 
     def text(self, errors: str = "strict") -> str:
         """The pre-image decoded as UTF-8 — the same bytes a caller reads
@@ -60,22 +67,73 @@ class PreImage:
         return "" if self.data is None else self.data.decode("utf-8", errors)
 
 
+# The kept-edit journal: edits that are verdicts in their own right and must
+# outlive a later restore of an older pre-image. A crash settlement stubs an
+# unproven culprit OUTSIDE the write it judged and records a refutation row
+# for it; the file route's decline, its compile peel and its whole-reply
+# revert then put back the attempt's pre-image, which was taken before the
+# settlement and still held the culprit's body: the refutation stood and the
+# culprit was back on the tree (seen on the file route on 2026-10-16 while
+# the crash peel was being written). One clock orders pre-images and
+# journal entries; `restore` re-applies, to its own file, every entry made
+# after its pre-image was taken. Entries are (seq, resolved path, fn name,
+# occurrence index among that name's fns, body text).
+_SEQ = itertools.count(1)
+_JOURNAL_LOCK = threading.Lock()
+_KEPT_EDITS: list[tuple[int, Path, str, int, str]] = []
+
+
+def note_kept_edit(path: Path, fn_name: str, occurrence: int,
+                   body: str) -> None:
+    """Record that the ``occurrence``-th fn named ``fn_name`` in ``path``
+    was given ``body`` (the text between its braces) as a verdict that a
+    restore of an older pre-image must not undo."""
+    with _JOURNAL_LOCK:
+        _KEPT_EDITS.append((next(_SEQ), Path(path).resolve(), fn_name,
+                            occurrence, body))
+
+
+def _reapply_kept_edits(pre: PreImage) -> None:
+    if pre.seq <= 0:
+        return
+    target = Path(pre.path).resolve()
+    with _JOURNAL_LOCK:
+        due = [e for e in _KEPT_EDITS if e[0] > pre.seq and e[1] == target]
+    if not due:
+        return
+    text = pre.path.read_bytes().decode("utf-8", "replace")
+    changed = False
+    for _seq, _p, name, i, body in due:
+        locs = locate_all_fns(text, name)
+        if i >= len(locs):
+            continue
+        _sig, _s, b, e = locs[i]
+        if text[b:e] != body:
+            text = text[:b] + body + text[e:]
+            changed = True
+    if changed:
+        pre.path.write_bytes(text.encode("utf-8"))
+
+
 def capture(path: Path, validate_parse: ParseValidator | None) -> PreImage:
+    seq = next(_SEQ)
     if not path.exists():
-        return PreImage(path, None, None)
+        return PreImage(path, None, None, seq)
     data = path.read_bytes()
     parsed = None if validate_parse is None else bool(validate_parse(path))
-    return PreImage(path, data, parsed)
+    return PreImage(path, data, parsed, seq)
 
 
 def restore(pre: PreImage) -> None:
-    """Put the pre-image back, byte for byte. A file that did not exist is
-    removed again."""
+    """Put the pre-image back, byte for byte, then re-apply every kept edit
+    (:func:`note_kept_edit`) made to that file after the pre-image was
+    taken. A file that did not exist is removed again."""
     if pre.data is None:
         pre.path.unlink(missing_ok=True)
         return
     pre.path.parent.mkdir(parents=True, exist_ok=True)
     pre.path.write_bytes(pre.data)
+    _reapply_kept_edits(pre)
 
 
 def parse_guarded_write(

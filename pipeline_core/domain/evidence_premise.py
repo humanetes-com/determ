@@ -108,6 +108,16 @@ def _fold(text: str) -> str:
     return " ".join(str(text).split())
 
 
+# The fields of a retrospectives row a prompt can carry: the lesson
+# (`RETROSPECTIVE_GUIDANCE`) and the three a later `LAST_ERROR` is built from.
+_PROMPT_FIELDS = ("guidance", "last_compile_error", "last_error_preview",
+                  "last_failed_body")
+# A lesson learned on a tree whose own stubs decided the run is never shown
+# (`retro_gate.screen_guidance`, its first rule); the flag's name is that
+# module's `GUIDANCE_FROM_HOLLOW_TREE`.
+_HOLLOW_FLAG = "guidance_from_hollow_tree"
+
+
 def retro_evidence_text(records: Mapping[str, Mapping[str, Any]]) -> str:
     """The retrospectives store's rows for ONE unit, as comparable text.
 
@@ -115,11 +125,18 @@ def retro_evidence_text(records: Mapping[str, Mapping[str, Any]]) -> str:
     container (`src/error.rs::fmt` has `DebugforError`, `DisplayforError`,
     `DebugforErrorImpl<E>` and `DisplayforErrorImpl<E>` on the live store)
     plus any joint record that names it. Keys are sorted so the store's
-    iteration order cannot move the digest, and each row is dumped with
-    sorted field names for the same reason. `default=str` keeps a row a
-    corrupt value cannot make unreadable: this feeds a fingerprint, and the
-    cost of rendering an odd value as its repr is a fingerprint that moves
-    (one re-dispatch), never an exception on the dispatch path.
+    iteration order cannot move the digest.
+
+    Only what a prompt can carry is digested: the guidance (unless the row
+    is flagged as learned on a hollow tree, which no prompt shows) and the
+    `last_compile_error` / `last_error_preview` / `last_failed_body` a later
+    LAST_ERROR reads. Counters, rounds, categories and convictor lists moved
+    the fingerprint with nothing new in any prompt: run `1158170-ce307ee7`
+    (2026-09-15) printed 13 retired and 9 withheld retro lines against 5
+    honoured, so a released unit could re-buy on a byte-identical prompt.
+    Screen rules that need the prompt's own context (a contradicted target,
+    a moved convictor) are not applied here; a row they retire still moves
+    the digest when its guidance text changes.
     """
     if not records:
         return ""
@@ -127,8 +144,13 @@ def retro_evidence_text(records: Mapping[str, Mapping[str, Any]]) -> str:
     for key in sorted(records):
         row = records[key]
         body = row if isinstance(row, Mapping) else {"value": row}
+        shown = {f: body.get(f) for f in _PROMPT_FIELDS if body.get(f)}
+        if body.get(_HOLLOW_FLAG):
+            shown.pop("guidance", None)
+        if not shown:
+            continue
         parts.append(key + "\t" + json.dumps(
-            dict(body), sort_keys=True, default=str, ensure_ascii=False))
+            shown, sort_keys=True, default=str, ensure_ascii=False))
     return "\n".join(parts)
 
 

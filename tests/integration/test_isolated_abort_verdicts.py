@@ -350,7 +350,7 @@ def test_every_schedule_crash_input_sees_the_isolated_abort(
                  crash_blamed=frozenset({culprit}))
     assert [r.run.label for r in s.ordered] == ["culprit"]
     assert [(r.run.label, r.reason) for r in s.deferred] == [
-        ("bystander", "rebuy_flat")]
+        ("bystander", "unmeasurable")]
 
 
 @pytest.mark.gate

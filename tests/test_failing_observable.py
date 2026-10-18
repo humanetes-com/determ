@@ -234,3 +234,24 @@ def test_an_aliased_test_name_finds_its_observable() -> None:
     res2 = AttributionResult({}, FailureKind.BEHAVIOR, {},
                              {"bag::bag_roundtrip": _whole("bag_roundtrip")})
     assert res2.observable_traits_for("bag_roundtrip") == {"Display"}
+
+
+def test_the_hop_line_says_what_its_traits_were_read_from() -> None:
+    """341's offline reading of eleven hop lines could not tell whether the
+    hop read the failing line or the whole test source. The attribution
+    line now names it."""
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for r in _RECS:
+        by_name.setdefault(r["fn_name"], []).append(r)
+    logs: list[str] = []
+    _attribute_format_only_test(
+        "bag_roundtrip", _whole("bag_roundtrip"), _TEST_SRC, by_name,
+        {}, {}, logs.append, owned=True, pairs_out=set(), observed=None)
+    assert any("read from the whole test source" in m for m in logs)
+    logs.clear()
+    _attribute_format_only_test(
+        "bag_roundtrip", _whole("bag_roundtrip"), _TEST_SRC, by_name,
+        {}, {}, logs.append, owned=True, pairs_out=set(),
+        observed='assert_eq!(format!("{}", b), "x")')
+    assert any("read from the failing observable `assert_eq!" in m
+               for m in logs)

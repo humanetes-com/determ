@@ -160,7 +160,7 @@ class FillEngine(Protocol):
         module: str, cluster: BuildCluster, check_cmd: str,
         cluster_env: dict[str, str], leaf_counts: dict[str, int] | None,
         fr_path: Path | None, test_cmd_builder: Any, tag: str,
-        heal_file: Any = ...,
+        heal_file: Any = ..., score_only: bool = ...,
     ) -> ClusterFillResult: ...
     def fill_fns_one_by_one(
         self, *, project_dir: Path, target_src_dir: Path,

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.layout_retrigger import (
     PAYOFF_HIGH_KEY,
     PAYOFF_ZERO_KEY,
@@ -32,7 +31,6 @@ from pipeline_core.domain.layout_retrigger import (
 )
 from pipeline_core.domain.models import FnLocator, FnRecord
 from pipeline_core.domain.starvation import StarvationCause
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 _PRIV = frozenset({"ErrorImpl", "ErrorVTable"})
 
@@ -213,11 +211,11 @@ def test_crash_blame_is_filled_body_only_when_every_named_body_compiles():
     assert crash_blame_is_filled_body(ev, []) is False
 
 
-def test_a_filled_conversion_stays_filled_body_when_a_family_sibling_is_undeclared():
-    """Family union is for dispatch and the MUST. The retrigger reads
-    origin-blamed locators only. A filled recovered conversion plus an
-    undeclared sibling keeps filled-body True; the union of the same
-    evidence is False — the gate that would re-open cause C."""
+def test_a_filled_recovered_origin_is_a_filled_body():
+    """The retrigger reads origin-blamed locators, and they are the whole
+    blame: no undeclared sibling at the same file joins the set, so a filled
+    recovered origin keeps filled-body True — the gate that would re-open
+    cause C if a name catalog widened it (removed 2026-10-17)."""
     from pipeline_core.domain.crash_site import (
         CrashFrame,
         CrashSite,
@@ -244,13 +242,14 @@ def test_a_filled_conversion_stays_filled_body_when_a_family_sibling_is_undeclar
     origin_ev = CrashEvidence(
         vanished=vanished, suspect_fns=frozenset(),
         blamed_fns=origin_blamed_locators((site,)))
-    with using_driver(catalog_driver()):
-        union_ev = CrashEvidence(
-            vanished=vanished, suspect_fns=frozenset(),
-            blamed_fns=blamed_locators((site,)))
+    assert blamed_locators((site,)) == origin_blamed_locators((site,))
     assert crash_blame_is_filled_body(origin_ev, filled) is True
-    assert crash_blame_is_filled_body(union_ev, filled) is False, (
-        "negative control: the family union is False on the same records")
+    unfilled = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=origin_blamed_locators((site,))
+        | {FnLocator("src/error.rs", "undeclared_sibling")})
+    assert crash_blame_is_filled_body(unfilled, filled) is False, (
+        "negative control: an undeclared locator in the blame is not filled")
 
 
 def test_crash_blame_decides_and_excludes_components_the_fault_never_touched():
@@ -792,16 +791,14 @@ def test_a_fault_no_component_declares_still_reaches_the_ones_it_references():
         ev, records, frozenset({"Quoted"})) is BlameGrade.NONE
 
 
-def test_an_undeclared_origin_beside_a_declared_family_sibling_still_declines():
-    """The driver hands the retrigger origin_blamed_locators, never the
-    family-widened blamed_locators dispatch uses. When the origin frame
-    names a CONVERSION_FAMILY member the extractor has no record for,
-    while a same-file sibling is a declared member of some component,
-    the family-widened set grades that component OWNS on the sibling's
-    name alone. Declining is the intended trade: the origin locator is
-    present, the extractor has no record for it, and a component that
-    only declares a family sibling must not grade OWNS. Empty blamed_fns
-    (unattributed) is a different decline."""
+def test_an_undeclared_origin_beside_a_declared_sibling_still_declines():
+    """When the origin frame names a fn the extractor has no record for,
+    while a same-file sibling is a declared member of some component, that
+    component must not grade OWNS on the sibling's name alone. Declining is
+    the intended trade: the origin locator is present, the extractor has no
+    record for it. Empty blamed_fns (unattributed) is a different decline.
+    Negative control: a blame that also names the declared sibling (what a
+    name catalog's widening produced, removed 2026-10-17) grades OWNS."""
     from pipeline_core.domain.crash_site import (
         CrashFrame,
         CrashSite,
@@ -829,15 +826,16 @@ def test_an_undeclared_origin_beside_a_declared_family_sibling_still_declines():
     origin_ev = CrashEvidence(
         vanished=vanished, suspect_fns=frozenset(),
         blamed_fns=origin_blamed_locators((site,)))
-    with using_driver(catalog_driver()):
-        union_ev = CrashEvidence(
-            vanished=vanished, suspect_fns=frozenset(),
-            blamed_fns=blamed_locators((site,)))
+    assert blamed_locators((site,)) == origin_blamed_locators((site,))
     assert crash_candidate_grade(
         origin_ev, records, vtable_comp) is BlameGrade.NONE
+    sibling = FnLocator(records[0].file, records[0].fn_name)
+    widened = CrashEvidence(
+        vanished=vanished, suspect_fns=frozenset(),
+        blamed_fns=origin_blamed_locators((site,)) | {sibling})
     assert crash_candidate_grade(
-        union_ev, records, vtable_comp) is BlameGrade.OWNS, (
-        "negative control: the family union grades OWNS on the declared sibling")
+        widened, records, vtable_comp) is BlameGrade.OWNS, (
+        "negative control: naming the declared sibling grades OWNS")
 
 
 # --- cause C's own memory: signature refutation and signature payoff -----------

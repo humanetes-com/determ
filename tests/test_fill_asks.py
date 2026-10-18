@@ -54,3 +54,25 @@ def test_a_run_that_asked_nothing_records_nothing() -> None:
     for oc in (RunOutcome.DEFERRED, RunOutcome.EMPTY, RunOutcome.STOPPED):
         asks.note(_row(oc), [_U])
     assert not asks.would_defer([_U])
+
+
+def test_a_compile_revert_of_a_joint_write_leaves_its_units_open() -> None:
+    """A file reply reverted on a compile error judged the joint write; the
+    per-block fallback is the narrower ask it exists for. Control: a revert
+    with no compile class (a crash, a wrong body) records the ask."""
+    asks = FillAsks()
+    asks.note(_row(RunOutcome.REVERTED, classes={"compile": 1}), [_U])
+    assert not asks.would_defer([_U])
+    asks.note(_row(RunOutcome.REVERTED, classes={"wrong": 1}), [_U])
+    assert asks.would_defer([_U])
+
+
+def test_a_reply_with_no_body_is_not_an_ask() -> None:
+    """A file call that replied with no FN tags (an answer dropped) judged
+    nothing; its blocks keep the per-block fallback. Control: a flat keep
+    is an ask."""
+    asks = FillAsks()
+    asks.note(_row(RunOutcome.FLAT, classes={"dropped": 1}), [_U])
+    assert not asks.would_defer([_U])
+    asks.note(_row(RunOutcome.FLAT, kept=(_U,)), [_U])
+    assert asks.would_defer([_U])

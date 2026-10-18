@@ -1152,6 +1152,13 @@ class ClusterFillResult:
     # `EXHAUSTED ... after its budgets were spent` and checkpointed them done
     # after a TypeError at their first fill, before any model call.
     crashed: str = ""
+    # The traceback of `crashed`, carried so the run's end can print it beside
+    # the HEALTH line without reading the log (`domain/pipeline_crash.py`).
+    crash_traceback: str = ""
+    # The cluster was scored by its entry sweep only, because an earlier
+    # cluster's fill raised. Nothing was filled and no budget was spent, so it
+    # is neither done nor exhausted and is not checkpointed.
+    scored_only: bool = False
     # The fns a fill route ACTUALLY attempted this call (a model attempt was
     # made, or a body landed) — as opposed to the frontier the caller asked
     # for. The two differ whenever a route stands down: the impl route defers

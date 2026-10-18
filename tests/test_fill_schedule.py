@@ -585,7 +585,7 @@ def test_order_only_under_a_zero_budget_defers_nothing() -> None:
 
 def test_an_unmeasurable_run_ranks_rebuy_flat_and_defers_under_a_budget() -> None:
     """A run whose every aimed test is unmeasurable, and whose targets miss
-    the crash-blamed set, ranks rebuy_flat (weight 0) even with no ledger
+    the crash-blamed set, ranks at weight 0 (`unmeasurable`) even with no ledger
     row. Under a budget it defers behind a never-served neighbour.
     Control: without the new arguments it ranks never_served and runs."""
     fmt = _FMT
@@ -610,7 +610,7 @@ def test_an_unmeasurable_run_ranks_rebuy_flat_and_defers_under_a_budget() -> Non
         [file_run, neighbour], [], oracle_fp="o", hollow={},
         unmeasurable_tests=unmeas, crash_blamed=blamed)
     by = {s.run.label: s for s in ranked.ordered}
-    assert by["file src/fmt.rs"].reason == "rebuy_flat"
+    assert by["file src/fmt.rs"].reason == "unmeasurable"
     assert by["file src/fmt.rs"].weight == 0
     assert by["per-fn"].reason == "never_served"
     budgeted = schedule(

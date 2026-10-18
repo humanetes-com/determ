@@ -572,6 +572,25 @@ def unreached_by_test(unit: FnLocator, test: str) -> bool:
     return bool(convictors_never_enter(unit, [key], reading.owners))
 
 
+def screen_unentered_convictions[K: (FnLocator, FnSite)](
+    convicting: Mapping[K, set[str]],
+) -> dict[K, set[str]]:
+    """The direct-evidence map without the convictions the BOUND reading
+    refutes: a test convicts a unit only if it was not measured entering
+    other bodies while never entering this one (`unreached_by_test`, the
+    positive-evidence rule; unbound or unmeasured keeps the conviction).
+
+    The identifier scan grades a unit DIRECT because a failing test's source
+    names it. `test_atom` / `test_path` convicted `src/chain.rs::new` that
+    way while the coverage reading already said the tests never executed it
+    (entry run `507656-fe50f9f1`, 2026-09-24), so the unit's fill was
+    judged, and its retrospective written, on tests it cannot move. The
+    format hop screens its members the same way (`attribution`)."""
+    return {k: {t for t in tests
+                if not unreached_by_test(FnLocator(k.file, k.fn_name), t)}
+            for k, tests in convicting.items()}
+
+
 def measured_entry_sets(tests: Iterable[str]) -> dict[str, tuple[str, ...]]:
     """The bound reading's measured entry set per test, rendered as sorted
     `file::fn` strings — the checkable premise a behavioural retrospective is

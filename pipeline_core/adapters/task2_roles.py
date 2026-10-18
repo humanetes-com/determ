@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.adapters.process import cargo_manifest_refusal
 from pipeline_core.domain.attribution import AttributionResult
 from pipeline_core.domain.models import ClusterFillResult, FnLocator, Frontier
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -160,6 +161,9 @@ class CargoBackendAdapter:
 
     def run_raw(self, cmd: list[str], cwd: Path, env: dict[str, str],
                 timeout: int) -> tuple[int, str, str]:
+        refusal = cargo_manifest_refusal(cmd, cwd)
+        if refusal is not None:
+            return -1, "", refusal
         try:
             r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace",
                                timeout=timeout, env=env)

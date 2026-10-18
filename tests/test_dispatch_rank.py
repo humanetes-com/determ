@@ -904,3 +904,30 @@ def test_starved_names_an_evidenced_unit_the_sweep_the_bound_breaks():
     assert starved(lone, (), 12) == {"n": 0}
     assert starved(lone, ("n",), 12) == {}
     assert rotation_bound(0, 0, 12) == 1 and rotation_bound(5, 13, 12) == 5
+
+
+def test_a_served_unit_with_an_unasked_fingerprint_is_evidenced() -> None:
+    """A served unit nothing owes, whose current fingerprint no route has
+    asked, used to rank OTHER and could stay past the cap for good (run
+    `1430425-193a8f28`, six sweeps). It is EVIDENCED and leads the OTHER
+    units into the batch. Control: the same unit without the flag ranks by
+    static order behind them."""
+    from pipeline_core.domain.dispatch_rank import (
+        RankClass,
+        Service,
+        UnitFacts,
+        rank,
+        take,
+    )
+    others = {f"o{i}": UnitFacts(static_index=i, service=Service.SERVED)
+              for i in range(3)}
+    late = UnitFacts(static_index=9, service=Service.SERVED, unasked=True)
+    assert late.rank_class is RankClass.EVIDENCED
+    batch = take(rank({**others, "late": late}), (), 2,
+                 cohort=None, traversed=())
+    assert "late" in batch.keys
+    plain = UnitFacts(static_index=9, service=Service.SERVED)
+    assert plain.rank_class is RankClass.OTHER
+    batch2 = take(rank({**others, "late": plain}), (), 2,
+                  cohort=None, traversed=())
+    assert "late" not in batch2.keys

@@ -9,19 +9,17 @@ family of five crate names is the pipeline taking the language job —
 the next leftover of a different construct then needs a sibling of
 each function.
 
-Two drivers, selected by ``LANGUAGE_DRIVER`` at composition
-(``generic`` default, ``catalog`` the pre-2026-09-09 tables for an A/B):
-
-- :class:`GenericLanguageDriver` keys on shape the record already has
-  (a ``fmt::Result`` return, a harvested pin, a computed derive list
-  injected elsewhere, an unsized ``Box<dyn`` argument, a by-value
-  ``self`` that copies a pointer field, a Then that moved under an
-  env flip, rustc saying a name or field is missing). It does not
-  import or call the catalog tables.
-- :class:`CatalogLanguageDriver` is those tables, kept so an A/B can
-  turn them back on. The factory
-  ``pipeline_core.prompts.language_catalog.catalog_driver`` injects the
-  original functions so this module never imports prompts.
+One driver, :class:`GenericLanguageDriver`: it keys on shape the record
+already has (a ``fmt::Result`` return, a harvested pin, a computed derive
+list injected elsewhere, an unsized ``Box<dyn`` argument, a by-value
+``self`` that copies a pointer field, a Then that moved under an env flip,
+rustc saying a name or field is missing). The catalog driver (the
+pre-2026-09-09 tables, a recipe keyed on two crate constructors and a
+conversion family of five crate names) was deleted on 2026-10-17: it was
+original-derived guidance one ``LANGUAGE_DRIVER`` flip from a prompt. The
+last commit that carries it is tagged ``catalog-driver-last``; an A/B
+restores its files from that tag into a branch and ports it to the
+then-current protocol.
 
 Bind once at the composition root (:func:`bind`). The default is
 generic so unit tests that never import the pipeline see the
@@ -31,7 +29,7 @@ composition seam (same shape as ``prompts.runtime``).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -66,13 +64,11 @@ class LanguageDriver(Protocol):
     def is_vtable_dispatch(self, sig_text: str, container: str) -> bool: ...
     def vtable_fast_exit_guidance(self) -> str: ...
     def vtable_category_line(self) -> str: ...
-    def conversion_family(self) -> frozenset[str]: ...
     def access_licenses_conversion(
         self, symbols: str, crate_types: Collection[str] = (),
         crate_traits: Collection[str] = ()) -> bool: ...
     def origin_licenses_conversion(self, origin: Sequence[Mapping[str, object]]) -> bool: ...
     def unique_called_name(self, source_line: str) -> str | None: ...
-    def is_destructor_fn_name(self, fn_name: str) -> bool: ...
     def ownership_transfer_must(self, names: Collection[str]) -> str: ...
     def file_fill_tag_examples(self) -> str: ...
     def sig_change_example(self, fn_name: str) -> str: ...
@@ -404,12 +400,6 @@ class GenericLanguageDriver:
             "the skeleton does not expose the table"
         )
 
-    def conversion_family(self) -> frozenset[str]:
-        # Membership is shape (by-value receiver that copies a pointer
-        # field), computed at the call site from records. No hardcoded
-        # name set lives here.
-        return frozenset()
-
     def access_licenses_conversion(
         self, symbols: str, crate_types: Collection[str] = (),
         crate_traits: Collection[str] = ()) -> bool:
@@ -430,21 +420,10 @@ class GenericLanguageDriver:
         found = _called_idents(source_line)
         return found[0] if found else None
 
-    def is_destructor_fn_name(self, fn_name: str) -> bool:
-        # The faulting frame already names the fn. Synthesizing a family
-        # from a token in crate fn names is the hop this path drops.
-        # ASAN drop-glue marks stay evidence parsing at the call site.
-        del fn_name
-        return False
-
     def ownership_transfer_must(self, names: Collection[str]) -> str:
-        if not names:
-            return ""
-        if self.conversion_family().intersection(names):
-            return _OWNERSHIP_AFTER_COPY
-        # No hardcoded family: a non-empty crashed set at this slot is
-        # already the conversion the localizer named.
-        return _OWNERSHIP_AFTER_COPY
+        # A non-empty crashed set at this slot is already the conversion the
+        # localizer named; no name set decides it.
+        return _OWNERSHIP_AFTER_COPY if names else ""
 
     def file_fill_tag_examples(self) -> str:
         return (
@@ -455,149 +434,7 @@ class GenericLanguageDriver:
         )
 
     def sig_change_example(self, fn_name: str) -> str:
-        return f"  unsafe fn {fn_name}(arg: Own<T>, target: TypeId) {{\n"
-
-
-@dataclass(frozen=True, slots=True)
-class CatalogLanguageDriver:
-    """The pre-2026-09-09 language catalogs, kept for an A/B.
-
-    The tables live in prompts / ``catalog_is_formatting``. This class
-    holds injected callables so domain never imports prompts; the
-    factory is :func:`pipeline_core.prompts.language_catalog.catalog_driver`.
-    Constructing this with empty callables would silently no-op — do not;
-    go through the factory.
-    """
-
-    trait_contract_fn: Callable[[str], str]
-    is_formatting_fn: Callable[[str, str], bool]
-    derived_trait_rule_text: str
-    autotrait_rule_text: str
-    gotchas_summary_fn: Callable[[], str]
-    gotchas_for_error_fn: Callable[[str], str]
-    class_prompts_fn: Callable[[bool], dict[str, str]]
-    name: str = "catalog"
-    format_follow: tuple[str, ...] = ("fmt", "debug")
-
-    def trait_contract(self, container: str) -> str:
-        return self.trait_contract_fn(container)
-
-    def is_formatting(self, container: str, sig: str) -> bool:
-        return self.is_formatting_fn(container, sig)
-
-    def format_follow_default(self) -> tuple[str, ...]:
-        return self.format_follow
-
-    def derived_trait_rule(self) -> str:
-        return self.derived_trait_rule_text
-
-    def autotrait_rule(self) -> str:
-        return self.autotrait_rule_text
-
-    def class_prompts(self, *, pin_env_debug: bool) -> dict[str, str]:
-        return self.class_prompts_fn(pin_env_debug)
-
-    def exact_format_observe_ok(self, observe: str) -> bool:
-        from pipeline_core.domain.behaviour_probe import catalog_exact_format_observe_ok
-        return catalog_exact_format_observe_ok(observe)
-
-    def exact_format_probe_covers(self, spec: object) -> bool:
-        from pipeline_core.domain.behaviour_probe import catalog_exact_format_probe_covers
-        return catalog_exact_format_probe_covers(spec)
-
-    def gotchas_summary(self) -> str:
-        return self.gotchas_summary_fn()
-
-    def gotchas_for_error(self, error_excerpt: str) -> str:
-        return self.gotchas_for_error_fn(error_excerpt)
-
-    def construction_recipe(self, name: str, container: str, sig: str = "") -> str:
-        from pipeline_core.domain.construction_recipe import catalog_construction_recipe
-        del sig
-        return catalog_construction_recipe(name, container)
-
-    def constructs_identity_subject(
-        self, name: str, container: str, sig: str,
-        identity_subject: str = "") -> bool:
-        from pipeline_core.domain.behaviour_select import catalog_constructs_identity_subject
-        del identity_subject
-        return catalog_constructs_identity_subject(name, container, sig)
-
-    def identity_must_admits(
-        self, name: str, container: str, sig: str,
-        identity_subject: str = "") -> bool:
-        from pipeline_core.domain.behaviour_select import catalog_identity_must_admits
-        del identity_subject
-        return catalog_identity_must_admits(name, container, sig)
-
-    def is_vtable_dispatch(self, sig_text: str, container: str) -> bool:
-        # Catalog: Own<ErrorImpl>/Ref<ErrorImpl> and no where E: bound.
-        if "unsafe fn" not in sig_text:
-            return False
-        combined = sig_text + " " + container
-        if "Own<ErrorImpl" not in combined and "Ref<ErrorImpl" not in combined:
-            return False
-        return "where E:" not in sig_text
-
-    def vtable_fast_exit_guidance(self) -> str:
-        return (
-            "fn requires ErrorVTable layout access via Own<ErrorImpl> or "
-            "Ref<ErrorImpl> without a where-bound. The vtable struct is not "
-            "exposed by the skeleton — do not retry."
-        )
-
-    def vtable_category_line(self) -> str:
-        return (
-            "  NEEDS_VTABLE_ACCESS     — requires reading the ErrorVTable; "
-            "layout is needed → classify as GENUINELY_HARD immediately; "
-            "vtable layout cannot be satisfied via trait methods alone, and "
-            "the skeleton does not expose the vtable struct"
-        )
-
-    def conversion_family(self) -> frozenset[str]:
-        from pipeline_core.domain.crash_site import CONVERSION_FAMILY
-        return CONVERSION_FAMILY
-
-    def access_licenses_conversion(
-        self, symbols: str, crate_types: Collection[str] = (),
-        crate_traits: Collection[str] = ()) -> bool:
-        from pipeline_core.domain.crash_site import catalog_access_licenses_conversion
-        del crate_types, crate_traits
-        return catalog_access_licenses_conversion(symbols)
-
-    def origin_licenses_conversion(
-            self, origin: Sequence[Mapping[str, object]]) -> bool:
-        from pipeline_core.domain.crash_site import catalog_origin_licenses_conversion
-        return catalog_origin_licenses_conversion(origin)
-
-    def unique_called_name(self, source_line: str) -> str | None:
-        from pipeline_core.domain.crash_site import (
-            CONVERSION_FAMILY,
-            crate_fn_named_on_source_line,
-        )
-        return crate_fn_named_on_source_line(source_line, CONVERSION_FAMILY)
-
-    def is_destructor_fn_name(self, fn_name: str) -> bool:
-        from pipeline_core.domain.crash_site import catalog_is_destructor_fn_name
-        return catalog_is_destructor_fn_name(fn_name)
-
-    def ownership_transfer_must(self, names: Collection[str]) -> str:
-        from pipeline_core.domain.crash_site import catalog_ownership_transfer_must
-        return catalog_ownership_transfer_must(names)
-
-    def file_fill_tag_examples(self) -> str:
-        return (
-            'WRONG: <FN name="Error: root_cause" block="impl Error">\n'
-            'WRONG: <FN name="ErrorImpl::provide" block="impl ErrorImpl">\n'
-            'RIGHT: <FN name="root_cause" block="impl Error">\n'
-            'RIGHT: <FN name="provide" block="impl ErrorImpl">'
-        )
-
-    def sig_change_example(self, fn_name: str) -> str:
-        return (
-            "  unsafe fn " + fn_name
-            + "<E: 'static>(e: Own<ErrorImpl>, target: TypeId) {\n"
-        )
+        return f"  fn {fn_name}(arg: &mut T, extra: usize) {{\n"
 
 
 _DRIVER: LanguageDriver = GenericLanguageDriver()

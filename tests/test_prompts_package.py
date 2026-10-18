@@ -15,7 +15,6 @@ from pipeline_core.prompts import runtime
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section,
     extract_trait_from_container,
-    trait_contract_for,
 )
 
 
@@ -26,8 +25,7 @@ def test_extract_trait_from_container() -> None:
     assert extract_trait_from_container("impl Foo") is None          # inherent
     assert extract_trait_from_container("") is None
     assert extract_trait_from_container("fn free()") is None
-    # Forms the old regex silently MISSED (returned None, so the catalog
-    # driver had no trait name to look up): generic impls (regex demanded
+    # Forms the old regex silently MISSED (returned None): generic impls (regex demanded
     # whitespace right after `impl`) ...
     assert extract_trait_from_container("impl<T> From<T> for X") == "From"
     assert extract_trait_from_container("impl<'a, T: ?Sized> AsRef<T> for Y<'a, T>") == "AsRef"
@@ -37,17 +35,6 @@ def test_extract_trait_from_container() -> None:
     # Unbalanced generics → unsupported form, not a crash.
     assert extract_trait_from_container("impl<T Unclosed") is None
     print("  OK  extract_trait_from_container")
-
-
-def test_trait_contract_lookup() -> None:
-    """The catalog table still exists (LANGUAGE_DRIVER=catalog A/B).
-    Production builders go through the bound driver; generic injects
-    nothing — that pin lives in test_language_driver.py."""
-    assert "Display::fmt" in trait_contract_for("impl Display for X")
-    # The generic-impl fix makes contracts reachable for generic impls too.
-    assert "From<T>::from" in trait_contract_for("impl<T> From<T> for X")
-    assert trait_contract_for("impl UnknownTrait for X") == ""
-    print("  OK  trait_contract_for")
 
 
 def test_runtime_defaults_and_bind() -> None:

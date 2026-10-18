@@ -16,9 +16,7 @@ from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
 from pipeline_core.application.tasks.task0d import Task0dDeps, run_task0d
 from pipeline_core.domain.behaviour import BehaviourSuite, OutcomeKind
 from pipeline_core.domain.behaviour_probe import ProbeResult
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import BuildCluster, FnRecord
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 FIXTURES = Path(__file__).parent / "fixtures" / "behaviours"
 
@@ -289,19 +287,6 @@ _DISPLAY_REPLY = (
 )
 
 
-def test_a_display_observe_is_a_miss_for_the_exact_format_ask(tmp_path: Path) -> None:
-    """EXACT_FORMAT is asked (harvest Display does not cover it). A Display
-    observe of a public value is not that pin and must not spend cargo."""
-    w = _World(reply=_DISPLAY_REPLY)
-    with using_driver(catalog_driver()):
-        run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
-    reasons = [m["reason"] for _c, ms in w.misses for m in ms]
-    assert reasons and "EXACT_FORMAT ask requires observe debug" in reasons[0]
-    assert w.probes_run == []
-    assert not any(s.behaviour_id.startswith("probe::") for s in w.saved["stable"].specs)
-    assert "never Display" in w.prompts[0]
-
-
 def test_pin_env_debug_off_admits_display_and_does_not_recapture(tmp_path: Path) -> None:
     """BEHAVIOUR_PIN_ENV_DEBUG=0 restores the pre-2026-09-02 contract: harvest
     Display covers EXACT_FORMAT so the Debug-only miss does not fire, and the
@@ -323,7 +308,7 @@ def test_pin_env_debug_off_admits_display_and_does_not_recapture(tmp_path: Path)
     assert seen.get("recapture") is None
     assert w.probes_run  # Display was not refused before cargo
     reasons = [m["reason"] for _c, ms in w.misses for m in ms]
-    assert not any("EXACT_FORMAT ask requires observe debug" in r for r in reasons)
+    assert not any("EXACT_FORMAT ask requires" in r for r in reasons)
     assert "never Display" not in w.prompts[0]
 
 

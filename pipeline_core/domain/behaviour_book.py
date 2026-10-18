@@ -943,6 +943,8 @@ class BookReading:
     # The roots the examples are given, the phrases kept for them, and why
     # the others have none (`given_phrase_drops`).
     given_roots: int = 0
+    # Distinct example setups phrased beside the roots (`given_setups`).
+    given_setups: int = 0
     given_phrases: int = 0
     given_refused: Mapping[str, int] = field(default_factory=dict)
 
@@ -960,11 +962,12 @@ class BookReading:
                 f"{where}{self._givens()}")
 
     def _givens(self) -> str:
-        if not self.given_roots:
+        if not (self.given_roots or self.given_setups):
             return ""
         why = ", ".join(f"{k} {v}" for k, v in sorted(self.given_refused.items())) or "none"
-        return (f"; givens: {self.given_phrases} phrase(s) for {self.given_roots} root(s) "
-                f"(without one: {why})")
+        setups = f" and {self.given_setups} setup(s)" if self.given_setups else ""
+        return (f"; givens: {self.given_phrases} phrase(s) for {self.given_roots} root(s)"
+                f"{setups} (without one: {why})")
 
     def _temp(self) -> str:
         return "server" if self.predict_temperature is None else f"{self.predict_temperature:g}"
@@ -983,7 +986,8 @@ class BookReading:
             "think": self.think,
             "sibling_examples": self.sibling_examples,
             "unaided_examples": self.unaided_examples,
-            "given_roots": self.given_roots, "given_phrases": self.given_phrases,
+            "given_roots": self.given_roots, "given_setups": self.given_setups,
+            "given_phrases": self.given_phrases,
             "given_refused": dict(self.given_refused),
         }
 
@@ -1192,12 +1196,16 @@ def render_feature(
     rule-less `Rule:` heading. Pure; deterministic for a given book.
 
     An example's Given is one step per root (:func:`example_given`), a
-    pointer `name (file)` into the test file that declares it, then the
-    example's own setup. No helper text is printed here: each root, observer
-    and import block is printed once, in :func:`render_givens_index`.
+    pointer `name (file)` into the test file that declares it, then a
+    pointer to the example's own setup (:func:`setup_key`). No code is
+    printed under a Given: each root, setup, observer and import block is
+    printed once, in :func:`render_givens_index`. A view that printed
+    `Given this setup` and the setup's code put 232 doc strings under a
+    Given in the anyhow stable view (book of 2026-10-04).
     `phrases` (`root key → sentence`, the book's `givens`) leads a step with
     its sentence; a root without one prints the pointer alone, so the
     pointer never depends on a model."""
+    setup_rep = setup_keys_by_text(specs_by_id.values())
     aimed = set(feature_spellings(feature.item, glossary))
     names = [g for g in glossary if g.name in aimed]
     lines = [GHERKIN_HEADER, f"Feature: {feature.item}"]
@@ -1212,11 +1220,13 @@ def render_feature(
         out = [f"    Example: {bid}"]
         given = example_given(s)
         steps = [_given_step(k, phrases or {}) for k in given.roots]
+        if given.setup.strip():
+            skey = setup_rep.get(given.setup.strip(), setup_key(s))
+            phrase = (phrases or {}).get(skey, "")
+            steps.append(f"{phrase} — {_setup_pointer(skey)}" if phrase
+                         else _setup_pointer(skey))
         for n, step in enumerate(steps):
             out.append(f"      {'And' if n else 'Given'} {step}")
-        if given.setup.strip():
-            out.append(f"      {'And' if steps else 'Given'} this setup")
-            out.extend("      " + ln for ln in _code_block(given.setup))
         out.append("      When")
         out.extend("      " + ln for ln in _code_block(example_when(s)))
         out.extend("      " + ln for ln in _then_step(s.then, _observer_pointer(s, given)))
@@ -1261,6 +1271,68 @@ def _given_step(key: str, phrases: Mapping[str, str]) -> str:
     return f"{phrase} — {_pointer(key)}" if phrase else _pointer(key)
 
 
+SETUP_KEY_PREFIX = "setup::"
+
+
+def setup_key(spec: BehaviourSpec) -> str:
+    """A pointer to an example's own setup, computed from its origin and
+    never stored: a crate test's (`testassert::<file>::<test>::<n>`) is that
+    test's n-th assertion, `setup::<file>::<test>#<n>`; any other example's
+    is its behaviour id. The view prints this instead of the setup's code
+    (the setup lives once in the index); the book's `givens` may hold a
+    phrase under it."""
+    parts = spec.behaviour_id.split("::")
+    if len(parts) >= 4 and parts[0] == "testassert":
+        return (f"{SETUP_KEY_PREFIX}{'::'.join(parts[1:-2])}::"
+                f"{parts[-2]}#{parts[-1]}")
+    return f"{SETUP_KEY_PREFIX}{spec.behaviour_id}"
+
+
+def _setup_origin(key: str) -> tuple[str, str]:
+    """`(test file, the rest)` of a setup key; the file is "" for a key that
+    is a behaviour id."""
+    body = key[len(SETUP_KEY_PREFIX):]
+    head, sep, tail = body.rpartition("::")
+    if sep and "#" in tail and head.endswith(".rs"):
+        return head, tail
+    return "", body
+
+
+def _setup_pointer(key: str) -> str:
+    file, rest = _setup_origin(key)
+    if file:
+        test, _hash, n = rest.partition("#")
+        return f"setup of `{test}` #{n} ({file})"
+    return f"setup of example `{rest}` (in {GIVENS_INDEX_NAME})"
+
+
+def setup_keys_by_text(specs: Iterable[BehaviourSpec]) -> dict[str, str]:
+    """Each distinct setup text (stripped) -> the key it is shown and
+    phrased under: the first example carrying it, by behaviour id."""
+    out: dict[str, str] = {}
+    for s in sorted(specs, key=lambda x: x.behaviour_id):
+        t = s.setup.strip()
+        if t:
+            out.setdefault(t, setup_key(s))
+    return out
+
+
+def given_setups(specs: Sequence[BehaviourSpec]) -> tuple[GivenRoot, ...]:
+    """Every distinct example setup once, as a root the phrase drafting and
+    the index read: keyed by :func:`setup_keys_by_text`, its text the setup
+    itself, given to every example carrying that text."""
+    keys = setup_keys_by_text(specs)
+    ids: dict[str, list[str]] = {}
+    for s in sorted(specs, key=lambda x: x.behaviour_id):
+        t = s.setup.strip()
+        if t:
+            ids.setdefault(keys[t], []).append(s.behaviour_id)
+    by_key = {k: t for t, k in keys.items()}
+    return tuple(GivenRoot(k, (), by_key[k], tuple(ids[k]),
+                           origin_file=_setup_origin(k)[0] or "examples")
+                 for k in sorted(ids))
+
+
 @dataclass(frozen=True, slots=True)
 class GivenRoot:
     """One root the examples are given, across the suite: its key, the keys
@@ -1270,10 +1342,13 @@ class GivenRoot:
     pulled: tuple[str, ...]
     text: str
     example_ids: tuple[str, ...]
+    #: The test file of a SETUP root (:func:`setup_key`), whose key is not a
+    #: helper key; "" for a helper root.
+    origin_file: str = ""
 
     @property
     def file(self) -> str:
-        return helper_key_parts(self.key)[0]
+        return self.origin_file or helper_key_parts(self.key)[0]
 
 
 def _joined(keys: Sequence[str], text: Mapping[str, str]) -> str:
@@ -1330,12 +1405,37 @@ def keep_given_phrases(
         if not phrase:
             refused[r.key] = NO_PHRASE
             continue
-        why = sentence_refusal(phrase, [examples[i] for i in r.example_ids if i in examples], private)
+        why = (sentence_refusal(phrase, [examples[i] for i in r.example_ids if i in examples],
+                                private)
+               or quotes_fixture_code(phrase, r.text))
         if why:
             refused[r.key] = why
         else:
             kept[r.key] = phrase
     return kept, refused
+
+
+def quotes_fixture_code(phrase: str, code: str) -> str | None:
+    """Why a phrase is refused for transcribing the code it was given, else
+    None: it shares with that code a whitespace-normalised span of at least
+    ``_RESTATEMENT_MIN`` characters holding a non-word character (a call, a
+    path, an attribute, a type with its parameters). A name alone is
+    vocabulary and passes; on the stable book of 2026-10-04 this refuses 11
+    of 17 stored phrases (`io::Error::new(io::ErrorKind::Other,`,
+    `#[derive(Error,Debug)]`, `Arc<AtomicBool>`, `&'static str`,
+    `Result<()>`, `Add<T> for S`)."""
+    p = " ".join(phrase.split())
+    c = " ".join(code.split())
+    n = _RESTATEMENT_MIN
+    if len(p) < n or not c:
+        return None
+    for i in range(len(p) - n + 1):
+        chunk = p[i:i + n]
+        if not any(not (ch.isalnum() or ch == "_" or ch == " ") for ch in chunk):
+            continue
+        if chunk in c:
+            return "quotes its fixture's code"
+    return None
 
 
 def render_givens_index(specs: Sequence[BehaviourSpec],
@@ -1356,7 +1456,7 @@ def render_givens_index(specs: Sequence[BehaviourSpec],
             have.extend(k for k in given.observer[1:] if k not in have)
         imports.extend(k for k in given.imports if k not in imports)
     roots = given_roots(specs)
-    if not (roots or observers or imports):
+    if not (roots or observers or imports or any(x.setup.strip() for x in specs)):
         return ""
 
     def block(body: str) -> list[str]:
@@ -1373,6 +1473,18 @@ def render_givens_index(specs: Sequence[BehaviourSpec],
         if r.pulled:
             out.append("- pulls in: " + ", ".join(f"`{k}`" for k in r.pulled))
         out += ["", *block(r.text)]
+    setups = given_setups(specs)
+    if setups:
+        out += ["# Setups", "",
+                "An example's own setup, once per distinct text: what a `Given … setup "
+                "of …` step points at.", ""]
+        for r in setups:
+            out += [f"## {_setup_pointer(r.key)}", ""]
+            if (phrases or {}).get(r.key):
+                out += [(phrases or {})[r.key], ""]
+            out += [f"- key: `{r.key}`", f"- given in {len(r.example_ids)} example(s): "
+                    + ", ".join(f"`{i}`" for i in r.example_ids[:6])
+                    + (" …" if len(r.example_ids) > 6 else ""), "", *block(r.text)]
     if observers:
         out += ["# Observers", "",
                 "The asserting helper a `Then` is compared through. Not a precondition.", ""]

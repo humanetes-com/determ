@@ -2838,8 +2838,15 @@ def p38_unfounded_flat(schedule: dict, flat: set[str]) -> list[tuple[str, list[s
     (an uncarved file, impl or pair run) when at least one is. Sessions are
     ranked on their slice's rows, not on units, and are never judged here."""
     out: list[tuple[str, list[str]]] = []
+    # Until 2026-10-17 the unmeasurable demotion (every aimed test's binary
+    # did not complete) was labelled `rebuy_flat`; it carries its own name
+    # now. On older events it is recognised from the recorded inputs.
+    unmeasurable = set((schedule.get("inputs") or {}).get("unmeasurable_tests") or ())
     for r in schedule.get("deferred") or ():
         if r.get("reason") != "rebuy_flat" or r.get("kind") == "session":
+            continue
+        aimed = set(r.get("target_tests") or ())
+        if aimed and unmeasurable and aimed <= unmeasurable:
             continue
         targets = [str(t) if isinstance(t, str) else "::".join(t)
                    for t in r.get("targets") or ()]

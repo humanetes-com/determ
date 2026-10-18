@@ -199,12 +199,21 @@ class UnitFacts:
     #: key orders by this when it is non-zero, and by `held_tests` otherwise,
     #: so a caller that only counted stub holds keeps that order.
     blocked_tests: int = 0
+    #: A served unit a red test aims at whose current ask fingerprint (own
+    #: body, its red tests' words, its retro rows, its crash excerpt) no
+    #: route has asked. Such a unit sat in `OTHER` and could stay past the
+    #: cap indefinitely: run `1430425-193a8f28` left one six sweeps
+    #: unclaimed while the tests it could move stayed red, and 214 of 214
+    #: `owner_unrouted` alarms since 2026-10-12 were measured owners past
+    #: the cap. It joins `EVIDENCED`, where the rotation bound reaches it.
+    unasked: bool = False
 
     @property
     def rank_class(self) -> RankClass:
         if self.held_tests > 0 or self.culprit:
             return RankClass.HELD
-        if self.owed_tier is not None or self.crash in (Crash.BLAMED, Crash.SITED) or self.service is Service.NEVER:
+        if (self.owed_tier is not None or self.crash in (Crash.BLAMED, Crash.SITED)
+                or self.service is Service.NEVER or self.unasked):
             return RankClass.EVIDENCED
         return RankClass.OTHER
 

@@ -1,7 +1,14 @@
 """rustc's dead-code analysis of one tree under one cluster world (adapter).
 
 `cargo check --lib --message-format=json` with `--force-warn dead_code`
-appended to the cluster's RUSTFLAGS. `--force-warn` is what makes this a
+appended to the cluster's RUSTFLAGS, taken twice: once as the library builds
+and once with `--profile test`, which compiles the same library under
+`cfg(test)` and so counts the in-crate test modules (the generated
+`*.gen_tests_*.rs` siblings) as callers. A span is dead only when both
+readings report it: a private body only an oracle test reaches is reached.
+Measured on an invented crate (2026-10-17): a private fn called only from a
+`#[cfg(test)]` module is reported never used by the plain check and not by
+the test-profile one; a fn nothing calls is reported by both. `--force-warn` is what makes this a
 reading rather than a hope: the trees this pipeline writes open every file
 with `#![allow(unused, dead_code, …)]` and the base cargo env carries
 `-A warnings`, and a forced lint is reported over both. Measured on the merged
@@ -42,12 +49,16 @@ def measure_world_dead_code(
     toolchain = getattr(cluster, "toolchain", None)
     if toolchain:
         cmd.append(f"+{toolchain}")
-    cmd += ["check", "--lib", "--message-format=json"]
-    run = run_bounded(cmd, cwd=project_dir, env=env, timeout=float(timeout))
-    if run.failure is not None:
-        return WorldDeadCode(name, reason=f"cargo check did not finish: {run.failure}")
-    if run.returncode != 0:
-        tail = (run.stderr or "").strip().splitlines()[-1:] or [""]
-        return WorldDeadCode(
-            name, reason=f"cargo check rc={run.returncode}: {tail[0][:200]}")
-    return WorldDeadCode(name, spans=dead_code_spans(run.stdout))
+    readings = []
+    for extra in ([], ["--profile", "test"]):
+        what = " ".join(["cargo check --lib", *extra])
+        run = run_bounded([*cmd, "check", "--lib", *extra, "--message-format=json"],
+                          cwd=project_dir, env=env, timeout=float(timeout))
+        if run.failure is not None:
+            return WorldDeadCode(name, reason=f"{what} did not finish: {run.failure}")
+        if run.returncode != 0:
+            tail = (run.stderr or "").strip().splitlines()[-1:] or [""]
+            return WorldDeadCode(
+                name, reason=f"{what} rc={run.returncode}: {tail[0][:200]}")
+        readings.append(dead_code_spans(run.stdout))
+    return WorldDeadCode(name, spans=readings[0] & readings[1])

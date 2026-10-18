@@ -88,7 +88,7 @@ def test_a_budget_opens_only_the_run_holding_the_crash_culprit() -> None:
                  unmeasurable_tests=unmeas, crash_blamed=frozenset({MEMBER}))
     assert [r.run.label for r in s.ordered] == ["file src/ring.rs"]
     assert [(r.run.label, r.reason) for r in s.deferred] == [
-        ("file src/view.rs", "rebuy_flat")]
+        ("file src/view.rs", "unmeasurable")]
 
 
 def test_under_the_pre_fix_set_both_runs_share_the_budget() -> None:

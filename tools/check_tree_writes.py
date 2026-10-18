@@ -86,6 +86,10 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("application/generators/task2_generator.py", "_generate_one_cluster"):
         "skeleton seed copy of files that do not exist yet (parseable by "
         "construction) and the gen_tests oracle attach",
+    ("application/generators/task2_generator.py", "_establish_crate_root"):
+        "the gen_tests oracle attach (sibling copy and its declaration), "
+        "moved out of _generate_one_cluster so the tree is a crate before "
+        "its first cargo check",
 }
 
 

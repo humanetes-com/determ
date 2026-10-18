@@ -210,3 +210,120 @@ def test_a_world_that_does_not_build_excuses_nothing(tmp_path: Path) -> None:
     assert _SPARE not in dead
     assert _LOOKUP not in dead   # shared: the broken world compiles it too
     assert any("no dead-code reading" in line for line in log), log
+
+
+# ---- the oracle's own tests are callers; an exported stub is never dead ----
+# Decided 2026-10-17: a crate-private stub no rebuilt caller and no oracle test
+# reaches is not counted against green; a public fn, or a stub any oracle test
+# or rebuilt caller reaches, still blocks. The plain `cargo check --lib`
+# compiles without `cfg(test)`, so a private body only an in-crate test module
+# calls read as dead there and was excused.
+
+_KEEPER_LIB = """#![allow(unused, dead_code)]
+mod helpers;
+
+pub fn size() -> u8 {
+    helpers::fetch()
+}
+
+pub fn exported() -> u8 {
+    ::core::unimplemented!()
+}
+
+#[cfg(test)]
+mod checks {
+    #[test]
+    fn probe_is_one() {
+        assert_eq!(crate::helpers::probe(), 1);
+    }
+}
+"""
+
+_KEEPER_HELPERS = """#![allow(unused, dead_code)]
+pub fn fetch() -> u8 {
+    1
+}
+pub fn probe() -> u8 {
+    ::core::unimplemented!()
+}
+pub fn routed() -> u8 {
+    ::core::unimplemented!()
+}
+"""
+
+
+def _keeper(tmp_path: Path) -> Path:
+    root = tmp_path / "keeper"
+    (root / "src").mkdir(parents=True)
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("gadgets", "keeper"))
+    (root / "src" / "lib.rs").write_text(_KEEPER_LIB)
+    (root / "src" / "helpers.rs").write_text(_KEEPER_HELPERS)
+    return root
+
+
+def _plain_and_test_profile(root: Path) -> tuple[set[str], set[str]]:
+    from pipeline_core.adapters.process import run_bounded
+    from pipeline_core.domain.dead_code import dead_code_spans
+    env = cluster_cargo_env(_clusters()[0])
+    env["RUSTFLAGS"] = f"{env.get('RUSTFLAGS', '')} --force-warn dead_code"
+    env["CARGO_TARGET_DIR"] = str(root / "target" / "premise")
+    text = (root / "src" / "helpers.rs").read_text()
+    out = []
+    for extra in ([], ["--profile", "test"]):
+        run = run_bounded(["cargo", "check", "--lib", *extra,
+                           "--message-format=json"],
+                          cwd=root, env=env, timeout=600.0)
+        assert run.returncode == 0, run.stderr
+        names = set()
+        for f, b in dead_code_spans(run.stdout):
+            if f == "src/helpers.rs":
+                names.add(text[b:].split("(", 1)[0])
+        out.append(names)
+    return out[0], out[1]
+
+
+def test_premise_the_test_profile_counts_an_in_crate_test_as_a_caller(
+        tmp_path: Path) -> None:
+    """The negative control is the plain reading the gate took before: it
+    reports `probe`, which an oracle test calls."""
+    plain, test_profile = _plain_and_test_profile(_keeper(tmp_path))
+    assert plain == {"probe", "routed"}, plain
+    assert test_profile == {"routed"}, (
+        f"`cargo check --lib --profile test` reported {test_profile}: if it "
+        "no longer compiles the library under cfg(test), the gate cannot see "
+        "an oracle test as a caller and must be re-derived.")
+
+
+def test_only_the_body_nothing_reaches_is_excused(tmp_path: Path) -> None:
+    root = _keeper(tmp_path)
+    clusters = _clusters()[:1]
+    cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
+                for c in clusters]
+    stubs = scan_stub_inventory(
+        root, enumerate_fns=_structure().enumerate_fns).site_preds()
+    dead = read_dead_stub_sites(root, clusters, _deps())
+    assert dead == {FnSite("src/helpers.rs", "routed", "")}
+    verdict = classify_remaining_stubs(stubs, cfg_sets, (), (), dead)
+    assert verdict.dead_in_tree == (FnLocator("src/helpers.rs", "routed"),)
+    assert set(verdict.orphaned) == {
+        FnLocator("src/helpers.rs", "probe"),   # an oracle test reaches it
+        FnLocator("src/lib.rs", "exported"),    # public: rustc never calls it dead
+    }
+    assert report_stub_verdict(verdict, [].append, len(cfg_sets)) is False
+
+    # The same tree with the reached and the public stub filled: the routed
+    # private body alone does not fail the run.
+    (root / "src" / "helpers.rs").write_text(
+        _KEEPER_HELPERS.replace(
+            "pub fn probe() -> u8 {\n    ::core::unimplemented!()",
+            "pub fn probe() -> u8 {\n    1"))
+    (root / "src" / "lib.rs").write_text(
+        _KEEPER_LIB.replace(
+            "pub fn exported() -> u8 {\n    ::core::unimplemented!()",
+            "pub fn exported() -> u8 {\n    2"))
+    stubs = scan_stub_inventory(
+        root, enumerate_fns=_structure().enumerate_fns).site_preds()
+    dead = read_dead_stub_sites(root, clusters, _deps())
+    verdict = classify_remaining_stubs(stubs, cfg_sets, (), (), dead)
+    assert verdict.orphaned == ()
+    assert report_stub_verdict(verdict, [].append, len(cfg_sets)) is True

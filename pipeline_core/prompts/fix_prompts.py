@@ -23,7 +23,6 @@ from pipeline_core.domain.construction_recipe import (
 from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.crash_site import (
     CRASH_EVIDENCE_LEAD,
-    family_members_beside_a_crashed_conversion,
     ownership_transfer_must,
 )
 from pipeline_core.domain.installable_fns import ProducerBypass
@@ -320,17 +319,7 @@ def _plan_line(p: BlockFillPlan) -> str:
         seen_recipe.add(name)
         parts.append(f"{recipes[name]}: {name}")
     bypass_names = frozenset(b.fn_name for b in p.bypass)
-    # A conversion-family member AIMED beside a CRASHED family member is
-    # graded CRASHED: the family is one ownership contract, and the aimed
-    # sentence ("re-derive the erased layout") is the wrong instruction for
-    # it — run `1577437-c93d5c26`'s iter-1 error.rs prompt sent
-    # `into_boxed_dyn_error` CRASHED with the MUST and `object_boxed` AIMED,
-    # and the reply forgot self in one and re-boxed the payload in the other.
-    # Promotion is the ownership contract, so it starts from the names an
-    # invalid-memory crash blamed and from no other crash.
-    promoted = family_members_beside_a_crashed_conversion(
-        p.memory_crashed, p.aimed)
-    crashed_names = frozenset(p.crashed) | promoted
+    crashed_names = frozenset(p.crashed)
     crashed = tuple(r for r in p.refills if r in crashed_names)
     aimed = tuple(r for r in p.refills
                   if r in p.aimed and r not in recipe_names
@@ -368,14 +357,11 @@ def _plan_line(p: BlockFillPlan) -> str:
             "process aborted, so the tests attributed to it report no "
             "verdict. What the crash was is in CRASH_EVIDENCE, and that "
             "block is the instruction): " + ", ".join(crashed))
-        # Conversion family only. `drop` is a correct destructor; putting
-        # this MUST on a drop rewrite re-instructs the innocent body the
-        # skip exists to stop aiming at. Run `1790133-2181e509` had
-        # `into_boxed_dyn_error` in CRASH_EVIDENCE and still wrote
-        # `let own = self.inner` because this slot named drop.
+        # Invalid-memory culprits only: a stack exhaustion's cycle says
+        # nothing about who owns a pointer. The MUST lands on the body the
+        # fault named, whatever its name.
         extra = ownership_transfer_must(tuple(
-            r for r in crashed
-            if r in frozenset(p.memory_crashed) | promoted))
+            r for r in crashed if r in frozenset(p.memory_crashed)))
         if extra:
             crash_clause += " — " + extra
         parts.append(crash_clause)

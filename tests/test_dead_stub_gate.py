@@ -149,8 +149,10 @@ def test_a_dead_stub_the_original_executed_is_excused_and_said_loudly() -> None:
     log: list[str] = []
     assert report_stub_verdict(verdict, log.append, 1) is True
     text = "\n".join(log)
-    assert "‼ 1 of them the ORIGINAL's suite executed at augmentation" in text
-    assert "src/probe.rs::lookup" in text
+    assert ("UNREACHED PRIVATE BODY, EXECUTED BY THE ORIGINAL: 1 fn(s)"
+            in text)
+    assert "    src/probe.rs::lookup" in text
+    assert "NOTE: 1 fn(s)" not in text, "said once, on its own line"
 
 
 def _verdict_deps(inventory: StubInventory, dead: frozenset[FnSite],

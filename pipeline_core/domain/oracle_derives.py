@@ -124,6 +124,12 @@ def derive_requirements_text(reqs: Iterable[RequiredDerive]) -> str:
         why = "; ".join(f"{r.evidence} at {r.origin}" if r.origin else r.evidence
                         for r in rs[:3])
         rows.append(f"  - `{ty}` must derive: {traits}\n      because {why}")
+    # Why "nothing beyond": measured on `anyhow` (2026-08-09/16), three
+    # consecutive re-authors of one component were rejected, two of them for
+    # a derived `Debug, PartialEq` on a type with a hand-written `Debug`
+    # impl (E0119) and one for `Copy, Clone` on pointer wrappers that
+    # implement both by hand. The incident stays here: the prompt states the
+    # rule, never the crate it was measured on.
     return ("\n\nDERIVES THE CRATE'S OWN TESTS REQUIRE — read off those tests, "
             "which are WRITE-PROTECTED and which no later stage may edit. A "
             "missing derive here does not fail gracefully: the cluster stops "
@@ -135,9 +141,4 @@ def derive_requirements_text(reqs: Iterable[RequiredDerive]) -> str:
             "fails the scaffold exactly as a missing one does: for a trait the "
             "crate already implements by hand it is `error[E0119]: conflicting "
             "implementations`, and for a bound the type's own fields do not "
-            "satisfy it is `E0277`/`E0369`. Both were measured on `anyhow` "
-            "(2026-08-09/16): three consecutive re-authors of the `Error`/"
-            "`ErrorImpl`/`Own`/`Ref` component were rejected, two of them for "
-            "`#[derive(Debug, PartialEq)]` on `Error` against the crate's own "
-            "`impl Debug for Error`, and `#[derive(Copy, Clone)]` on `Own`/"
-            "`Ref` against their hand-written impls.\n")
+            "satisfy it is `E0277`/`E0369`.\n")

@@ -252,12 +252,14 @@ _NO_GAIN = "FUNCTION {name}: UNREACHABLE — dead code, add an ignore pragma"
 def _stalled_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str,
                   targets: tuple[FnTarget, ...]) -> tuple[_Harness, list[_PhaseCOutcome], str]:
     """Two passes whose blocks add no line (quick coverage stays at the seed),
-    so the file stalls on the second and the retrospective runs; it classifies
-    `name` UNREACHABLE. Returns the harness, the outcomes and the source text
-    before the passes."""
+    so each visit stalls on its own measurement and the retrospective runs in
+    that visit (entry 333's order: visit, retrospective, visit, retrospective);
+    it classifies `name` UNREACHABLE. Returns the harness, the outcomes and
+    the source text before the passes."""
     from pipeline_core.domain.refine import parse_retrospective_categories
+    _retro = _NO_GAIN.format(name=name)
     h = _Harness(tmp_path, monkeypatch, src_name="lib.rs",
-                 replies=[EXACT, EXACT, _NO_GAIN.format(name=name)], target=0.0, specs=())
+                 replies=[EXACT, _retro, EXACT, _retro], target=0.0, specs=())
     object.__setattr__(h.deps, "quick_file_coverage", lambda pd, m, rel: (3, 10))
     object.__setattr__(h.deps, "parse_retrospective_categories", parse_retrospective_categories)
     before = (h.ws / "src" / "lib.rs").read_text(encoding="utf-8")
@@ -277,14 +279,14 @@ def test_a_retrospective_verdict_writes_nothing_to_the_source(
     assert (h.ws / "src" / "lib.rs").read_text(encoding="utf-8") == before
     assert not any("Targeted pragma" in ln or "[targeted-pragma]" in ln for ln in h.logs)
     # The verdict is on the record for the pending function.
-    assert (_HINT.site, "UNREACHABLE") in outs[-1].fn_verdicts
+    assert any((_HINT.site, "UNREACHABLE") in o.fn_verdicts for o in outs)
 
 
 def test_negative_control_a_verdict_on_a_function_not_pending_writes_nothing_either(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     h, outs, before = _stalled_pass(tmp_path / "ctl", monkeypatch, "target", ())
     assert (h.ws / "src" / "lib.rs").read_text(encoding="utf-8") == before
-    assert outs[-1].fn_verdicts == ()
+    assert all(o.fn_verdicts == () for o in outs)
 
 
 def test_a_trait_impl_target_is_told_the_route_that_reaches_it() -> None:
@@ -378,3 +380,28 @@ def test_negative_control_an_executed_function_gets_no_zero_line(
     # Executed now: not among the next pass's targets.
     _run(h, _EXTRA, {"src/lib.rs": [48]}, (_ADD,), hist=hist)
     assert "still has 0 executions" not in h.prompts[-1]
+
+
+def test_the_visit_after_a_reverted_aim_says_so_and_carries_its_retrospective(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run `857717-812ee44c` (2026-10-10): attempt 1's block aimed at
+    `thiserror_provide` ran, covered nothing and was reverted; attempt 2's
+    prompt said `Previous attempt covered 1 more line(s)`, had no
+    retrospective and nothing about the reverted aim. Now the failed visit
+    runs its retrospective, the next prompt carries it and states the
+    reverted attempt, and nothing claims a line no block covered."""
+    h, _outs, _before = _stalled_pass(tmp_path, monkeypatch, "capacity_hint",
+                                      (_HINT,))
+    second = [p for p in h.prompts if "Rust unit tests" in p][1]
+    assert "Previous attempt covered" not in second
+    assert "attempt 1: a block aimed at `" in second and "reverted" in second
+
+
+def test_the_note_states_each_recorded_attempt() -> None:
+    from pipeline_core.domain.test_evidence import still_unexecuted
+    note = still_unexecuted({}, ["src/e.rs::f"],
+                            {"src/e.rs::f": ["reverted", "compile_failed"]})
+    assert "attempt 1: a block aimed at `src/e.rs::f` compiled and ran" in note
+    assert "attempt 2: a block aimed at `src/e.rs::f` did not compile" in note
+    # Control: without the record's outcomes a reverted aim leaves no line.
+    assert still_unexecuted({}, ["src/e.rs::f"]) == ""

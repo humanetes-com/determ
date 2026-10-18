@@ -13,8 +13,8 @@ and `tests/test_repr.rs::test_drop`. A subject naming a test file is the defect
 a frame filter was shipped for: no fill writes a test, so the key lands
 in the frontier and buys a dispatch that cannot change anything.
 
-The fixture crate below is that shape in miniature — a drop family in `src/`, a
-`Drop` impl and a `test_drop` under `tests/` — written into `tmp_path`. It is
+The fixture crate below is that shape in miniature — ownership-transfer bodies in
+`src/`, a `Drop` impl and a `test_drop` under `tests/` — written into `tmp_path`. It is
 NOT the crate under reconstruction, deliberately: that tree changes every run
 (that is the pipeline's job), so a gate asserting on its contents would fail
 exactly when the loop works. `scripts/probe_destruction_subjects.py` is where
@@ -27,9 +27,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.domain.crash_site import destruction_path_subjects
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 _BIN = (Path(__file__).parent.parent / "tools" / "skeleton_extractor"
         / "target" / "release" / "skeleton-extractor")
@@ -38,11 +36,6 @@ pytestmark = pytest.mark.skipif(
     not _BIN.exists(), reason="skeleton-extractor binary not built (bash setup.sh)")
 
 
-@pytest.fixture(autouse=True)
-def _catalog_driver():
-    """Catalog drop-token subjects (the A/B). Generic uses body primitives only."""
-    with using_driver(catalog_driver()):
-        yield
 
 _ERROR_RS = """\
 pub struct Own<T> { pub ptr: *mut T }
@@ -80,13 +73,14 @@ impl Drop for Error {
 }
 """
 
-# The two shapes the live tree has under `tests/`, both matching the drop rule.
+# The two shapes the live tree has under `tests/`, both holding an
+# ownership primitive, so only the test-file exclusion keeps them out.
 _TESTS_MOD_RS = """\
 pub struct Flag;
 
 impl Drop for Flag {
     fn drop(&mut self) {
-        let _ = self;
+        let _ = core::mem::ManuallyDrop::new(0u8);
     }
 }
 """
@@ -94,7 +88,8 @@ impl Drop for Flag {
 _TESTS_MAIN_RS = """\
 #[test]
 fn test_drop() {
-    assert!(true);
+    let b = Box::into_raw(Box::new(1u8));
+    let _ = unsafe { Box::from_raw(b) };
 }
 """
 
@@ -116,7 +111,7 @@ def _records(root: Path) -> list[dict]:
     return [r.to_dict() for r in recs]
 
 
-def test_the_selector_names_the_drop_family_and_no_test_file(tmp_path: Path) -> None:
+def test_the_selector_names_the_ownership_bodies_and_no_test_file(tmp_path: Path) -> None:
     """The measurement that found the leak, as a gate. Enumerated at the
     CLUSTER ROOT — which is what the driver passes — so the walk reaches
     `tests/` exactly as it does live."""
@@ -126,14 +121,10 @@ def test_the_selector_names_the_drop_family_and_no_test_file(tmp_path: Path) -> 
         FnLocator("src/error.rs", "object_drop"),
         FnLocator("src/error.rs", "object_drop_front"),
         FnLocator("src/error.rs", "context_drop_rest"),
-        FnLocator("src/lib.rs", "drop"),
+        FnLocator("src/error.rs", "downcast"),
     })
     assert not [k for k in subs if not str(k.file).startswith("src/")], \
         "a subject in a test file is a dispatch that cannot change anything"
-    # `downcast` holds `core::ptr::read` and is deliberately absent: the body
-    # rule is the fallback for a crate that does not name its drop family, not
-    # a widening of a set the names already resolved.
-    assert FnLocator("src/error.rs", "downcast") not in subs
 
 
 def test_the_paths_the_selector_returns_are_the_frontier_key_form(

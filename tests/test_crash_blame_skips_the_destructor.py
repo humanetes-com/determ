@@ -32,41 +32,25 @@ wrapping `ErrorImpl`, blame is `into_boxed_dyn_error`.
 """
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
-import pytest
-
 from pipeline_core.domain.crash_site import (
-    CONVERSION_FAMILY,
     AsanReport,
     CrashFrame,
     CrashSite,
     SourceWindow,
     authorable_frames,
     blamed_locators,
-    conversion_family_from_access,
     first_test_file_after_destructor,
     first_test_file_on_access,
     non_destructor_frames,
     parse_asan_report,
     parse_asan_reports,
-    prefer_non_destructor,
     recover_owner_from_caller_source,
     relativize_frame_files,
     site_from_frames,
 )
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.prompts.language_catalog import catalog_driver
-
-
-@pytest.fixture(autouse=True)
-def _catalog_driver() -> Iterator[None]:
-    """This module pins the catalog destructor skip and conversion family."""
-    with using_driver(catalog_driver()):
-        yield
-
 
 #: The run's own report, first error block, byte-for-byte. Driven through the
 #: real parser and the real relativizer so this pins the LIVE path and not a
@@ -79,6 +63,17 @@ REPORT = (Path(__file__).parent / "fixtures" / "crash"
 WORKSPACE_ROOT = "/home/user/determ/tmp/anyhow/.skeleton-filled/stable"
 #: Line 27 of the crashing test, the free stack's next workspace frame.
 RECORDED_SOURCE_LINE = "let boxed = err.into_boxed_dyn_error();"
+#: The fn names `src/error.rs` declared in that tree, as the localizer reads
+#: them (`_declared_reader`). A call to anything else on a test line is
+#: std's or the test's, and names nobody.
+_DECLARED_ERROR_RS = frozenset({
+    "new", "msg", "drop", "downcast", "downcast_ref", "into_boxed_dyn_error",
+    "reallocate_into_boxed_dyn_error_without_backtrace", "from",
+})
+
+
+def _declared(file_rel: str) -> frozenset[str] | None:
+    return _DECLARED_ERROR_RS if file_rel == "src/error.rs" else None
 
 
 def _parsed_stacks() -> tuple[str, list[dict[str, object]], list[dict[str, object]]]:
@@ -187,8 +182,6 @@ def test_the_origin_shape_licenses_recovery_when_the_read_marks_are_absent() -> 
     _, _, origin = _parsed_stacks()
     access = [{"func": "core::ptr::drop_glue::<alloc::sync::Arc<bool>>",
                "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 1}]
-    assert conversion_family_from_access(access) == frozenset(), (
-        "the READ marks alone license nothing here")
     site = site_from_frames(
         "tests/behaviour_stable_gen_1.rs",
         "behaviour_probe_stable_trait_object_identity_0",
@@ -198,23 +191,38 @@ def test_the_origin_shape_licenses_recovery_when_the_read_marks_are_absent() -> 
     assert site.blamed_locator == FnLocator("src/error.rs", "into_boxed_dyn_error")
 
 
-def test_recovery_stays_off_when_the_line_names_no_conversion() -> None:
-    """A READ stack that matches the type chain still cannot promote a fn
-    the test line does not call."""
-    site = _parsed_site(source_line="let _ = err.downcast_ref::<MyErr>();")
+def test_recovery_stays_off_when_the_line_calls_no_declared_fn() -> None:
+    """A licensed stack still cannot promote a call the anchor file does
+    not declare: `to_string` is std's. Negative control: with no declared
+    names to count with, the line's first call is named."""
+    _, access, origin = _parsed_stacks()
+    line = "let s = err.to_string();"
+    loc = first_test_file_after_destructor(origin)
+    site = site_from_frames(
+        "tests/behaviour_stable_gen_1.rs", "t",
+        "AddressSanitizer: heap-use-after-free", access,
+        origin_raw_frames=origin, origin_capable=True,
+        source_line=line, source_loc=loc, declared_in=_declared)
     assert site.blamed_locator == FnLocator("src/error.rs", "drop")
+    blind = site_from_frames(
+        "tests/behaviour_stable_gen_1.rs", "t",
+        "AddressSanitizer: heap-use-after-free", access,
+        origin_raw_frames=origin, origin_capable=True,
+        source_line=line, source_loc=loc)
+    assert blind.blamed_locator == FnLocator("src/error.rs", "to_string")
 
 
-def test_a_src_caller_behind_the_destructor_is_left_for_the_skip() -> None:
-    """When the next frame is still in `src/`, source-line recovery does
-    not fire — `prefer_non_destructor` already promotes that caller."""
+def test_a_src_caller_behind_the_destructor_is_promoted() -> None:
+    """When the next frame is still in `src/`, that caller is the line the
+    localizer reads, and `prefer_non_destructor` promotes it as the blame
+    even with no line read."""
     origin = [
         {"func": "<anyhow::Error as core::ops::drop::Drop>::drop",
          "file": "src/error.rs", "line": 706},
         {"func": "anyhow::Error::reallocate_into_boxed_dyn_error_without_backtrace",
          "file": "src/error.rs", "line": 610},
     ]
-    assert first_test_file_after_destructor(origin) is None
+    assert first_test_file_after_destructor(origin) == ("src/error.rs", 610)
     site = _site(origin=origin)
     assert site.blamed is not None
     assert site.blamed.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
@@ -246,64 +254,6 @@ def test_drop_glue_and_drop_in_place_are_the_same_event() -> None:
                    symbol="anyhow::error::object_boxed"),
     )
     assert [f.fn_name for f in non_destructor_frames(frames)] == ["object_boxed"]
-
-
-def test_a_gdb_site_blames_the_caller_the_destructor_hid() -> None:
-    """The live sweep this filter first ran on, run `1790133-2181e509`
-    (2026-08-30 05:20:18). The ASAN site correctly blamed nobody, and two
-    SIGSEGV siblings built from GDB frames still blamed `drop` — a gdb symbol
-    carries no `as core::ops::drop::Drop>` marker, so a mark-only test misses
-    it. Their access stack held the caller one frame out the whole time."""
-    frames = [
-        {"func": "drop", "file": "src/error.rs", "line": 705},
-        {"func": "reallocate_into_boxed_dyn_error_without_backtrace",
-         "file": "src/error.rs", "line": 610},
-    ]
-    # A native backtrace is not origin-capable, so blame falls to the access
-    # stack — which is correct, and is exactly where the destructor sat.
-    site = site_from_frames(
-        "tests/error_gen_5.rs",
-        "test_reallocate_into_boxed_dyn_error_without_backtrace_msg",
-        "SIGSEGV", frames, origin_raw_frames=[], raw_report="",
-        origin_capable=False)
-
-    pre_fix = authorable_frames(site.frames)
-    assert pre_fix[0].fn_name == "drop", (
-        "negative control: the recorded event reads blamed: "
-        '["src/error.rs", "drop"] off this stack')
-
-    assert site.blamed is not None
-    assert site.blamed.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
-
-
-def test_a_bare_drop_symbol_is_still_a_destructor() -> None:
-    """gdb prints the function, not the trait impl that owns it."""
-    frames = (
-        CrashFrame(file_rel="src/error.rs", line=705, fn_name="drop",
-                   symbol="drop"),
-        CrashFrame(file_rel="src/error.rs", line=610, fn_name="convert",
-                   symbol="convert"),
-    )
-    assert [f.fn_name for f in non_destructor_frames(frames)] == ["convert"]
-
-
-def test_object_drop_is_a_destructor_the_same_way_the_crate_names_it() -> None:
-    """destruction_path_subjects already treats a drop token as a destructor.
-    Blame skip must, or object_drop is promoted over the conversion."""
-    frames = (
-        CrashFrame(file_rel="src/error.rs", line=1, fn_name="object_drop",
-                   symbol="anyhow::error::object_drop"),
-        CrashFrame(file_rel="src/error.rs", line=2,
-                   fn_name="into_boxed_dyn_error",
-                   symbol="anyhow::Error::into_boxed_dyn_error"),
-    )
-    assert [f.fn_name for f in non_destructor_frames(frames)] == [
-        "into_boxed_dyn_error"]
-    alone = (
-        CrashFrame(file_rel="src/error.rs", line=1, fn_name="object_drop",
-                   symbol="anyhow::error::object_drop"),
-    )
-    assert prefer_non_destructor(alone) == alone
 
 
 def test_a_from_wrapper_source_line_names_the_conversion() -> None:
@@ -457,11 +407,10 @@ def test_a_uaf_read_without_either_type_mark_recovers_downcast_from_the_origin_s
     PartialEq>::eq → test line 19` — no `ErrorImpl`, no `Box<dyn Error>`;
     origin is `free → Error::drop src/error.rs:630 → test line 21`, and
     line 21 calls `downcast::<String>()`. Blame is `downcast`, named by
-    `tests/test_downcast.rs:21`. Pre-fix (family licensed by the READ marks
-    only): `src/error.rs::drop`."""
+    `tests/test_downcast.rs:21`. The line's first call is std's
+    `unwrap_err`; only `downcast` is declared by the anchor file, so the
+    declared names decide it (negative control below)."""
     rep = _report(_SWEEP_ITER4, "tests/test_downcast.rs")
-    assert conversion_family_from_access(rep.access) == frozenset(), (
-        "the READ stack carries neither mark — the pre-fix licence is off")
     loc = first_test_file_after_destructor(rep.origin)
     assert loc == ("tests/test_downcast.rs", 21)
     without = site_from_frames(
@@ -472,13 +421,20 @@ def test_a_uaf_read_without_either_type_mark_recovers_downcast_from_the_origin_s
     site = site_from_frames(
         rep.label, "test_downcast", rep.kind, rep.access,
         origin_raw_frames=rep.origin, origin_capable=True,
-        source_line=_LINE_TEST_DOWNCAST_21, source_loc=loc)
+        source_line=_LINE_TEST_DOWNCAST_21, source_loc=loc,
+        declared_in=_declared)
     assert site.blamed is not None
     assert site.blamed.fn_name == "downcast"
     assert site.blamed.file_rel == "src/error.rs"
     assert site.blamed.named_by == ("tests/test_downcast.rs", 21)
     assert site.origin_unattributed is False
     assert "named by tests/test_downcast.rs:21" in site.render_evidence()
+    blind = site_from_frames(
+        rep.label, "test_downcast", rep.kind, rep.access,
+        origin_raw_frames=rep.origin, origin_capable=True,
+        source_line=_LINE_TEST_DOWNCAST_21, source_loc=loc)
+    assert blind.blamed_locator == FnLocator("src/error.rs", "unwrap_err"), (
+        "negative control: without the declared names the first call wins")
 
 
 def test_the_test_context_uaf_recovers_downcast_through_the_turbofish() -> None:
@@ -488,19 +444,20 @@ def test_the_test_context_uaf_recovers_downcast_through_the_turbofish() -> None:
     line 124 is `err.downcast::<HighLevel>().unwrap()`. Pre-fix the regex
     required `downcast(` and `downcast` was not in the family: `drop`."""
     rep = _report(_SWEEP_ITER2, "tests/test_context.rs")
-    assert conversion_family_from_access(rep.access)
     loc = first_test_file_after_destructor(rep.origin)
     assert loc == ("tests/test_context.rs", 124)
     without = site_from_frames(
         rep.label, "test_downcast_high", rep.kind, rep.access,
         origin_raw_frames=rep.origin, origin_capable=True,
-        source_line="    let _ = err.downcast_ref::<HighLevel>();", source_loc=loc)
+        source_line="    let _ = err.to_string();", source_loc=loc,
+        declared_in=_declared)
     assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
-        "negative control: a line naming no family member leaves the destructor")
+        "negative control: a line calling no declared fn leaves the destructor")
     site = site_from_frames(
         rep.label, "test_downcast_high", rep.kind, rep.access,
         origin_raw_frames=rep.origin, origin_capable=True,
-        source_line=_LINE_TEST_CONTEXT_124, source_loc=loc)
+        source_line=_LINE_TEST_CONTEXT_124, source_loc=loc,
+        declared_in=_declared)
     assert site.blamed is not None
     assert site.blamed.fn_name == "downcast"
     assert site.blamed.named_by == ("tests/test_context.rs", 124)
@@ -517,8 +474,6 @@ def test_a_segv_with_no_origin_stack_recovers_the_conversion_from_the_access_win
     rep = _report(_SWEEP_ITER4, "tests/error_gen_3.rs")
     assert rep.origin == [] and rep.origin_stack_lines == 0
     assert first_test_file_after_destructor(rep.origin) is None
-    assert conversion_family_from_access(rep.access), (
-        "`Box<dyn core::error::Error + Sync + Send>` on the READ stack")
     assert first_test_file_on_access(rep.access) == ("tests/error_gen_3.rs", 33)
     nobody = site_from_frames(
         rep.label, None, rep.kind, rep.access,
@@ -528,7 +483,7 @@ def test_a_segv_with_no_origin_stack_recovers_the_conversion_from_the_access_win
     site = site_from_frames(
         rep.label, None, rep.kind, rep.access,
         origin_raw_frames=rep.origin, origin_capable=True,
-        source_window=_WINDOW_ERROR_GEN_3)
+        source_window=_WINDOW_ERROR_GEN_3, declared_in=_declared)
     assert site.blamed is not None
     assert site.blamed.fn_name == "reallocate_into_boxed_dyn_error_without_backtrace"
     assert site.blamed.file_rel == "src/error.rs"
@@ -538,26 +493,34 @@ def test_a_segv_with_no_origin_stack_recovers_the_conversion_from_the_access_win
     assert "src/error.rs:0" not in site.render_evidence()
 
 
-def test_the_family_is_convicted_across_both_live_sites_and_drop_never_is() -> None:
-    """`blamed_locators` over the two iter-4 sites (recovered
-    `reallocate_…` and `downcast`) holds every family member at
-    `src/error.rs` and not `drop`, even though `drop` is a frame on the
-    UAF's origin stack."""
+def test_both_live_sites_convict_their_named_fn_and_drop_never_is() -> None:
+    """`blamed_locators` over the two iter-4 sites holds exactly the two
+    recovered fns (`reallocate_…` and `downcast`) and not `drop`, even
+    though `drop` is a frame on the UAF's origin stack. A catalog of crate
+    conversion names once widened each to its whole "family" at the file;
+    that catalog was removed on 2026-10-17."""
     segv = _report(_SWEEP_ITER4, "tests/error_gen_3.rs")
     uaf = _report(_SWEEP_ITER4, "tests/test_downcast.rs")
     sites = (
         site_from_frames(segv.label, None, segv.kind, segv.access,
                          origin_raw_frames=segv.origin, origin_capable=True,
-                         source_window=_WINDOW_ERROR_GEN_3),
+                         source_window=_WINDOW_ERROR_GEN_3,
+                         declared_in=_declared),
         site_from_frames(uaf.label, "test_downcast", uaf.kind, uaf.access,
                          origin_raw_frames=uaf.origin, origin_capable=True,
                          source_line=_LINE_TEST_DOWNCAST_21,
-                         source_loc=("tests/test_downcast.rs", 21)),
+                         source_loc=("tests/test_downcast.rs", 21),
+                         declared_in=_declared),
     )
     assert [f.fn_name for f in sites[1].origin_frames] == ["downcast", "drop"], (
         "the destructor stays on the evidence frames")
     got = blamed_locators(sites)
-    assert got == frozenset(FnLocator("src/error.rs", n) for n in CONVERSION_FAMILY)
+    assert got == frozenset({
+        FnLocator("src/error.rs",
+                  "reallocate_into_boxed_dyn_error_without_backtrace"),
+        FnLocator("src/error.rs", "downcast")}), (
+        "each site convicts the fn its own source named, and nothing that "
+        "merely shares its file")
     assert FnLocator("src/error.rs", "drop") not in got
 
 

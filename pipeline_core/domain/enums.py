@@ -112,13 +112,11 @@ class LanguageDriverKind(_Coercible):
     DETAIL, name-keyed construction recipes, and crate-symbol conversion
     families are not injected.
 
-    CATALOG: those pre-2026-09-09 tables, kept so an A/B can turn them
-    back on. Production call sites go through the bound driver; when
-    generic is bound the catalog functions are not called.
+    The CATALOG kind (the pre-2026-09-09 tables) was removed on
+    2026-10-17; the git tag ``catalog-driver-last`` holds it.
     """
 
     GENERIC = "generic"
-    CATALOG = "catalog"
 
 
 class ModelTier(_Coercible):
@@ -151,3 +149,7 @@ class ProcessFailure(_Coercible):
 
     TIMEOUT = "timeout"
     BINARY_MISSING = "binary_missing"
+    # A cargo command whose working directory has no `Cargo.toml` of its own
+    # and names no `--manifest-path`: cargo would climb to an ancestor
+    # manifest and build that crate instead. Refused before it starts.
+    NO_MANIFEST = "no_manifest"

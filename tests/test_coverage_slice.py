@@ -178,3 +178,30 @@ def test_high_dead_fraction_names_contiguous_runs_not_a_spanning_range() -> None
         "Line 95 of the body you are editing is never reached.")
     assert FnLocator(_DEBUG_SITE.file, _DEBUG_SITE.fn_name) not in slice_.dead
 
+
+
+def test_a_conviction_the_coverage_reading_refutes_does_not_judge_the_unit(
+        ) -> None:
+    """The identifier scan convicted a unit because the failing test's source
+    names it, while the bound reading measured that test entering other
+    bodies and never this one (run `507656-fe50f9f1`, `src/chain.rs::new`).
+    The conviction is dropped; a test the reading never measured keeps
+    convicting. Control: unbound, nothing changes."""
+    from pipeline_core.domain.coverage_slice import (
+        CoverageSlice,
+        bind,
+        screen_unentered_convictions,
+    )
+    named = FnSite("src/chain.rs", "new", "impl Chain")
+    other = FnSite("src/error.rs", "msg", "impl Error")
+    conv = {FnLocator("src/chain.rs", "new"): {"t_measured", "t_unmeasured"}}
+    sites = {named: {"t_measured"}}
+    try:
+        bind(CoverageSlice(owners={"t_measured": frozenset({other})}))
+        assert screen_unentered_convictions(conv) == {
+            FnLocator("src/chain.rs", "new"): {"t_unmeasured"}}
+        assert screen_unentered_convictions(sites) == {named: set()}
+        bind(None)
+        assert screen_unentered_convictions(conv) == conv
+    finally:
+        bind(None)

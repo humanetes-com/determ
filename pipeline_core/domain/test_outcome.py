@@ -397,35 +397,39 @@ def _first_fail_fns(identity: tuple[str, ...]) -> frozenset[tuple[str, str]]:
 
 
 def standing_in(
-    now: Mapping[str, PremiseEntry], scope: Iterable[str] | None,
-    units: Iterable[tuple[str, str]],
+    now: Mapping[str, PremiseEntry], units: Iterable[tuple[str, str]],
 ) -> tuple[str, ...]:
-    """The failing tests of ``scope`` whose first failure, on the ground as
-    it stands NOW, lies inside one of ``units`` ((file, fn) pairs), sorted.
+    """The failing tests whose first failure, on the ground as it stands
+    NOW, lies inside one of ``units`` ((file, fn) pairs), sorted.
 
     This is the claim's standing on the current ground, independent of the
-    ground it was planned on: a unit a planned test now stops inside is on
+    ground it was planned on: a unit a failing test now stops inside is on
     that test's path whatever else moved, which is the reading a fresh plan
-    dispatches it on (the sweep's stub holds rank such a unit as a blocker).
-    A move is evidence FOR such a claim. Run `790176-f0df7402` (2026-09-23,
-    cluster `stable`): the keep of `src/ptr.rs::new` moved all 141 failing
-    tests, and the gate refused `src/error.rs::downcast_ref` and `is`, which
-    the next sweep read holding 6 and 4 tests at their first failure; in the
-    next fill it refused them again — their held tests had not moved, other
-    tests of their scope had — and the third sweep read the same holds.
+    dispatches it on (the sweep's stub holds rank such a unit as a blocker,
+    whichever test put it there). A move is evidence FOR such a claim. Run
+    `790176-f0df7402` (2026-09-23, cluster `stable`): the keep of
+    `src/ptr.rs::new` moved all 141 failing tests, and the gate refused
+    `src/error.rs::downcast_ref` and `is`, which the next sweep read holding
+    6 and 4 tests at their first failure.
 
-    A claim with no named test (None or empty) stands on the whole ground.
+    Any failing test counts, not only the tests the claim was planned on.
+    Run `14235-bf24f931` (2026-10-16) fill 1: the per-fn claim of
+    `src/lib.rs::must_use` was refused `premise` because the tests it was
+    planned on had moved elsewhere, while the keep that moved them put
+    `test_boxed_str` (attributed at that sweep to a formatter) at its first
+    failure inside `must_use`; the next sweep's stub holds name it, and the
+    unit waited a fill. The same refusal recurs on `14495-a26ad4ea` and
+    `327239-f8e7fff0`.
+
     Units are matched by file and function name: two homonyms in one file
     read as one, which can only admit a claim the fresh measurement then
     judges, never refuse one."""
     want = frozenset(units)
     if not want:
         return ()
-    leaves = {_scope_leaf(s) for s in scope} if scope else None
     return tuple(sorted(
         k for k, (passed, identity, _aborted) in now.items()
-        if not passed and (leaves is None or _scope_leaf(k) in leaves)
-        and _first_fail_fns(identity) & want))
+        if not passed and _first_fail_fns(identity) & want))
 
 
 def names_of(entries: Iterable[str]) -> str:

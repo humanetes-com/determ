@@ -96,6 +96,7 @@ from pipeline_core.domain.models import FnLocator, FnRecord
 
 __all__ = [
     "DEFAULT_UNPAID_GRACE",
+    "premise_refused_last_fill",
     "TODAY_ORDER",
     "UnitEvidence",
     "FillBudget",
@@ -789,6 +790,34 @@ def unpaid_pair_buys(rows: Iterable[RouteLedgerRow], test: str,
         return 0
     return unpaid_tries_for_test(
         rows, test, oracle_fp, match=lambda r: r.kind is RouteKind.PAIR)
+
+
+def premise_refused_last_fill(
+    rows: Iterable[RouteLedgerRow], *, cluster: str, run_id: str,
+    iteration: int,
+) -> frozenset[FnLocator]:
+    """The units the newest earlier fill of ``cluster`` left unclaimed on
+    the premise gate (``RouteLedgerRow.filtered`` reason ``premise``).
+
+    A premise refusal says "a keep of this fill moved the tests this claim
+    was planned on; wait for the re-plan". The re-plan can choose the unit
+    again, and a keep of another run in the next fill can move its tests
+    again before its claim, so the wait has no bound: since 2026-10-01
+    eight units were refused in consecutive fills, `src/ensure.rs::render`
+    and `as_str` on `14235-bf24f931` fills 3 and 4 while the rank's
+    unclaimed streak lifted them from batch position 10 to 3. A unit in
+    this set is not refused on premise again (`_GroundGate`); its claim is
+    then judged on what it lands. The fill is the newest by ``started``
+    among the rows that are not this fill's own."""
+    earlier = [r for r in rows if r.cluster == cluster
+               and (r.run_id, r.iteration) != (run_id, iteration)]
+    if not earlier:
+        return frozenset()
+    last = max(earlier, key=lambda r: r.started)
+    fill = (last.run_id, last.iteration)
+    return frozenset(
+        FnLocator(f, n) for r in earlier if (r.run_id, r.iteration) == fill
+        for f, n, why in r.filtered if why == "premise")
 
 
 def unpaid_pair_fills(rows: Iterable[RouteLedgerRow], test: str,
@@ -2293,7 +2322,13 @@ def schedule(
             readmit_after=readmit_after,
             grace_left=_served_key(run) not in spent)
         if _run_is_unmeasurable(run, unmeasurable_tests, crash_blamed):
-            rank, reason = _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
+            # Weight 0 like a flat re-buy, under its own name: nothing
+            # was bought flat, the aimed tests cannot report. Labelled
+            # `rebuy_flat` it read as a flat body that does not exist
+            # (census P38, run `14235-bf24f931` iter 4: `file` and `impl
+            # src/context.rs` deferred `rebuy_flat` with the standing-FLAT
+            # set empty and the unit rank `served`, replayed 2026-10-17).
+            rank, reason = _RANK_REBUY_FLAT, "unmeasurable"
         ranked.append((run, rank, reason, _level(run, blockers)))
 
     return admit_ranked(

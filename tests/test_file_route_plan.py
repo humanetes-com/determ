@@ -115,3 +115,34 @@ def test_negative_control_the_prefix_plan_schedules_a_run_that_opens_and_lands_n
     assert opened == [_OVER_BOUND], (
         "the run OPENED (snapshot taken, fill entered) and the fill declined "
         "inside — the shape the plan-time bound removes")
+
+
+def test_every_empty_exit_of_a_file_run_names_its_reason(
+        tmp_path: Path) -> None:
+    """Run `1057870-b427a3a2` fill 2: a 12-unit file run printed `EMPTY
+    after 0.0 min (0 call(s))` and no line located the exit. Each return
+    that opens nothing now logs why: no plannable block left, a refused
+    claim. Control: a claim the clock grants opens the file."""
+    from pipeline_core.domain.fill_schedule import RouteRun, RunClock
+    root = _tree(tmp_path)
+    logs: list[str] = []
+    opened: list[str] = []
+    route = _route(_admits(root, logs), units=_units(),
+                   fill=lambda f, _bs, **_k: opened.append(f), logs=logs)
+    run = RouteRun(kind=RouteKind.FILE, label=f"file {_FITS}",
+                   targets=frozenset({FnLocator(_FITS, "d")}),
+                   files=(_FITS,))
+    refusing = RunClock(share_minutes=None, fill_remaining=lambda: None,
+                        ground_moved=lambda _s, _u: True)
+    assert route.run(run, refusing).empty
+    assert any("opens nothing — the claim was refused (premise)" in m
+               for m in logs)
+    gone = RouteRun(kind=RouteKind.FILE, label="file src/none.rs",
+                    targets=frozenset(), files=("src/none.rs",))
+    assert route.run(gone, refusing).empty
+    assert any("src/none.rs: opens nothing — the file has no stub" in m
+               for m in logs)
+    assert not opened
+    granting = RunClock(share_minutes=None, fill_remaining=lambda: None)
+    route.run(run, granting)
+    assert opened == [_FITS]

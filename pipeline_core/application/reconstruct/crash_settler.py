@@ -38,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
-from pipeline_core.application.reconstruct.tree_txn import TreeTxn
+from pipeline_core.application.reconstruct.tree_txn import TreeTxn, note_kept_edit
 from pipeline_core.domain.crash_settlement import (
     SettlementOutcome,
     frame_locator,
@@ -170,6 +170,9 @@ class CrashSettler:
 
     def __init__(self, deps: CrashSettlerDeps) -> None:
         self.deps = deps
+        # (file, fn, occurrence) of every body `_stub` put back, so the
+        # committed ones can be journalled as kept edits.
+        self._stubbed_at: list[tuple[str, str, int]] = []
 
     def settle(
         self,
@@ -290,6 +293,7 @@ class CrashSettler:
                 txn.rollback()
                 d.record_settled(locs, (*first_sites, *(
                     s for s in own_sites if s not in first_sites)))
+                self._stubbed_at.clear()
                 if not self._stub(txn, stubbed):
                     raise RuntimeError("a culprit moved while it was recorded")
                 if write is not None and withdrawn_at and not self._withdraw(
@@ -298,6 +302,11 @@ class CrashSettler:
                                        "recorded")
                 txn.commit()
                 committed = True
+                # A stub of an unproven culprit is a verdict of its own: a
+                # route that later restores a pre-image taken before it must
+                # not put the culprit back (`tree_txn.note_kept_edit`).
+                for rel, name, i in self._stubbed_at:
+                    note_kept_edit(d.src_dir / rel, name, i, STUB_BODY)
             except Exception as exc:  # noqa: BLE001 — see above
                 txn.rollback()
                 outcome = SettlementOutcome.UNSETTLED
@@ -450,6 +459,7 @@ class CrashSettler:
                     return False
                 _sig, _s, b, e = locs[i]
                 edits.append((b, e))
+                self._stubbed_at.append((rel, f.fn_name, i))
             for b, e in sorted(set(edits), reverse=True):
                 text = text[:b] + STUB_BODY + text[e:]
             txn.write(rel, text)

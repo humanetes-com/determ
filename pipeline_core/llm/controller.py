@@ -50,6 +50,9 @@ def _noop_close() -> None: ...
 def _noop_guard(location: str, msg: str) -> None: ...
 def _noop_dbg(msg: str) -> None: ...
 def _noop_persist(result: str, thinking: str) -> None: ...
+
+
+def _noop_persist_paired(prompt_sha: str, result: str, thinking: str) -> None: ...
 def _noop_emit(event: str, data: dict[str, Any]) -> None: ...
 
 
@@ -70,6 +73,13 @@ class Hooks:
     # the main trace, so the reasoning that actually wrote the reply on
     # record was discarded on every one of them.
     persist_followup_thinking: Callable[[str, str], None] = field(default=_noop_persist)
+    # The same main trace keyed by (prompt sha, response sha). The response
+    # sha alone is shared by every identical reply: the 41-char request
+    # reply `<REQUEST kind="file" arg="src/error.rs"/>` held a per-fn call's
+    # reasoning about another unit, so a session's request turns could not
+    # be audited (run `1430425-193a8f28`, 2026-10-14).
+    persist_paired_thinking: Callable[[str, str, str], None] = field(
+        default=_noop_persist_paired)
     # Structured vLLM-runtime events for the monitor (replaces guard-log scrapes).
     emit: Callable[[str, dict[str, Any]], None] = field(default=_noop_emit)
 
@@ -370,6 +380,7 @@ class LLMController:
         # result stood.
         if reasoning_text:
             self._h.persist_thinking(result, reasoning_text)
+            self._h.persist_paired_thinking(prompt_sha, result, reasoning_text)
         if fu.reasoning:
             self._h.persist_followup_thinking(result, fu.reasoning)
 

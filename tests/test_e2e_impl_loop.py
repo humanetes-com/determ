@@ -2405,3 +2405,147 @@ def test_negative_control_without_the_crash_peel_the_reply_goes_back_whole(
             "kind_works))") in capsys.readouterr().out
     assert "self.tag + 1" not in text       # `name`'s right answer was lost
     assert "crashed the test process" not in "".join(prompts[1:])
+
+
+IMPL_LIB_ONE_BLOCK = """\
+pub struct Foo { tag: u32 }
+
+impl Foo {
+    pub fn kind(&self) -> u32 {
+        unimplemented!()
+    }
+    pub fn name(&self) -> u32 {
+        unimplemented!()
+    }
+}
+"""
+
+
+def _one_block() -> list[ImplBlock]:
+    a = FnRecord(file="lib.rs", fn_name="kind", container="impl Foo",
+                 sig_text="fn kind (& self) -> u32", has_unimplemented_body=True)
+    b = FnRecord(file="lib.rs", fn_name="name", container="impl Foo",
+                 sig_text="fn name (& self) -> u32", has_unimplemented_body=True)
+    return [ImplBlock(file="lib.rs", container="impl Foo",
+                      members=(a, b), stub_members=(a, b))]
+
+
+def _impl_crash_peel_case(monkeypatch, tmp_path, *, settle: bool):
+    """The per-impl route, one block of two members; the first reply writes
+    both and `kind`'s body is the crash. Same shape as the file route's case
+    above (run `757853-e28f1a7d`, 2026-10-16, iter 4: the impl route's
+    attempt aborted the binaries the file route's peel had narrowed to one
+    body, and the block went back whole)."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+
+    ws = _setup(monkeypatch, tmp_path)
+    lib = ws / "src" / "lib.rs"
+    lib.write_text(IMPL_LIB_ONE_BLOCK)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _one_block())
+    replies = ['<FN name="kind" block="impl Foo">self.tag</FN>\n'
+               '<FN name="name" block="impl Foo">self.tag + 1</FN>',
+               '<FN name="kind" block="impl Foo">self.tag + 2</FN>']
+    monkeypatch.setattr(
+        pipeline, "_ask_raw",
+        lambda *a, **k: replies.pop(0) if len(replies) > 1 else replies[0])
+
+    def _run_out():
+        text = lib.read_text()
+        if "self.tag\n" in text or "self.tag }" in text:
+            return (101, _CRASH_OUT)
+        if "unimplemented!()" in text:
+            return (101, _BASE_OUT)
+        return (0, _GREEN_OUT)
+
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []), run=_run_out)
+    site = CrashSite(
+        binary_label="tests/t.rs", test_name="kind_works", signal="SIGSEGV",
+        frames=(CrashFrame("lib.rs", 4, "kind", "kind"),),
+        origin_frames=(CrashFrame("lib.rs", 0, "kind", "kind"),),
+        origin_capable=True)
+    rounds = iter([[site], []])
+    recorded: list = []
+    settler = crash_settler.CrashSettler(crash_settler.CrashSettlerDeps(
+        localize=lambda _cap, _ex: next(rounds, []),
+        run_suite=lambda: _run_out()[1], is_proven=lambda _u: False,
+        src_dir=ws / "src",
+        record_settled=lambda locs, _s: recorded.append(list(locs)),
+        log=lambda _m: None))
+    crash_settler.bind(settler if settle else None)
+    try:
+        pipeline._phase_c_fill_impl_blocks(
+            project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+            module_name="m", cluster_name="t", cluster=None,
+            check_cmd="cargo check", cluster_env={}, fr_path=None,
+            tdd_test_cmd="cargo test",
+            tdd_frontier_keys={FnLocator("lib.rs", "kind"),
+                               FnLocator("lib.rs", "name")},
+            tdd_frontier_tests=FailureFrontier.of_direct({
+                FnLocator("lib.rs", "kind"): {"kind_works"},
+                FnLocator("lib.rs", "name"): {"name_works"}}))
+    finally:
+        crash_settler.bind(None)
+    return lib.read_text(), recorded
+
+
+def test_the_impl_route_peels_the_body_a_crash_names_and_keeps_the_rest(
+        monkeypatch, tmp_path, capsys):
+    text, recorded = _impl_crash_peel_case(monkeypatch, tmp_path, settle=True)
+    out = capsys.readouterr().out
+    assert "PEELED 1 body(ies) a test process crashed on (kind)" in out
+    assert recorded == [[FnLocator("lib.rs", "kind")]]
+    assert "self.tag + 1" in text          # `name` stood through the crash
+
+
+def test_control_without_the_settlement_the_impl_block_goes_back_whole(
+        monkeypatch, tmp_path, capsys):
+    text, recorded = _impl_crash_peel_case(monkeypatch, tmp_path, settle=False)
+    assert recorded == []
+    assert "PEELED" not in capsys.readouterr().out
+    assert "self.tag + 1" not in text       # `name`'s right answer was lost
+
+
+def _impl_partial_run(monkeypatch, tmp_path, replies: list[str], *,
+                      delete_the_call: bool = False) -> tuple[Path, list[str]]:
+    ws = _setup(monkeypatch, tmp_path)
+    (ws / "src" / "lib.rs").write_text(IMPL_LIB_ONE_BLOCK)
+    install_cluster_scan(monkeypatch, impl_blocks=lambda *a, **k: _one_block())
+    _refuse_the_cast(monkeypatch)
+    if delete_the_call:
+        from pipeline_core.application.reconstruct import impl_fill as impl_fill_mod
+        monkeypatch.setattr(impl_fill_mod, "reply_refusal_feedback",
+                            lambda *a, **k: None)
+    prompts: list[str] = []
+
+    def _capture(prompt, *a, **k):
+        prompts.append(prompt)
+        return replies[min(len(prompts) - 1, len(replies) - 1)]
+
+    monkeypatch.setattr(pipeline, "_ask_raw", _capture)
+    install_scripted_cargo(monkeypatch, check_diag=(0, "", []))
+    _run(ws)
+    return ws, prompts
+
+
+def test_a_partial_impl_reply_keeps_the_rest_and_retries_the_refused_member(
+        monkeypatch, tmp_path):
+    """One block, two members: the reply's `kind` is refused for its text,
+    `name` lands. `name` is kept, and `kind` alone is asked again with the
+    parser's words (the file and pair routes already did this; the impl
+    route dropped the refused member with no feedback turn). Control:
+    without the feedback call no later prompt says why."""
+    one_cast = (f'<FN name="kind" block="impl Foo">{_CAST}</FN>\n'
+                '<FN name="name" block="impl Foo">self.tag + 1</FN>')
+    retry = '<FN name="kind" block="impl Foo">self.tag</FN>'
+    ws, prompts = _impl_partial_run(monkeypatch, tmp_path, [one_cast, retry])
+    text = (ws / "src" / "lib.rs").read_text()
+    assert len(prompts) == 2
+    assert "ambiguous `+` in a type" in prompts[1] and "kind" in prompts[1]
+    assert "self.tag + 1" in text, "the landed body is kept"
+    assert "unimplemented!()" not in text, "the refused member lands on retry"
+
+    c_ws, c_prompts = _impl_partial_run(monkeypatch, tmp_path / "control",
+                                        [one_cast, retry], delete_the_call=True)
+    assert not any("ambiguous `+` in a type" in p for p in c_prompts)
+    assert "unimplemented!()" in (c_ws / "src" / "lib.rs").read_text()

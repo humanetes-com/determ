@@ -180,14 +180,16 @@ def build_given_phrase_prompt(*, crate: str, file: str, roots: Sequence[GivenRoo
 
 TEST FILE: {file}
 
-FIXTURES (each: an item of the test files, followed by the test-file items it uses):
+FIXTURES (each: an item of the test files followed by the test-file items it uses, or one
+test's own setup statements):
 
 {blocks}
 
 TASK: for EACH fixture write ONE sentence saying what a test that uses it is given: the
 value it builds or the type it declares, and what is particular about it (what it wraps,
-how many layers, what it returns, what it records). Say only what this code shows. Do not
-say what the crate does with it and do not quote an expected output.
+how many layers, what it returns, what it records). Say only what this code shows, in plain
+words: name a fixture or a type by its name, never write its code. Do not say what the
+crate does with it and do not quote an expected output.
 
 Answer with one block per fixture and nothing else:
 

@@ -40,6 +40,11 @@ PID_IDENTITY=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/check_tree_writes.py \
     > "$GATE_TMP/tree_writes.out" 2>&1 &
 PID_TREE_WRITES=$!
+# Hard Rule 11 as a gate: an executed string naming a symbol of a crate under
+# reconstruction. 16 such literals in 6 files on 2026-10-17, one of them live.
+"$SCRIPT_DIR/.venv/bin/python" tools/check_crate_symbols.py \
+    > "$GATE_TMP/crate_symbols.out" 2>&1 &
+PID_CRATE_SYMBOLS=$!
 "$SCRIPT_DIR/.venv/bin/python" tools/loc_ratchet.py \
     > "$GATE_TMP/loc.out" 2>&1 &
 PID_LOC=$!
@@ -97,7 +102,7 @@ gate() {  # gate <name> <pid> <outfile>
     fi
 }
 
-echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, fixture ambiguity, identity contract, tree writes, LOC, /tmp literals, port keywords, rust)..."
+echo "Running static gates in parallel (mypy, ruff, import-linter, extraction invariants, fixture ambiguity, identity contract, tree writes, crate symbols, LOC, /tmp literals, port keywords, rust)..."
 gate "mypy" "$PID_MYPY" "$GATE_TMP/mypy.out"
 gate "ruff" "$PID_RUFF" "$GATE_TMP/ruff.out"
 gate "layer contract (adapters > application > ports > domain)" "$PID_LAYERS" "$GATE_TMP/layers.out"
@@ -105,6 +110,7 @@ gate "extraction invariants" "$PID_EXTRACTION" "$GATE_TMP/extraction.out"
 gate "fixture ambiguity" "$PID_FIXTURES" "$GATE_TMP/fixtures.out"
 gate "identity contract" "$PID_IDENTITY" "$GATE_TMP/identity.out"
 gate "tree writes (every write into a fill tree goes through tree_txn)" "$PID_TREE_WRITES" "$GATE_TMP/tree_writes.out"
+gate "crate symbols (no executed string names a reconstructed crate's symbol)" "$PID_CRATE_SYMBOLS" "$GATE_TMP/crate_symbols.out"
 gate "LOC ratchet (god-files only shrink)" "$PID_LOC" "$GATE_TMP/loc.out"
 gate "no /tmp path outside runtime_paths (tests share /tmp with live runs)" "$PID_TMP_LITERALS" "$GATE_TMP/tmp_literals.out"
 gate "untyped-port keywords (no new keyword through a Callable[..., X] port)" "$PID_PORT_KEYWORDS" "$GATE_TMP/port_keywords.out"

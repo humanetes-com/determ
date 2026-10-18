@@ -187,7 +187,10 @@ class Call:
     error: str = ""
 
     def thinking_path(self) -> Path:
-        return THINKING / f"{self.response_sha}.txt"
+        # The call's own trace when it was written (from 2026-10-17); the
+        # response-sha file is shared by identical replies.
+        paired = THINKING / f"{self.prompt_sha}.{self.response_sha}.txt"
+        return paired if paired.exists() else THINKING / f"{self.response_sha}.txt"
 
     def prompt_path(self) -> Path:
         return PROMPTS / f"{self.prompt_sha}.txt"

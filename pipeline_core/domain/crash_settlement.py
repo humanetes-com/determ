@@ -114,6 +114,21 @@ def settle_step(
                 reason=(f"{site.binary_label}: the culprit is the written "
                         f"body {own[0].fn_name} ({own[0].file_rel}:"
                         f"{own[0].line})"))
+        if (site.origin_traced and site.origin_traced_at_reader
+                and not site.origin_stack_lines):
+            # Outside the write only: a written reader is judged as
+            # written, as an untraced fault is. Run `14235-bf24f931`
+            # iter 3: the trace named the accessor that dereferenced a stale pointer it had loaded from a freed
+            # object (`src/error.rs::error`, line 818), and the settlement
+            # stubbed and refuted a correct body. Only an origin the
+            # sanitizer printed, or a trace that runs past a crate frame
+            # handed the address, names a producer.
+            return SettlementStep(
+                SettlementOutcome.UNSETTLED,
+                reason=(f"{site.binary_label}: the debugger's trace stops at "
+                        f"the frame that read the bad address "
+                        f"({culprits[0].fn_name}); a pointer it loaded from "
+                        "memory has a producer the trace cannot see"))
         proven = [f for f in culprits if is_proven(frame_locator(f))]
         if proven:
             return SettlementStep(

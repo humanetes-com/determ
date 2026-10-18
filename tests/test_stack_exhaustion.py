@@ -30,7 +30,6 @@ injected through `fault_class`):
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -49,22 +48,16 @@ from pipeline_core.domain.crash_site import (
     faulting_stack_records,
     memory_blamed_locators,
     origin_blamed_locators,
-    reader_blamed_locators,
     repeating_cycle,
     site_from_frames,
 )
 from pipeline_core.domain.language_driver import GenericLanguageDriver, using_driver
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.prompts.language_catalog import catalog_driver
 
 _FIX = Path(__file__).parent / "fixtures" / "crash"
 _ROOT = Path("/home/user/determ/tmp/anyhow/.skeleton-filled/stable")
 
 
-@pytest.fixture(autouse=True)
-def _catalog_driver() -> Iterator[None]:
-    with using_driver(catalog_driver()):
-        yield
 
 
 def _sweep(fixture: str, binaries: list[tuple[str, str]]) -> str:
@@ -171,7 +164,7 @@ def test_negative_control_read_as_invalid_memory_the_cycle_blames_nobody(
 def test_the_layout_retrigger_and_the_producer_aim_do_not_read_a_cycle() -> None:
     sites = _sites(_TWO, _BINARIES)
     assert origin_blamed_locators(sites) == frozenset()
-    assert reader_blamed_locators(sites) == frozenset()
+    assert origin_blamed_locators(sites) == frozenset()
 
 
 def _stamped(crash_blamed: frozenset[FnLocator]) -> set[str]:
@@ -391,13 +384,13 @@ def test_the_ownership_must_is_the_memory_renderers_claim() -> None:
     The builders prefixed it by the prompt's fn name; the generic driver
     returns it for any name. It is the invalid-memory renderer's sentence
     now, about the frame that renderer blames, and the plan line reads
-    `memory_blamed_locators` for the same class. Checked under both drivers.
+    `memory_blamed_locators` for the same class.
     """
     sites = _sites(_THREE, _BINARIES)
     raw = [{"func": "crate::error::into_boxed_dyn_error",
             "file": "src/error.rs", "line": 4}]
     memory = site_from_frames("tests/t.rs", "t", "SIGSEGV", raw)
-    for drv in (GenericLanguageDriver(), catalog_driver()):
+    for drv in (GenericLanguageDriver(),):
         with using_driver(drv):
             for text in crash_evidence_by_locator(sites).values():
                 assert "must not drop" not in text

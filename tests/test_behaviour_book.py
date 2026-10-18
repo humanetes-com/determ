@@ -978,10 +978,14 @@ def test_a_given_is_a_pointer_per_root_and_no_helper_text_is_in_a_feature_file()
     # (c) the asserting helper is in no Given; the Then names it
     assert ("check", "tests/one.rs") not in steps
     assert "Then, as `check` (tests/one.rs) compares it, it displays as '2'" in view
-    # an example with no root and a setup still opens with a Given
-    assert "Given this setup" in view and "And this setup" in view
-    # the index prints each root, observer and import block once
+    # a setup is a pointer, never code under a Given (entry 309's amendment):
+    # an example with no root opens with it, one with a root follows with it
+    assert "Given setup of example `bare` (in _givens.md)" in view
+    assert "And setup of example" in view
+    assert not re.search(r"(Given|And)[^\n]*\n\s*\"\"\"rust", "\n".join(features.values()))
+    # the index prints each root, setup, observer and import block once
     index = files[GIVENS_INDEX_NAME]
+    assert "# Setups" in index and "## setup of example `bare`" in index
     assert index.count("## `build` (tests/shared/mod.rs)") == 1 and "given in 2 example(s)" in index
     assert all(index.count(t) == 1 for t in _SHARED.values())
     assert index.index("# Observers") < index.index("## `check` (tests/one.rs)") < index.index("# Imports")
@@ -1073,14 +1077,16 @@ def test_a_root_gets_one_phrase_per_bake_and_the_view_prints_it_before_the_point
     book, reading, seen = _build_given_book(
         f'<GIVEN key="{key}">A layer two deep.</GIVEN>'
         '<GIVEN key="tests/shared/mod.rs::Layer">A sentence on a key no example is given.</GIVEN>')
-    asked = [p for p in seen if "TEST FILE:" in p]
-    # one call per test file that declares a root; test code only, and of the
-    # root and what it pulls in — never the asserting helper
-    assert len(asked) == 1 and "TEST FILE: tests/shared/mod.rs" in asked[0]
+    asked = [p for p in seen if "TEST FILE: tests/shared/mod.rs" in p]
+    # one call per test file that declares a root (the examples' own setups
+    # are asked in their own call); test code only, and of the root and
+    # what it pulls in — never the asserting helper
+    assert len(asked) == 1
     assert _SHARED[key] in asked[0] and _SHARED["tests/shared/mod.rs::Layer::impl1"] in asked[0]
     assert "fn check" not in asked[0]
     assert book.givens == ((key, "A layer two deep."),)
-    assert "givens: 1 phrase(s) for 1 root(s) (without one: none)" in reading.line()  # type: ignore[attr-defined]
+    assert "givens: 1 phrase(s) for 1 root(s) and 2 setup(s) (without one: no phrase in the reply 2)" \
+        in reading.line()  # type: ignore[attr-defined]
     files = feature_files(book)
     assert "Given A layer two deep. — `build` (tests/shared/mod.rs)" in files["wrap.feature"]
     assert "A layer two deep." in files[GIVENS_INDEX_NAME]
@@ -1103,7 +1109,10 @@ def test_a_refused_or_missing_phrase_leaves_the_pointer() -> None:
     ):
         book, reading, _seen = _build_given_book(reply)
         assert book.givens == ()
-        assert reading.given_refused == {why: 1}, why  # type: ignore[attr-defined]
+        refused = dict(reading.given_refused)  # type: ignore[attr-defined]
+        # the two example setups had no phrase in these replies
+        refused["no phrase in the reply"] = refused.get("no phrase in the reply", 0) - 2
+        assert {k: v for k, v in refused.items() if v} == {why: 1}, why
         assert "Given `build` (tests/shared/mod.rs)" in feature_files(book)["wrap.feature"]
     # a phrase that quotes the Then of an example given that root is a restatement
     from pipeline_core.domain.behaviour_book import given_roots, keep_given_phrases
@@ -1118,7 +1127,8 @@ def test_phrases_off_asks_nothing_about_a_root() -> None:
     book, reading, seen = _build_given_book("<GIVEN key=\"x\">y</GIVEN>", given_phrases=False)
     assert not [p for p in seen if "TEST FILE:" in p] and book.givens == ()
     # the roots are still counted, and the line says why they have no phrase
-    assert "givens: 0 phrase(s) for 1 root(s) (without one: not asked 1)" in reading.line()  # type: ignore[attr-defined]
+    assert "givens: 0 phrase(s) for 1 root(s) and 2 setup(s) (without one: not asked 3)" \
+        in reading.line()  # type: ignore[attr-defined]
 
 
 _READS_GIVENS = re.compile(r"\.givens\b")

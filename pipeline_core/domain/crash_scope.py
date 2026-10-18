@@ -25,10 +25,11 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.oracle_ledger import bare_test_name
 
-__all__ = ["CrashScope", "crash_culprits_by_test", "scope_to_crash_culprits"]
+__all__ = ["CrashScope", "crash_culprits_by_test", "scope_convicting",
+           "scope_to_crash_culprits"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,3 +96,28 @@ def scope_to_crash_culprits(
     return CrashScope(tuple(out),
                       {t: tuple(ls) for t, ls in sorted(blocked.items())},
                       tuple(dropped))
+
+
+def scope_convicting[K: (FnLocator, FnSite)](
+    convicting: Mapping[K, set[str]], scope: CrashScope,
+) -> dict[K, set[str]]:
+    """The direct-evidence map under the same rule as the frontier: a test a
+    crash blocks on a unit no longer convicts that unit (keys match on file
+    and fn name, so a site-keyed map is scoped by its locator). The map is
+    what a fill's test gate and its retrospective judge a body on
+    (`FailureFrontier.convicting_for`); scoping the frontier alone left a
+    non-culprit unit that stayed for other tests judged and convicted on
+    tests that died of another body's crash (the retrospective of run
+    `371055-1a407b3c` that recorded a wrong-deref lesson for `display` from
+    13 aborted tests). A unit left convicted by nothing keeps an empty
+    entry: it is still a dispatch unit, judged on compiling and on not
+    regressing the suite."""
+    if not scope.blocked:
+        return {k: set(v) for k, v in convicting.items()}
+    off: dict[tuple[str, str], set[str]] = {}
+    for test, units in scope.blocked.items():
+        for u in units:
+            off.setdefault((u.file, u.fn_name), set()).add(test)
+    return {k: {t for t in v
+                if bare_test_name(t) not in off.get((k.file, k.fn_name), set())}
+            for k, v in convicting.items()}

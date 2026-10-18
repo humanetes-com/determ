@@ -227,34 +227,20 @@ def non_destructor_frames(
     Compiler drop glue and `drop_in_place` are matched with the same marks:
     they are the same event with the destructor inlined away.
 
-    THE BARE NAME IS MATCHED TOO, because the symbol marks only reach ASAN.
-    A gdb backtrace carries no `as core::ops::drop::Drop>` in its symbol — the
-    debugger prints the function, not the trait impl that owns it — so a
-    mark-only test skips the destructor on the sanitized site and misses it on
-    every native one. Measured on run `1790133-2181e509` (2026-08-30 05:20:18),
-    which is this filter's first live sweep: the ASAN site correctly reported
-    `blamed: null, origin_frames: [["src/error.rs", 705, "drop"]]`, and two
-    SIGSEGV siblings built from gdb frames still read
-    `blamed: ["src/error.rs", "drop"]` from
-
-        frames: [["src/error.rs", 705, "drop"],
-                 ["src/error.rs", 610,
-                  "reallocate_into_boxed_dyn_error_without_backtrace"]]
-
-    In Rust a method named `drop` is `Drop::drop` — the trait's only method,
-    and the name is reserved by convention for it; a free `drop` is
-    `core::mem::drop`, which is a destructor by another route. Neither is ever
-    the body that owns an ownership bug, so the name alone is a safe test.
-
-    What it buys on that stack is the whole point of the rule: skipping the
-    destructor promotes `reallocate_into_boxed_dyn_error_without_backtrace`,
-    the frame that CALLED it — a conversion in the same family as
-    `into_boxed_dyn_error`, which is where this crash actually lives. The
-    caller was in the evidence the whole time, one frame out.
+    ONLY THE SYMBOL MARKS ARE MATCHED. A gdb backtrace carries no
+    `as core::ops::drop::Drop>` in its symbol — the debugger prints the
+    function, not the trait impl that owns it — so a native site keeps a
+    frame named `drop` (run `1790133-2181e509`, 2026-08-30 05:20:18: two
+    SIGSEGV siblings built from gdb frames read `blamed: ["src/error.rs",
+    "drop"]` while the ASAN site skipped it). Matching the bare name `drop`
+    was the removed catalog driver's rule (git tag ``catalog-driver-last``,
+    2026-10-17); the pipeline does not special-case a language name the
+    fill model is the expert on. A sanitized sweep of the same binary
+    supersedes the gdb site (:func:`localize_crashes`), which is where the
+    destructor is skipped by evidence rather than by name.
     """
     return tuple(f for f in frames
-                 if not _is_destructor_fn_name(f.fn_name)
-                 and not any(m in f.symbol for m in _DROP_SYMBOL_MARKS))
+                 if not any(m in f.symbol for m in _DROP_SYMBOL_MARKS))
 
 
 def prefer_non_destructor(
@@ -280,21 +266,6 @@ def prefer_non_destructor(
     """
     kept = non_destructor_frames(frames)
     return kept or frames
-
-
-def catalog_is_destructor_fn_name(fn_name: str) -> bool:
-    """Catalog-driver drop-token rule: `drop`, `object_drop`, …
-
-    Production skip/subject selection goes through :func:`language_driver`.
-    The generic driver does not synthesize a family from the token.
-    """
-    return fn_name == "drop" or "drop" in fn_name.split("_")
-
-
-def _is_destructor_fn_name(fn_name: str) -> bool:
-    """Bound-driver destructor-name test (catalog: drop token; generic: no)."""
-    from pipeline_core.domain.language_driver import language_driver
-    return language_driver().is_destructor_fn_name(fn_name)
 
 
 # A drop is running when the symbol is a `Drop::drop` impl, the compiler's drop
@@ -335,203 +306,13 @@ _POINTER_SENTINELS = ("dangling()", "::null()", "::null_mut()")
 # four are correct.
 _SENTINEL_EXCHANGE_CALLS = ("replace(", "swap(", "ptr::write")
 
-# The by-value transfer of `Error.inner`: every fn that takes `self` (or the
-# owning pointer) by value, copies the inner pointer out, and must therefore
-# neutralise the original owner before returning. A use-after-free whose free
-# stack is `Error::drop` called from a test line that invoked one of these is
-# this family's defect: the body copied the pointer, handed it on, and let
-# self drop. The four Box conversions were named from the recorded READ stack
-# of run `1618155-b60a8c4c` (2026-08-30), fixture
-# `tests/fixtures/crash/uaf_into_boxed_dyn_error_1618155_2026-08-30.txt`.
-# `downcast` joined from run `1577437-c93d5c26` (2026-09-06, archives
-# `logs/asan/asan-20260906T204443251879.txt` and `…T221545829298.txt`): it
-# takes `self` by value, copies inner, and lets Drop run on the failure path
-# and on the success path after `object_drop_rest` — the same ownership
-# shape with a different return type. The reply of that run's iter-1
-# file-first fill wrote `let own = self.inner;` with no forget in `downcast`
-# while forgetting self correctly in `into_boxed_dyn_error`, which had the
-# MUST. `downcast_ref`, `is` and `drop` do not belong: they take `&self`, or
-# they are the destructor the skip exists to stop aiming at.
-CONVERSION_FAMILY: frozenset[str] = frozenset({
-    "into_boxed_dyn_error",
-    "object_boxed",
-    "reallocate_into_boxed_dyn_error_without_backtrace",
-    "object_reallocate_boxed",
-    "downcast",
-})
-_BOX_DYN_ERROR_MARKS = (
-    "Box<dyn core::error::Error",
-    "Box<dyn std::error::Error",
-)
-# Type name in the demangled symbol, not the generic-open form. Live ASAN
-# on run `1212998-d61fbd2c` (2026-09-06) printed
-# `<anyhow::error::ErrorImpl>::error` with no `<E>` list; `ErrorImpl<` missed
-# it and recovery stayed off. `ErrorImpl<E>` still contains this mark.
-_ERROR_IMPL_MARK = "ErrorImpl"
-# A call of a family member: `.name(`, `::name(`, or the turbofish form
-# `.name::<T>(` — `err.downcast::<HighLevel>().unwrap()` on
-# `tests/test_context.rs:124` and `.downcast::<String>()` on
-# `tests/test_downcast.rs:21` (run `1577437-c93d5c26`). A `(`-only rule
-# matched neither, so a generic conversion was never a unique name. Nested
-# generics (`::<Vec<u8>>`) are accepted two levels deep. `downcast_ref::<T>(`
-# does not match: after `downcast` the next char must open the turbofish or
-# the call, never `_`.
-_TURBOFISH = r"(?:::<(?:[^<>]|<(?:[^<>]|<[^<>]*>)*>)*>)?"
-_CONVERSION_CALL_RE = re.compile(
-    r"(?:\.|::)\s*("
-    + "|".join(sorted((re.escape(n) for n in CONVERSION_FAMILY),
-                      key=len, reverse=True))
-    + r")\s*" + _TURBOFISH + r"\s*\("
-)
-# The instruction a conversion-crash fill was missing. Run `1790133-2181e509`'s
-# error.rs file-first prompt (sha 667e2060fd67e07451e68f24bb4790186067bd541caa7ac22ffbe432dea50c15)
-# quoted `into_boxed_dyn_error` in the file and named it in CRASH_EVIDENCE and
-# still instructed `drop`. The live builder is `build_file_fill_prompt`; the
-# slot that would have converted that fill is `_plan_line`. Without this
-# sentence a correctly aimed conversion fill re-emits `let own = self.inner`.
-# Worded for the COPY, not for the Box: every family member copies inner out
-# of a by-value self, and only some hand it to a Box. Run `1577437-c93d5c26`'s
-# iter-1 reply forgot self in `into_boxed_dyn_error` (which carried the
-# Box-worded sentence) and wrote `let own = self.inner;` with no forget in
-# `downcast`, which returns `Result<T, Self>` and never sees a Box.
-OWNERSHIP_TRANSFER_MUST = (
-    "MUST: after inner is copied out of self, self must not drop "
-    "(ManuallyDrop, or ptr::read plus mem::forget, or replace inner with a "
-    "sentinel before returning). A `let own = self.inner` copy leaves two "
-    "owners and the destructor frees what the copy still points at."
-)
-
 
 def _raw_is_destructor(func: str) -> bool:
-    return (_is_destructor_fn_name(bare_fn_name(func))
-            or any(m in func for m in _DROP_SYMBOL_MARKS))
+    return any(m in func for m in _DROP_SYMBOL_MARKS)
 
 
 def _raw_is_toolchain(file_: str) -> bool:
     return any(m in file_ for m in _TOOLCHAIN_PATH_MARKS)
-
-
-def _has_boxed_dyn_error(symbols: str) -> bool:
-    """True when a demangled symbol names `Box<dyn Error>` (any auto traits).
-
-    The mark is the Box-of-Error type itself, not Send/Sync on the window.
-    Requiring both auto traits missed `From<Error> for Box<dyn Error>` at
-    `src/error.rs:952` (run `1869206-7fd52754`, report
-    `logs/asan/asan-20260830T083211573812.txt`, convert-test READ stack
-    `drop_glue::<Box<dyn core::error::Error>>` wrapping `ErrorImpl`).
-    `Box<dyn FnOnce + Send>` in thread start does not match these marks, so
-    an Arc double-drop still returns empty: that crash has neither mark.
-    """
-    return any(m in symbols for m in _BOX_DYN_ERROR_MARKS)
-
-
-def catalog_access_licenses_conversion(symbols: str) -> bool:
-    """Catalog-driver ACCESS license: `ErrorImpl` or `Box<dyn Error>`."""
-    return _ERROR_IMPL_MARK in symbols or _has_boxed_dyn_error(symbols)
-
-
-def conversion_family_from_access(
-    raw_frames: list[dict[str, object]],
-) -> frozenset[str]:
-    """The conversion family iff the ACCESS (READ) stack names `ErrorImpl`
-    or `Box<dyn Error>`.
-
-    Catalog table. Production recovery goes through
-    :func:`language_driver` (generic licenses `Box<dyn` or a crate type
-    the extractor recorded, and names the unique call on the source
-    line). This function stays the catalog so tests pin today's table.
-    """
-    symbols = "\n".join(str(r.get("func") or "") for r in raw_frames)
-    if catalog_access_licenses_conversion(symbols):
-        return CONVERSION_FAMILY
-    return frozenset()
-
-
-def conversion_family_from_origin(
-    origin: list[dict[str, object]],
-) -> frozenset[str]:
-    """The conversion family iff the ORIGIN (free) stack has the shape the
-    destructor skip already recognises: its first in-crate frame is a
-    destructor and the next non-toolchain caller is a test line or an
-    in-crate non-family wrapper — the walk :func:`first_test_file_after_destructor`
-    does, reused here so the two licences cannot drift.
-
-    Why the READ marks alone are not enough: the surviving UAF of run
-    `1577437-c93d5c26` (iter 4, `logs/asan/asan-20260906T221545829298.txt`)
-    reads through `memcmp → <str as PartialEq>::eq → test_downcast.rs:19`
-    — neither `ErrorImpl` nor `Box<dyn Error>` on the READ stack — while
-    its free stack is `free → <anyhow::Error as Drop>::drop src/error.rs:630
-    → tests/test_downcast.rs:21`, and line 21 is
-    `bail_fmt().unwrap_err().downcast::<String>().unwrap()`. With the
-    family licensed by the READ marks only, recovery never read line 21 and
-    blame fell to `drop`. Negative control: the Arc double-drop of
-    `test_downcast::test_drop` (run `1064759-0f23fb68`) frees in the test's
-    own `Arc::drop` — no in-crate destructor in its origin — so this returns
-    empty and blame stays `drop`/nobody. The unique-name gate on the caller
-    line is unchanged and is the real filter.
-    """
-    if first_test_file_after_destructor(origin) is not None:
-        return CONVERSION_FAMILY
-    return frozenset()
-
-
-def catalog_origin_licenses_conversion(
-        origin: Sequence[Mapping[str, object]]) -> bool:
-    """Catalog-driver ORIGIN license: destructor-then-caller on the free stack."""
-    return first_test_file_after_destructor(origin) is not None
-
-
-def crate_fn_named_on_source_line(
-    source_line: str,
-    family: frozenset[str],
-) -> str | None:
-    """The unique family name the source line calls, or None.
-
-    Unique is the gate: a line that names two conversions is not a
-    resolution, and a line that names none (`downcast_ref`, `drop`) is not
-    one either. The recorded line is `let boxed = err.into_boxed_dyn_error();`.
-    A turbofish call (`err.downcast::<HighLevel>().unwrap()`) is a call.
-    """
-    return crate_fn_named_in_source_window((source_line,), family)
-
-
-def crate_fn_named_in_source_window(
-    window: Sequence[str],
-    family: frozenset[str],
-) -> str | None:
-    """The unique family name called anywhere in ``window``, or None.
-
-    The bounded-window form of :func:`crate_fn_named_on_source_line`, for
-    the ACCESS-side recovery: the faulting line is where the returned value
-    is READ, and the conversion that produced it sits on an earlier line of
-    the same test fn. Live (run `1577437-c93d5c26`, `tests/error_gen_3.rs`):
-    the SEGV's access test frame is line 33, `assert_eq!(boxed.to_string(),
-    "io");`, which names nothing; line 32 is `let boxed =
-    err.reallocate_into_boxed_dyn_error_without_backtrace();`. The gate is
-    the same: exactly one family name across the window, else None — a fn
-    that calls two conversions is not a resolution.
-    """
-    hit = crate_fn_named_in_source_window_at(window, family)
-    return hit[0] if hit is not None else None
-
-
-def crate_fn_named_in_source_window_at(
-    window: Sequence[str],
-    family: frozenset[str],
-) -> tuple[str, int] | None:
-    """:func:`crate_fn_named_in_source_window` plus the 0-based index of the
-    window line that names it — the binding line, which is what the
-    recovered frame is ``named_by`` (`error_gen_3.rs:32`, not the access
-    at `:33`)."""
-    hits: list[tuple[str, int]] = [
-        (m.group(1), i)
-        for i, line in enumerate(window)
-        for m in _CONVERSION_CALL_RE.finditer(line)
-        if m.group(1) in family]
-    names = list(dict.fromkeys(n for n, _ in hits))
-    if len(names) != 1:
-        return None
-    return hits[0]
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,25 +392,22 @@ def first_test_file_after_destructor(
     origin: Sequence[Mapping[str, object]],
 ) -> tuple[str, int] | None:
     """If the first in-crate origin frame is a destructor, return the next
-    non-toolchain caller's ``(file_rel, line)`` when that caller is not
-    itself a conversion.
+    non-toolchain caller's ``(file_rel, line)``.
 
     Two shapes, one owner:
 
-    * a test file — the conversion was inlined
+    * a test file — the call was inlined
       (`Drop::drop` at `src/error.rs:706` from
       `tests/behaviour_stable_gen_1.rs:27`);
-    * an in-crate wrapper whose bare name is not in
-      :data:`CONVERSION_FAMILY` — live, `From<Error> for Box<dyn Error>`
-      at `src/error.rs:955` (`error.into_boxed_dyn_error()`), run
-      `1869206-7fd52754`, report
-      `logs/asan/asan-20260830T083211573812.txt`. Preferring `from` aims
-      the wrapper; four `fn from` bodies share one locator shape, so
-      `from` must not join the family.
+    * an in-crate caller — live, `From<Error> for Box<dyn Error>` at
+      `src/error.rs:955`, run `1869206-7fd52754`, report
+      `logs/asan/asan-20260830T083211573812.txt`.
 
-    A next frame already in the family (`reallocate_into_boxed_dyn_error_
-    without_backtrace`) is left for :func:`prefer_non_destructor` — that
-    is how the gdb siblings already promote it. Consecutive destructor
+    A crate-symbol catalog once excluded callers whose bare name it listed
+    as a "conversion"; it was removed on 2026-10-17 (git tag
+    ``catalog-driver-last``), so every in-crate caller is returned and
+    :func:`recover_owner_from_caller_source` reads its line. Consecutive
+    destructor
     frames (`Error::drop` then `object_drop`) are walked past.
     """
     seen_destructor = False
@@ -651,39 +429,28 @@ def first_test_file_after_destructor(
         if file_.startswith("tests/"):
             return (file_, raw_line)
         if file_.startswith("src/"):
-            from pipeline_core.domain.language_driver import language_driver
-            if bare_fn_name(func) in language_driver().conversion_family():
-                return None
             return (file_, raw_line)
         return None
     return None
 
 
-def _declared_calls(
-    line: str, family: frozenset[str], declared: frozenset[str],
-) -> list[str]:
+def _declared_calls(line: str, declared: frozenset[str]) -> list[str]:
     """Distinct calls on one source line, in source order, to a fn the
     anchor file declares.
 
-    A non-empty family counts only its members (the catalog match). An
-    empty family counts every ``.name(`` / ``::name(`` call. A bare call
-    is not one. A name the file does not declare (``to_string``,
-    ``unwrap``) is std's or the test's, not a body this crash can blame."""
-    if family:
-        found = [m.group(1) for m in _CONVERSION_CALL_RE.finditer(line)
-                 if m.group(1) in family]
-    else:
-        from pipeline_core.domain.language_driver import _called_idents
-        found = _called_idents(line)
+    Every ``.name(`` / ``::name(`` call counts. A bare call is not one. A
+    name the file does not declare (``to_string``, ``unwrap``) is std's or
+    the test's, not a body this crash can blame."""
+    from pipeline_core.domain.language_driver import _called_idents
     out: list[str] = []
-    for name in found:
+    for name in _called_idents(line):
         if name in declared and name not in out:
             out.append(name)
     return out
 
 
 def _name_from_binding(
-    lines: Sequence[str], family: frozenset[str], declared: frozenset[str],
+    lines: Sequence[str], declared: frozenset[str],
 ) -> tuple[str | None, int] | None:
     """The call the faulting line's value was bound to.
 
@@ -708,13 +475,13 @@ def _name_from_binding(
     if not lines:
         return None
     fault = lines[-1]
-    if _declared_calls(fault, family, declared):
+    if _declared_calls(fault, declared):
         return (None, 0)
     fault_names = uses(fault) - binds(fault)
     for index in range(len(lines) - 2, -1, -1):
         if not binds(lines[index]) & fault_names:
             continue
-        calls = _declared_calls(lines[index], family, declared)
+        calls = _declared_calls(lines[index], declared)
         if len(calls) > 1:
             return (None, 0)
         if not calls:
@@ -751,22 +518,24 @@ def recover_owner_from_caller_source(
     source_window: SourceWindow | None = None,
     declared_in: Callable[[str], frozenset[str] | None] | None = None,
 ) -> CrashFrame | None:
-    """Name the conversion the caller source called, gated by the family.
+    """Name the crate fn the caller source called, when a stack licenses it.
 
-    The family is licensed by EITHER stack — the READ marks
-    (:func:`conversion_family_from_access`) or the origin's
-    destructor-then-caller shape (:func:`conversion_family_from_origin`).
-    The unique-name gate runs over ``source_line`` (the origin's caller
-    line, located by ``named_by``) when given, else over ``source_window``
-    (the access-side window of the enclosing test fn, whose own
-    coordinates supply ``named_by`` — the binding line, not the faulting
-    access). On a window, the name the faulting line reads is resolved
+    The recovery is licensed by EITHER stack — the access stack's symbols
+    or the origin's destructor-then-caller shape, both read through the
+    language driver. The unique-name gate runs over ``source_line`` (the
+    origin's caller line, located by ``named_by``) when given, else over
+    ``source_window`` (the access-side window of the enclosing test fn,
+    whose own coordinates supply ``named_by`` — the binding line, not the
+    faulting access). On a line, with the anchor's declared names in hand,
+    the name is the one call to a declared fn, and two or none is nobody;
+    without them, the line's first call. On a window, the name the faulting
+    line reads is resolved
     first (:func:`_name_from_binding`), counting only calls to fns the
     anchor file declares (``declared_in``, the anchor's fn names, or None
     when it cannot be read): the nearest line that bound it, when that
     line calls one such fn. A faulting line that calls one itself, or a
     binder that calls two, names nobody. No binding, or no declared names
-    to count with, falls through to the unique-name gate. Empty family or
+    to count with, falls through to the unique-name gate. Unlicensed, or
     no unique name: None, and blame is unchanged.
 
     ``file_rel`` of the recovered frame: the origin's in-crate destructor
@@ -792,15 +561,27 @@ def recover_owner_from_caller_source(
         or drv.origin_licenses_conversion(origin_raw))
     if not licensed:
         return None
-    family = drv.conversion_family()
     if source_line:
-        name = (crate_fn_named_on_source_line(source_line, family)
-                if family else drv.unique_called_name(source_line))
+        # The line path counts calls the way the window path does: only fns
+        # the anchor file declares, exactly one. The first call on the line
+        # is std's as often as the crate's — `bail_fmt().unwrap_err()
+        # .downcast::<String>()` (`tests/test_downcast.rs:21`, run
+        # `1577437-c93d5c26`) named `unwrap_err`, which no crate file
+        # declares, so the blame dropped out of the frontier downstream.
+        anchor = _anchor_file(
+            origin_raw, named_by[0] if named_by is not None else None)
+        declared = (declared_in(anchor) if declared_in is not None and anchor
+                    else None)
+        if declared is not None:
+            calls = _declared_calls(source_line, declared)
+            name = calls[0] if len(calls) == 1 else None
+        else:
+            name = drv.unique_called_name(source_line)
     elif source_window is not None and source_window.lines:
         anchor = _anchor_file(origin_raw, source_window.file_rel)
         declared = (declared_in(anchor) if declared_in is not None and anchor
                     else None)
-        bound = (_name_from_binding(source_window.lines, family, declared)
+        bound = (_name_from_binding(source_window.lines, declared)
                  if declared is not None else None)
         if bound is not None and bound[0] is None:
             return None
@@ -808,13 +589,6 @@ def recover_owner_from_caller_source(
             name = bound[0]
             named_by = (source_window.file_rel,
                         source_window.line_no(bound[1]))
-        elif family:
-            hit = crate_fn_named_in_source_window_at(
-                source_window.lines, family)
-            name = hit[0] if hit is not None else None
-            if hit is not None:
-                named_by = (source_window.file_rel,
-                            source_window.line_no(hit[1]))
         else:
             name = None
             for i, line in enumerate(source_window.lines):
@@ -933,13 +707,6 @@ def _frame_locus(fr: CrashFrame) -> str:
         src, ln = fr.named_by
         return f"{fr.file_rel} (named by {src}:{ln})"
     return f"{fr.file_rel}:{fr.line}"
-
-
-def catalog_ownership_transfer_must(names: Collection[str]) -> str:
-    """Catalog-driver MUST: ManuallyDrop catalog aimed at CONVERSION_FAMILY."""
-    if CONVERSION_FAMILY.intersection(names):
-        return OWNERSHIP_TRANSFER_MUST
-    return ""
 
 
 def ownership_transfer_must(names: Collection[str]) -> str:
@@ -1092,6 +859,13 @@ class CrashSite:
     # the fault address through the arguments each frame received — a
     # debugger measurement, not a sanitizer's origin stack.
     origin_traced: bool = False
+    # The trace stopped at the innermost crate frame: no crate frame was
+    # handed the bad address, so the frame that faulted is named its producer
+    # by default. It may have computed the address or loaded it from memory
+    # (a stale pointer in a field), and the trace cannot tell which
+    # (`traced_origin_index`, "what it does not see"). A settlement does not
+    # stub on such a site alone (`crash_settlement.settle_step`).
+    origin_traced_at_reader: bool = False
     # How many `#N` lines the sanitizer printed under its origin introducer
     # (`AsanReport.origin_stack_lines`). Zero on a debugger site and on a
     # report that carried no free or allocation stack. The localizer
@@ -1692,6 +1466,7 @@ def site_from_frames(
     # Only for an invalid-memory fault: a stub's abort or an overflow is
     # sited where it happened.
     traced = False
+    traced_at_reader = False
     if (not origin_raw and fault_addr is not None
             and carries_fault_address(signal or "")
             and fault_class(signal or "", abort) is FaultClass.INVALID_MEMORY):
@@ -1699,6 +1474,11 @@ def site_from_frames(
         if idx is not None:
             origin = _crate_frames([raw_frames[idx]], crate_file_prefix, 1)
             traced = bool(origin)
+            innermost = next(
+                (j for j, f in enumerate(raw_frames)
+                 if str(f.get("file") or "").startswith(crate_file_prefix)
+                 and f.get("func")), None)
+            traced_at_reader = traced and idx == innermost
     cycle: StackCycle | None = None
     if fault_class(signal or "", abort) is FaultClass.EXHAUSTION:
         # The whole faulting stack, not the innermost `max_frames`: a period
@@ -1729,6 +1509,7 @@ def site_from_frames(
         origin_frames=origin,
         raw_report=raw_report, origin_capable=origin_capable, cycle=cycle,
         abort=abort, origin_traced=traced,
+        origin_traced_at_reader=traced_at_reader,
         origin_stack_lines=origin_stack_lines)
 
 
@@ -2077,31 +1858,18 @@ def destruction_path_subjects(
     fn_records: Iterable[Mapping[str, object]],
     *, max_subjects: int = 12,
 ) -> frozenset[FnLocator]:
-    """The crate's OWN destruction/ownership-transfer family, from extractor
-    records (`file`, `fn_name`, `body_text`).
+    """The crate's OWN destruction/ownership-transfer fns, from extractor
+    records (`file`, `fn_name`, `body_text`): a fn whose BODY holds an
+    ownership-transfer primitive.
 
-    Two rules, in this order, because the second is a heuristic and the first
-    is not:
-
-    1. a fn whose bare name carries `drop` as a token (`drop`, `object_drop`,
-       `object_drop_front`, `context_chain_drop_rest`) — the crate declared
-       those names, so this is reading the crate's own vocabulary, not
-       guessing at one;
-    2. if and only if rule 1 finds nothing, a fn whose BODY holds an
-       ownership-transfer primitive.
-
-    Rule 2 is second on purpose. A name-token match on the wrong set is this
-    project's recurring collapse, so the body evidence is the fallback for a
-    crate that does not name its drop family `drop`, never a widening of a set
-    that already resolved.
+    A name-token rule (`drop` in the fn name) ran first under the removed
+    catalog driver (git tag ``catalog-driver-last``, 2026-10-17); the
+    pipeline does not read a language's naming convention, so the body is
+    the only evidence.
 
     A result wider than `max_subjects` contributes NOTHING, on
     `vanished_subject_fns`' precedent: the point is a subject, and a subject
-    that names half the crate names none of it. On the live anyhow tree rule 1
-    yields five — `Error::drop`, `object_drop`, `object_drop_front`,
-    `context_drop_rest`, `context_chain_drop_rest` — against the 50 fns the
-    construction chain named on 2026-08-15, none of which was any of them."""
-    named: set[FnLocator] = set()
+    that names half the crate names none of it."""
     bodied: set[FnLocator] = set()
     for rec in fn_records:
         file_ = str(rec.get("file") or "")
@@ -2110,16 +1878,11 @@ def destruction_path_subjects(
             continue
         if not _is_authorable_file(file_):
             continue
-        loc = FnLocator(file_, fn_name)
-        from pipeline_core.domain.language_driver import language_driver
-        if language_driver().is_destructor_fn_name(fn_name):
-            named.add(loc)
-            continue
         body = str(rec.get("body_text") or "")
         if any(p in body for p in _OWNERSHIP_PRIMITIVES):
-            bodied.add(loc)
-    picked = named or bodied
-    return frozenset(picked) if 0 < len(picked) <= max_subjects else frozenset()
+            bodied.add(FnLocator(file_, fn_name))
+    return (frozenset(bodied) if 0 < len(bodied) <= max_subjects
+            else frozenset())
 
 
 def crash_evidence_by_locator(
@@ -2169,16 +1932,12 @@ def crash_evidence_by_locator(
 
 
 def origin_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
-    """Each site's origin-blamed locator, with no family union.
+    """Each site's origin-blamed locator, one per site.
 
-    The schedule and the family instruction read the widened set
-    (:func:`blamed_locators`). Dispatch's held batch reads this set plus
-    the exhaustion cycle (:func:`blocker_culprit_tests`): holding the
-    widened set would admit every family name at the file under a driver
-    whose conversion family is non-empty. The retrigger's filled-body
-    gate and OWNS grade need the observed origin only: a filled recovered
-    conversion plus an undeclared sibling must stay a fill, not a type
-    re-author. Chain-derived sites contribute nothing:
+    :func:`blamed_locators` adds the exhaustion cycle. The retrigger's
+    filled-body gate and OWNS grade need the observed origin only: a
+    filled recovered culprit plus an undeclared sibling must stay a fill,
+    not a type re-author. Chain-derived sites contribute nothing:
     `chain_derived_site` builds with `frames=()` and `origin_frames=()`,
     so `CrashSite.blamed` — and therefore `blamed_locator` — is None for
     every `PROVENANCE_CHAIN` site by construction; a non-None locator
@@ -2464,33 +2223,29 @@ def exhaustion_culprit_locators(
 
 
 def blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
-    """Everything a sweep's crash sites convict: the origin blame with its
-    family (:func:`reader_blamed_locators`) plus the cycle of every stack
+    """Everything a sweep's crash sites convict: the origin blame
+    (:func:`origin_blamed_locators`) plus the cycle of every stack
     exhaustion (:func:`exhaustion_culprit_locators`). The set the refill
-    stamp, the schedule and the dispatch grade (`Crash.BLAMED`) read.
-    The held batch does not: it reads :func:`blocker_culprit_tests`."""
-    return reader_blamed_locators(sites) | exhaustion_culprit_locators(sites)
+    stamp, the schedule, the dispatch grade (`Crash.BLAMED`) and the held
+    batch (:func:`blocker_culprit_tests`) read.
+
+    No locator is widened to names that share a file with the origin. A
+    catalog of crate conversion names once did that (the culprit's whole
+    "family" at its file); it was removed on 2026-10-17 because the
+    pipeline may not know a crate's symbols, and the git tag
+    ``catalog-driver-last`` holds it."""
+    return origin_blamed_locators(sites) | exhaustion_culprit_locators(sites)
 
 
 def blocker_culprit_tests(
     sites: tuple[CrashSite, ...],
 ) -> dict[FnLocator, frozenset[str]]:
     """Culprits the dispatch batch admits ahead of the cap, each with the
-    tests whose crash convicted it.
-
-    The set is the observed origin (:func:`origin_blamed_locators`) plus
-    every exhaustion-cycle member (:func:`exhaustion_culprit_locators`).
-    :func:`blamed_tests` widens an origin that sits in the driver's
-    conversion family to every family name at that file. Those siblings
-    stay on the schedule and on the family instruction. They are not held
-    here. Under a driver whose family is empty the locators match
-    :func:`blamed_locators`. Under one whose family names several
-    conversions, holding the widened set would fill a batch with bodies
-    the crash did not run. A culprit with an empty test set is still a
-    key: membership admits it, and the count orders it."""
-    keep = origin_blamed_locators(sites) | exhaustion_culprit_locators(sites)
-    return {loc: tests for loc, tests in blamed_tests(sites).items()
-            if loc in keep}
+    tests whose crash convicted it: :func:`blamed_tests` of the same
+    sites, the observed origin plus every exhaustion-cycle member. A
+    culprit with an empty test set is still a key: membership admits it,
+    and the count orders it."""
+    return blamed_tests(sites)
 
 
 def blamed_tests(
@@ -2525,78 +2280,8 @@ def memory_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]
     crashed conversion whatever its class, and run `371055-1a407b3c`'s
     file prompt `8bd6c469…` told a stack overflow's cycle member that the
     original owner must not drop."""
-    return reader_blamed_locators(tuple(
+    return origin_blamed_locators(tuple(
         s for s in sites if s.fault is FaultClass.INVALID_MEMORY))
-
-
-def reader_blamed_locators(sites: tuple[CrashSite, ...]) -> frozenset[FnLocator]:
-    """The ORIGIN blame, widened to the whole :data:`CONVERSION_FAMILY` at a
-    site's file whenever the origin is a family member — built on
-    :func:`origin_blamed_locators`, which is one locator per site, where the
-    localizer put the fault (`CrashSite.blamed_locator`).
-
-    Deliberately not the evidence keys: `crash_evidence_by_locator` keys by
-    EVERY frame, access and origin, so the innocent caller that merely routes
-    execution into the fault is a key too. Any 'is the blame outside this
-    unit' test written against the keys reads the blame as inside the caller
-    and never fires — live 2026-08-09/10, `ext_context` (src/context.rs) was
-    an access frame of the very `object_drop` (src/error.rs) fault it was
-    being charged for.
-
-    A frame-derived blame on a :data:`CONVERSION_FAMILY` member convicts
-    the whole family at that file. The family is one ownership contract
-    (copy inner out of a by-value self, then neutralise self), and the
-    recorded fills show the model honouring it only where the sentence was
-    attached: run `1577437-c93d5c26`'s iter-1 reply forgot self in the
-    blamed `into_boxed_dyn_error` and copied inner without a forget in
-    `downcast` and in `reallocate_into_boxed_dyn_error_without_backtrace`,
-    which were AIMED callees or absent — and the next three sweeps aborted
-    in those siblings' binaries. Convicting the family puts every member
-    on the file-first CRASHED clause with the MUST. Locators the extractor
-    does not declare drop out of the frontier downstream, so a crate
-    without those names is a no-op. Deliberately NOT applied to
-    `crash_evidence_by_locator` (that set is every frame; widening it
-    re-opens the outside-the-unit trap).
-
-    The layout retrigger does not read this set. Its filled-body gate is
-    true only when every blamed locator has a filled record, so the union
-    re-opens a type re-author the moment any sibling is stubbed or
-    undeclared; grading has the matching risk — a component that merely
-    shares a file with the true origin would grade OWNS by name proximity
-    alone, the same over-attribution class `crash_blame_grade` exists to
-    avoid (`self_type_names`'s docstring; the StdError/`Quoted` fires).
-    Both the filled-body gate and the OWNS grade take
-    :func:`origin_blamed_locators` instead."""
-    from pipeline_core.domain.language_driver import language_driver
-    family = language_driver().conversion_family()
-    out: set[FnLocator] = set(origin_blamed_locators(sites))
-    for loc in list(out):
-        if loc.fn_name in family:
-            out |= {FnLocator(loc.file, n) for n in family}
-    return frozenset(out)
-
-
-def family_members_beside_a_crashed_conversion(
-    crashed: Collection[str],
-    candidates: Collection[str],
-) -> frozenset[str]:
-    """The ``candidates`` that belong to :data:`CONVERSION_FAMILY` when
-    ``crashed`` already holds a family member; empty otherwise.
-
-    The prompt slot's half of the family contract. `_plan_line` grades a
-    unit CRASHED (rewrite, with the ownership MUST) or AIMED (a callee of
-    the faulting frame: re-derive the erased layout). Run
-    `1577437-c93d5c26`'s iter-1 `src/error.rs` file-first prompt (sha
-    `9cc1333b…`) listed `into_boxed_dyn_error` CRASHED with the MUST and
-    `object_boxed` AIMED with the layout sentence; the reply forgot self in
-    the first and moved the payload into a fresh `Box::new` in the second.
-    A family member beside a crashed family member is the same defect and
-    gets the same instruction."""
-    from pipeline_core.domain.language_driver import language_driver
-    family = language_driver().conversion_family()
-    if not family.intersection(crashed):
-        return frozenset()
-    return frozenset(c for c in candidates if c in family)
 
 
 def blame_outside_unit(

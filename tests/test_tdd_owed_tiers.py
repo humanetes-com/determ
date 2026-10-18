@@ -54,7 +54,8 @@ def _run(tmp_path: Path, monkeypatch, *, owed: bool,
          logs: list[str] | None = None,
          cargo: tuple[int, str] | None = None,
          reference: Any = None, rows: Any = None,
-         compile_errors: Any = None) -> ClusterFillResult:
+         compile_errors: Any = None, score_only: bool = False,
+         sweeps: list[str] | None = None) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "0" if owed else "3")
@@ -84,7 +85,9 @@ def _run(tmp_path: Path, monkeypatch, *, owed: bool,
         order_frontier=lambda eligible, counts_: list(eligible.items()),
         record_tdd_regression=lambda *a, **k: "",
         reset_exhaustion_flags=lambda *a, **k: [],
-        run_cargo=lambda *a, **k: (101, _FLAT) if cargo is None else cargo,
+        run_cargo=lambda *a, **k: (
+            sweeps.append(str(a[0])) if sweeps is not None else None,
+            (101, _FLAT) if cargo is None else cargo)[1],
         scan_unimplemented_for_cluster=lambda *a, **k: StubInventory(),
         scan_unimplemented_functions=lambda *a, **k: StubInventory(),
         task2_fill_fns_one_by_one=_fill,
@@ -99,7 +102,7 @@ def _run(tmp_path: Path, monkeypatch, *, owed: bool,
         cluster=_cluster(), check_cmd="cargo check", cluster_env={},
         leaf_counts=None, fr_path=None,
         test_cmd_builder=lambda stems, include_lib=False: "cargo test",
-        tag="[stable]")
+        tag="[stable]", score_only=score_only)
 
 
 def test_the_narrowest_tier_is_owed_and_offers_landing_nothing_end_the_cluster_failed(
@@ -188,6 +191,7 @@ def test_a_fill_that_raises_ends_the_cluster_failed_with_its_traceback(
     # A crash spent no budget: it is named, not called exhausted, so the
     # generator neither checkpoints it nor reports it as exhausted.
     assert result.crashed.startswith("UnicodeDecodeError")
+    assert "Traceback" in result.crash_traceback
     assert not result.exhausted and result.failed_tests
     assert len(fills) == 2, "no fill after the crash"
     crashed = [d for ev, d in events if ev == "task2a.cluster_crashed"]
@@ -195,6 +199,30 @@ def test_a_fill_that_raises_ends_the_cluster_failed_with_its_traceback(
     assert crashed[0]["cluster"] == "stable"
     assert "UnicodeDecodeError" in crashed[0]["exception"]
     assert "Traceback" in crashed[0]["traceback"]
+
+
+def test_score_only_reads_the_entry_sweep_and_fills_nothing(
+        tmp_path: Path, monkeypatch) -> None:
+    """After an earlier cluster's pipeline crash (decided 2026-10-17), a
+    cluster is read by one sweep, reports its red list, and makes no fill
+    call. Control: the same cluster without the flag fills."""
+    events: list[tuple[str, dict]] = []
+    fills: list[dict] = []
+    logs: list[str] = []
+    sweeps: list[str] = []
+    result = _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
+                  logs=logs, score_only=True, sweeps=sweeps)
+    assert fills == []
+    assert len(sweeps) == 1, f"one sweep, nothing after it: {sweeps}"
+    assert result.scored_only and not result.exhausted and not result.crashed
+    assert result.failed_tests == frozenset({"t1"})
+    scored = [d for ev, d in events if ev == "phase_c.tdd.score_only"]
+    assert scored and scored[0]["failed"] == ["t1"]
+    assert any("SCORED ONLY" in line and "red: t1" in line for line in logs)
+
+    control_fills: list[dict] = []
+    _run(tmp_path, monkeypatch, owed=True, events=[], fills=control_fills)
+    assert control_fills, "negative control: without the flag the cluster fills"
 
 
 def test_control_a_stop_still_leaves_the_process(

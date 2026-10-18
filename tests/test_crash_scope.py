@@ -45,3 +45,26 @@ def test_no_culprit_no_scoping() -> None:
     # A crash of a test that is no longer failing scopes nothing either.
     passing = [SimpleNamespace(test_name="test_drop", culprit_locators={_STD})]
     assert crash_culprits_by_test(passing, ["test_other"]) == {}
+
+
+def test_the_convicting_map_is_scoped_by_the_same_rule() -> None:
+    """A non-culprit unit that stays on the frontier for another test is no
+    longer convicted by the crashed test; the culprit still is, and so is a
+    site-keyed map. Control: no blocked test leaves the map as it was."""
+    from pipeline_core.domain.crash_scope import (
+        scope_convicting,
+        scope_to_crash_culprits,
+    )
+    from pipeline_core.domain.models import FnLocator, FnSite
+    culprit = FnLocator("src/a.rs", "make")
+    reader = FnLocator("src/a.rs", "show")
+    ordered = [(culprit, {"t_crash"}), (reader, {"t_crash", "t_other"})]
+    scope = scope_to_crash_culprits(ordered, {"t_crash": frozenset({culprit})})
+    conv = {culprit: {"t_crash"}, reader: {"t_crash", "t_other"}}
+    assert scope_convicting(conv, scope) == {
+        culprit: {"t_crash"}, reader: {"t_other"}}
+    sites = {FnSite("src/a.rs", "show", "impl Display for E"): {"t_crash"}}
+    assert scope_convicting(sites, scope) == {
+        FnSite("src/a.rs", "show", "impl Display for E"): set()}
+    none = scope_to_crash_culprits(ordered, {})
+    assert scope_convicting(conv, none) == conv

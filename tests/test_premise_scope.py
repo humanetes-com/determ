@@ -89,7 +89,10 @@ def _replay(tmp_path: Path, *, own_tests: bool,
             only: bool = False) -> tuple[list[str], tuple]:
     """``shared`` = (unit, test): that unit's planned tests also carry one
     of the kept unit's held tests, so the keep moves its ground too;
-    ``only``: that test is the unit's whole planned ground."""
+    ``only``: that test is the unit's whole planned ground, and the unit's
+    own recorded holds have moved off it as well, so no failing test stops
+    in it any more (a unit some failing test still stops in stands,
+    `test_outcome.standing_in`)."""
     rec = json.loads(_FIXTURE.read_text())
     held: dict[str, list[str]] = {u: list(ts) for u, ts in rec["held"].items()}
     batch: list[str] = rec["batch"]
@@ -105,6 +108,10 @@ def _replay(tmp_path: Path, *, own_tests: bool,
     for t in held[keep]:
         after[t] = (False, ("fn", "src/error.rs", "construct_from_std", ""),
                     False)
+    if shared is not None and only:
+        for t in rec["held"].get(shared[0], ()):
+            after[t] = (False, ("fn", "src/error.rs", "construct_from_std", ""),
+                        False)
     run = RouteRun(
         kind=RouteKind.PER_FN, label=f"per-fn {len(batch)} stub(s)",
         targets=frozenset(_loc(u) for u in batch),
@@ -140,8 +147,8 @@ def test_a_later_unit_planned_on_a_moved_test_is_refused_beside_ones_that_are_no
         tmp_path: Path) -> None:
     """The recorded holds partition the tests, so no other unit of the batch
     shares one of `new`'s. Make one of them a later unit's whole planned
-    ground: the keep moves it to a unit that later one does not write, so it
-    is refused; every unit before and after it that shares none is still
+    ground, and move that unit's own holds off it too: no failing test stops
+    in it now, so it is refused; every unit before and after it that shares none is still
     claimed. A gate that never refuses a scoped claim fails here."""
     rec = json.loads(_FIXTURE.read_text())
     batch: list[str] = rec["batch"]

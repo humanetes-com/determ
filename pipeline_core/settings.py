@@ -246,11 +246,10 @@ class Settings:
     # costs two cargo runs).
     behaviour_rule_probes: int = 8
     behaviour_rule_probe_programs: int = 3
-    # Who is the language expert in fill and layout prompts. generic (default):
-    # the fill model; the pipeline is the gate. catalog: the pre-2026-09-09
-    # std-trait tutorials, Display/Debug name-set, standard derive set, and
-    # Send/Sync tutorial, kept as an A/B. Read at composition; no code_id
-    # change. Confirmed on the cluster-entry line (language-driver=…).
+    # Who is the language expert in fill and layout prompts: the fill model
+    # (generic, the only driver since 2026-10-17; any other value refuses
+    # the launch at composition). Confirmed on the cluster-entry line
+    # (language-driver=…).
     language_driver: LanguageDriverKind = LanguageDriverKind.GENERIC
 
     @classmethod

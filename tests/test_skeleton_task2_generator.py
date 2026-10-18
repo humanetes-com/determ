@@ -22,6 +22,7 @@ from pipeline_core.application.generators.task2_generator import (
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.generation import GenerationRequest, SkeletonConfig
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult
+from pipeline_core.domain.pipeline_crash import PipelineCodeCrash
 from pipeline_core.domain.stub_inventory import StubInventory
 
 
@@ -86,6 +87,9 @@ class FakeAdapter:
     # (event, data) — an event's PAYLOAD is the alarm an operator reads; a name
     # alone cannot catch a verdict field that reports the wrong tree state.
     event_data: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    # (cwd, cwd had its own Cargo.toml) per run_check_diag: a check run in a
+    # directory without a manifest builds whatever crate sits above it.
+    checked_dirs: list[tuple[Path, bool]] = field(default_factory=list)
 
     # --- Telemetry ---
     def log(self, msg: str) -> None:
@@ -130,6 +134,7 @@ class FakeAdapter:
 
     def run_check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
                        timeout: int = 180) -> tuple[int, str, list[_Diag]]:
+        self.checked_dirs.append((Path(cwd), (Path(cwd) / "Cargo.toml").is_file()))
         if self.diag_results:
             return self.diag_results.pop(0)
         return (0, "", list(self.diags))
@@ -405,7 +410,8 @@ def test_cluster_exception_caught(tmp_path: Path) -> None:
     fake = FakeAdapter(clusters_list=[c], raise_in_filter=True,
                        run_results=[(0, "ok")])
     pd = _make_project(tmp_path, [c])
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    with pytest.raises(PipelineCodeCrash):
+        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
     assert any("cluster crashed" in m for m in fake.logs)
 
 
@@ -453,19 +459,26 @@ def test_a_cluster_whose_fill_crashed_is_not_checkpointed_or_called_exhausted(
     """Run `486681-a304b30a` (2026-10-10): the TDD driver caught a TypeError
     at both clusters' first fill and returned ok, so each was logged
     `EXHAUSTED ... after its budgets were spent` and checkpointed done; a
-    resume would never have re-entered them. The crash is named, the tree
-    still merges, and no marker is written."""
+    resume would never have re-entered them. The crash is named and no marker
+    is written. Policy decided 2026-10-17: the next cluster is read by its
+    entry sweep only, the merge does not run, and the run ends on a
+    PipelineCodeCrash."""
     import json
     cs = [_cluster("default"), _cluster("nightly")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
                        run_results=[(0, "ok")])
+    calls: list[tuple[str, bool]] = []
 
     def _fill(**kw: Any) -> ClusterFillResult:
-        if kw.get("cluster") is not None and kw["cluster"].name == "default":
+        calls.append((kw["cluster"].name, bool(kw.get("score_only"))))
+        if kw["cluster"].name == "default":
             return ClusterFillResult(
                 failed_tests=frozenset({"t"}), ran_tests=frozenset({"t"}),
-                crashed="TypeError: run() got an unexpected keyword argument 'x'")
-        return ClusterFillResult(ran_tests=frozenset({"t"}))
+                crashed="TypeError: run() got an unexpected keyword argument 'x'",
+                crash_traceback="Traceback (most recent call last): ...")
+        return ClusterFillResult(failed_tests=frozenset({"u"}),
+                                 ran_tests=frozenset({"t", "u"}),
+                                 scored_only=True)
     fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
     merged: list[str] = []
 
@@ -474,17 +487,69 @@ def test_a_cluster_whose_fill_crashed_is_not_checkpointed_or_called_exhausted(
         return {"files_written": 1, "cfg_gated_fns": 0}
     fake.merge_cluster_outputs = _merge  # type: ignore[method-assign]
     pd = _make_project(tmp_path, cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    with pytest.raises(PipelineCodeCrash) as exc:
+        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
+    assert calls == [("default", False), ("nightly", True)], (
+        "the cluster after the crash is read, never filled")
+    assert exc.value.crash.cluster == "default"
+    assert "unexpected keyword argument" in exc.value.crash.exception
+    assert [(c.cluster, c.how, c.failed) for c in exc.value.scores] == [
+        ("default", "crashed", ("t",)), ("nightly", "scored only", ("u",))]
     done = [k for k, status, _ in fake.marks if status == "done"]
-    assert "task2a/crate/default" not in done
-    assert "task2a/crate/nightly" in done, "the cluster that ended keeps its marker"
-    assert "task2a/crate" not in done, "the outer marker would skip the re-entry"
+    assert not [k for k in done if k.startswith("task2a/")], (
+        "neither the crashed nor the scored cluster, nor the stage, is done")
     assert any("'default' CRASHED, not exhausted: TypeError" in m for m in fake.logs)
-    assert not any("'default' is EXHAUSTED" in m for m in fake.logs)
+    assert not any("is EXHAUSTED" in m for m in fake.logs)
     evidence = json.loads(
         (pd / ".skeleton" / "_cluster_evidence.json").read_text())
     assert evidence["default"]["exit"] == "crashed"
-    assert "default" in merged, "its tree still enters the merge"
+    assert merged == [], "the merge does not run after a pipeline crash"
+
+
+def test_an_escaped_fill_exception_scores_the_rest_and_skips_the_merge(
+        tmp_path: Path) -> None:
+    """An exception that escapes the cluster (no ClusterFillResult at all)
+    is the same crash: the traceback is kept, cluster 2 is read by its entry
+    sweep only, nothing merges. Control: the same two clusters ending
+    normally fill both, pass no score_only, and merge."""
+    cs = [_cluster("default"), _cluster("nightly")]
+
+    def _world(raise_on_first: bool) -> tuple[FakeAdapter, list[tuple[str, bool]],
+                                              list[str]]:
+        fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                           run_results=[(0, "ok")])
+        calls: list[tuple[str, bool]] = []
+        merged: list[str] = []
+
+        def _fill(**kw: Any) -> ClusterFillResult:
+            calls.append((kw["cluster"].name, bool(kw.get("score_only"))))
+            if raise_on_first and kw["cluster"].name == "default":
+                raise TypeError("run() got an unexpected keyword argument 'y'")
+            return ClusterFillResult(ran_tests=frozenset({"t"}),
+                                     scored_only=bool(kw.get("score_only")))
+
+        def _merge(**kw: Any) -> dict[str, Any]:
+            merged.extend(str(s.get("cluster")) for s in kw["successes"])
+            return {"files_written": 1, "cfg_gated_fns": 0}
+        fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+        fake.merge_cluster_outputs = _merge  # type: ignore[method-assign]
+        return fake, calls, merged
+
+    fake, calls, merged = _world(raise_on_first=True)
+    pd = _make_project(tmp_path / "crash", cs)
+    with pytest.raises(PipelineCodeCrash) as exc:
+        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
+    assert calls == [("default", False), ("nightly", True)]
+    assert "TypeError" in exc.value.crash.exception
+    assert "Traceback" in exc.value.crash.traceback
+    assert merged == []
+    assert exc.value.report()[0].startswith("HEALTH ‼ PIPELINE_CODE_CRASH")
+
+    fake, calls, merged = _world(raise_on_first=False)
+    pd = _make_project(tmp_path / "normal", cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert calls == [("default", False), ("nightly", False)]
+    assert sorted(merged) == ["default", "nightly"]
 
 
 def test_checkpointed_cluster_is_skipped_but_still_seeds_the_next(
@@ -554,6 +619,45 @@ def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
     assert "unimplemented!()" in seen_at_fill[0]
     assert "42" in seen_at_fill[1] and "unimplemented!()" not in seen_at_fill[1]
     assert any("[ownership] seeded 1 shared fn" in m for m in fake.logs)
+
+
+def test_a_fresh_cluster_tree_is_a_crate_before_its_first_check(
+        tmp_path: Path) -> None:
+    """Every fresh cluster entry used to run the ownership backfill's compile
+    gate and the pre-pass heal before the tree had its own `Cargo.toml`, so
+    cargo built the workspace's stripped shell above it: eight `reverted 0`
+    heal rounds and `STILL BROKEN` on a tree that compiles (checkpoint
+    `18fb6a03d6`, the entry of run `412606-f903acb4`, replayed 2026-10-17).
+    Every check on a seeded tree now runs where the tree's manifest, tests
+    and gen_tests siblings already are."""
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    pd = _make_project(tmp_path, cs, with_gen_tests=True)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    filled = [(d, has) for d, has in fake.checked_dirs
+              if ".skeleton-filled" in d.parts]
+    assert filled, "the entry checks ran on the cluster trees"
+    assert all(has for _d, has in filled), filled
+    tree = pd / ".skeleton-filled" / "nightly"
+    assert (tree / "tests").is_symlink()
+    assert (tree / "src" / "lib.gen_tests_1.rs").is_file()
+
+
+def test_control_without_the_crate_root_the_entry_check_has_no_manifest(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Negative control: with the crate-root setup out of the seed, as
+    before the change, the first check on a fresh tree runs where there
+    is no manifest."""
+    cs = [_cluster("default"), _cluster("nightly")]
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    pd = _make_project(tmp_path, cs)
+    monkeypatch.setattr(StaticSkeletonTask2Generator, "_establish_crate_root",
+                        lambda *a, **k: None)
+    _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
+    filled = [has for d, has in fake.checked_dirs if ".skeleton-filled" in d.parts]
+    assert filled and not filled[0]
 
 
 def test_premerge_backfill_adopts_sibling_body(tmp_path: Path) -> None:
@@ -1213,3 +1317,37 @@ def test_the_env_handed_to_the_loop_is_the_clusters_own_not_the_active_scopes(
     old.update(nightly.env_extra)
     assert old == {"RUSTFLAGS": "--cfg error_generic_member_access"}
     assert "RUSTUP_TOOLCHAIN" not in old
+
+
+def test_the_post_merge_rank_holds_a_crash_culprit_the_localizer_names(
+        tmp_path: Path) -> None:
+    """The post-merge loop ranked with no crash facts, so a merged tree's
+    crash origin could sit past the dispatch cap (task2a's was rank 17 of
+    12 on run `14235-bf24f931` iter 3). With the localizer bound, a frontier
+    unit it convicts is held with the tests its crash stopped. Controls: no
+    localizer, or no dead binary, holds nothing."""
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.models import FnLocator
+    culprit = FnLocator("src/lib.rs", "make")
+    other = FnLocator("src/lib.rs", "other")
+    site = CrashSite(
+        binary_label="tests/t.rs", test_name="t1", signal="SIGSEGV",
+        frames=(CrashFrame("src/lib.rs", 10, "make", "make"),),
+        origin_frames=(CrashFrame("src/lib.rs", 9, "make", "make"),),
+        origin_capable=True)
+    fake = FakeAdapter(clusters_list=[_cluster()])
+    gen = replace(_gen(fake, _cfg(per_fn=True, tdd=True)),
+                  localize_crashes=lambda *_a, **_k: (site,))
+    gap = SimpleNamespace(silent_binaries=("tests/t.rs",), missing=1)
+    eligible = {culprit: {"t1"}, other: {"t2"}}
+    got = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
+                                   gap, eligible)
+    assert set(got) == {culprit} and "t1" in got[culprit]
+    assert any("crash culprit(s) held in the batch" in m for m in fake.logs)
+    assert gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
+                                    None, eligible) == {}
+    gen = replace(gen, localize_crashes=None)
+    assert gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
+                                    gap, eligible) == {}

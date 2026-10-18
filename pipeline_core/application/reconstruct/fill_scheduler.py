@@ -51,6 +51,7 @@ from pipeline_core.domain.fill_schedule import (
     ScheduledRun,
     UnitEvidence,
     call_price,
+    premise_refused_last_fill,
     release_held,
     schedule,
     withhold_landed,
@@ -122,6 +123,10 @@ class FillExecutionDeps:
     #: some candidate run, opened or deferred with its reason; one that no
     #: run writes is `owner_unrouted`. Empty (the default) checks nothing.
     measured_owners: frozenset[FnLocator] = frozenset()
+    #: Defer a non-session run every target of which an earlier run of this
+    #: fill already asked under evidence nothing has moved since
+    #: (`fill_asks.FillAsks`). False keeps the shadow line only.
+    defer_reasked: bool = True
     #: What the red tests owe this fill (`candidate_tiers.due_reading`): a
     #: tier of an executed slice no prompt has asked under the current
     #: evidence. Each gets an opened writer whatever deferred it
@@ -202,16 +207,21 @@ class _GroundGate:
     its unclaimed units unnamed).
 
     A claim whose planned ground moved still stands when the ground as it is
-    now puts one of its planned tests' first failure inside a unit the claim
-    writes (`test_outcome.standing_in`): the move is evidence for it, and a
-    re-plan would dispatch it on exactly that reading. The units are a
+    now puts a failing test's first failure inside a unit the claim writes
+    (`test_outcome.standing_in`), whether or not the claim was planned on
+    that test: the move is evidence for it, and a re-plan would dispatch it
+    on exactly that reading. The units are a
     required argument, so no claim can be asked without them. Scoped refusal
     alone refused such holders fill after fill on a stub chain: run
     `790176-f0df7402` (2026-09-23) refused `downcast_ref` and `is` in fills
     1 and 2 while every sweep read them holding tests."""
 
-    def __init__(self, deps: FillExecutionDeps) -> None:
+    def __init__(self, deps: FillExecutionDeps,
+                 spared: frozenset[FnLocator] = frozenset()) -> None:
         self._premise = deps.premise
+        #: Units the previous fill already refused on premise
+        #: (`fill_schedule.premise_refused_last_fill`): not refused again.
+        self._spared = spared
         self._read = deps.ground_now
         self._log = deps.log
         self._iteration = deps.iteration
@@ -279,7 +289,7 @@ class _GroundGate:
                         f"read as planned ({names_of(left)})")
                 return False
             pairs = frozenset((u.file, u.fn_name) for u in units)
-            standing = standing_in(self._now, scope, pairs)
+            standing = standing_in(self._now, pairs)
             if standing:
                 self.admitted += 1
                 if pairs not in self._admitted:
@@ -287,9 +297,21 @@ class _GroundGate:
                     self._log(
                         f"  [phase-c/schedule] fill {self._iteration}: "
                         f"claim on moved ground admitted — "
-                        f"{len(standing)} planned test(s) now first-fail "
+                        f"{len(standing)} failing test(s) now first-fail "
                         f"inside {names_of(sorted(f'{f}::{n}' for f, n in pairs))} "
                         f"({names_of(standing)})")
+                return False
+            spared = frozenset(units) & self._spared
+            if spared:
+                self.admitted += 1
+                if pairs not in self._admitted:
+                    self._admitted.add(pairs)
+                    self._log(
+                        f"  [phase-c/schedule] fill {self._iteration}: "
+                        f"claim on moved ground stands — the previous fill "
+                        f"already refused "
+                        f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in spared))} "
+                        "on premise; it is not refused twice running")
                 return False
             self.refused += 1
             return True
@@ -648,7 +670,11 @@ def execute_fill(
     rows: list[RouteLedgerRow] = []
     stopped = False
     ordered = list(sched.ordered)
-    gate = _GroundGate(deps)
+    _rows_for_gate = prior if prior or deps.ledger is None else (
+        deps.ledger.load(deps.project, deps.cluster))
+    gate = _GroundGate(deps, premise_refused_last_fill(
+        _rows_for_gate, cluster=deps.cluster, run_id=deps.run_id,
+        iteration=deps.iteration))
     # The held stubs of this fill: a run's share never skips one it was
     # given to write (`RunClock.owed`).
     held_units = (HeldStubs.of_map(hollow).units if deps.scheduled
@@ -740,17 +766,49 @@ def execute_fill(
                 _release(withheld_keys)
             if not wave:
                 continue
+        # A run every target of which an earlier run of this fill asked
+        # under evidence nothing has moved since asks the same question
+        # again. Measured 2026-10-17 over every shadowed run since the
+        # shadow shipped (2026-10-13): 15 runs, all impl or per-fn, 175
+        # minutes, 5 flat, 3 reverted, 6 empty, none paid a test. They are
+        # deferred. A session's question is its slice and its turns, not its
+        # units; it stays in the shadow count.
+        _reasked_deferred: list[RouteLedgerRow] = []
+        _kept_wave: list[ScheduledRun] = []
         for w in wave:
             _tg = tuple(sorted(w.run.targets))
-            if fill_asks.would_defer(_tg):
-                reasked[w.run.label] = _tg
+            if not fill_asks.would_defer(_tg):
+                _kept_wave.append(w)
+                continue
+            reasked[w.run.label] = _tg
+            if deps.defer_reasked and w.run.kind is not RouteKind.SESSION:
                 deps.log(
-                    f"  [phase-c/schedule] fill {deps.iteration}: SHADOW "
-                    f"asked_this_fill — {w.run.label} re-asks "
+                    f"  [phase-c/schedule] fill {deps.iteration}: "
+                    f"{w.run.label} DEFERRED asked_this_fill — it re-asks "
                     + ", ".join(f"{a}::{b}" for a, b in _tg[:6])
-                    + " under evidence no run of this fill has moved "
-                    "(not deferred: the deferral waits on the route-order "
-                    "reading)")
+                    + " under evidence no run of this fill has moved")
+                row = replace(
+                    _row_for(w, None, None, deps=deps, started=started,
+                             minutes=0.0, share=0.0,
+                             outcome=RunOutcome.DEFERRED),
+                    reason="asked_this_fill")
+                _reasked_deferred.append(row)
+                _log_row(deps, row)
+                continue
+            _kept_wave.append(w)
+            deps.log(
+                f"  [phase-c/schedule] fill {deps.iteration}: SHADOW "
+                f"asked_this_fill — {w.run.label} re-asks "
+                + ", ".join(f"{a}::{b}" for a, b in _tg[:6])
+                + " under evidence no run of this fill has moved "
+                "(a session, or the deferral is off)")
+        if _reasked_deferred:
+            rows.extend(_reasked_deferred)
+            _flush(_reasked_deferred)
+            _release({w.run.key for w in wave if w not in _kept_wave})
+            wave = _kept_wave
+            if not wave:
+                continue
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         # The plan reserved later floors against the whole budget. Opening

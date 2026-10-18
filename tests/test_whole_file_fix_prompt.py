@@ -69,15 +69,3 @@ def test_budget_truncates_oversized_sections() -> None:
     assert "chars omitted ...]" in got
 
 
-def test_gotcha_unsafe_block_triggers_on_e0133() -> None:
-    from pipeline_core.prompts.sections import gotchas_for_error
-    out = gotchas_for_error(
-        "error[E0133]: call to unsafe function `MaybeUninit::<T>::assume_init`"
-        " is unsafe and requires unsafe block")
-    assert "unsafe { self.slot.assume_init() }" in out
-
-
-def test_gotcha_no_core_format_triggers_on_e0433() -> None:
-    from pipeline_core.prompts.sections import gotchas_for_error
-    out = gotchas_for_error("error[E0433]: cannot find `format` in `core`")
-    assert "core::format!" in out and "core::fmt::Write" in out

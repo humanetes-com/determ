@@ -360,3 +360,69 @@ def test_a_stub_the_settlement_made_is_told_what_its_body_did() -> None:
     # Negative control: a stub no settlement made says only that it is one.
     plain = held_stub_evidence(3)
     assert "put back" not in plain and plain.endswith("Give it a real body.")
+
+
+def test_a_settled_stub_survives_a_restore_of_an_older_pre_image(
+        tmp_path: Path) -> None:
+    """A route's pre-image of the file, taken before the settlement, used to
+    put the culprit's body back on any later restore (the decline, the
+    compile peel, a whole-reply revert) while its refutation row stood. The
+    stub is a kept edit now. Control: a pre-image taken after the
+    settlement restores exactly its bytes."""
+    from pipeline_core.application.reconstruct.tree_txn import capture, restore
+    root = _tree(tmp_path)
+    lib = root / "src" / "lib.rs"
+    older = capture(lib, None)
+    lib.write_text(_LIB.replace("real", "written"))       # the route's write
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []])
+    assert s.settle("capture", {READ}, _baseline()).outcome is \
+        SettlementOutcome.SETTLED
+    later = capture(lib, None)
+    restore(older)
+    text = lib.read_text()
+    assert "real" in text and "written" not in text      # the write is gone
+    assert "bad_a" not in text and text.count(STUB_BODY) == 1
+    lib.write_text(_LIB)
+    restore(later)
+    assert lib.read_bytes() == later.data
+
+
+def test_control_without_the_journal_the_older_restore_brings_the_culprit_back(
+        tmp_path: Path, monkeypatch) -> None:
+    from pipeline_core.application.reconstruct import crash_settler as cs
+    from pipeline_core.application.reconstruct.tree_txn import capture, restore
+    monkeypatch.setattr(cs, "note_kept_edit", lambda *_a, **_k: None)
+    root = _tree(tmp_path)
+    lib = root / "src" / "lib.rs"
+    older = capture(lib, None)
+    s = _settler(root, [_PASS], [[_site("t1", "make_a", 6)], []])
+    assert s.settle("capture", {READ}, _baseline()).outcome is \
+        SettlementOutcome.SETTLED
+    restore(older)
+    assert "bad_a" in lib.read_text()
+
+
+def test_a_trace_that_stops_at_the_reader_outside_the_write_is_not_stubbed(
+        ) -> None:
+    """Run `14235-bf24f931` iter 3: the faulting accessor received a valid
+    pointer and read a stale one out of it, so the trace named it the
+    producer and the settlement refuted a correct body. A trace that stops
+    at the innermost crate frame is not a producer outside the write.
+    Control: 344's shape, where the inner accessor was handed the fabricated
+    address and its caller made it, still names the caller and stubs it."""
+    reader = site_from_frames("tests/t.rs", "t1", "SIGSEGV", [
+        {"func": "crate::make_a", "file": "src/lib.rs", "line": 6,
+         "ptr_args": [[0x1000, 8]]}], fault_addr=0x9999_0000)
+    assert reader.origin_traced and reader.origin_traced_at_reader
+    step = settle_step([reader], {READ}, _never)
+    assert step.outcome is SettlementOutcome.UNSETTLED
+    assert "trace stops at the frame that read" in step.reason
+    fabricated = site_from_frames("tests/t.rs", "t1", "SIGSEGV", [
+        {"func": "crate::read", "file": "src/lib.rs", "line": 2,
+         "ptr_args": [[0x8, 8]]},
+        {"func": "crate::make_a", "file": "src/lib.rs", "line": 6,
+         "ptr_args": []}], fault_addr=0x8)
+    assert fabricated.origin_traced and not fabricated.origin_traced_at_reader
+    step2 = settle_step([fabricated], {FnLocator("src/lib.rs", "other")}, _never)
+    assert step2.outcome is SettlementOutcome.STUB
+    assert [f.fn_name for f in step2.culprits] == ["make_a"]

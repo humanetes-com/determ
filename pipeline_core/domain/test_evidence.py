@@ -39,16 +39,41 @@ def without_model_comments(rust: str) -> str:
     return "\n".join([REMOVED_NOTE, *kept])
 
 
-def still_unexecuted(committed_for: Mapping[str, Sequence[str]], labels: Iterable[str]) -> str:
-    """One line per still-unexecuted function a committed block was aimed at:
-    which test files ran, and that the function has 0 executions."""
+# What one charged attempt's block did, as the next prompt states it.
+_OUTCOME_WORDS = {
+    "reverted": ("compiled and ran; `{label}` still had 0 executions, so the "
+                 "block was reverted"),
+    "compile_failed": "did not compile",
+    "no_tests": "held no test",
+    "ran": "ran",
+    "committed": "ran",
+}
+
+
+def still_unexecuted(committed_for: Mapping[str, Sequence[str]],
+                     labels: Iterable[str],
+                     outcomes: Mapping[str, Sequence[str]] | None = None) -> str:
+    """One line per still-unexecuted function the record has evidence on:
+    which test files ran with it still at 0 executions, and what each
+    earlier attempt aimed at it did.
+
+    The second half is read from the function record (`PendingFn.outcomes`,
+    persisted), not from the in-process `committed_for`, which a revert
+    clears: run `857717-812ee44c` (2026-10-10) reverted the block aimed at
+    `thiserror_provide` on attempt 1 and attempt 2's prompt said nothing
+    about it, so the function spent a second attempt on the same miss."""
     lines = []
     for label in labels:
         files = list(dict.fromkeys(committed_for.get(label, ())))
         if files:
             ran = ", ".join(f"`{f}`" for f in files)
             lines.append(f"- {ran} ran; `{label}` still has 0 executions.")
+        for n, why in enumerate((outcomes or {}).get(label, ()), 1):
+            words = _OUTCOME_WORDS.get(why)
+            if words and why not in ("ran", "committed"):
+                lines.append(f"- attempt {n}: a block aimed at `{label}` "
+                             + words.format(label=label) + ".")
     if not lines:
         return ""
-    return ("Measured on this tree after committed blocks aimed at these functions "
+    return ("Measured on this tree after earlier blocks aimed at these functions "
             "(a fact, not a hypothesis):\n" + "\n".join(lines) + "\n")

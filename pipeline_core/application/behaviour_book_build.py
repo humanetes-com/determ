@@ -54,6 +54,7 @@ from pipeline_core.domain.behaviour_book import (
     feature_file_name,
     feature_spellings,
     given_roots,
+    given_setups,
     group_features,
     judge_rule_set,
     judge_visit,
@@ -238,7 +239,11 @@ def build_behaviour_book(
         built.append(replace(f, rules=tuple(rules), unaided_ids=plain))
         log(f"    [behaviour-book] {f.item}: {len(checkable_of[f.item])} checkable "
             f"example(s), {len(rules)} rule(s) kept")
-    roots = given_roots(suite.specs)
+    # The roots and every distinct example setup are phrased by one drafting
+    # call per test file, under one contract (`keep_given_phrases`).
+    _roots = given_roots(suite.specs)
+    _setups = given_setups(suite.specs)
+    roots = (*_roots, *_setups)
     phrases, without = (_given_phrases(roots, by_id, crate=crate, private=private, ask=ask,
                                        lanes=budget.lanes)
                         if budget.rules and budget.given_phrases
@@ -253,7 +258,8 @@ def build_behaviour_book(
         predict_temperature=budget.predict_temperature, think=budget.think,
         sibling_examples=len(sibling),
         unaided_examples=unaided,
-        given_roots=len(roots), given_phrases=len(phrases),
+        given_roots=len(_roots), given_setups=len(_setups),
+        given_phrases=len(phrases),
         given_refused=dict(Counter(drop_reason_class(why) for why in without.values())))
     out = BehaviourSuite(
         cfg_cluster=suite.cfg_cluster,

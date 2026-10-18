@@ -557,6 +557,13 @@ def _attribute_format_only_test(
     # test (run `3076-051d385a`, `tests/test_boxed.rs:26:14`). `observed`
     # None is ignorance and reads the whole source, as before.
     traits = format_traits_used(observed if observed is not None else tsrc)
+    # What the traits were read from, on every line the hop prints: 341's
+    # offline reading of eleven `format_err_else_branch_*` hop lines could
+    # not tell whether the hop had read the failing line or the whole test.
+    _obs_one = " ".join((observed or "").split())
+    _read_from = (f"read from the failing observable `{_obs_one[:120]}`"
+                  if observed is not None else
+                  "read from the whole test source (no failing observable)")
     fmt_recs = by_name.get("fmt")
     if not traits or not fmt_recs:
         return
@@ -681,7 +688,8 @@ def _attribute_format_only_test(
             "coverage reading proves it enters neither the dispatcher(s) "
             + ", ".join(sorted({f"{k.file}::{k.fn_name}" for k in screened}))
             + " nor their implementer(s) before its failure — no format "
-            "owner and no pair: what renders it is the failure report.")
+            "owner and no pair: what renders it is the failure report "
+            f"(traits {_read_from}).")
     if added:
         _why = ("no crate fn named in its source (formatting-macro test)"
                 if not owned else
@@ -690,8 +698,9 @@ def _attribute_format_only_test(
         log(f"  [attribution/behavior] {tname}: {_why} — attributed to "
             + ", ".join(f"{k.file}::{k.fn_name}"
                         for k in sorted(added, key=lambda k: (k.file, k.fn_name)))
-            + f" via {'/'.join(sorted(traits))} on a self-type the test file "
-            "names, following the dispatcher to its formatting implementer"
+            + f" via {'/'.join(sorted(traits))} ({_read_from}) on a self-type "
+            "the test file names, following the dispatcher to its formatting "
+            "implementer"
             + ("" if not redirected else
                " — REDIRECTED to the dispatcher: the sweep's coverage "
                "reading proves this test never enters "

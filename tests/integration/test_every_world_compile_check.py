@@ -158,3 +158,55 @@ def test_a_tree_broken_at_home_reports_its_home_errors_only(tmp_path: Path) -> N
     assert rc != 0 and "FAILS in cfg world" not in text
     assert not (root / "target" / "worlds").exists()
     assert all("cfg world's build" not in d.rendered for d in diags)
+
+
+# --------------------------------------------------------------------------- #
+# A cluster tree without its own manifest. Cargo looks for `Cargo.toml` in its
+# working directory and then in every ancestor; the cluster trees live inside
+# the workspace crate. On every fresh cluster entry the pre-pass heal and the
+# seed's compile gate ran before the tree had its manifest and built the
+# workspace's stripped shell instead (checkpoint `18fb6a03d6`, the entry of
+# run `412606-f903acb4`, replayed 2026-10-17). The runner refuses a cargo
+# command in a directory with no manifest of its own.
+# --------------------------------------------------------------------------- #
+
+def _nested_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A parent crate that does not compile, and below it a crate tree that
+    does but has not been given its manifest yet."""
+    parent = _crate(tmp_path, _BROKEN_AT_HOME)
+    tree = parent / ".trees" / "base"
+    (tree / "src").mkdir(parents=True)
+    (tree / "src" / "lib.rs").write_text(_EVERY_WORLD)
+    return parent, tree
+
+
+def test_premise_cargo_climbs_to_the_ancestor_manifest(tmp_path: Path) -> None:
+    import subprocess
+    _parent, tree = _nested_tree(tmp_path)
+    r = subprocess.run(["cargo", "check", "--offline"], cwd=tree,
+                       capture_output=True, text=True, errors="replace",
+                       timeout=600, env=cluster_cargo_env(_clusters()[0]))
+    assert r.returncode != 0
+    assert "missing_value" in r.stderr, (
+        "cargo run in a directory with no Cargo.toml must build the ancestor "
+        "crate; the runner's refusal exists because it does\n" + r.stderr[-1500:])
+
+
+def test_the_runner_refuses_a_tree_with_no_manifest_of_its_own(
+        tmp_path: Path) -> None:
+    _parent, tree = _nested_tree(tmp_path)
+    rc, text, diags = _check(tree, _runner(every_world=True), "base")
+    assert rc == -1 and "NOT A CRATE ROOT" in text, text[-1500:]
+    assert diags == [] and "missing_value" not in text
+    # Given its manifest, the same tree builds as itself.
+    (tree / "Cargo.toml").write_text(_CARGO_TOML)
+    assert _check(tree, _runner(every_world=True), "base")[0] == 0
+
+
+def test_control_without_the_refusal_the_runner_reports_the_parents_errors(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.adapters import process
+    monkeypatch.setattr(process, "cargo_manifest_refusal", lambda *_a: None)
+    _parent, tree = _nested_tree(tmp_path)
+    rc, text, _diags = _check(tree, _runner(every_world=False), "base")
+    assert rc != 0 and "missing_value" in text

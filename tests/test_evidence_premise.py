@@ -156,12 +156,30 @@ def test_the_retro_text_is_order_free_and_survives_an_unserializable_row(
     with sorted fields. `default=str` is why a row holding a value `json`
     cannot encode costs a fingerprint that moves (one re-dispatch) instead
     of an exception on the dispatch path."""
-    rows = {"src/error.rs::fmt::DebugforError": {"rounds": 1, "cat": "A"},
-            "src/error.rs::fmt::DisplayforError": {"cat": "B", "rounds": 2}}
+    rows = {"src/error.rs::fmt::DebugforError": {"rounds": 1, "guidance": "A"},
+            "src/error.rs::fmt::DisplayforError": {"guidance": "B", "rounds": 2}}
     assert retro_evidence_text(rows) == retro_evidence_text(
         {k: rows[k] for k in reversed(list(rows))})
     assert retro_evidence_text({}) == ""
-    odd = retro_evidence_text({"k": {"when": object()}})
-    assert odd and "when" in odd
-    # A row that is not a mapping at all still renders rather than raising.
-    assert retro_evidence_text({"k": "corrupt"})  # type: ignore[dict-item]
+    odd = retro_evidence_text({"k": {"guidance": object()}})
+    assert odd and "guidance" in odd
+    # A row that is not a mapping at all renders nothing rather than raising.
+    assert retro_evidence_text({"k": "corrupt"}) == ""  # type: ignore[dict-item]
+
+
+def test_the_retro_text_digests_only_what_a_prompt_can_carry() -> None:
+    """Run `1158170-ce307ee7`: 13 retired and 9 withheld retro lines against 5
+    honoured, so a fingerprint over whole rows could release a flat unit
+    onto a byte-identical prompt. A counter or a category moving is not new
+    evidence; the guidance or a LAST_ERROR field is. A hollow-tree lesson is
+    never shown. Control: the guidance changing moves the text."""
+    base = {"k": {"guidance": "use X", "round": 1, "category": "A"}}
+    bumped = {"k": {"guidance": "use X", "round": 2, "category": "B",
+                    "retrospective_count": 5}}
+    assert retro_evidence_text(base) == retro_evidence_text(bumped)
+    hollow = {"k": {"guidance": "use Y", "guidance_from_hollow_tree": True}}
+    assert retro_evidence_text(hollow) == ""
+    assert retro_evidence_text({"k": {"guidance": "use Z"}}) != \
+        retro_evidence_text(base)
+    assert "E0277" in retro_evidence_text(
+        {"k": {"last_compile_error": "error[E0277]"}})

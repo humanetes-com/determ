@@ -452,3 +452,39 @@ def test_a_stripped_tree_is_rendered_from_stored_facts_never_measured(tmp_path: 
         orchestrator.run_pipeline(deps, _args(), tmp_path)
     assert ("facts", True) not in facts.calls
     assert facts.calls[0] == ("facts", False)
+
+
+def test_a_pipeline_code_crash_ends_the_run_failed_with_the_health_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decided 2026-10-17: a pipeline-code exception in a cluster's fill ends
+    the process failed, after every cluster is scored, with a `HEALTH ‼` line,
+    each cluster's red list and the traceback. Control: any other exception
+    still propagates unchanged."""
+    from pipeline_core.domain.pipeline_crash import (
+        PIPELINE_CODE_CRASH_EXIT,
+        ClusterScore,
+        PipelineCodeCrash,
+        PipelineCrash,
+    )
+    crash = PipelineCodeCrash(
+        PipelineCrash("stable", "TypeError: boom", "Traceback (most recent call last):\n  x"),
+        (ClusterScore("stable", 31, ("t1",), "crashed"),
+         ClusterScore("nightly", 40, ("t2", "t3"), "scored only")))
+
+    def _raise(*_a: object) -> None:
+        raise crash
+    monkeypatch.setattr(orchestrator, "_run_pipeline", _raise)
+    deps = _run_deps(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        orchestrator.run_pipeline(deps, _args(), tmp_path)
+    assert exc.value.code == PIPELINE_CODE_CRASH_EXIT
+    logged = [str(c.args[0]) for c in deps.log.call_args_list]
+    assert logged[0].startswith("HEALTH ‼ PIPELINE_CODE_CRASH in cluster 'stable'")
+    assert any("[nightly] scored only: pass=40 red=2 (t2, t3)" in m for m in logged)
+    assert any("Traceback (most recent call last)" in m for m in logged)
+
+    def _other(*_a: object) -> None:
+        raise RuntimeError("not a fill crash")
+    monkeypatch.setattr(orchestrator, "_run_pipeline", _other)
+    with pytest.raises(RuntimeError):
+        orchestrator.run_pipeline(_run_deps(tmp_path), _args(), tmp_path)

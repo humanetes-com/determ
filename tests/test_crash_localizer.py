@@ -5,25 +5,13 @@ dependent and reproduce intermittently), and the "nothing localized" contract
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
-
-import pytest
 
 from pipeline_core.application.reconstruct.crash_localizer import (
     CrashLocalizerDeps,
     localize_crashes,
 )
-from pipeline_core.domain.language_driver import using_driver
 from pipeline_core.domain.models import FnLocator
-from pipeline_core.prompts.language_catalog import catalog_driver
-
-
-@pytest.fixture(autouse=True)
-def _catalog_driver() -> Iterator[None]:
-    """This module pins catalog conversion recovery from ASAN reports."""
-    with using_driver(catalog_driver()):
-        yield
 
 _SWEEP_WITH_CRASH = """\
     Running tests/test_a.rs (target/debug/deps/test_a-111)
@@ -511,6 +499,24 @@ fn test_downcast_high() {
 """
 
 
+# The anchor file's declarations, which the localizer reads from the tree
+# under test (`_declared_reader`) to tell a crate call from std's. Bodies are
+# irrelevant to the read: only the fn names it declares are counted.
+_SRC_ERROR = """\
+impl Error {
+    pub fn new<E>(error: E) -> Self { unimplemented!() }
+    pub fn downcast<E>(self) -> Result<E, Self> { unimplemented!() }
+    pub fn into_boxed_dyn_error(self) -> Box<dyn StdError> { unimplemented!() }
+    pub fn reallocate_into_boxed_dyn_error_without_backtrace(self) -> Box<dyn StdError> {
+        unimplemented!()
+    }
+}
+impl Drop for Error {
+    fn drop(&mut self) { unimplemented!() }
+}
+"""
+
+
 def _live_sweep(fixture: Path, root: Path, *, with_tests: bool) -> str:
     text = fixture.read_text().replace(_LIVE_ROOT, str(root))
     if with_tests:
@@ -519,6 +525,9 @@ def _live_sweep(fixture: Path, root: Path, *, with_tests: bool) -> str:
         (tests / "error_gen_3.rs").write_text(_ERROR_GEN_3)
         (tests / "test_downcast.rs").write_text(_TEST_DOWNCAST)
         (tests / "test_context.rs").write_text(_TEST_CONTEXT)
+        src = root / "src"
+        src.mkdir(exist_ok=True)
+        (src / "error.rs").write_text(_SRC_ERROR)
     return text
 
 
