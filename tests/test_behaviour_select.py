@@ -514,3 +514,74 @@ def test_select_identity_must_units_accept_fn_record_and_reject_a_bare_name() ->
         select_identity_must(suite.specs, units=("fmt",))  # type: ignore[arg-type]
 
 
+
+
+# ---- the identity subject is the type the crate declares the method on ----
+
+_SKELETON_RECORDS = (Path(__file__).resolve().parent / "fixtures" / "behaviours"
+                     / "stable_skeleton_records_2026-10-18.json")
+
+
+def test_the_recorded_suite_is_asked_about_error_and_admits_its_constructors() -> None:
+    """The plan's sentence on recorded inputs: the 2026-08-27 stable suite
+    and the stable skeleton's records (`enumerate_fns`, 2026-10-18). Every
+    one of the 35 identity examples resolves to `Error`, and the generic
+    driver admits the `impl Error` constructors. Negative control: the text
+    harvest the suite was read with before names `Box` and admits none."""
+    from pipeline_core.domain.behaviour_select import (
+        _identity_suite,
+        identity_subject_from_specs,
+        resolve_identity_subjects,
+    )
+    suite = BehaviourSuite.from_dict(
+        json.loads(_RECORDED_STABLE.read_text(encoding="utf-8")))
+    records = json.loads(_SKELETON_RECORDS.read_text(encoding="utf-8"))
+    drv = language_driver()
+
+    def _admitted(subject: str) -> list[str]:
+        return sorted(r["fn_name"] for r in records
+                      if r["container"] == "impl Error"
+                      and drv.identity_must_admits(
+                          r["fn_name"], r["container"], r["sig_text"] or "", subject))
+
+    before = identity_subject_from_specs(suite.specs)
+    assert before == "Box" and _admitted(before) == []
+    resolved = resolve_identity_subjects(suite.specs, records)
+    ident = _identity_suite(resolved)
+    assert len(ident) == 35 and {s.subject for s in ident} == {"Error"}
+    after = identity_subject_from_specs(resolved)
+    assert after == "Error"
+    assert {"construct_from_adhoc", "construct_from_display", "construct_from_std",
+            "construct_from_boxed", "construct_from_context", "msg"} <= set(
+                _admitted(after))
+    assert resolved == suite.specs, "the subject is not part of an example's identity"
+
+
+def test_a_subject_needs_exactly_one_inherent_owner_of_the_method() -> None:
+    """Invented crate: `peek` is declared on `Counter` alone (resolves),
+    `probe` on two types (does not), `downcast_ref` nowhere in the crate (a
+    std trait object's, does not), and a trait impl's method is not an
+    owner."""
+    from pipeline_core.domain.behaviour_select import (
+        identity_call_name,
+        resolve_identity_subjects,
+    )
+
+    def _ident(bid: str, when: str) -> BehaviourSpec:
+        return BehaviourSpec(
+            bid, "", when, ObservableOutcome.type_identity("u8", True),
+            subkind=BehaviourSubKind.OUTCOME, klass=BehaviourClass.IDENTITY)
+
+    specs = (_ident("a", "c.peek::<u8>()"), _ident("b", "c.probe::<u8>()"),
+             _ident("c", "e.downcast_ref::<u8>()"), _ident("d", "c.fmt::<u8>()"))
+    records = [
+        {"fn_name": "peek", "container": "impl Counter"},
+        {"fn_name": "probe", "container": "impl Counter"},
+        {"fn_name": "probe", "container": "impl<T> Gauge<T>"},
+        {"fn_name": "fmt", "container": "impl Display for Counter"},
+    ]
+    got = {s.behaviour_id: s.subject for s in resolve_identity_subjects(specs, records)}
+    assert got == {"a": "Counter", "b": "", "c": "", "d": ""}
+    assert identity_call_name('Counter::new(1).peek::<u8>()') == "peek"
+    assert identity_call_name("c.peek()") == "peek"
+    assert identity_call_name("value") == ""

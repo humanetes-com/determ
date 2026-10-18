@@ -516,6 +516,12 @@ class BehaviourSpec:
     # `rules` and never serialized: a function's reach (which features'
     # examples run it) is read off this (`candidate_tiers.feature_reach`).
     features: tuple[str, ...] = field(default=(), compare=False)
+    # The crate type an identity example is asked through: the self type of
+    # the inherent impl that declares the method carrying the identity's type
+    # argument (`err.downcast::<T>()` -> the impl declaring `downcast`).
+    # Resolved against the cluster's records when the specs are loaded for a
+    # fill (`behaviour_select.resolve_identity_subjects`), never serialized.
+    subject: str = field(default="", compare=False)
 
     def __post_init__(self) -> None:
         # An OUTCOME-behaviour compares a captured observable to a golden Then,

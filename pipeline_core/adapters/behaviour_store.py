@@ -8,9 +8,11 @@ oracle. One file per cfg-cluster mirrors the skeleton's per-cluster layout.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from pipeline_core.domain.behaviour import SUITE_FILE_PREFIX, BehaviourSuite
+from pipeline_core.domain.behaviour import SUITE_FILE_PREFIX, BehaviourSpec, BehaviourSuite
+from pipeline_core.domain.behaviour_select import resolve_identity_subjects
 from pipeline_core.log import emit, log
 
 _SKELETON_DIR = ".skeleton"
@@ -96,3 +98,41 @@ def _unreadable(path: Path, cfg_cluster: str, exc: BaseException) -> BehaviourSu
     emit("behaviour.suite.unreadable",
          data={"path": str(path), "cfg_cluster": cfg_cluster, "error": detail})
     return BehaviourSuite(cfg_cluster=cfg_cluster)
+
+
+def load_fill_specs(
+    project_dir: Path, cfg_cluster: str,
+    enumerate_fns: Callable[[Path], Sequence[object] | None],
+) -> tuple[BehaviourSpec, ...]:
+    """A cluster's baked examples as the fills read them: each identity
+    example carries the crate type it is asked through, resolved against
+    the records of the cluster's skeleton (`resolve_identity_subjects`).
+    The skeleton keeps every impl header and signature after strip, so the
+    owner of `downcast` is readable without any original body. No skeleton
+    records: the examples as stored."""
+    specs = load_behaviour_suite(project_dir, cfg_cluster).specs
+    if not specs:
+        return specs
+    try:
+        records = enumerate_fns(Path(project_dir) / _SKELETON_DIR / cfg_cluster) or ()
+    except (OSError, ValueError) as exc:
+        log(f"  [behaviours] {cfg_cluster}: skeleton records unreadable "
+            f"({exc}); identity subjects stay unresolved.")
+        records = ()
+    return resolve_identity_subjects(specs, records) if records else specs
+
+
+def fill_suite_for_prompt(
+    project_dir: Path, cfg_cluster: str,
+    enumerate_fns: Callable[[Path], Sequence[object] | None],
+) -> BehaviourSuite:
+    """The suite a prompt's identity instruction is built from.
+
+    `load_fill_specs` is the one resolver. The fix loop unions one of
+    these per cluster. A raw `load_behaviour_suite` leaves every subject
+    empty, and the text harvest on the recorded stable suite is `Box`,
+    which admits no constructor of the type the examples are asked through.
+    """
+    return BehaviourSuite(
+        cfg_cluster=cfg_cluster,
+        specs=load_fill_specs(project_dir, cfg_cluster, enumerate_fns))

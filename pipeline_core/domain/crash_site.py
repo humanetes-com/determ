@@ -307,8 +307,24 @@ _POINTER_SENTINELS = ("dangling()", "::null()", "::null_mut()")
 _SENTINEL_EXCHANGE_CALLS = ("replace(", "swap(", "ptr::write")
 
 
-def _raw_is_destructor(func: str) -> bool:
-    return any(m in func for m in _DROP_SYMBOL_MARKS)
+def _symbol_is_destructor(symbol: str) -> bool:
+    return any(m in symbol for m in _DROP_SYMBOL_MARKS)
+
+
+def _record_is_destructor(rec: Mapping[str, object]) -> bool:
+    """A raw frame record is a destructor by its full symbol
+    (:func:`_raw_symbol`), never by the printed name alone."""
+    return _symbol_is_destructor(_raw_symbol(rec))
+
+
+def _raw_symbol(rec: Mapping[str, object]) -> str:
+    """The frame's full symbol: the debugger's demangled linkage name when it
+    recorded one (`symbol`), else the name it printed (`func`). gdb prints a
+    trait-impl method by namespace (`gd::{impl#0}::drop`) and only the
+    linkage name says `<gd::Holder as core::ops::drop::Drop>::drop`;
+    measured with gdb on an invented crate, 2026-10-18. The sanitizer's
+    `func` is already the demangled linkage name."""
+    return str(rec.get("symbol") or rec.get("func") or "")
 
 
 def _raw_is_toolchain(file_: str) -> bool:
@@ -417,11 +433,11 @@ def first_test_file_after_destructor(
         if not file_ or not func or _raw_is_toolchain(file_):
             continue
         if not seen_destructor:
-            if file_.startswith("src/") and _raw_is_destructor(func):
+            if file_.startswith("src/") and _record_is_destructor(rec):
                 seen_destructor = True
                 continue
             return None
-        if file_.startswith("src/") and _raw_is_destructor(func):
+        if file_.startswith("src/") and _record_is_destructor(rec):
             continue
         raw_line = rec.get("line")
         if not (isinstance(raw_line, int) and raw_line >= 1):
@@ -501,8 +517,7 @@ def _anchor_file(
     answers for (:func:`crate_file_for_test_file`)."""
     for rec in origin_raw:
         file_ = str(rec.get("file") or "")
-        func = str(rec.get("func") or "")
-        if file_.startswith("src/") and _raw_is_destructor(func):
+        if file_.startswith("src/") and _record_is_destructor(rec):
             return file_
     if named_file:
         return crate_file_for_test_file(named_file) or ""
@@ -1346,7 +1361,7 @@ def _crate_frames(
             continue
         frames.append(CrashFrame(
             file_rel=file_, line=line,
-            fn_name=bare_fn_name(func), symbol=func))
+            fn_name=bare_fn_name(func), symbol=_raw_symbol(rec)))
         if len(frames) >= max_frames:
             break
     return tuple(frames)
@@ -1447,12 +1462,11 @@ def site_from_frames(
     localizes the code that created the invalid memory.
 
     ``source_line`` is the caller line the free stack's next non-destructor
-    frame points at (a test file, or an in-crate wrapper that is not
-    itself a conversion); ``source_window`` is the access-side alternative
+    frame points at (a test file, or an in-crate caller); ``source_window`` is the access-side alternative
     — the enclosing test fn's lines up to the faulting access, for a report
     whose origin stack is empty. Recovery prepends a synthetic origin frame
-    for the conversion the text uniquely names, gated by the family licence
-    of either stack. ``source_loc`` is the (file, line) that justified it
+    for the crate fn the text uniquely names, when either stack licenses
+    it. ``source_loc`` is the (file, line) that justified it
     so render can name it instead of fabricating ``:0``. Both omitted (the
     default) leaves blame unchanged — destructor last resort when nothing
     else survives. That default is what keeps the recorded walk
@@ -1479,6 +1493,16 @@ def site_from_frames(
                  if str(f.get("file") or "").startswith(crate_file_prefix)
                  and f.get("func")), None)
             traced_at_reader = traced and idx == innermost
+            if traced_at_reader and _record_is_destructor(raw_frames[idx]):
+                # The trace's blind spot on its most common shape: a
+                # destructor loads the pointer it faults on from the value it
+                # destroys, so "produced here" says nothing, and the frame
+                # policy below (`prefer_non_destructor`) names the caller
+                # that built that value. Invented crate under real gdb,
+                # 2026-10-18: `Drop::drop` faulting on its own field was
+                # the traced producer and the caller that made the pointer
+                # was never blamed.
+                origin, traced, traced_at_reader = (), False, False
     cycle: StackCycle | None = None
     if fault_class(signal or "", abort) is FaultClass.EXHAUSTION:
         # The whole faulting stack, not the innermost `max_frames`: a period
@@ -1492,7 +1516,7 @@ def site_from_frames(
     # caller-source recovery exists for. Three use-after-free reports of
     # 2026-10-15 named the conversion on their free stack and lost it to
     # the window's binding rule.
-    named_origin = any(not _raw_is_destructor(f.symbol or f.fn_name)
+    named_origin = any(not _symbol_is_destructor(f.symbol or f.fn_name)
                        for f in origin)
     window = None if named_origin else source_window
     if source_line or window is not None:

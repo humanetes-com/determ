@@ -1516,3 +1516,32 @@ def test_dispatch_holds_the_blamed_origin_and_the_cycle() -> None:
         assert blocker_culprit_tests((one, two))[rloc] == frozenset(
             {"t_a", "t_c"})
         assert blocker_culprit_tests((unnamed,))[rloc] == frozenset()
+
+
+def test_a_destructor_the_trace_stops_at_names_nobody_and_its_caller_is_blamed() -> None:
+    """A debugger stop where the innermost crate frame faults on an address
+    no frame was handed: the trace names that frame, which it cannot tell
+    from a frame that loaded the pointer. When that frame is a destructor by
+    its symbol (gdb's linkage name, `<T as core::ops::drop::Drop>::drop`),
+    the trace names nobody and the caller that built the value is blamed.
+    Negative control: the same frames with gdb's printed name only
+    (`crate::{impl#0}::drop`, no destructor mark) keep the trace on drop."""
+    def _frames(with_symbol: bool) -> list[dict[str, object]]:
+        drop = {"func": "dropper::{impl#0}::drop", "file": "src/lib.rs",
+                "line": 7, "ptr_args": [[0x7000, 8]]}
+        if with_symbol:
+            drop["symbol"] = "<dropper::Holder as core::ops::drop::Drop>::drop"
+        return [drop,
+                {"func": "core::ptr::drop_in_place<dropper::Holder>",
+                 "file": "/rustc/x/library/core/src/ptr/mod.rs", "line": 1},
+                {"func": "dropper::release", "file": "src/lib.rs", "line": 13,
+                 "ptr_args": []}]
+
+    site = site_from_frames("tests/releases.rs", "releases", "SIGSEGV",
+                            _frames(True), fault_addr=16)
+    assert not site.origin_traced and not site.origin_traced_at_reader
+    assert site.blamed_locator == FnLocator("src/lib.rs", "release")
+    control = site_from_frames("tests/releases.rs", "releases", "SIGSEGV",
+                               _frames(False), fault_addr=16)
+    assert control.origin_traced_at_reader
+    assert control.blamed_locator == FnLocator("src/lib.rs", "drop")

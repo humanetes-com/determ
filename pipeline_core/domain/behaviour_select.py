@@ -15,14 +15,16 @@ spec is never truncated mid-body (a half example teaches the wrong shape).
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 
 from pipeline_core.domain.behaviour import BehaviourSpec, FenceDirective, example_code, then_value_text
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.rust_idents import (
     camelcase_type_names,
+    impl_self_type,
+    impl_trait_name,
 )
 from pipeline_core.domain.rust_scan import contains_word
 
@@ -384,8 +386,70 @@ def identity_subject_from_when(when: str) -> str:
     return last
 
 
+def identity_call_name(when: str) -> str:
+    """The method an identity ``when`` is asked through: the call carrying
+    the type argument (``err.downcast::<T>()`` -> ``downcast``,
+    ``Error::msg("x").is::<&str>()`` -> ``is``), else the last method call,
+    else ``""``."""
+    from pipeline_core.domain.language_driver import _called_idents
+    i = when.find("::<")
+    while i != -1:
+        j = i
+        while j > 0 and (when[j - 1].isalnum() or when[j - 1] == "_"):
+            j -= 1
+        if j < i and j > 0 and when[j - 1] == ".":
+            return when[j:i]
+        i = when.find("::<", i + 3)
+    calls = _called_idents(when)
+    return calls[-1] if calls else ""
+
+
+def resolve_identity_subjects(
+    specs: Sequence[BehaviourSpec], records: Iterable[object],
+) -> tuple[BehaviourSpec, ...]:
+    """Each identity example with ``subject`` set to the self type of the one
+    inherent impl the cluster declares its identity method in; every other
+    example unchanged.
+
+    The text of an example does not carry its receiver's type (`let error =
+    anyhow!(error)`, `let (err, _) = make_chain()`), and the last ``Type::``
+    path in it is whatever the setup happened to construct: on the recorded
+    stable suite of 2026-08-27, 32 of 35 identity examples named no type and
+    the other three named `Box`, `DetectDrop` and `Error`, so the harvest
+    picked `Box` and admitted no constructor of the crate's error type. The
+    method the identity is asked through is declared by the crate, and its
+    impl names the type. A method no inherent impl declares (a std trait
+    object's `downcast_ref`), or two impls declare, leaves the example as it
+    was."""
+    owners: dict[str, set[str]] = {}
+    for rec in records:
+        get = rec.get if isinstance(rec, Mapping) else (
+            lambda k, _r=rec: getattr(_r, k, ""))
+        name = str(get("fn_name") or "")
+        container = str(get("container") or "")
+        if not name or not container or impl_trait_name(container):
+            continue
+        self_ty = impl_self_type(container)
+        if self_ty:
+            owners.setdefault(name, set()).add(self_ty)
+    ident = {id(s) for s in _identity_suite(specs)}
+    out: list[BehaviourSpec] = []
+    for spec in specs:
+        if id(spec) in ident:
+            found = owners.get(identity_call_name(spec.when), set())
+            if len(found) == 1:
+                spec = replace(spec, subject=next(iter(found)))
+        out.append(spec)
+    return tuple(out)
+
+
 def identity_subject_from_specs(specs: Sequence[BehaviourSpec]) -> str:
-    """The identity type the suite's ``when`` texts name, most common."""
+    """The identity type the suite is asked about, most common: the
+    resolved ``subject`` of its identity examples when any has one, else
+    the last ``Type::`` path their texts name."""
+    resolved = Counter(s.subject for s in _identity_suite(specs) if s.subject)
+    if resolved:
+        return resolved.most_common(1)[0][0]
     counts: Counter[str] = Counter()
     for spec in _identity_suite(specs):
         for text in (spec.when, spec.setup):

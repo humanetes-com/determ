@@ -1344,10 +1344,79 @@ def test_the_post_merge_rank_holds_a_crash_culprit_the_localizer_names(
     eligible = {culprit: {"t1"}, other: {"t2"}}
     got = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
                                    gap, eligible)
-    assert set(got) == {culprit} and "t1" in got[culprit]
+    assert set(got.culprits) == {culprit} and "t1" in got.culprits[culprit]
+    assert got.sites == (site,)
     assert any("crash culprit(s) held in the batch" in m for m in fake.logs)
-    assert gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
-                                    None, eligible) == {}
+    quiet = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
+                                     None, eligible)
+    assert quiet.culprits == {} and quiet.sites == ()
     gen = replace(gen, localize_crashes=None)
-    assert gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
-                                    gap, eligible) == {}
+    quiet = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
+                                     gap, eligible)
+    assert quiet.culprits == {} and quiet.sites == ()
+
+
+def test_post_merge_convicting_drops_a_crashed_test_from_a_non_culprit(
+        tmp_path: Path) -> None:
+    """The post-merge builder is the loop, not a helper it might skip. One
+    site names one culprit for one test. A second unit stays in the batch,
+    convicted by that test and by another that completed. Its
+    convicting_for omits the crashed test and keeps the completed one.
+    The crashed test stays on its dispatch. Negative control: no site, and
+    the map is the raw attribution map. One localizer call feeds both the
+    rank and the judgment."""
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.models import FnLocator
+    culprit = FnLocator("src/lib.rs", "make")
+    other = FnLocator("src/lib.rs", "other")
+    frontier = {
+        culprit: {"t_crash", "t_done"},
+        other: {"t_crash", "t_done"},
+    }
+    site = CrashSite(
+        binary_label="tests/t.rs", test_name="t_crash", signal="SIGSEGV",
+        frames=(CrashFrame("src/lib.rs", 10, "make", "make"),),
+        origin_frames=(CrashFrame("src/lib.rs", 9, "make", "make"),),
+        origin_capable=True)
+    silent = (
+        "Running tests/t.rs (target/debug/deps/t-abc)\n"
+        "running 2 tests\n")
+    calls = {"n": 0}
+
+    def _loc(*_a, **_k):
+        calls["n"] += 1
+        return (site,)
+
+    c = _cluster()
+    fake = FakeAdapter(clusters_list=[c], run_results=[(101, silent)])
+    fake.attribute_failures = lambda *_a, **_k: AttributionResult(
+        dict(frontier), FailureKind.RUNTIME, dict(frontier))
+    seen: list = []
+    fake.fill_fns_one_by_one = lambda **kw: (
+        seen.append(kw["tdd_frontier_tests"]), _PER_FN_RESULT)[1]
+    gen = replace(_gen(fake, _cfg(per_fn=True, tdd=True, hard_cap=1)),
+                  localize_crashes=_loc)
+    pd = _make_project(tmp_path, [c])
+    gen._post_merge_fill_pass(
+        project_dir=pd, clusters=fake.clusters_list, module="crate",
+        functional_req="")
+    assert len(seen) == 1 and calls["n"] == len(seen)
+    ff = seen[0]
+    assert other in ff.dispatch and "t_crash" in ff.tests_for(other)
+    assert "t_crash" not in ff.convicting_for(other)
+    assert "t_done" in ff.convicting_for(other)
+    assert "t_crash" in ff.convicting_for(culprit)
+
+    fake2 = FakeAdapter(clusters_list=[c], run_results=[(101, silent)])
+    fake2.attribute_failures = lambda *_a, **_k: AttributionResult(
+        dict(frontier), FailureKind.RUNTIME, dict(frontier))
+    seen2: list = []
+    fake2.fill_fns_one_by_one = lambda **kw: (
+        seen2.append(kw["tdd_frontier_tests"]), _PER_FN_RESULT)[1]
+    _gen(fake2, _cfg(per_fn=True, tdd=True, hard_cap=1))._post_merge_fill_pass(
+        project_dir=pd, clusters=fake2.clusters_list, module="crate",
+        functional_req="")
+    assert len(seen2) == 1
+    raw = seen2[0]
+    assert "t_crash" in raw.convicting_for(other)
+    assert "t_done" in raw.convicting_for(other)

@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ...application.author_layout import (
     LayoutComponentRecord,
@@ -52,6 +52,11 @@ from ...domain.attribution import FailureFrontier, FailureKind
 from ...domain.cfg import CfgSet, cluster_cfg_set
 from ...domain.cluster_evidence import dominant_cluster
 from ...domain.cluster_plan import fill_order, merged_view_cluster
+from ...domain.crash_scope import (
+    crash_culprits_by_test,
+    scope_convicting,
+    scope_to_crash_culprits,
+)
 from ...domain.crash_site import blocker_culprit_tests
 from ...domain.dispatch_batch import DEFAULT_MAX_DISPATCH
 from ...domain.dispatch_rank import (
@@ -90,6 +95,7 @@ from ...domain.rust_scan import item_names
 from ...domain.test_results import (
     find_unreported_tests,
     parse_binary_results,
+    parse_failed_tests,
     parse_test_counts,
 )
 from ...domain.text import (
@@ -1040,6 +1046,29 @@ Generate the implementation for `{file_path}` (this call writes ONLY that file).
         written = self.ws.write_source_files(all_files, project_dir, manifest_path, existing_test_files)
         self.tel.log(f"  {written} source file(s) written.")
         return True
+
+
+class PostMergeCrash(NamedTuple):
+    """One merged sweep's crash reading. `culprits` is what the rank holds
+    ahead of the cap. `sites` is what `scope_convicting` reads, so the
+    judgment and the rank cannot come from two localizer calls."""
+
+    culprits: Mapping[FnLocator, frozenset[str]]
+    sites: tuple[Any, ...]
+
+
+def _post_merge_failing(output: str, sites: tuple[Any, ...]) -> set[str]:
+    """The failing names `crash_culprits_by_test` intersects with the sites.
+
+    A binary that dies prints no FAILED line. The site already names the
+    test that was in flight, and that name is part of the failing set.
+    """
+    failed = set(parse_failed_tests(output))
+    for site in sites:
+        name = getattr(site, "test_name", None)
+        if name:
+            failed.add(str(name))
+    return failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -3669,8 +3698,9 @@ class StaticSkeletonTask2Generator(Task2Generator):
             # cap with the tests its crash stopped, as in task2a: without it
             # a merged tree's crash origin could rank past the cap (task2a's
             # was rank 17 of 12 on run `14235-bf24f931` iter 3).
-            _culprit_tests = self._post_merge_culprits(
+            _crash = self._post_merge_culprits(
                 tag, iter_n, output, test_cmd, project_dir, gap, eligible)
+            _culprit_tests = _crash.culprits
             _ordered = rank({
                 k: UnitFacts(static_index=i, service=Service.NEVER,
                              unclaimed=_unclaimed.get(k, 0),
@@ -3716,7 +3746,21 @@ class StaticSkeletonTask2Generator(Task2Generator):
                 fr_path=fr_path,
                 tdd_frontier_keys=_batch_keys,
                 tdd_frontier_tests=FailureFrontier.build(
-                    _batch_eligible, _attr.convicting,
+                    _batch_eligible,
+                    # The same rule as task2a: a test a crash blocks no
+                    # longer convicts a unit that is not its culprit. The
+                    # sites are the ones the rank already localized. This
+                    # loop has no held-stub reading, so nothing is exempt,
+                    # and it binds no coverage reading, so that screen is
+                    # not applied here.
+                    scope_convicting(
+                        _attr.convicting,
+                        scope_to_crash_culprits(
+                            tuple((k, set(v)) for k, v in eligible.items()),
+                            crash_culprits_by_test(
+                                _crash.sites, _post_merge_failing(
+                                    output, _crash.sites)),
+                        )),
                     sources=_attr.sources),
                 tdd_test_cmd=test_cmd,
                 skip_end_pass_test=True,
@@ -3807,20 +3851,22 @@ class StaticSkeletonTask2Generator(Task2Generator):
     def _post_merge_culprits(
         self, tag: str, iter_n: int, output: str, test_cmd: str,
         project_dir: Path, gap: Any, eligible: Mapping[FnLocator, Any],
-    ) -> dict[FnLocator, frozenset[str]]:
+    ) -> PostMergeCrash:
         """The frontier units the localizer convicts for this merged sweep's
-        dead binaries, each with the tests its crash stopped. Empty when no
-        localizer is bound, no binary died, or the localizer fails (the
-        rank then reads no crash facts, as before)."""
+        dead binaries, each with the tests its crash stopped, and the sites
+        that named them. Both empty when no localizer is bound, no binary
+        died, or the localizer fails (the rank then reads no crash facts,
+        as before). One call: the rank reads the culprits, and the
+        convicting map reads the same sites."""
         if self.localize_crashes is None or not gap:
-            return {}
+            return PostMergeCrash({}, ())
         try:
             sites = tuple(self.localize_crashes(
                 output, test_cmd, project_dir, self.cargo.env()))
         except Exception as exc:  # noqa: BLE001 — a reading, never a stop
             self.tel.log(f"  {tag} post-merge iter {iter_n}: crash "
                          f"localization failed ({type(exc).__name__}: {exc})")
-            return {}
+            return PostMergeCrash({}, ())
         got = {k: v for k, v in blocker_culprit_tests(sites).items()
                if k in eligible}
         if got:
@@ -3831,7 +3877,7 @@ class StaticSkeletonTask2Generator(Task2Generator):
                             for k, v in sorted(got.items(),
                                                key=lambda kv: (kv[0].file,
                                                                kv[0].fn_name))))
-        return got
+        return PostMergeCrash(got, sites)
 
     @staticmethod
     def _frontier_from_silent_binaries(

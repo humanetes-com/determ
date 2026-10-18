@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pipeline_core.application.reconstruct.tree_txn import PreImage, capture, restore
+from pipeline_core.application.reconstruct.tree_txn import PreImage, restore
 from pipeline_core.domain.layout_retrigger import RefillGrace
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.test_report import stub_only_crash
@@ -235,17 +235,23 @@ def snapshot_src_tree(src_root: Path) -> TreeSnapshot | None:
     """Every `.rs` under `src_root` → {abs-path: text}, each over its byte
     pre-image. None when `src_root` is absent (ratchet self-disables for
     that workspace). Scoped to `src/` on purpose: fills only touch impl
-    files there, never `tests/` (the oracle) or `target/` (build cache)."""
+    files there, never `tests/` (the oracle) or `target/` (build cache).
+
+    The pre-images are seq 0. `capture` would mint a journal seq, and
+    `restore` would then splice every crash stub journalled after the
+    snapshot back onto the scored tree. A scored-tree restore wants the
+    bytes it read. An attempt's `capture` still mints a seq, and
+    `TreeTxn.rollback` still re-applies edits made after that attempt
+    started."""
     if not src_root.is_dir():
         return None
     pres: dict[str, PreImage] = {}
     for p in sorted(src_root.rglob("*.rs")):
         try:
-            pre = capture(p, None)
+            data = p.read_bytes()
         except OSError:
             continue
-        if pre.data is not None:
-            pres[str(p)] = pre
+        pres[str(p)] = PreImage(p, data, None)
     return TreeSnapshot(pres)
 
 

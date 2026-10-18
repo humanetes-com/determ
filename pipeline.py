@@ -42,7 +42,7 @@ from pipeline_core.adapters.artifacts import (
     load_original_structure as _artifacts_load_original_structure,
 )
 from pipeline_core.adapters.ask_client import AskClient, contents_index_hook
-from pipeline_core.adapters.behaviour_store import load_behaviour_suite
+from pipeline_core.adapters.behaviour_store import load_fill_specs
 from pipeline_core.adapters.cargo import CargoEnv
 from pipeline_core.adapters.file_constraints import FileConstraintsReader
 from pipeline_core.adapters.gen_tests_storage import (
@@ -1228,7 +1228,7 @@ def _build_phase_c_engine(*, structure: "_structure_port.StructureReader | None"
     return PhaseCFillEngine(tel=roles.tel, mut=roles.mut, cargo=roles.cargo, prompt=roles.prompt,
                             ws=ws, retros=roles.retros, tests=roles.tests, stall=roles.stall,
                             impl_path=roles.impl, fill_one=fill_one, config=cfg,
-                            behaviour_loader=lambda pd, c: load_behaviour_suite(pd, c).specs, route_ledger=roles.route_ledger)
+                            behaviour_loader=lambda pd, c: load_fill_specs(pd, c, _APP.structure.enumerate_fns), route_ledger=roles.route_ledger)
 
 
 def _task2_fill_fns_one_by_one(

@@ -655,9 +655,12 @@ def generate_fix_loop(
     if _load_suite is not None:
         _sk = project_dir / ".skeleton"
         if _sk.is_dir():
-            # Sorted puts nightly before stable. First-wins on behaviour_id
-            # alone would silently take nightly's Then; the helper keeps a
-            # shared id whose Then differs. See union_cluster_suites.
+            # The bound loader resolves each cluster's identity subject
+            # (`fill_suite_for_prompt`). A raw suite leaves the subject
+            # empty and the text harvest stands in for it. Sorted puts
+            # nightly before stable. First-wins on behaviour_id alone would
+            # silently take nightly's Then; the helper keeps a shared id
+            # whose Then differs. See union_cluster_suites.
             # `suite_cluster_of` decides which files are suites: these specs
             # are prompt-visible, and the held-out captures stored beside the
             # suites must never be among them.

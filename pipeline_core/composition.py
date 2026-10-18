@@ -76,7 +76,9 @@ from pipeline_core.adapters.behaviour_probe import (
     subprocess_runner as _probe_subprocess_runner,
 )
 from pipeline_core.adapters.behaviour_store import (
+    fill_suite_for_prompt,
     load_behaviour_suite,
+    load_fill_specs,
     save_behaviour_suite,
     write_feature_files,
 )
@@ -2974,7 +2976,7 @@ def build_app(
             # The baked suite, for the tiers a red test owes; and the ask
             # ledger, so a resumed process does not re-owe what the last one
             # already asked.
-            behaviour_specs_for=lambda pd, cl: load_behaviour_suite(pd, cl).specs,
+            behaviour_specs_for=lambda pd, cl: load_fill_specs(pd, cl, enumerate_fns),
             load_ask_ledger=_load_ask_ledger,
             save_ask_ledger=_save_ask_ledger,
             # The red ledger every cluster end writes; task 3 prints it and
@@ -3194,7 +3196,11 @@ def build_app(
             is_compiler_output_line=_is_compiler_output_line,
             run_generate_fix=_run_generate_fix,
             write=_io_write,
-            load_behaviour_suite=load_behaviour_suite,
+            # Resolved per cluster. The raw loader leaves the identity
+            # subject as the text harvest, and this loop's instruction is
+            # built from the union of what this dep returns.
+            load_behaviour_suite=lambda pd, name: fill_suite_for_prompt(
+                pd, name, enumerate_fns),
         ),
         attribution_deps=_attr_deps,
         task1_deps=Task1Deps(

@@ -1308,6 +1308,36 @@ def test_restore_src_tree_is_a_byte_restore_after_a_corrupting_write(tmp_path: P
     assert (src / "a.rs").read_bytes() == _CRLF
 
 
+def test_a_scored_tree_snapshot_ignores_a_journal_entry_made_after_it(
+        tmp_path: Path) -> None:
+    """A scored-tree snapshot is seq 0. A crash stub journalled after it
+    stays off the restored tree. Negative control: the same kind of journal
+    entry against the pre-image `TreeTxn.write` captures, rolled back,
+    still splices the stub. `rollback` calls `restore`."""
+    from pipeline_core.application.reconstruct.tree_txn import (
+        TreeTxn,
+        note_kept_edit,
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    path = src / "a.rs"
+    body = "fn a() {\n    1\n}\n"
+    stub = "\n    2\n"
+    path.write_text(body, encoding="utf-8")
+    snap = snapshot_src_tree(src)
+    assert snap is not None
+    assert {pre.seq for pre in snap.pre_images.values()} == {0}
+    note_kept_edit(path, "a", 0, stub)
+    path.write_text("fn a() {\n    9\n}\n", encoding="utf-8")
+    assert restore_src_tree(snap) == 1
+    assert path.read_text(encoding="utf-8") == body
+    txn = TreeTxn(src)
+    txn.write("a.rs", "fn a() {\n    9\n}\n")
+    note_kept_edit(path, "a", 0, stub)
+    assert txn.rollback() == 1
+    assert path.read_text(encoding="utf-8") == "fn a() {\n    2\n}\n"
+
+
 def test_control_a_text_snapshot_read_with_newline_translation_cannot_restore_the_bytes(
         tmp_path: Path) -> None:
     """The pre-fix shape: the snapshot was `{path: read_text()}` and the

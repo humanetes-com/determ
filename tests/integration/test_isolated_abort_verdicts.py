@@ -744,3 +744,102 @@ def test_negative_control_without_a_settler_the_reader_is_rejected(
     assert verdict.decision is U2Decision.REJECT
     assert "a_made" in verdict.aborted
     assert lib.count("read(NonNull::dangling())") == 2
+
+
+# ---- gdb names a trait-impl method without its trait (2026-10-18) ----------
+#
+# A native (gdb) crash site blamed a frame named `drop`: gdb prints a Drop
+# impl's method as `<crate>::{impl#N}::drop`, which carries none of the
+# destructor marks the sanitizer's demangled symbol does, so the skip that
+# promotes the caller never fired. The linkage name keeps the trait. The
+# invented crate's `release` drops a value whose destructor writes through a
+# dangling pointer.
+
+_DROP_LIB = """pub struct Holder {
+    p: *mut u8,
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        unsafe { core::ptr::write_volatile(self.p, 1) }
+    }
+}
+
+pub fn release(n: usize) -> u8 {
+    let h = Holder { p: n as *mut u8 };
+    drop(h);
+    0
+}
+"""
+
+_DROP_TESTS = """#[test]
+fn releases() {
+    assert_eq!(dropper::release(16), 0);
+}
+"""
+
+
+def _drop_capture(root: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, dict[str, str]]:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "dropper")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(_DROP_LIB)
+    (root / "tests" / "releases.rs").write_text(_DROP_TESTS)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "dropper")
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    return out, env
+
+
+def test_a_gdb_site_skips_the_destructor_by_its_symbol(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    from pipeline_core.domain.models import FnLocator
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    root = tmp_path / "d"
+    out, env = _drop_capture(root, monkeypatch)
+    raw: list[list[dict[str, object]]] = []
+
+    def _gdb(*a: object, **k: object):
+        got = localize_crashed_binary(*a, **k)  # type: ignore[arg-type]
+        if got is not None:
+            raw.append(got[1])
+        return got
+
+    def _no_symbol(*a: object, **k: object):
+        got = localize_crashed_binary(*a, **k)  # type: ignore[arg-type]
+        if got is None:
+            return None
+        sig, frames, addr = got
+        return sig, [{k_: v for k_, v in f.items() if k_ != "symbol"}
+                     for f in frames], addr
+
+    logs: list[str] = []
+    sites = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=_gdb, asan_sweep=None, log=logs.append),
+        out, _CMD, root, env)
+    assert sites, "no crash site localized:\n" + "\n".join(logs)
+    drop_frames = [f for f in raw[0] if str(f.get("func", "")).endswith("::drop")
+                   and "{impl" in str(f.get("func", ""))]
+    assert drop_frames and "as core::ops::drop::Drop>::drop" in str(
+        drop_frames[0].get("symbol")), (
+        "premise: gdb prints the Drop impl's method without its trait and "
+        f"the demangled linkage name carries it; frames: {raw[0][:4]}")
+    assert sites[0].blamed_locator == FnLocator("src/lib.rs", "release"), (
+        sites[0], logs)
+
+    control = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=_no_symbol, asan_sweep=None,
+                           log=lambda _m: None),
+        out, _CMD, root, env)
+    assert control and control[0].blamed_locator == FnLocator(
+        "src/lib.rs", "drop"), "negative control: the printed name alone blames drop"

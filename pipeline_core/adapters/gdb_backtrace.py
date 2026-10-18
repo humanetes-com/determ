@@ -53,6 +53,20 @@ def _ptrs(val, depth, out):
     except (gdb.error, gdb.MemoryError, ValueError, TypeError):
         return
 
+def _symbol(fr):
+    # gdb names a trait-impl method by its namespace (`gd::{impl#0}::drop`);
+    # the linkage name keeps the trait (`<gd::Holder as
+    # core::ops::drop::Drop>::drop`), the form the sanitizer prints.
+    try:
+        f = fr.function()
+        link = getattr(f, "linkage_name", None) if f is not None else None
+        if not link:
+            return ""
+        out = gdb.execute("demangle -l rust -- " + link, to_string=True).strip()
+        return out if out and out != link else ""
+    except (gdb.error, RuntimeError):
+        return ""
+
 def _arg_ptrs(fr):
     out = []
     try:
@@ -94,6 +108,7 @@ try:
             symtab = sal.symtab if sal is not None else None
             res["frames"].append({
                 "func": fr.name() or "",
+                "symbol": _symbol(fr),
                 "file": symtab.filename if symtab is not None else "",
                 "line": sal.line if sal is not None else 0,
                 "ptr_args": _arg_ptrs(fr),
