@@ -3,8 +3,17 @@
 Extracted from pipeline.py. Body verbatim; cross-cutting infra (log/emit) and
 the pure domain helpers (`parse_test_counts`, `validate_task3_output_strict`,
 `OUTPUT_SEPARATOR`) are imported, while the genuinely pipeline-coupled collaborators
-(phase tracking, cluster loading, cargo env, the inline-retry fix loop, the legacy path)
-are injected via :class:`Task3Deps`. No import of pipeline.py.
+(phase tracking, cluster loading, cargo env, the legacy path) are injected via
+:class:`Task3Deps`. No import of pipeline.py.
+
+Task 3 measures; it writes no body. It used to run an inline retry on the
+merged `src/` and, after it, the module step ran a whole-file fix loop there.
+Both wrote bodies the cluster trees never held, so the next re-entry's merge
+overwrote them (108 lines in 4 files on the anyhow workspace, 2026-10-19), and
+the retry was the only writer a pinned red test ever reached because the
+re-entry skipped every cluster (run `240506-87538963`). With the re-entry
+re-opening each cluster, a red task 3 goes back to the per-cluster loop
+through the module loop's re-entry instead.
 """
 
 from __future__ import annotations
@@ -20,7 +29,6 @@ from typing import Any
 
 from pipeline_core.domain.test_results import join_capture
 
-from ...application.reconstruct.attribution import not_body_repairable_tests
 from ...domain.cluster_env import overlay_cluster_env
 from ...domain.reference_floor import (
     ReferenceMeasurement,
@@ -32,9 +40,7 @@ from ...domain.test_results import (
     cluster_failure_is_actionable,
     compile_gate_reason,
     parse_binary_results,
-    parse_failed_tests,
     parse_test_counts,
-    rank_repair_candidates,
     validate_task3_output_strict,
 )
 from ...log import emit, log
@@ -51,7 +57,6 @@ class Task3Deps:
     parse_cmd: Callable[[str], list[str]]           # _parse_cmd
     count_active_tests_for_cluster: Callable[[Path, Any], int]
     store_prompt_content: Callable[[str], Any]      # _store_prompt_content
-    task3_inline_retry: Callable[..., tuple[bool, str]]  # _task3_inline_retry
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
     test_timeout: int
@@ -103,27 +108,6 @@ def red_ledger_lines(stored: Mapping[str, Any], *, limit: int = 40) -> list[str]
     lines.extend(f"  {e.get('class')}: {e.get('test')} — {e.get('why')}"
                  for e in entries[:limit])
     return lines
-
-
-def _should_reverify(primary_output: str, retry_output: str, retry_passed: bool,
-                     budget_remaining: int) -> bool:
-    """Whether to re-run TASK 3 across all clusters after an inline retry.
-
-    Gate on STABLE test COUNTS, never raw cargo text: cargo output is not
-    byte-deterministic (test ordering/timing), so a no-op retry "changes" the
-    text — the old `retry_output != primary_test_output` check then recursed
-    forever (RecursionError). Re-verify only on genuine progress (retry passed,
-    or more tests pass, or fewer fail — the last covers a build-fix that makes
-    the tree compile so more tests run) AND while the budget lasts. Exhausted
-    budget → caller falls through to the FAIL verdict → TASK 4.
-    """
-    if budget_remaining <= 0:
-        return False
-    if retry_passed:
-        return True
-    init_p, init_f, _ = parse_test_counts(primary_output)
-    new_p, new_f, _ = parse_test_counts(retry_output)
-    return new_p > init_p or new_f < init_f
 
 
 def run_clusters_strict(project_dir: Path, clusters: list[Any],
@@ -248,8 +232,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
 
 
 def task3(project_dir: Path, test_command: str, iteration: int | str,
-          output_dir: Path | str, genesis_path: Path, deps: Task3Deps,
-          _reverify_remaining: int = 2) -> Any:
+          output_dir: Path | str, genesis_path: Path, deps: Task3Deps) -> Any:
     """TASK 3 — per-cluster strict-verdict test runner.
 
     SUCCESS only when every test in every cluster genuinely runs
@@ -299,55 +282,21 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
         agg_fail = sum(r["fail"] for r in cluster_results)
         agg_ignored = sum(r["ignored"] for r in cluster_results)
         agg_expected = sum(r["expected"] for r in cluster_results)
-        # Primary = first ACTIONABLE non-pass cluster: one whose output carries a
-        # repairable signal (failing tests, or a nonzero exit with compiler
-        # diagnostics). The inline retry must rebuild under ITS toolchain/env to
-        # reproduce the failure. A clean-exit shortfall (rc==0, fail==0, but
-        # fewer #[test]s than statically expected) is NOT actionable — sending it
-        # to the fix loop only churns (no compile error, no failing test → floor
-        # metric 0). When EVERY non-pass cluster is such a shortfall we skip the
-        # retry and surface a count/oracle mismatch instead of burning LLM calls.
-        primary_test_output = ""
-        primary_cluster = None
-        _cluster_by_name = {c.name: c for c in clusters}
+        # A clean-exit shortfall (rc==0, fail==0, but fewer #[test]s than
+        # statically expected) is a count/oracle mismatch, not a code defect.
         _unactionable_shortfalls = [
             r for r in cluster_results if r["status"] != "pass"
             and not cluster_failure_is_actionable(r["status"], r["rc"], r["fail"])
         ]
-        # Choose the primary by EVIDENCE, not by name order. `run_clusters_strict`
-        # iterates name-sorted, so taking the first actionable failure picked
-        # `nightly` over `stable` on 2026-08-05 because "nightly" < "stable" —
-        # and `nightly` is the cluster carrying `ui`, a trybuild compile-fail
-        # test no body rewrite can satisfy, while `stable` failed only
-        # `test_boxed_str`.
-        _actionable = [
-            r for r in cluster_results
-            if r["status"] != "pass" and cluster_failure_is_actionable(
-                r["status"], r["rc"], r["fail"])]
-        if _actionable:
-            _unrepairable = not_body_repairable_tests(
-                list((project_dir / "tests").rglob("*.rs")))
-            _by_name = {r["cluster"]: r for r in _actionable}
-            # compile-broken = INCOMPLETE with rc != 0: no verdicts, compiler
-            # diagnostics present. Disjoint from every test-failing candidate
-            # (those are status FAIL), so the 2026-08-05 ordering between two
-            # clusters that both RAN is untouched.
-            _order = rank_repair_candidates(
-                [(r["cluster"], frozenset(parse_failed_tests(r["output"])),
-                  r["status"] == ClusterStatus.INCOMPLETE and r["rc"] != 0)
-                 for r in _actionable], _unrepairable)
-            _chosen = _by_name[_order[0]]
-            primary_test_output = _chosen["output"]
-            primary_cluster = _cluster_by_name[_chosen["cluster"]]
-            if len(_order) > 1:
-                log(f"  [task3] repairing via cluster '{_order[0]}' "
-                    f"(candidates: {', '.join(_order)}).")
-        if primary_cluster is None and _unactionable_shortfalls:
+        _any_actionable = any(
+            r["status"] != "pass" and cluster_failure_is_actionable(
+                r["status"], r["rc"], r["fail"]) for r in cluster_results)
+        if not _any_actionable and _unactionable_shortfalls:
             for r in _unactionable_shortfalls:
                 log(f"  [task3/{r['cluster']}] count/oracle mismatch — clean run "
                     f"({r['pass']} pass, rc={r['rc']}) but {r['expected']} expected; "
-                    "NOT a code defect, skipping the code-fix retry (would churn). "
-                    "Check expected-count derivation or a genuinely missing test.")
+                    "NOT a code defect. Check expected-count derivation or a "
+                    "genuinely missing test.")
         genesis = deps.read(genesis_path)
         deps.write(output_file,
                    f"=== genesis.md (iteration {iteration}) ===\n{genesis}\n"
@@ -388,46 +337,10 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
                    "ignored_count": agg_ignored,
                    "expected_count": agg_expected,
                    "reason": ("incomplete_shortfall_unactionable"
-                              if _unactionable_shortfalls and primary_cluster is None
+                              if _unactionable_shortfalls and not _any_actionable
                               else "incomplete" if any_incomplete and not any_failed
                               else "failed_tests"),
                    "output": deps.store_prompt_content(aggregated_output)})
-
-        # Inline retry on the primary failing cluster. Uses the
-        # full attribution chain (panics → compile → classifier →
-        # recently_filled → reverse_map) to identify fns to refix.
-        if primary_test_output:
-            retry_passed, retry_output = deps.task3_inline_retry(
-                project_dir=project_dir,
-                test_command="cargo test --no-fail-fast",
-                iteration=iteration,
-                initial_test_output=primary_test_output,
-                cluster=primary_cluster,
-                # Every baked cluster, not just the one whose failure opened the
-                # retry: the tree it repairs is one artifact that all of them
-                # compile, so the accept gate has to be able to see a body that
-                # fixes this cluster and breaks another.
-                all_clusters=clusters,
-            )
-            # Re-verify across all clusters ONLY on genuine progress, and only
-            # while the budget lasts (see _should_reverify).
-            if _should_reverify(primary_test_output, retry_output, retry_passed,
-                                _reverify_remaining):
-                r_passed, r_output = task3(
-                    project_dir, test_command, iteration,
-                    output_dir, genesis_path, deps,
-                    _reverify_remaining=_reverify_remaining - 1,
-                )
-                # The recursion emitted its own fully-populated task.done; this
-                # level's event must still carry the verdict — a task.done with
-                # no `passed` key reads as passed=None to the auditor (C9).
-                r_pass, r_fail, _r_ign = parse_test_counts(r_output)
-                done["data"] = {
-                    "passed": r_passed, "reverified": True,
-                    "pass_count": r_pass, "fail_count": r_fail,
-                    "expected_count": agg_expected,
-                }
-                return r_passed, r_output
 
         done["data"] = {
             "passed": False, "pass_count": agg_pass,

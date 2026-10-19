@@ -70,7 +70,6 @@ from pipeline_core.adapters.telemetry import LogTelemetry
 from pipeline_core.application import orchestrator as _orchestrator
 from pipeline_core.application.reconstruct import fix_diagnostics as _fix_diag
 from pipeline_core.application.reconstruct import impl_fill as _impl_fill
-from pipeline_core.application.reconstruct import per_fn_retry as _per_fn_retry
 from pipeline_core.application.reconstruct.fill_merge import (
     merge_fn_blocks_into_disk as _merge_fn_blocks_into_disk,  # noqa: F401  (test pin: pipeline._merge_fn_blocks_into_disk)
 )
@@ -509,11 +508,6 @@ COVERAGE_AUGMENTATION_TARGET = SETTINGS.coverage_augmentation_target
 # wanting a strict regen cap can override the env.
 BUILD_CHECK_RETRIES = int(os.getenv("BUILD_CHECK_RETRIES", "10000"))
 
-# Fix attempts after TASK 3 failure before escalating to TASK 4 + full regeneration.
-# Each attempt asks the LLM to fix only the specific files causing test failures,
-# preserving files that are already correct — same principle as TASK 0c.
-TASK2_FIX_RETRIES = 2
-
 # Max chars for genesis.md and functional_requirements.md when passed to task4.
 # Set high enough that truncation never occurs in practice on a large local context.
 
@@ -787,7 +781,6 @@ _CFG = _CompositionConfig(
     test_timeout=TEST_TIMEOUT,
     build_check_retries=BUILD_CHECK_RETRIES,
     task2_build_max_stalls=int(os.getenv("TASK2_BUILD_MAX_STALLS", "2")),
-    task2_fix_retries=TASK2_FIX_RETRIES,
     synthesis_group_size=SYNTHESIS_GROUP_SIZE,
     chunk_cache_dir=CHUNK_CACHE_DIR,
     task1_thinking_directive=_TASK1_THINKING_DIRECTIVE,
@@ -846,7 +839,6 @@ _HELPERS = _Helpers(
     ask_raw=lambda *a, **k: _ask_raw(*a, **k),
     pipeline_parallelism=lambda: _pipeline_parallelism(),
     task3_legacy_single=lambda *a, **k: _task3_legacy_single(*a, **k),
-    task3_inline_retry=lambda *a, **k: _task3_inline_retry(*a, **k),
     source_extensions=SOURCE_EXTENSIONS,
     fix_thinking_directive=_FIX_THINKING_DIRECTIVE,
     task2_verbosity_guard=_TASK2_VERBOSITY_GUARD,
@@ -1027,8 +1019,8 @@ def _converge_in_cluster(cluster: "BuildCluster | None") -> str | None:
 
 # _improvement_loop (the callback->RefineStrategy adapter) was relocated to
 # pipeline_core.application.refine_loop.run_callback_loop and is
-# imported above as _improvement_loop. The 4 in-file callers (generate_fix_loop
-# closures, _task3_inline_retry) move onto it directly.
+# imported above as _improvement_loop. Its in-file callers (the generate_fix_loop
+# closures) moved onto it directly.
 
 
 # Retro/diagnosis calls run with think=True. When this was written, Qwen3.6 on
@@ -1317,39 +1309,14 @@ generate_in_parallel = _APP.task0c_deps.generate_in_parallel
 
 
 # Deps for the extracted TASK 2 (defined after generate_fix_loop, its latest dep).
-# Task3 inline retry. Currently task3 is one-shot; failure escalates
-# straight to task4 + full regen. The inline retry catches the case where
-# only a handful of fns broke a test — classifier identifies them, a single
-# LLM call per fn fixes the body, cargo test re-runs. Bounded by stall budget
-# and a snapshot/revert guard so we never leave the tree worse than we found it.
-
-def _task3_inline_retry(
-    project_dir: Path,
-    test_command: str,
-    iteration,
-    initial_test_output: str,
-    cluster: "BuildCluster | None" = None,
-    all_clusters: "list[BuildCluster] | None" = None,
-) -> tuple[bool, str]:
-    """Composition-root shim -> per_fn_retry.run_task3_inline_retry (chunk H,
-    deps migrated into build_app). The deps' fill-role adapters +
-    Helpers lambdas late-bind the module globals, so the scripted-cargo /
-    scripted-model monkeypatch seams (test_e2e_build_fix / test_e2e_routing)
-    still intercept at call time; env knobs are read per call in pipeline_core.
-    """
-    return _per_fn_retry.run_task3_inline_retry(
-        project_dir, test_command, iteration, initial_test_output, cluster,
-        all_clusters=all_clusters, deps=_APP.task3_retry_deps)
-
-
 def _task3_legacy_single(
     project_dir, test_command, iteration, output_dir, genesis_path,
 ) -> tuple[bool, str]:
     """Composition-root shim -> legacy_test_run.run_legacy_single. Builds the
-    deps fresh per call, binding the resident telemetry / cargo / io / inline-
-    retry collaborators by name so the e2e monkeypatch seams (pipeline._emit,
-    pipeline._run_cargo via inline-retry, …) still intercept at call time. The
-    single-shot orchestration itself lives in pipeline_core."""
+    deps fresh per call, binding the resident telemetry / cargo / io
+    collaborators by name so the e2e monkeypatch seams (pipeline._emit, …)
+    still intercept at call time. The single-shot orchestration itself lives
+    in pipeline_core."""
     return _run_legacy_single(
         project_dir, test_command, iteration, output_dir, genesis_path,
         LegacyTestRunDeps(
@@ -1359,7 +1326,6 @@ def _task3_legacy_single(
             cargo_env=_cargo_env,
             parse_cmd=_parse_cmd,
             store_prompt_content=_store_prompt_content,
-            task3_inline_retry=_task3_inline_retry,
             read=read,
             write=write,
             test_timeout=TEST_TIMEOUT,

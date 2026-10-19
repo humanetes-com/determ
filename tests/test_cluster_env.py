@@ -156,7 +156,6 @@ def test_task3_runs_each_cluster_under_the_overlay_when_no_env_is_bound(
             'echo "test result: ok. 1 passed; 0 failed; 0 ignored"'],
         count_active_tests_for_cluster=lambda _p, _c: 1,
         store_prompt_content=lambda _s: "",
-        task3_inline_retry=lambda **_k: (False, ""),
         read=lambda _p: "",
         write=lambda _p, _s: None,
         test_timeout=30,

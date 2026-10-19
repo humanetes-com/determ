@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from ...domain.generation import GenerationRequest
-from ...domain.text import trim_to_line
 from ...log import emit, log
 
 
@@ -33,15 +32,7 @@ class Task2Deps:
     build_check_retries: int
     build_max_stalls: int
     build_timeout: int
-    test_timeout: int
     task2_model: str
-    task2_fix_retries: int
-    single_call_char_limit: int
-    genesis_cap: int
-    # Builds the per-cluster strict check for the post-task3 fix loop:
-    # factory(project_dir) → check_fn running EVERY baked cluster, or None
-    # when the workspace has no baked clusters (legacy single-command path).
-    cluster_check_factory: Callable[[Path], Callable[[], tuple[bool, str]] | None] | None = None
 
 
 def task2(project_dir: Path, genesis_path: Path, functional_req_path: Path,
@@ -210,90 +201,3 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
          duration_ms=int((time.monotonic() - _t2_t0) * 1000),
          data={"ok": False, "reason": "retries_exhausted"})
     return False
-
-
-def task2_fix_loop(
-    project_dir: Path,
-    manifest_path: Path,
-    existing_test_files: set[str],
-    test_output: str,
-    test_command: str,
-    functional_req_path: Path,
-    deps: Task2Deps,
-    genesis_path: Path | None = None,
-    module_dir_rel: str = "",
-) -> tuple[bool, str]:
-    """
-    After TASK 3 failure: targeted fix before full TASK 4 + regeneration.
-    Thin wrapper around generate_fix_loop using the manifest's source files.
-    """
-    current_files = deps.load_manifest(manifest_path)
-    if not current_files:
-        return False, test_output
-
-    source_paths = [
-        project_dir / rel for rel in current_files
-        if rel not in existing_test_files and (project_dir / rel).exists()
-    ]
-
-    functional_req = deps.read(functional_req_path)
-
-    # Fill-down for extra_context: genesis → test files (stem-prioritized).
-    _extra_budget = max(10_000, deps.single_call_char_limit - 10_000 - 30_000 - 8_000)
-
-    # 1. Genesis — methodology, always first.
-    _genesis_section = ""
-    if genesis_path and genesis_path.exists():
-        _genesis = deps.read(genesis_path)
-        if _genesis.strip():
-            _genesis_section = (
-                f"\n--- genesis.md (methodology) ---\n"
-                f"{trim_to_line(_genesis, deps.genesis_cap, chr(10) + '... (genesis truncated)')}\n"
-            )
-
-    # 2. Test files — stem-prioritized, fill remaining budget.
-    _test_budget = max(0, _extra_budget - len(_genesis_section))
-    _file_stem = Path(module_dir_rel.rstrip("/")).name if module_dir_rel else ""
-    _primary_tests: list[str] = []
-    _secondary_tests: list[str] = []
-    for _rel in sorted(existing_test_files):
-        if module_dir_rel and not _rel.startswith(module_dir_rel):
-            continue
-        _tp = project_dir / _rel
-        if not _tp.exists():
-            continue
-        _blk = f'\n<TESTFILE path="{_rel}">\n{_tp.read_text(encoding="utf-8")}\n</TESTFILE>'
-        if _file_stem and Path(_rel).name.split(".")[0] == _file_stem:
-            _primary_tests.append(_blk)
-        else:
-            _secondary_tests.append(_blk)
-    _test_parts = ["\nTest files (the tests your fix must pass):"]
-    _test_used = 0
-    for _blk in _primary_tests + _secondary_tests:
-        if _test_used + len(_blk) > _test_budget:
-            break
-        _test_parts.append(_blk)
-        _test_used += len(_blk)
-    _test_section = ("\n".join(_test_parts) + "\n") if len(_test_parts) > 1 else ""
-
-    extra = _genesis_section + _test_section
-
-    # Verdict authority: the per-cluster strict runner, when baked clusters
-    # exist. The bare test_command sees only the default cluster — validating
-    # with it alone is the false-SUCCESS bug (2026-06-12 microcrate).
-    check_fn = (deps.cluster_check_factory(project_dir)
-                if deps.cluster_check_factory else None)
-
-    return deps.generate_fix_loop(
-        project_dir=project_dir,
-        check_cmd=test_command,
-        check_fn=check_fn,
-        source_paths=source_paths,
-        existing_test_files=existing_test_files,
-        extra_context=extra,
-        model=deps.task2_model,
-        max_fix_attempts=deps.task2_fix_retries,
-        timeout=deps.test_timeout,
-        functional_req=functional_req,
-        fr_path=functional_req_path,
-    )

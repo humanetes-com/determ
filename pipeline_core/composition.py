@@ -561,13 +561,6 @@ from pipeline_core.application.reconstruct.macro_invariants import (
     compute_cluster_macro_invariants as _compute_cluster_macro_invariants,
 )
 from pipeline_core.application.reconstruct.module_reconstructor import ModuleReconstructor
-from pipeline_core.application.reconstruct.per_fn_retry import (
-    RetryDeps,
-    Task3Attribution,
-    Task3Cargo,
-    Task3Enumerate,
-    Task3RetryDeps,
-)
 from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
 from pipeline_core.application.reconstruct.phase_c_tdd import (
     run_phase_c_tdd as _run_phase_c_tdd_impl,
@@ -687,16 +680,10 @@ from pipeline_core.application.tasks.task1 import (
 )
 from pipeline_core.application.tasks.task2 import Task2Deps
 from pipeline_core.application.tasks.task2 import (
-    task2_fix_loop as _task2_fix_impl,
-)
-from pipeline_core.application.tasks.task2 import (
     task2_inner_loop as _task2_inner_impl,
 )
 from pipeline_core.application.tasks.task3 import (
     Task3Deps,
-)
-from pipeline_core.application.tasks.task3 import (
-    run_clusters_strict as _run_clusters_strict,
 )
 from pipeline_core.application.tasks.task3 import (
     task3 as _task3_impl,
@@ -853,7 +840,6 @@ from pipeline_core.domain.refine import (
 )
 from pipeline_core.domain.run_state import RunState
 from pipeline_core.domain.rust_fn_headers import is_pub_fn as _domain_is_pub_fn
-from pipeline_core.domain.rust_fn_headers import locate_all_fns as _domain_locate_all_fns
 from pipeline_core.domain.rust_fn_headers import locate_fn as _domain_locate_fn
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _pm_fallback_reqs,
@@ -922,7 +908,6 @@ from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
 )
 from pipeline_core.prompts.output_format import FILE_FORMAT_INSTRUCTION
-from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt, build_per_fn_prompt
 from pipeline_core.prompts.per_impl import (
     build_per_impl_prompt as _build_per_impl_prompt,
 )
@@ -999,7 +984,6 @@ class CompositionConfig:
     test_timeout: int
     build_check_retries: int
     task2_build_max_stalls: int
-    task2_fix_retries: int
     synthesis_group_size: int
     chunk_cache_dir: str
     task1_thinking_directive: str
@@ -1049,7 +1033,6 @@ class Helpers:
     ask_raw: Callable[..., Any]
     pipeline_parallelism: Callable[[], int]
     task3_legacy_single: Callable[..., Any]
-    task3_inline_retry: Callable[..., Any]
     source_extensions: Any
     fix_thinking_directive: str
     task2_verbosity_guard: str
@@ -1245,7 +1228,6 @@ class App:
     telemetry: LogTelemetry                    # injected
     requirements_phase: RequirementsPhase      # read by main()
     module_reconstructor: ModuleReconstructor  # read by main()
-    task3_retry_deps: Task3RetryDeps           # task3 inline retry
     # Top-level run-loop deps — read by pipeline main() → run_pipeline.
     run_deps: RunDeps
 
@@ -2205,7 +2187,6 @@ def build_app(
         parse_cmd=_parse_cmd,
         count_active_tests_for_cluster=count_active_tests_for_cluster,
         store_prompt_content=helpers.store_prompt_content,
-        task3_inline_retry=helpers.task3_inline_retry,
         read=read,
         write=write,
         test_timeout=cfg.test_timeout,
@@ -2213,18 +2194,6 @@ def build_app(
         cluster_env=cluster_cargo_env,
         red_ledger=_load_red_ledger,
     )
-
-    def _cluster_check_factory(project_dir: Path) -> Callable[[], tuple[bool, str]] | None:
-        clusters = _load_baked_clusters(project_dir)
-        if not clusters:
-            return None
-
-        def _check() -> tuple[bool, str]:
-            all_pass, output, _results = _run_clusters_strict(
-                project_dir, clusters, _task3_deps)
-            return all_pass, output
-
-        return _check
 
     def _task3(project_dir: Path, test_command: str, iteration: Any,
                output_dir: Any, genesis_path: Path) -> tuple[Any, str]:
@@ -2415,12 +2384,7 @@ def build_app(
         build_check_retries=cfg.build_check_retries,
         build_max_stalls=cfg.task2_build_max_stalls,
         build_timeout=cfg.build_timeout,
-        test_timeout=cfg.test_timeout,
         task2_model=settings.task_models.task2,
-        task2_fix_retries=cfg.task2_fix_retries,
-        single_call_char_limit=cfg.single_call_char_limit,
-        genesis_cap=PromptBudgets.derive(cfg.single_call_char_limit).genesis,
-        cluster_check_factory=_cluster_check_factory,
     )
 
     def _task2_inner_loop(project_dir: Path, genesis_path: Path,
@@ -2458,7 +2422,6 @@ def build_app(
         validate_task2_output, validate_task2_api_conformance,
     )
     fixer = FixerAdapter(
-        functools.partial(_task2_fix_impl, deps=_task2_deps),
         _classify_failure, ports.log,
         _insert_no_run, settings.fix_caps.fix_err_cap,
     )
@@ -3385,58 +3348,5 @@ def build_app(
         telemetry=telemetry,
         requirements_phase=requirements_phase,
         module_reconstructor=module_reconstructor,
-        # task3 inline-retry deps — composed from the fill-role adapters
-        # (whose lambdas late-bind the pipeline globals, so the scripted-cargo/
-        # scripted-model e2e seams intercept at call time) + the Helpers shims
-        # for the attribution/diag collaborators the fill roles don't carry.
-        task3_retry_deps=Task3RetryDeps(
-            cargo=Task3Cargo(
-                env=fill_roles.cargo.env,
-                run=fill_roles.cargo.run,
-                check_diag=helpers.run_cargo_check_diag,
-                cluster_env=cluster_cargo_env,
-            ),
-            attribution=Task3Attribution(
-                attribute_failures=_via("attribute_failures"),
-                build_test_reverse_map=build_test_reverse_map,
-                frontier_from_diags=_via("frontier_from_diags"),
-                filter_test_targets=filter_test_targets,
-                expand_frontier_by_calls=functools.partial(
-                    _attribution.expand_frontier_by_calls, _attr_deps),
-                stub_hold=functools.partial(
-                    _attribution.sweep_stub_hold, _attr_deps),
-            ),
-            enumerator=Task3Enumerate(
-                cluster_filter_type_members=fill_roles.ws.cluster_filter_type_members,
-                enumerate_types=enumerate_types,
-                fn_container_index=fill_roles.ws.fn_container_index,
-                fn_occurrence_index=functools.partial(
-                    _fn_occurrence_index_impl, enumerate_fns=enumerate_fns),
-                collect_crate_macros=fill_roles.prompt.collect_crate_macros,
-                compute_cluster_macro_invariants=(
-                    fill_roles.prompt.compute_cluster_macro_invariants),
-                detect_crate_no_std_invariant=(
-                    fill_roles.prompt.detect_crate_no_std_invariant),
-            ),
-            retry_fix=RetryDeps(
-                locate_fn=fill_roles.mut.locate_fn,
-                locate_all_fns=_domain_locate_all_fns,
-                gather_fix_context=fill_roles.prompt.gather,
-                build_per_fn_fix_prompt=build_per_fn_fix_prompt,
-                build_per_fn_prompt=build_per_fn_prompt,
-                ask_per_fn_body=fill_roles.prompt.ask_per_fn_body,
-                open_conversation=fill_roles.prompt.open_conversation,
-                splice_fn_body=fill_roles.mut.splice_fn_body,
-                splice_body_scoped=fill_roles.mut.splice_body_scoped,
-                find_tests_for_fn=fill_roles.tests.find_tests_for_fn,
-                focus_cargo_errors=lambda out, rel_f: fill_roles.cargo.focus_errors(
-                    out, rel_f, max_chars=cfg.fix_err_cap),
-                is_gen_tests_file=fill_roles.ws.is_gen_tests_file,
-                log=ports.log,
-                parse_ok=fill_roles.mut.parse_validator(),
-            ),
-            log=ports.log,
-            test_timeout=cfg.test_timeout,
-        ),
         run_deps=run_deps,
     )

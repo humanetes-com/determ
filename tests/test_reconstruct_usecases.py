@@ -61,9 +61,9 @@ class FakeAdapter:
         if seq:
             return seq.pop(0)
         return self.s.get("task3", (True, "5 passed"))
-    # Fixer
+    # Fixer: no post-task3 writer. A step that still called one would raise.
     def task2_fix_loop(self, *a: Any, **k: Any) -> tuple[bool, str]:
-        self.calls.append("fix"); return self.s.get("fix", (False, "still failing"))
+        raise AssertionError("task 3 must not hand its failure to a writer")
     def classify_failure(self, out: str) -> str: return "test"
     def diagnose_no_tests(self, *a: Any) -> tuple[str, str]:
         self.calls.append("diagnose"); return self.s.get("diagnose", ("no_tests", "diag"))
@@ -217,20 +217,17 @@ def test_step_no_tests_diagnoses(tmp_path: Path) -> None:
     assert out == StepOutcome(False, "build", "diag-out")
 
 
-def test_step_fail_then_fix_reverified_locks(tmp_path: Path) -> None:
-    # first task3 fails, fix passes, reverify task3 passes → lock.
-    fa = FakeAdapter(task2=True, fix=(True, "fixed"),
+def test_a_red_task3_goes_back_to_the_module_loop_with_no_writer(tmp_path: Path) -> None:
+    """Task 3 measures. Its failure is the module loop's (t4, then the
+    re-entry that re-opens every cluster's loop); the step calls no writer on
+    the merged tree. The fake fixer raises if one is called: the old step
+    called `task2_fix_loop` here and re-ran task 3."""
+    fa = FakeAdapter(task2=True,
                      task3_seq=[(False, "test result: FAILED. 1 passed; 1 failed;"),
                                 (True, "test result: ok. 2 passed; 0 failed;")])
     out = _step(fa).run(_ctx(tmp_path), IterationState(), coverage_strategy="")
-    assert out.locked is True and "fix" in fa.calls
-
-
-def test_step_fail_then_fix_fails_returns_failure(tmp_path: Path) -> None:
-    fa = FakeAdapter(task2=True, fix=(False, "nope"),
-                     task3=(False, "test result: FAILED. 1 passed; 2 failed;"))
-    out = _step(fa).run(_ctx(tmp_path), IterationState(), coverage_strategy="")
     assert out.locked is False and out.failure_type == "test"
+    assert fa.calls.count("task3") == 1
 
 
 # --- FailureAnalysisStep ----------------------------------------------------

@@ -186,28 +186,10 @@ class ReconstructionStep:
                 ctx.project_dir, ctx.module_test_cmd, t3_reason, test_output)
             return StepOutcome(False, failure_type, test_output)
 
-        # "fail": targeted fix loop before full regeneration.
-        fix_passed, test_output = self._fixer.task2_fix_loop(
-            ctx.project_dir, ctx.module_manifest, ctx.existing_test_files, test_output,
-            ctx.module_test_cmd, ctx.module_req_path, genesis_path=ctx.genesis_path,
-            module_dir_rel=ctx.module_dir_rel)
-        if fix_passed:
-            # The fix loop's own check passed — but the ONLY authority for SUCCESS
-            # is the per-cluster strict runner. Re-run TASK 3 for the verdict.
-            with phase_scope("t3", module=ctx.module_name, attempt=it,
-                             detail="re-verify after the fix loop"):
-                reverified, test_output = self._tests.task3(
-                    ctx.project_dir, ctx.module_test_cmd, f"{label}-fixverify",
-                    ctx.project_dir, ctx.genesis_path)
-            if reverified:
-                verdict = self._lock(
-                    ctx, state,
-                    commit_message=f"pipeline: task3 iter {it} — {ctx.module_name} tests pass (fix loop)",
-                    tag=f"passing-{ctx.module_name}-{it}", detail=f"iteration {it} (fix loop)",
-                    set_current_label=f"task2-4/{ctx.module_name} / LOCKED iter {it}",
-                    locked_commit_msg=f"pipeline: locked — {ctx.module_name}",
-                    success_log="\nSUCCESS: all tests passed after fix loop.",
-                    complete_commit_msg=f"pipeline: complete — all tests pass iter {it}")
-                return self._locked_or_blocked(verdict, test_output)
-
+        # "fail": no writer runs here. A red task 3 is the module loop's: t4's
+        # retro, then the re-entry that re-opens every cluster's loop. The
+        # whole-file fix loop that ran here wrote the merged `src/`, which
+        # the next merge overwrites from the cluster trees; on run
+        # `801510-bb22799f` (2026-10-20) it changed nothing and the run passed
+        # on its re-verify, an order race in a generated test.
         return StepOutcome(False, self._fixer.classify_failure(test_output), test_output)

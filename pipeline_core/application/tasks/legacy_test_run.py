@@ -5,8 +5,7 @@ The single-shot test runner retained for pipelines without baked clusters
 ``pipeline.py::_task3_legacy_single``; the pure domain helpers
 (:data:`OUTPUT_SEPARATOR`, :func:`parse_test_counts`, :class:`TestOutcome`) are
 imported, while the pipeline-coupled collaborators (phase/emit/log telemetry,
-cargo env, command parsing, prompt-content store, the inline-retry fix loop, and
-file read/write) are injected via :class:`LegacyTestRunDeps`. No import of
+cargo env, command parsing, prompt-content store, and file read/write) are injected via :class:`LegacyTestRunDeps`. No import of
 pipeline.py; the composition-root shim binds the resident collaborators by name
 per call so the e2e monkeypatch seams still intercept.
 """
@@ -37,7 +36,6 @@ class LegacyTestRunDeps:
     cargo_env: Callable[[], dict[str, str]]      # _cargo_env
     parse_cmd: Callable[[str], list[str]]        # _parse_cmd
     store_prompt_content: Callable[[str], Any]   # _store_prompt_content
-    task3_inline_retry: Callable[..., tuple[bool, str]]  # _task3_inline_retry
     read: Callable[[Any], str]
     write: Callable[[Any, str], None]
     test_timeout: int
@@ -100,31 +98,5 @@ def run_legacy_single(
                   data={"returncode": result.returncode,
                         "pass_count": _pass_n, "fail_count": _fail_n,
                         "output": deps.store_prompt_content(test_output)})
-        if not passed:
-            retry_passed, retry_output = deps.task3_inline_retry(
-                project_dir=project_dir,
-                test_command=test_command,
-                iteration=iteration,
-                initial_test_output=test_output,
-            )
-            if retry_passed:
-                passed = True
-                test_output = retry_output
-                deps.write(output_file,
-                           f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
-                           f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n, _ = parse_test_counts(test_output)
-                deps.log(f"  Tests PASSED via inline retry. Output -> {output_file}")
-                deps.emit("test.pass", duration_ms=int(
-                    (time.monotonic() - _t_start) * 1000),
-                          data={"returncode": 0, "pass_count": _pass_n,
-                                "fail_count": _fail_n, "via": "task3_inline_retry",
-                                "output": deps.store_prompt_content(test_output)})
-            elif retry_output != test_output:
-                test_output = retry_output
-                deps.write(output_file,
-                           f"=== genesis.md (iteration {iteration}) ===\n{genesis}"
-                           f"\n{OUTPUT_SEPARATOR}\n{test_output}")
-                _pass_n, _fail_n, _ = parse_test_counts(test_output)
         done["data"] = TestOutcome.from_counts(passed, _pass_n, _fail_n).as_event_data()
         return passed, test_output

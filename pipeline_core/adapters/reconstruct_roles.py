@@ -83,18 +83,10 @@ class GeneratorAdapter:
 
 @dataclass(frozen=True, slots=True)
 class FixerAdapter:
-    fix_loop_fn: Callable[..., tuple[bool, str]]
     classify_fn: Callable[[str], str]
     log: Callable[[str], None]
     insert_no_run: Callable[[str], str]
     fix_err_cap: int
-
-    def task2_fix_loop(self, project_dir: Path, manifest_path: Path, existing_test_files: set[str],
-                       test_output: str, test_command: str, functional_req_path: Path, *,
-                       genesis_path: Path | None = None, module_dir_rel: str = "") -> tuple[bool, str]:
-        return self.fix_loop_fn(project_dir, manifest_path, existing_test_files, test_output,
-                                test_command, functional_req_path, genesis_path=genesis_path,
-                                module_dir_rel=module_dir_rel)
 
     def classify_failure(self, test_output: str) -> str:
         return self.classify_fn(test_output)

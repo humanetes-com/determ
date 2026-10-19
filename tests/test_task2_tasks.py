@@ -1,6 +1,6 @@
 """Fakes-driven tests for the TASK-2 orchestration (tasks/task2.py).
 
-task2/task2_inner_loop/task2_fix_loop are thin orchestration over injected collaborators
+task2/task2_inner_loop are thin orchestration over injected collaborators
 (generator, manifest loader, generate_fix_loop, error counters). These drive the
 build-check retry loop's success / floor-stall / scope-correction / proc-macro branches and
 the post-task3 fix-loop's context assembly — no LLM, no cargo.
@@ -13,7 +13,6 @@ from typing import Any
 
 from pipeline_core.application.tasks.task2 import (
     Task2Deps,
-    task2_fix_loop,
     task2_inner_loop,
 )
 
@@ -44,11 +43,7 @@ def _deps(gen: _Gen, *, fix_loop: Any, **over: Any) -> Task2Deps:
         build_check_retries=3,
         build_max_stalls=2,
         build_timeout=1,
-        test_timeout=1,
         task2_model="m",
-        task2_fix_retries=2,
-        single_call_char_limit=120_000,
-        genesis_cap=3000,
     )
     return replace(base, **over)
 
@@ -129,59 +124,3 @@ def test_inner_loop_detects_proc_macro_and_passes_constraint(tmp_path: Path) -> 
 
 # --------------------------------------------------------------------------- fix loop
 
-def test_fix_loop_empty_manifest_short_circuits(tmp_path: Path) -> None:
-    deps = _deps(_Gen(True), fix_loop=lambda **k: (True, ""), load_manifest=lambda _p: [])
-    ok, out = task2_fix_loop(tmp_path, Path("man"), set(), "TESTOUT", "cargo test",
-                             Path("fr"), deps)
-    assert ok is False and out == "TESTOUT"  # nothing to fix → returns the input unchanged
-
-
-def test_fix_loop_assembles_genesis_and_tests(tmp_path: Path) -> None:
-    """With a manifest, genesis, and a test file present, the fix loop builds the
-    genesis + TESTFILE extra-context and delegates to generate_fix_loop."""
-    (tmp_path / "cratea" / "src").mkdir(parents=True)
-    (tmp_path / "cratea" / "src" / "lib.rs").write_text("fn x() {}")
-    test_rel = "cratea/tests/t.rs"
-    (tmp_path / "cratea" / "tests").mkdir(parents=True)
-    (tmp_path / test_rel).write_text("#[test] fn t() {}")
-    genesis = tmp_path / "genesis.md"
-    genesis.write_text("METHODOLOGY: validate inputs")
-    fr = tmp_path / "fr.md"
-    fr.write_text("FR body")
-
-    captured: dict[str, Any] = {}
-
-    def fix_loop(**kw: Any) -> tuple[bool, str]:
-        captured.update(kw)
-        return True, "fixed"
-
-    deps = _deps(_Gen(True), fix_loop=fix_loop,
-                 load_manifest=lambda _p: ["cratea/src/lib.rs"],
-                 read=lambda p: genesis.read_text() if Path(p) == genesis else fr.read_text())
-    ok, out = task2_fix_loop(tmp_path, Path("man"), {test_rel}, "TESTOUT",
-                             "cargo test", fr, deps, genesis_path=genesis,
-                             module_dir_rel="cratea/")
-    assert (ok, out) == (True, "fixed")
-    extra = captured["extra_context"]
-    assert "METHODOLOGY: validate inputs" in extra        # genesis section
-    assert f'<TESTFILE path="{test_rel}">' in extra        # test section
-    assert captured["check_cmd"] == "cargo test"
-    # source_paths excludes the test file, includes the manifest src file.
-    assert tmp_path / "cratea/src/lib.rs" in captured["source_paths"]
-
-
-def test_fix_loop_uses_cluster_check_factory_when_present(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text("fn x() {}")
-    sentinel = object()
-    captured: dict[str, Any] = {}
-
-    def fix_loop(**kw: Any) -> tuple[bool, str]:
-        captured.update(kw)
-        return True, ""
-
-    deps = _deps(_Gen(True), fix_loop=fix_loop,
-                 load_manifest=lambda _p: ["src/lib.rs"],
-                 cluster_check_factory=lambda _pd: sentinel)  # type: ignore[arg-type]
-    task2_fix_loop(tmp_path, Path("man"), set(), "out", "cargo test", tmp_path / "fr", deps)
-    assert captured["check_fn"] is sentinel

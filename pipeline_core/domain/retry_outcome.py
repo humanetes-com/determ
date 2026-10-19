@@ -1,42 +1,15 @@
-"""The task3 inline-retry decision logic, as explicit types.
+"""A tree's reading in every build world, and the one rule that keeps a body.
 
-The retry ran in one of two implicit modes and ended on a tangle of inline
-comparisons deciding whether to keep the edits, revert them, recurse, or
-escalate. This module names both:
-
-* :class:`RetryMode` — BUILD (no test reported FAILED because the tree did not
-  compile → attribute via cargo diagnostics) vs TEST (≥1 test FAILED → attribute
-  via the reverse-map/classifier).
-* :class:`RetryVerdict` + the two pure ``*_verdict`` functions — given the
-  before/after counts, what to do. Pure: no I/O, so the revert-or-keep policy is
-  unit-testable on numbers alone (it was the subtlest part: a tree that
-  no longer compiles emits zero FAILED lines and must NOT read as "near success").
+Task 3's inline retry introduced these types (a reading of one tree under
+every cluster, and a per-body verdict that refuses a body regressing ANY
+cluster); the retry was removed on 2026-10-20 because it wrote bodies into
+the merged tree that the next merge overwrote. The reading stays: it is the
+judge a keep site needs once one tree is measured in every world.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-
-# A tree that produces no test verdicts at all is WORSE than any number of
-# failing tests, and the improvement loop's metric is lower-is-better. Scoring a
-# non-compiling tree as 0 read as the best result possible: on 2026-08-05 a
-# 14-body batch broke the build and `loop.iter` recorded
-# `metric_prev: 2, metric_new: 0, improved: true, metric_best: 0`, poisoning the
-# ratchet with a floor no real tree can beat. The sentinel puts it above every
-# real failure count instead.
-NO_VERDICTS_METRIC = 1_000_000
-
-
-def failure_metric(*, ran: bool, failures: int, diag_count: int = 0) -> int:
-    """The improvement loop's lower-is-better reading of one sweep.
-
-    `diag_count` — distinct compile diagnostics, consulted only when the sweep
-    produced no verdicts — keeps a broken tree ORDERED instead of constant: a
-    flat `NO_VERDICTS_METRIC` read 2 compile errors and 3 as the same reading,
-    so nothing accumulating new damage on a broken tree could ever register as
-    worse. The sentinel still dominates any real failure count (no crate has a
-    million distinct diagnostics), so a broken tree never beats one that ran."""
-    return failures if ran else NO_VERDICTS_METRIC + diag_count
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,45 +124,3 @@ def judge_body(*, before: TreeReading, after: TreeReading) -> BodyJudgement:
         if aft.failures > bef.failures:
             return BodyJudgement(BodyVerdict.REVERT_REGRESSED, bef, aft)
     return BodyJudgement(BodyVerdict.KEEP)
-
-
-class RetryMode(StrEnum):
-    """How the retry attributes failures and re-checks progress."""
-
-    BUILD = "build"   # tree didn't compile — cargo diagnostics drive the fix
-    TEST = "test"     # ≥1 test FAILED — reverse-map/classifier drives the fix
-
-
-class RetryVerdict(StrEnum):
-    """What to do with the retry's result."""
-
-    PASS = "pass"               # tests pass now — keep, report success
-    REVERT = "revert"           # strictly worse — restore the snapshot
-    RECURSE = "recurse"         # strict progress — re-run TASK 3 on the new tree
-    ESCALATE = "escalate"       # no progress — hand to TASK 4
-    KEEP_PARTIAL = "keep"       # not worse, not passing — keep partial progress
-
-
-def build_verdict(*, initial_errors: int, final_errors: int,
-                  has_snapshot: bool) -> RetryVerdict:
-    """BUILD mode: fewer compile errors ⇒ recurse; more ⇒ revert (if we can);
-    same ⇒ escalate to TASK 4."""
-    if has_snapshot and final_errors > initial_errors:
-        return RetryVerdict.REVERT
-    if final_errors < initial_errors:
-        return RetryVerdict.RECURSE
-    return RetryVerdict.ESCALATE
-
-
-def failing_test_verdict(*, passed: bool, initial_failures: int,
-                         final_failures: int, initially_ran: bool,
-                         finally_ran: bool, has_snapshot: bool) -> RetryVerdict:
-    """TEST mode: pass ⇒ keep. Else revert when the retry broke the build (ran
-    before, doesn't now — strictly worse than N failing tests) or increased the
-    failure count; otherwise keep the partial progress."""
-    if passed:
-        return RetryVerdict.PASS
-    broke_build = initially_ran and not finally_ran
-    if has_snapshot and (broke_build or final_failures > initial_failures):
-        return RetryVerdict.REVERT
-    return RetryVerdict.KEEP_PARTIAL

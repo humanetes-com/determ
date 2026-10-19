@@ -33,12 +33,8 @@
   ],
   "attribute_failures": [
     "cluster",
-    "cluster_name",
     "extra_failed",
-    "recently_filled",
-    "test_reverse_map",
-    "test_texts",
-    "unrepairable_tests"
+    "test_texts"
   ],
   "attribute_failures_fn": [
     "test_texts",
@@ -55,9 +51,6 @@
   ],
   "build_test_cmd_fn": [
     "include_lib"
-  ],
-  "check_diag": [
-    "timeout"
   ],
   "classify": [
     "cluster_name",
@@ -150,10 +143,6 @@
   "enumerate_types": [
     "cfg_false"
   ],
-  "expand_frontier_by_calls": [
-    "cap",
-    "max_hops"
-  ],
   "extract_and_store_rules": [
     "failure_type",
     "iteration",
@@ -184,42 +173,19 @@
     "fn_name",
     "hidden_symbols"
   ],
-  "filter_test_targets": [
-    "cluster"
-  ],
   "filter_test_targets_fn": [
     "cluster"
-  ],
-  "find_tests_for_fn": [
-    "container",
-    "file_rel",
-    "src_dir"
   ],
   "find_tests_for_fn_fn": [
     "container",
     "file_rel",
     "src_dir"
   ],
-  "fix_loop_fn": [
-    "genesis_path",
-    "module_dir_rel"
-  ],
   "fn_belongs_to_cluster_fn": [
     "fn_cfg_predicates"
   ],
   "focus_errors_fn": [
     "max_chars"
-  ],
-  "gather_fix_context": [
-    "body_text",
-    "container",
-    "error_excerpt",
-    "file_rel",
-    "file_text",
-    "fn_name",
-    "fr_path",
-    "sig_text",
-    "type_records"
   ],
   "gather_fn": [
     "body_text",
@@ -235,7 +201,6 @@
   "generate_fix_loop": [
     "allowed_dir_prefix",
     "check_cmd",
-    "check_fn",
     "existing_test_files",
     "extra_context",
     "fr_path",
@@ -288,11 +253,6 @@
     "hung",
     "timeout"
   ],
-  "open_conversation": [
-    "max_pulls",
-    "route",
-    "sources"
-  ],
   "open_conversation_fn": [
     "max_pulls",
     "route",
@@ -328,27 +288,6 @@
     "compile_evidence",
     "crash_evidence"
   ],
-  "run": [
-    "coverage_strategy",
-    "crate_type",
-    "ctx",
-    "env",
-    "failure_log_path",
-    "from_spec",
-    "genesis_path",
-    "iteration",
-    "module_name",
-    "module_req_path",
-    "prev_pass_count",
-    "prev_test_output",
-    "project_context",
-    "project_profile",
-    "readme_text",
-    "src_hash",
-    "t1_input",
-    "timeout",
-    "total_iters"
-  ],
   "run_cargo": [
     "timeout"
   ],
@@ -380,17 +319,8 @@
   "splice_body_fn": [
     "allow_nonstub"
   ],
-  "splice_body_scoped": [
-    "allow_nonstub",
-    "allow_stub_body",
-    "cfg_predicates"
-  ],
   "splice_body_scoped_fn": [
     "allow_nonstub"
-  ],
-  "splice_fn_body": [
-    "allow_nonstub",
-    "allow_stub_body"
   ],
   "splice_fn_body_at_fn": [
     "allow_nonstub",
@@ -413,14 +343,6 @@
   ],
   "task0b_discovery": [
     "clusters"
-  ],
-  "task3_inline_retry": [
-    "all_clusters",
-    "cluster",
-    "initial_test_output",
-    "iteration",
-    "project_dir",
-    "test_command"
   ],
   "task4_fn": [
     "api_surface",

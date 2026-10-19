@@ -62,46 +62,6 @@ def cluster_failure_is_actionable(status: str, rc: int, fail_count: int) -> bool
     return False
 
 
-def rank_repair_candidates(
-    candidates: list[tuple[str, frozenset[str], bool]],
-    unrepairable: frozenset[str] = frozenset(),
-) -> list[str]:
-    """Order actionable failing clusters by how good a repair signal each is.
-
-    `candidates` is (cluster name, its failing test names, compile-broken?).
-    The retry adopts ONE of these as its primary: its failures aim the frontier
-    and its output is what the repair reads. That choice used to fall out of
-    iteration order, which is alphabetical — so on 2026-08-05 `nightly` was
-    picked over `stable` because `"nightly" < "stable"`, and it is the cluster
-    that carries `ui`, a trybuild compile-fail test no body rewrite can
-    satisfy. `stable` failed only `test_boxed_str`.
-
-    A COMPILE-BROKEN cluster (INCOMPLETE with rc != 0: its lib or a test binary
-    did not build, so it reported no verdicts) ranks first. Its failing-test
-    name set is necessarily empty, which under the name-based key sorted it
-    into the same bucket as "nothing repairable" — on 2026-08-10 `nightly`
-    (2 compile errors, a minutes-scale BUILD-mode fix) ranked behind `stable`
-    (17 failing tests) and waited 4h15m behind a TEST-mode grind moving ~1
-    test per 2h pass, while its ~138 expected verdicts were worth zero to the
-    shared accept gate. Restoring a broken cluster's compilation restores its
-    verdicts — un-blinding that gate for every later repair — and its cost is
-    bounded by diagnostic count, not by a test grind; the reverify recursion
-    then re-ranks with both clusters producing verdicts.
-
-    Ordering, in words: compile-broken first, then a cluster with at least one
-    REPAIRABLE failure beats one with none, then fewer failures beats more (a
-    smaller frontier, and the cluster closest to green), then the name so the
-    choice is reproducible.
-    """
-    def key(item: tuple[str, frozenset[str], bool]) -> tuple[int, int, int, str]:
-        name, failures, compile_broken = item
-        repairable = {f for f in failures if f.split("::")[-1] not in unrepairable}
-        return (0 if compile_broken else 1,
-                0 if repairable else 1, len(failures), name)
-
-    return [name for name, _, _ in sorted(candidates, key=key)]
-
-
 def split_reachable_failures(
     failed: Iterable[str], unrepairable: Iterable[str] = (),
     excused: Iterable[str] = (),
@@ -115,15 +75,14 @@ def split_reachable_failures(
 
     The distinction decides whether another iteration can accomplish anything.
     On `anyhow` 2026-08-06 the answer was no from the first iteration on:
-    `ui` was the only failure, `per_fn_retry` had already excluded it from the
-    frontier with "not body-repairable", and the loop still ran the fix loop
+    `ui` was the only failure, the task 3 retry had already excluded it from
+    the frontier with "not body-repairable", and the loop still ran the fix loop
     three times and TASK 4 once per module iteration — seven model calls and
     13 min 06 s per iteration, every one recording
     `metric_prev 10001, metric_new 10001, improved False` — with
     `MODULE_PLATEAU_ABORT=10` between it and a guaranteed exit 1.
 
-    Names are compared on their last `::` segment, matching
-    :func:`rank_repair_candidates`: cargo reports a test as `module::path::name`
+    Names are compared on their last `::` segment: cargo reports a test as `module::path::name`
     in one binary and bare in another, and the taxonomy is keyed on the bare
     name.
     """

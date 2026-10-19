@@ -24,7 +24,6 @@ def test_phase_gate_forwards_commit_and_mark() -> None:
 
 def _fixer(no_run_cmd: str) -> FixerAdapter:
     return FixerAdapter(
-        fix_loop_fn=lambda *a, **k: (True, ""),
         classify_fn=lambda out: "build",
         log=lambda _m: None,
         insert_no_run=lambda _cmd: no_run_cmd,

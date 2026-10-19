@@ -607,7 +607,7 @@ def _deps(reference: object = None, out: str = _CARGO_OUT) -> object:
         cargo_env=lambda: {"PATH": os.environ.get("PATH", ""), "FAKE_OUT": out},
         parse_cmd=lambda cmd: ["sh", "-c", 'printf "%s" "$FAKE_OUT"'],
         count_active_tests_for_cluster=lambda p, c: 3,
-        store_prompt_content=lambda s: "", task3_inline_retry=lambda **k: (False, ""),
+        store_prompt_content=lambda s: "",
         read=lambda p: "", write=lambda p, s: None, test_timeout=30,
         reference=lambda _p: reference)
 

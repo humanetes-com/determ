@@ -84,7 +84,6 @@ def test_clean_shortfall_skips_code_fix_retry(tmp_path: Path, monkeypatch) -> No
         d: dict = {}
         yield d
 
-    retry_calls: list[dict] = []
     deps = Task3Deps(
         phase=fake_phase,
         load_baked_clusters=lambda p: [SimpleNamespace(
@@ -96,7 +95,6 @@ def test_clean_shortfall_skips_code_fix_retry(tmp_path: Path, monkeypatch) -> No
             "sh", "-c", 'echo "test result: ok. 2 passed; 0 failed; 0 ignored"'],
         count_active_tests_for_cluster=lambda p, c: 3,
         store_prompt_content=lambda s: "",
-        task3_inline_retry=lambda **k: retry_calls.append(k) or (True, "x"),
         read=lambda p: "",
         write=lambda p, s: None,
         test_timeout=30,
@@ -104,7 +102,6 @@ def test_clean_shortfall_skips_code_fix_retry(tmp_path: Path, monkeypatch) -> No
     passed, _out = task3(tmp_path, "cargo test", 1, tmp_path,
                          tmp_path / "genesis.md", deps)
     assert passed is False                 # never a false SUCCESS
-    assert retry_calls == []               # the churn-prone retry was skipped
 
 
 # --- B: every task3 task.done carries the verdict -------------------------
@@ -112,9 +109,10 @@ def test_clean_shortfall_skips_code_fix_retry(tmp_path: Path, monkeypatch) -> No
 
 def test_task3_reverify_outer_phase_carries_verdict(tmp_path: Path,
                                                     monkeypatch) -> None:
-    """When the inline retry triggers a reverify recursion, the OUTER task3
-    phase must still record done["data"]["passed"] — the recursion path
-    returned early and left the outer task.done with no verdict at all."""
+    """A red task 3 records its verdict in done["data"]["passed"]: a
+    task.done with no `passed` key reads as passed=None to the auditor. Task 3
+    writes no body and runs once; the re-verify recursion went with the inline
+    retry (2026-10-20)."""
     from pipeline_core.application.tasks.task3 import Task3Deps, task3
     monkeypatch.setattr(pclog, "_log_sink", lambda m: None)
     monkeypatch.setattr(pclog, "_emit_sink", lambda e, **f: None)
@@ -127,11 +125,6 @@ def test_task3_reverify_outer_phase_carries_verdict(tmp_path: Path,
         phases.append(d)
         yield d
 
-    # Inline retry claims progress once (forces the reverify recursion),
-    # then gives up; the cluster keeps failing identically.
-    retry_results = [(True, f"test result: {_FAIL_LINE}"),
-                     (False, f"test result: {_FAIL_LINE}")]
-
     deps = Task3Deps(
         phase=fake_phase,
         load_baked_clusters=lambda p: [SimpleNamespace(
@@ -141,7 +134,6 @@ def test_task3_reverify_outer_phase_carries_verdict(tmp_path: Path,
         parse_cmd=lambda cmd: ["sh", "-c", 'echo "test result: $FAKE_RESULT"'],
         count_active_tests_for_cluster=lambda p, c: 14,
         store_prompt_content=lambda s: "",
-        task3_inline_retry=lambda **k: retry_results.pop(0),
         read=lambda p: "",
         write=lambda p, s: None,
         test_timeout=30,
@@ -149,7 +141,7 @@ def test_task3_reverify_outer_phase_carries_verdict(tmp_path: Path,
     passed, _out = task3(tmp_path, "cargo test", 1, tmp_path,
                          tmp_path / "genesis.md", deps)
     assert passed is False
-    assert len(phases) == 2          # outer + one reverify recursion
+    assert len(phases) == 1          # task 3 measures once
     for i, d in enumerate(phases):
         assert "data" in d and "passed" in d["data"], (
             f"task3 phase {i} closed without a verdict in done['data'] — "

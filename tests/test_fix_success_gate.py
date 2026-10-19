@@ -7,8 +7,9 @@ Contract pinned here:
   - task3's per-cluster execution is extracted as `run_clusters_strict`
     (single source of truth for the "all tests pass" verdict).
   - `generate_fix_loop` accepts `check_fn` overriding the shell `check_cmd`.
-  - `task2_fix_loop` threads a per-cluster check (Task2Deps.cluster_check_factory)
-    into generate_fix_loop as check_fn — never the bare module test command.
+
+The post-task3 fix loop itself was removed on 2026-10-20: a red task 3 goes
+back to the per-cluster loop through the module loop's re-entry.
 """
 from __future__ import annotations
 
@@ -41,7 +42,6 @@ def _fake_task3_deps(expected: dict[str, int]):
         parse_cmd=lambda cmd: ["sh", "-c", 'echo "test result: $FAKE_RESULT"'],
         count_active_tests_for_cluster=lambda p, c: expected[c.name],
         store_prompt_content=lambda s: "",
-        task3_inline_retry=lambda **k: (False, ""),
         read=lambda p: "",
         write=lambda p, s: None,
         test_timeout=30,
@@ -115,7 +115,6 @@ def test_run_clusters_strict_uses_the_injected_cluster_env(tmp_path: Path) -> No
         parse_cmd=lambda cmd: ["sh", "-c", 'echo "test result: $FAKE_RESULT"'],
         count_active_tests_for_cluster=lambda p, c: 5,
         store_prompt_content=lambda s: "",
-        task3_inline_retry=lambda **k: (False, ""),
         read=lambda p: "",
         write=lambda p, s: None,
         test_timeout=30,
@@ -155,45 +154,3 @@ def test_generate_fix_loop_honors_check_fn_over_cmd(tmp_path: Path) -> None:
     assert "extra_cap" in output
 
 
-def test_task2_fix_loop_threads_cluster_check(tmp_path: Path) -> None:
-    """task2_fix_loop must hand generate_fix_loop the per-cluster check built
-    by Task2Deps.cluster_check_factory — validating the fix with the bare
-    single-cluster test command is the false-SUCCESS bug."""
-    from pipeline_core.application.tasks.task2 import Task2Deps, task2_fix_loop
-
-    captured: dict = {}
-
-    def fake_generate_fix_loop(**kwargs) -> tuple[bool, str]:
-        captured.update(kwargs)
-        return False, "still failing"
-
-    def sentinel_check() -> tuple[bool, str]:
-        return False, "cluster 'extra_cap': 3 failed"
-
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "lib.rs").write_text("fn x() {}\n")
-
-    deps = Task2Deps(
-        generator_factory=lambda: None,
-        load_manifest=lambda p: ["src/lib.rs"],
-        read=lambda p: "",
-        generate_fix_loop=fake_generate_fix_loop,
-        store_prompt_content=lambda s: "",
-        is_proc_macro_crate=lambda s: False,
-        count_error_codes=lambda s: 0,
-        build_check_retries=1,
-        build_max_stalls=1,
-        build_timeout=10,
-        test_timeout=10,
-        task2_model="m",
-        task2_fix_retries=1,
-        single_call_char_limit=100_000,
-        genesis_cap=10_000,
-        cluster_check_factory=lambda project_dir: sentinel_check,
-    )
-    passed, _out = task2_fix_loop(
-        tmp_path, tmp_path / "manifest.json", set(), "test output",
-        "cargo test", tmp_path / "fr.md", deps,
-    )
-    assert passed is False
-    assert captured.get("check_fn") is sentinel_check

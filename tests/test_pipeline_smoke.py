@@ -2742,30 +2742,27 @@ def test_impl_block_model() -> None:
 
 
 def test_slice5b_task2() -> None:
-    """Extracted TASK 2 dispatcher + inner loop (no-build-check path) + fix loop
-    (empty manifest) behave with fakes; generation engine stays injected from pipeline."""
+    """Extracted TASK 2 dispatcher + inner loop (no-build-check path) behave with
+    fakes; generation engine stays injected from pipeline."""
     from pathlib import Path
     from types import SimpleNamespace
 
-    from pipeline_core.application.tasks.task2 import Task2Deps, task2, task2_fix_loop, task2_inner_loop
+    from pipeline_core.application.tasks.task2 import Task2Deps, task2, task2_inner_loop
 
     gen = SimpleNamespace(generate=lambda *a, **k: True)
     deps = Task2Deps(
         generator_factory=lambda: gen, load_manifest=lambda p: [], read=lambda p: "",
         generate_fix_loop=lambda **k: (True, "ok"), store_prompt_content=lambda s: s,
         is_proc_macro_crate=lambda t: False, count_error_codes=lambda o: 0,
-        build_check_retries=3, build_max_stalls=2, build_timeout=1, test_timeout=1,
-        task2_model="m", task2_fix_retries=2, single_call_char_limit=120_000, genesis_cap=3000,
+        build_check_retries=3, build_max_stalls=2, build_timeout=1,
+        task2_model="m",
     )
     # dispatcher → generator.generate
     assert task2(Path("."), Path("g"), Path("r"), Path("m"), set(), deps) is True
     # inner loop with no build check → True after one generate
     assert task2_inner_loop(Path("."), Path("g"), Path("r"), Path("m"), set(),
                             "prof", "ws", None, deps) is True
-    # fix loop with empty manifest → (False, test_output)
-    assert task2_fix_loop(Path("."), Path("m"), set(), "OUT", "cargo test",
-                          Path("r"), deps) == (False, "OUT")
-    print("  OK  task2 (dispatcher + inner/fix loops) extracted")
+    print("  OK  task2 (dispatcher + inner loop) extracted")
 
 
 def test_slice5b_task3_task4() -> None:
@@ -2790,7 +2787,7 @@ def test_slice5b_task3_task4() -> None:
         task3_legacy_single=lambda *a: ("LEGACY", "out"),
         cargo_env=dict, parse_cmd=lambda c: c.split(),
         count_active_tests_for_cluster=lambda p, c: 0, store_prompt_content=lambda s: s,
-        task3_inline_retry=lambda **k: (False, ""), read=lambda p: "", write=lambda p, c: None,
+        read=lambda p: "", write=lambda p, c: None,
         test_timeout=1,
     )
     assert task3(Path("."), "cargo test", 1, ".", Path("g"), d_legacy) == ("LEGACY", "out")
@@ -2805,7 +2802,6 @@ def test_slice5b_task3_task4() -> None:
         task3_legacy_single=lambda *a: ("X", "X"),
         cargo_env=dict, parse_cmd=lambda c: c.split(),
         count_active_tests_for_cluster=lambda p, c: 2, store_prompt_content=lambda s: len(s),
-        task3_inline_retry=lambda **k: (False, ""),
         read=lambda p: "genesis", write=lambda p, c: written.__setitem__("t3", c),
         test_timeout=5,
     )

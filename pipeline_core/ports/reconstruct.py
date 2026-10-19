@@ -78,13 +78,10 @@ class TestRunner(Protocol):
 
 @runtime_checkable
 class Fixer(Protocol):
-    """The targeted post-failure fix loop + failure classifier."""
+    """The failure classifier. Task 3's failures are answered by the
+    per-cluster loop through the module loop's re-entry, not by a fix loop on
+    the merged tree."""
 
-    def task2_fix_loop(
-        self, project_dir: Path, manifest_path: Path, existing_test_files: set[str],
-        test_output: str, test_command: str, functional_req_path: Path, *,
-        genesis_path: Path | None = ..., module_dir_rel: str = ...,
-    ) -> tuple[bool, str]: ...
     def classify_failure(self, test_output: str) -> str: ...
     def diagnose_no_tests(
         self, project_dir: Path, test_command: str, reason: str, test_output: str,
