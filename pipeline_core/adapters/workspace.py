@@ -19,6 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..domain.workspace_layout import BUILD_OUTPUT_EXCLUDES
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceDeps:
@@ -26,6 +28,52 @@ class WorkspaceDeps:
 
     log: Callable[[str], None]
     emit: Callable[..., None]
+
+
+def exclude_build_output(deps: WorkspaceDeps, project_dir: Path) -> int:
+    """Make the repo ignore build output and stop tracking what it already holds.
+
+    Every commit into the workspace goes through here before it stages, so the
+    rule is the repo's state, not a per-call-site flag: the patterns are
+    written once into the repo's own `info/exclude` (which a `reset --hard`
+    does not touch and the crate's `.gitignore` does not carry), after which
+    any `git add` anywhere in the repo skips them. Paths a commit before this
+    rule existed already tracks are removed from the index (`rm --cached`, the
+    files stay on disk as cargo's cache) and leave in the next commit. Older
+    commits keep them; only a history rewrite reclaims that space.
+
+    Returns how many tracked paths were untracked; 0 off git or on failure."""
+    try:
+        exclude = Path(subprocess.run(
+            ["git", "rev-parse", "--git-path", "info/exclude"], cwd=project_dir,
+            check=True, capture_output=True, text=True, errors="replace").stdout.strip())
+        if not exclude.is_absolute():
+            exclude = project_dir / exclude
+        have = exclude.read_text(errors="replace").splitlines() if exclude.exists() else []
+        missing = [p for p in BUILD_OUTPUT_EXCLUDES if p not in have]
+        if missing:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            body = "\n".join(have).rstrip("\n")
+            exclude.write_text((body + "\n" if body else "") + "\n".join(missing) + "\n")
+        argv = ["git", "ls-files", "-z", "--cached", "--ignored"]
+        for p in BUILD_OUTPUT_EXCLUDES:
+            argv += ["-x", p]
+        tracked = subprocess.run(argv, cwd=project_dir, check=True,
+                                 capture_output=True).stdout
+        paths = [p for p in tracked.split(b"\0") if p]
+        if not paths:
+            return 0
+        subprocess.run(
+            ["git", "rm", "-r", "--cached", "--quiet", "--ignore-unmatch",
+             "--pathspec-from-file=-", "--pathspec-file-nul"],
+            cwd=project_dir, input=b"\0".join(paths), check=True, capture_output=True)
+    except Exception as e:
+        deps.log(f"  [git] build-output exclude failed: {e}")
+        return 0
+    deps.log(f"  [git] untracked {len(paths)} build-output path(s) "
+             f"({', '.join(BUILD_OUTPUT_EXCLUDES)}); they stay on disk")
+    deps.emit("git.untrack_build_output", data={"paths": len(paths)})
+    return len(paths)
 
 
 def git_default_branch(project_dir: Path) -> str:
@@ -65,6 +113,7 @@ def git_commit(deps: WorkspaceDeps, project_dir: Path, message: str, *, managed:
     """Stage all changes and commit. Returns True if a commit was made."""
     if not managed:
         return False
+    exclude_build_output(deps, project_dir)
     try:
         subprocess.run(["git", "add", "-A"], cwd=project_dir,
                        check=True, capture_output=True)
@@ -118,11 +167,13 @@ def git_commit_paths(
 ) -> bool:
     """Stage ONLY ``rel_paths`` and commit. Focused alternative to
     ``git_commit``'s ``git add -A`` — checkpoints the fill tree without
-    sweeping in build artifacts (``.skeleton/**/target``, absent at the earlier
-    whole-tree checkpoints but present once phase-c has built). Returns True if
-    a commit was made."""
+    sweeping in sibling paths. Build output INSIDE ``rel_paths`` (the fill
+    tree's own ``target``) is kept out by ``exclude_build_output``, not by the
+    path list: ``git add <dir>`` stages everything under it that is not
+    ignored. Returns True if a commit was made."""
     if not managed:
         return False
+    exclude_build_output(deps, project_dir)
     try:
         subprocess.run(["git", "add", "--", *rel_paths], cwd=project_dir,
                        check=True, capture_output=True)
@@ -260,6 +311,7 @@ def setup_workspace(deps: WorkspaceDeps, repo: str, workspace_dir: Path,
         if not (dest / ".git").exists():
             deps.log("  [git] no .git found — initialising git repo")
             subprocess.run(["git", "init"], cwd=dest, check=True, capture_output=True)
+            exclude_build_output(deps, dest)
             subprocess.run(["git", "add", "-A"], cwd=dest, check=True, capture_output=True)
             subprocess.run(
                 ["git", "commit", "-m", "initial: source snapshot", "--no-gpg-sign"],
@@ -286,6 +338,9 @@ def setup_workspace(deps: WorkspaceDeps, repo: str, workspace_dir: Path,
                            cwd=dest, check=True, capture_output=True)
             deps.log("  [git] created pipeline branch")
 
+    # After the checkout: untracking stages deletions, and a checkout over a
+    # staged index can refuse.
+    exclude_build_output(deps, dest)
     return dest
 
 

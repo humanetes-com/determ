@@ -31,11 +31,27 @@ MODULE_STRIPPED_DIR = ".module_stripped"
 #                                    target_src_dir, and what a resume picks up
 #   .best_tree/<cluster>/src       — heal's durable restore tier
 # All three are TRACKED in the workspace repo (its .gitignore is /target/ and
-# /Cargo.lock only), which is what makes the task2a checkpoint commits real and
+# /Cargo.lock only; their build output is excluded by BUILD_OUTPUT_EXCLUDES
+# below), which is what makes the task2a checkpoint commits real and
 # what makes a `git reset --hard` to a pre-fill tag delete them wholesale.
 SKELETON_DIR = ".skeleton"
 SKELETON_FILLED_DIR = ".skeleton-filled"
 BEST_TREE_DIR = ".best_tree"
+
+# Build output the workspace repo must never track, written to the repo's own
+# `.git/info/exclude` (never to the crate's `.gitignore`, which belongs to the
+# crate). The crate's ignore file is the upstream one, `/target/` anchored at
+# the root, so every cluster crate root the pipeline builds in
+# (`.skeleton-filled/<c>/target`, `.skeleton/<c>/target`, `.best_tree/<c>/target`)
+# was committed by each checkpoint: 26,329 tracked build files and a 31 GiB
+# pack in `tmp/anyhow` after run `1680589-7a6824f8` (2026-10-19). Unanchored,
+# because a crate root can sit at any depth; `SKIP_DIR_NAMES` already treats a
+# `target` directory anywhere as build output. `target-*/` because the
+# pipeline also builds into siblings (`target-asan` in `adapters/asan_sweep`,
+# 6,356 tracked files on that same tree; `target-cov` in
+# `adapters/coverage_owner`), the same `target*` rule `held_out_store` uses
+# for what a scratch copy leaves behind.
+BUILD_OUTPUT_EXCLUDES: tuple[str, ...] = ("target/", "target-*/")
 
 # Ordered widest-first: the layout and the bodies are a PAIR (t1.5 re-authors
 # the layout per run, so bodies from one run do not compile against another's

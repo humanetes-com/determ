@@ -78,6 +78,80 @@ def test_git_commit_no_changes_returns_false(repo: Path) -> None:
     assert rec.events == []
 
 
+# --------------------------------------------------------------- build output never tracked
+# Run `1680589-7a6824f8` (2026-10-19): the workspace's `.gitignore` is the
+# crate's own `/target/`, anchored at the root, so every cluster crate root's
+# `target/` was committed by each checkpoint — 26,329 tracked build files.
+
+def _crate_with_nested_build(repo: Path) -> Path:
+    (repo / ".gitignore").write_text("/target/\n/Cargo.lock\n")
+    fill = repo / ".skeleton-filled" / "stable"
+    (fill / "src").mkdir(parents=True)
+    (fill / "src" / "lib.rs").write_text("pub fn a() {}\n")
+    (fill / "target" / "debug" / "deps").mkdir(parents=True)
+    (fill / "target" / "debug" / "deps" / "test_bin").write_bytes(b"\x7fELF" + b"\0" * 64)
+    # The sanitizer sweep's sibling build dir (`adapters/asan_sweep`).
+    (fill / "target-asan" / "debug").mkdir(parents=True)
+    (fill / "target-asan" / "debug" / "asan_bin").write_bytes(b"\x7fELF")
+    return fill
+
+
+def test_premise_root_anchored_ignore_does_not_cover_a_nested_target(repo: Path) -> None:
+    # The premise the fix rests on: plain `git add -A` under the crate's own
+    # ignore file commits a nested crate root's build output.
+    _crate_with_nested_build(repo)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    assert ".skeleton-filled/stable/target/debug/deps/test_bin" in _git(repo, "ls-files", "--cached")
+
+
+def test_git_commit_never_stages_nested_build_output(repo: Path) -> None:
+    rec = _Recorder()
+    _crate_with_nested_build(repo)
+    assert ws.git_commit(rec.deps, repo, "checkpoint", managed=True) is True
+    tracked = _git(repo, "ls-files").splitlines()
+    assert ".skeleton-filled/stable/src/lib.rs" in tracked
+    assert not [p for p in tracked if "/target" in p]
+    # The rule lives in the repo's own exclude file, not in the crate's.
+    assert "target/" in (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert (repo / ".gitignore").read_text() == "/target/\n/Cargo.lock\n"
+
+
+def test_git_commit_untracks_build_output_an_earlier_commit_tracked(repo: Path) -> None:
+    rec = _Recorder()
+    fill = _crate_with_nested_build(repo)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "legacy", "--no-gpg-sign"], cwd=repo,
+                   check=True, capture_output=True)
+    (fill / "src" / "lib.rs").write_text("pub fn a() { }\n")
+    assert ws.git_commit(rec.deps, repo, "next", managed=True) is True
+    assert not [p for p in _git(repo, "ls-files").splitlines() if "/target" in p]
+    assert not [p for p in _git(repo, "ls-tree", "-r", "--name-only", "HEAD").splitlines()
+                if "/target" in p]
+    # Untracked, not deleted: cargo's cache stays on disk.
+    assert (fill / "target" / "debug" / "deps" / "test_bin").exists()
+    assert (fill / "target-asan" / "debug" / "asan_bin").exists()
+    assert ("git.untrack_build_output", {"paths": 2}) in rec.events
+
+
+def test_git_commit_paths_keeps_out_the_fill_trees_own_target(repo: Path) -> None:
+    rec = _Recorder()
+    _crate_with_nested_build(repo)
+    assert ws.git_commit_paths(rec.deps, repo, [".skeleton-filled/stable"], "cp",
+                               managed=True) is True
+    tracked = _git(repo, "ls-files").splitlines()
+    assert ".skeleton-filled/stable/src/lib.rs" in tracked
+    assert not [p for p in tracked if "/target" in p]
+
+
+def test_exclude_build_output_is_idempotent(repo: Path) -> None:
+    rec = _Recorder()
+    assert ws.exclude_build_output(rec.deps, repo) == 0
+    assert ws.exclude_build_output(rec.deps, repo) == 0
+    lines = (repo / ".git" / "info" / "exclude").read_text().splitlines()
+    assert lines.count("target/") == 1 and lines.count("target-*/") == 1
+    assert rec.events == []
+
+
 # --------------------------------------------------------------------------- git_tag
 
 def test_git_tag_creates_tag_at_head(repo: Path) -> None:
