@@ -27,13 +27,18 @@ from pipeline_core.application.pinning_tests import (
     run_pinning_pass,
 )
 from pipeline_core.domain.end_verdict import EndVerdict
+from pipeline_core.domain.fn_execution import site_label
 from pipeline_core.domain.fn_routes import FnRoutes, PublicRoute, WorldFacts
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.pinning_test import (
+    PIN_CRITERIA,
+    PinCriterion,
     PinRefusal,
     TestRun,
+    check_criteria,
     judge_pin,
 )
+from pipeline_core.prompts.pinning_test import build_pinning_test_prompt
 
 _SITE = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < T >")
 _FILE = "use krate::*;\n\n#[test]\nfn reaches_probe() {\n    assert!(fetch().is_some());\n}\n"
@@ -335,3 +340,85 @@ def test_the_observation_run_empties_every_blocking_body_of_the_world(tmp_path: 
         asked.append(tuple(a[5])), (red, frozenset(a[5])))[1])
     assert run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE, other)), deps) >= 1
     assert asked[0] == (_SITE, other)
+
+
+# --- the writer is told every check the judge applies -------------------------
+
+def _prompt(**kw: Any) -> str:
+    args: dict[str, Any] = {
+        "crate": "krate", "world": "alt", "world_flags": "--cfg alt",
+        "body": site_label(_SITE),
+        "signature": "fn probe(&self) -> Option<u8> { unimplemented!() }",
+        "routes": [], "api_surface": "pub fn fetch() -> Option<u8>", "example_header": "",
+        "blocking": [site_label(_SITE)], "previous": []}
+    return build_pinning_test_prompt(**{**args, **kw})
+
+
+def test_the_prompt_states_every_check_the_judge_refuses_on() -> None:
+    """Run `3991945-1b7ae3e9` (2026-10-19): the prompt listed two checks and
+    the judge applied a third, the run on the original with the blocking
+    bodies emptied. All six candidates discarded what the reaching call
+    handed back, and two were refused `unobserved`. Every refusal the judge
+    can issue now has its sentence in the prompt, the emptied-body check
+    included, and the rule the candidates read as "assert on the reaching
+    call" is gone."""
+    prompt = _prompt()
+    for refusal in PinRefusal:
+        stated = [c for c in PIN_CRITERIA if refusal in c.refusals]
+        assert len(stated) == 1 and stated[0].statement in prompt, refusal
+    assert "replaced by an empty body" in prompt
+    assert "observable result of the call that reaches the body" not in prompt
+
+
+def test_a_judge_check_with_no_sentence_for_the_writer_fails() -> None:
+    """Negative control: the pre-fix contract, which stated only the two
+    runs, leaves `unobserved`, `unmeasured` and `shape` unstated."""
+    two_checks = tuple(c for c in PIN_CRITERIA
+                       if PinRefusal.UNOBSERVED not in c.refusals
+                       and PinRefusal.SHAPE not in c.refusals)
+    try:
+        check_criteria(two_checks)
+    except RuntimeError as exc:
+        assert "unobserved" in str(exc) and "shape" in str(exc)
+    else:
+        raise AssertionError("an unstated refusal was accepted")
+    dup = PIN_CRITERIA + (PinCriterion(frozenset({PinRefusal.SHAPE}), "x"),)
+    try:
+        check_criteria(dup)
+    except RuntimeError as exc:
+        assert "stated twice ['shape']" in str(exc)
+    else:
+        raise AssertionError("a refusal stated twice was accepted")
+
+
+def test_the_prompt_names_the_whole_blocking_set_it_empties() -> None:
+    other = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < Other >")
+    prompt = _prompt(blocking=[site_label(_SITE), site_label(other)])
+    assert f"- {site_label(other)}" in prompt
+
+
+def test_a_refusal_reached_for_one_body_is_shown_to_its_sibling(tmp_path: Path) -> None:
+    """Run `3991945-1b7ae3e9`: the second `provide` body's first attempt
+    opened with none of the three refusals of the first, although the judge
+    empties both. Earlier candidates are kept per world. Negative control: a
+    body in another world is not shown them."""
+    other = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < Other >")
+    green = TestRun(True, passed=frozenset({"reaches_probe"}))
+
+    def _run(worlds_of: dict[FnSite, list[Any]]) -> list[str]:
+        prompts: list[str] = []
+        deps = _deps(tmp_path, [f"```rust\n{_FILE}```"] * 6,
+                     [(_OK_ORIG, green, frozenset())] * 6, prompts, [])
+        deps = _with(deps, worlds_for=lambda _pd, s: worlds_of[s])
+        assert run_pinning_pass(tmp_path, "krate",
+                                EndVerdict(blocking=(_SITE, other)), deps) == 0
+        return prompts
+
+    alt = SimpleNamespace(name="alt", cfg_true=["alt"], cfg_false=[])
+    shared = _run({_SITE: [alt], other: [alt]})
+    assert len(shared) == 6
+    assert f"written for {site_label(_SITE)} (refused: rebuilt_passed" in shared[3]
+    assert shared[3].count("CANDIDATE ") == 3
+    base = SimpleNamespace(name="base", cfg_true=[], cfg_false=["alt"])
+    apart = _run({_SITE: [alt], other: [base]})
+    assert "CANDIDATE " not in apart[3]

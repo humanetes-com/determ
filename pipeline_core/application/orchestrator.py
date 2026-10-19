@@ -287,8 +287,11 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
                     if loc in verdict.executed_upstream
                     else " — no augmentation record accounts for it")
             log(f"    {loc.file}::{loc.fn_name}{note}")
-        log("         This is NOT a clean success — the fns above were never "
-            "attempted.")
+        # Not "never attempted": a body can be dispatched and deferred, or
+        # asked for by the end gate's pinning pass, and still be here (run
+        # `3991945-1b7ae3e9`, 2026-10-19: six pin attempts, then this line).
+        log("         This is NOT a clean success — no test reaches the fns "
+            "above in the reconstruction, so no body for them could be judged.")
         return False
     return True
 
@@ -1474,9 +1477,10 @@ def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
     # Plateaued (non-converged) modules never lock — without this exclusion the
     # loop re-picks them forever with a fresh IterationState (plateau counter
     # resets each re-entry → unbounded macro-loop; observed on anyhow run 30425).
-    nonconverged_modules: set[str] = set()
+    # Module -> why it stopped (`ModuleResult.stopped_because`).
+    nonconverged_modules: dict[str, str] = {}
     while True:
-        module_name = (next_module(modules, locked_modules | nonconverged_modules,
+        module_name = (next_module(modules, locked_modules | set(nonconverged_modules),
                                    module_coverage)
                        if is_multi_module else (modules[0] if modules else None))
         if module_name is None or module_name in nonconverged_modules:
@@ -1649,16 +1653,16 @@ def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
                 project_dir, coverage_strategy,
                 deps.construction_facts.facts(project_dir, _clusters, may_measure=False))
         if not result.converged:
-            nonconverged_modules.add(module_name)
+            nonconverged_modules[module_name] = (
+                result.stopped_because or "the repair loop stopped")
 
     # -----------------------------------------------------------------------
     # Final: run full test suite to validate the integrated workspace.
     # Reached in multi-module mode (single-module exits on pass above) and by
     # any run with a plateaued module — that run reports FAIL and exits 1.
     # -----------------------------------------------------------------------
-    if nonconverged_modules:
-        deps.log(f"\nNON-CONVERGED (plateau): {', '.join(sorted(nonconverged_modules))}"
-                 " — repair stopped at the plateau cap; best tree kept.")
+    for _name, _why in sorted(nonconverged_modules.items()):
+        deps.log(f"\nNON-CONVERGED: {_name} — {_why}; best tree kept.")
     deps.log(f"\n{'=' * 60}")
     deps.log("FINAL: Running full test suite to validate integrated workspace")
     deps.log(f"{'=' * 60}")
@@ -1700,7 +1704,7 @@ def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)
     elif nonconverged_modules:
-        deps.log("\nFAIL: pipeline stopped — non-converged module(s) plateaued; "
+        deps.log("\nFAIL: pipeline stopped — non-converged module(s); "
                  "final suite failing. Best tree kept for inspection.")
         sys.exit(1)
     else:

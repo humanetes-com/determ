@@ -572,7 +572,7 @@ def test_module_loop_stops_without_calling_task4() -> None:
                      total_iters=0, coverage_strategy="")
     assert calls == []
     assert result.converged is False
-    assert "compile-fail harness" in result.out_of_reach
+    assert "compile-fail harness" in result.stopped_because
 
 
 # --- the floor, end to end through run_clusters_strict --------------------

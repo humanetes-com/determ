@@ -54,8 +54,8 @@ from enum import StrEnum
 from pipeline_core.domain.oracle_admission import weakening_reason
 from pipeline_core.domain.rust_scan import attributed_test_fn_names
 
-__all__ = ["PinRefusal", "TestRun", "PinJudgement", "judge_pin", "pin_shape_refusal",
-           "observes_blocking"]
+__all__ = ["PinRefusal", "PinCriterion", "PIN_CRITERIA", "TestRun", "PinJudgement",
+           "check_criteria", "judge_pin", "pin_shape_refusal", "observes_blocking"]
 
 
 class PinRefusal(StrEnum):
@@ -67,6 +67,72 @@ class PinRefusal(StrEnum):
     REBUILT_FAILED_ELSEWHERE = "rebuilt_failed_elsewhere"
     UNOBSERVED = "unobserved"                    # passes with the body emptied
     UNMEASURED = "unmeasured"                    # the emptied run gave no reading
+
+
+@dataclass(frozen=True, slots=True)
+class PinCriterion:
+    """One check the judge applies, stated for the writer: the refusals it
+    issues and the sentence that tells the writer what it demands.
+
+    The writer's prompt renders `PIN_CRITERIA` as its judging contract. On
+    run `3991945-1b7ae3e9` (2026-10-19) the prompt listed two checks (passes
+    on the original, panics in the body on the rebuilt tree) while the judge
+    applied a third (fails on the original with the blocking bodies
+    emptied). All six candidates met the two stated checks' intent and
+    discarded what the reaching call handed back; the third check's refusal
+    reached attempt 3 only as an earlier candidate's reason, and that reply
+    still discarded it. Every refusal belongs to exactly one criterion, so a
+    check the judge gains without a sentence the writer reads fails at
+    import."""
+
+    refusals: frozenset[PinRefusal]
+    statement: str
+
+
+PIN_CRITERIA: tuple[PinCriterion, ...] = (
+    PinCriterion(
+        frozenset({PinRefusal.SHAPE}),
+        "The file declares at least one `#[test]` fn, and no test carries "
+        "`#[ignore]` or `#[should_panic]`."),
+    PinCriterion(
+        frozenset({PinRefusal.ORIGINAL_DID_NOT_RUN, PinRefusal.ORIGINAL_FAILED}),
+        "It is built and run against the ORIGINAL crate: it must build, and "
+        "every test in it must pass. Assert only what the public API "
+        "documents or what the call must do; a guessed value fails here."),
+    PinCriterion(
+        frozenset({PinRefusal.REBUILT_DID_NOT_RUN, PinRefusal.REBUILT_PASSED,
+                   PinRefusal.REBUILT_FAILED_ELSEWHERE}),
+        "It is run against the REBUILT crate: at least one test must fail "
+        "with its first panic inside a blocking body (its "
+        "`unimplemented!()`), because the test's calls reach it. A test that "
+        "passes there, or whose first panic is somewhere else, does not "
+        "count."),
+    PinCriterion(
+        frozenset({PinRefusal.UNOBSERVED, PinRefusal.UNMEASURED}),
+        "It is run against the ORIGINAL crate once more, with every blocking "
+        "body of this build world replaced by an empty body `{}`: at least "
+        "one of the tests that reached a blocking body must FAIL there. So a "
+        "test must assert on something the blocking body itself produces or "
+        "hands back, not only on what the call that reaches it returns. A "
+        "test that calls through the body and discards what comes back "
+        "passes with an empty body and is refused. When no blocking body can "
+        "be emptied, or that run does not build, the file is refused too."),
+)
+
+
+
+def check_criteria(criteria: tuple[PinCriterion, ...]) -> None:
+    """Raise unless every `PinRefusal` is stated by exactly one criterion."""
+    stated = [r for c in criteria for r in c.refusals]
+    unstated = sorted(str(r) for r in set(PinRefusal) - set(stated))
+    twice = sorted({str(r) for r in stated if stated.count(r) > 1})
+    if unstated or twice:
+        raise RuntimeError(
+            "every PinRefusal must be stated by exactly one pin criterion: "
+            f"unstated {unstated}, stated twice {twice}")
+
+
+check_criteria(PIN_CRITERIA)
 
 
 @dataclass(frozen=True, slots=True)

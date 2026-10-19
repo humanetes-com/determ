@@ -392,7 +392,7 @@ def test_reconstructor_ends_red_when_the_retro_admits_nothing(tmp_path: Path) ->
         return coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s"), fa
 
     res, fa = _run(0)
-    assert not res.converged and "admitted nothing new" in res.out_of_reach
+    assert not res.converged and "admitted nothing new" in res.stopped_because
     assert fa.events.count("module.iter") == 1
     _res2, fa2 = _run(1)
     assert fa2.events.count("module.iter") == 5, "runs to the plateau cap"

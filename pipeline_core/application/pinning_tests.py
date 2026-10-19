@@ -20,7 +20,11 @@ needs is a red test owned by that body, and this pass writes one:
   the oracle seal with it (`admit`), so the seal and every clock keyed on the
   oracle move by rule, not by drift;
 - a refused candidate goes back into the next attempt's prompt with its
-  reason, up to `max_attempts`.
+  reason, up to `max_attempts`. The record is kept per build world, not per
+  body: the judge decides on the world's whole blocking set, so a refusal
+  reached while asking for one body is shown when asking for its siblings
+  (run `3991945-1b7ae3e9`, 2026-10-19: the second `provide` body's first
+  attempt opened with none of the first body's three refusals).
 
 Returns how many files were admitted. Zero means the retro had nothing new
 for this failure, and the module loop ends the module red with the verdict
@@ -174,13 +178,17 @@ def _observed(project_dir: Path, module: str, stem: str, text: str, world: Any,
 
 def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
              world: Any, unpinned: Sequence[FnSite],
-             deps: PinningDeps, *, blocking: Sequence[FnSite] = ()) -> tuple[tuple[FnSite, ...], int]:
+             deps: PinningDeps, *, blocking: Sequence[FnSite] = (),
+             previous: list[tuple[str, str, str]] | None = None,
+             ) -> tuple[tuple[FnSite, ...], int]:
     """Up to `max_attempts` candidates written for `site` in `world`. A
     candidate is judged against every still-unpinned blocking body the world
     compiles: written for one, it may be the test that reaches another, and
     that is still a pin, admitted for that body; the attempts left go on
-    asking for `site`. Returns the bodies pinned and how many files were
-    admitted."""
+    asking for `site`. `previous` is the world's record of earlier
+    candidates, (written for, file, reason), shared across the bodies of the
+    world and appended to here. Returns the bodies pinned and how many files
+    were admitted."""
     unpinned = list(unpinned)
     # Every blocking body the world compiles, pinned already or not: all of
     # them are still stubs on the tree, and the observation run empties them.
@@ -190,8 +198,10 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
     tests_dir = project_dir / "tests"
     gate = deps.gate_line(world)
     flags = " ".join(f"--cfg {c}" for c in getattr(world, "cfg_true", ()) or ())
-    previous: list[tuple[str, str]] = []
+    if previous is None:
+        previous = []
     label = site_label(site)
+    blocking_labels = [site_label(s) for s in world_blocking]
     wname = getattr(world, "name", "")
     for attempt in range(1, deps.max_attempts + 1):
         existing = [p.stem for p in tests_dir.glob("*.rs")] if tests_dir.is_dir() else []
@@ -203,7 +213,7 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
             routes=deps.routes_for(project_dir, world, site),
             api_surface=deps.api_surface(project_dir, module),
             example_header=deps.example_header(project_dir, world),
-            previous=previous)
+            blocking=blocking_labels, previous=previous)
         try:
             reply = deps.ask(prompt)
         except Exception as exc:  # noqa: BLE001 - one call never stops the pass
@@ -245,7 +255,7 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
                     if site in pinned:
                         return tuple(pinned_all), files
                     unpinned = [s for s in unpinned if s not in pinned]
-                    previous.append((text, "admitted as the pin of "
+                    previous.append((label, text, "admitted as the pin of "
                                      + ", ".join(site_label(s) for s in pinned)
                                      + ", but its first panic is not in the body "
                                      "asked for here: reach this one instead"))
@@ -258,7 +268,7 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
             "site": label, "world": wname, "attempt": attempt,
             "reason": str(judgement.refusal) if judgement and judgement.refusal else "no_file",
             "detail": why[:2000]})
-        previous.append((text or reply[:4000], why[:1500]))
+        previous.append((label, text or reply[:4000], why[:1500]))
     return tuple(pinned_all), files
 
 
@@ -270,6 +280,9 @@ def run_pinning_pass(project_dir: Path, module: str, verdict: EndVerdict,
     admitted = 0
     pinned: set[FnSite] = set()
     worlds_of = {site: list(deps.worlds_for(project_dir, site)) for site in verdict.blocking}
+    # Earlier candidates per world: the judge empties the world's whole
+    # blocking set, so every body of that world is shown every refusal.
+    tried: dict[str, list[tuple[str, str, str]]] = {}
     for site in verdict.blocking:
         if site in pinned:
             continue
@@ -283,7 +296,7 @@ def run_pinning_pass(project_dir: Path, module: str, verdict: EndVerdict,
                         if any(getattr(w, "name", "") == wname for w in worlds_of[s])]
             unpinned = [s for s in in_world if s not in pinned]
             got, files = _pin_one(project_dir, module, crate, site, world, unpinned, deps,
-                                  blocking=in_world)
+                                  blocking=in_world, previous=tried.setdefault(wname, []))
             admitted += files
             pinned.update(got)
             if site in pinned:

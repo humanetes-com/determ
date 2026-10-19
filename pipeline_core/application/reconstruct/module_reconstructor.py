@@ -20,17 +20,19 @@ from pipeline_core.ports.reconstruct import Telemetry
 
 
 class ModuleResult(NamedTuple):
-    """Outcome of reconstructing one module. converged=False means the plateau
-    terminator fired (module is non-converged) — the caller must NOT re-enter the
-    module (re-entry resets IterationState, restarting the plateau counter and
-    looping the whole module forever)."""
+    """Outcome of reconstructing one module. converged=False means the module
+    is non-converged — the caller must NOT re-enter the module (re-entry
+    resets IterationState, restarting the plateau counter and looping the
+    whole module forever)."""
     total_iters: int
     coverage_strategy: str
     converged: bool
-    # Set when the loop stopped because nothing left failing is repairable by a
-    # body rewrite. Distinct from a plateau: a plateau says the model has not
-    # improved for N iterations and might yet, this says no iteration can.
-    out_of_reach: str = ""
+    # Why a non-converged module stopped, in words the final report prints:
+    # nothing left failing is repairable by a body rewrite, the retro admitted
+    # nothing new, or the plateau cap. The caller used to print "repair stopped
+    # at the plateau cap" for all three; run `3991945-1b7ae3e9` (2026-10-19)
+    # stopped on an empty retro and the report named the plateau.
+    stopped_because: str = ""
 
 
 class ModuleReconstructor:
@@ -84,6 +86,7 @@ class ModuleReconstructor:
         of re-entering it."""
         state = IterationState()
         converged = True
+        stopped_because = ""
         while True:
             self._tel.log(f"\n{'=' * 50}")
             self._tel.log(f"MODULE {ctx.module_name} — ITERATION {state.iteration}")
@@ -156,5 +159,8 @@ class ModuleReconstructor:
                                      "streak": state.no_improvement_streak,
                                      "best_pass": state.prev_pass_count})
                 converged = False
+                stopped_because = (
+                    f"no pass-count improvement for {state.no_improvement_streak} "
+                    f"consecutive iteration(s) (plateau cap {self._plateau_abort})")
                 break
-        return ModuleResult(total_iters, coverage_strategy, converged)
+        return ModuleResult(total_iters, coverage_strategy, converged, stopped_because)

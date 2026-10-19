@@ -3,34 +3,59 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-__all__ = ["build_pinning_test_prompt"]
+from pipeline_core.domain.pinning_test import PIN_CRITERIA
+
+__all__ = ["build_pinning_test_prompt", "judging_contract"]
+
+
+def judging_contract() -> str:
+    """The judge's checks, in the order it applies them, as the writer reads
+    them. Rendered from `PIN_CRITERIA`, the list every refusal belongs to, so
+    the prompt states every check the judge can refuse on: a two-check
+    contract under a three-check judge drew six candidates that discarded
+    what the body hands back (run `3991945-1b7ae3e9`, 2026-10-19)."""
+    lines = [f"How the file is judged; all {len(PIN_CRITERIA)} checks must hold, "
+             "in this order:"]
+    lines += [f"{i}. {c.statement}" for i, c in enumerate(PIN_CRITERIA, 1)]
+    return "\n".join(lines)
 
 
 def build_pinning_test_prompt(*, crate: str, world: str, world_flags: str,
                               body: str, signature: str,
                               routes: Sequence[str], api_surface: str,
                               example_header: str,
-                              previous: Sequence[tuple[str, str]]) -> str:
+                              blocking: Sequence[str],
+                              previous: Sequence[tuple[str, str, str]]) -> str:
     """One blocking body: where it sits, the public calls that reach it, the
     crate's public API, the header shape of a test file in this build world,
-    and every earlier candidate with the reason it was refused. The reply is
+    the world's blocking set (the judge empties all of it), and every earlier
+    candidate written for any body of that set, as (written for, file,
+    reason refused). The judge decides on the set, so a refusal reached
+    while asking for one body is evidence for its siblings. The reply is
     one test file."""
     route_text = "\n".join(routes) or ("(no public route was found in the "
                                        "crate's MIR; reach it through the public "
                                        "API that builds or exposes its type)")
+    blocking_text = "\n".join(f"- {b}" for b in blocking) or f"- {body}"
     tries = "\n\n".join(
-        f"CANDIDATE {i + 1} (refused: {why}):\n```rust\n{text.strip()}\n```"
-        for i, (text, why) in enumerate(previous))
-    earlier = ("\nEARLIER CANDIDATES FOR THIS BODY, AND WHY EACH WAS REFUSED:\n\n"
-               + tries + "\n") if tries else ""
+        f"CANDIDATE {i + 1}, written for {site} (refused: {why}):\n"
+        f"```rust\n{text.strip()}\n```"
+        for i, (site, text, why) in enumerate(previous))
+    earlier = ("\nEARLIER CANDIDATES FOR THE BLOCKING BODIES OF THIS WORLD, AND WHY "
+               "EACH WAS REFUSED:\n\n" + tries + "\n") if tries else ""
     return f"""The Rust crate `{crate}` is being rebuilt from its tests. Every test
 passes, yet one body that the crate's public API reaches is still
 `unimplemented!()`, because no test reaches it. Write ONE integration test file
-(it goes in `tests/`) whose tests reach that body through the public API.
+(it goes in `tests/`) whose tests reach that body through the public API and
+assert on what it does.
 
 THE BODY (file, function and the impl it belongs to):
 {body}
 {signature}
+
+EVERY BLOCKING BODY OF THIS BUILD WORLD (all still `unimplemented!()`; check 4
+below empties all of them):
+{blocking_text}
 
 BUILD WORLD: `{world}` ({world_flags or "default flags"}). The file is compiled
 only in this world; the pipeline adds the line that gates it.
@@ -45,17 +70,10 @@ THE HEADER OF A TEST FILE THAT BUILDS IN THIS WORLD (follow its crate-level
 attributes and imports; do not copy its tests):
 {example_header or "(no example in this world)"}
 
-How the file is judged, and both must hold:
-1. It is run against the ORIGINAL crate: every test in it must build and pass.
-   Assert only what the public API documents or what the call must do; a
-   guessed value fails here.
-2. It is run against the rebuilt crate: at least one test must fail with its
-   first panic inside the body above (the `unimplemented!()`), because the
-   test's calls reach it.
+{judging_contract()}
 
 Rules: public API only (`use {crate}::...;` and the standard library). No
-`#[ignore]`, no `#[should_panic]`, no `catch_unwind`. Each test asserts an
-observable result of the call that reaches the body.
+`catch_unwind`.
 {earlier}
 Reply with exactly one ```rust fenced block holding the whole file and nothing
 else."""
