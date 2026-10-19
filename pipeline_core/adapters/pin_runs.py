@@ -34,7 +34,7 @@ from ..domain.models import FnSite
 from ..domain.pinning_test import TestRun
 from ..domain.test_report import (
     cap_at_line_boundary,
-    head_at_line_boundary,
+    head_with_cut_mark,
     parse_test_output,
 )
 from .process import run_bounded
@@ -56,10 +56,11 @@ def reading_of(output: str, *, finished: bool) -> TestRun:
     """The run's verdicts by leaf name, and an excerpt for the next prompt.
 
     Compiler output (the process did not finish, or no test was reported)
-    keeps the tail. A run that reported tests keeps the head of the failure
-    bodies. Both end on a line boundary. This is the only cut: the pin pass
-    stores the reason built on this excerpt whole. A line longer than the
-    bound is sliced, because there is no boundary inside it."""
+    keeps the tail, cut on a line boundary. A run that reported tests keeps
+    the head of the failure bodies, and a line the bound crosses is kept up
+    to it and marked as cut, so a long panic message is shortened, never
+    lost. This is the only cut: the pin pass stores the reason built on this
+    excerpt whole."""
     if not finished:
         return TestRun(False, excerpt=cap_at_line_boundary(output, _EXCERPT))
     report = parse_test_output(output)
@@ -69,7 +70,7 @@ def reading_of(output: str, *, finished: bool) -> TestRun:
         return TestRun(False, excerpt=cap_at_line_boundary(output, _EXCERPT))
     words = "\n".join(f"{f.test_name}: {(f.body or '').strip()}"
                       for f in report.failures)
-    return TestRun(True, passed, failed, head_at_line_boundary(words, _EXCERPT))
+    return TestRun(True, passed, failed, head_with_cut_mark(words, _EXCERPT))
 
 
 def run_on_original(project_dir: Path, module: str, stem: str, text: str,

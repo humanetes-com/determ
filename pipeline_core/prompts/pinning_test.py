@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from pipeline_core.domain.pinning_test import PIN_CRITERIA
+from pipeline_core.domain.pinning_test import PIN_CRITERIA, repair_of
 
 __all__ = ["build_pinning_test_prompt", "judging_contract"]
 
@@ -32,7 +32,16 @@ def build_pinning_test_prompt(*, crate: str, world: str, world_flags: str,
     candidate written for any body of that set, as (written for, file,
     reason refused). The judge decides on the set, so a refusal reached
     while asking for one body is evidence for its siblings. The reply is
-    one test file."""
+    one test file.
+
+    When this body's latest attempt did not compile (`repair_of`), the
+    prompt is that file and its diagnostics, not a request for a new file.
+    A fresh request is how a compile failure was answered with a different
+    file on run `4184066-ce008393` (2026-10-19)."""
+    repair = repair_of(body, previous)
+    if repair is not None:
+        return _repair_prompt(crate=crate, body=body, signature=signature,
+                              file=repair[0], diagnostics=repair[1])
     route_text = "\n".join(routes) or ("(no public route was found in the "
                                        "crate's MIR; reach it through the public "
                                        "API that builds or exposes its type)")
@@ -75,5 +84,32 @@ attributes and imports; do not copy its tests):
 Rules: public API only (`use {crate}::...;` and the standard library). No
 `catch_unwind`.
 {earlier}
+Reply with exactly one ```rust fenced block holding the whole file and nothing
+else."""
+
+
+def _repair_prompt(*, crate: str, body: str, signature: str,
+                   file: str, diagnostics: str) -> str:
+    """The attempt after a compile failure: the same file, the diagnostics,
+    and the checks it still has to meet. Not a request to write another."""
+    return f"""The file below did not compile, so it was not judged. Return that same file with every diagnostic below resolved. Do not write a different test.
+
+THE BODY IT MUST STILL REACH:
+{body}
+{signature}
+
+{judging_contract()}
+
+Rules: public API only (`use {crate}::...;` and the standard library). No
+`catch_unwind`.
+
+THE FILE:
+```rust
+{file.strip()}
+```
+
+DIAGNOSTICS:
+{diagnostics.rstrip()}
+
 Reply with exactly one ```rust fenced block holding the whole file and nothing
 else."""

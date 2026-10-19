@@ -41,10 +41,13 @@ from pipeline_core.domain.pinning_test import (
     PinRefusal,
     TestRun,
     check_criteria,
+    compiler_diagnostics,
     judge_pin,
+    repair_of,
     withdraw_original_failures,
 )
 from pipeline_core.domain.rust_scan import attributed_test_fn_names, without_test_fns
+from pipeline_core.domain.test_report import HEAD_CUT_MARK
 from pipeline_core.prompts.pinning_test import build_pinning_test_prompt
 
 _SITE = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < T >")
@@ -233,16 +236,18 @@ def test_a_run_that_reported_no_test_is_not_a_run() -> None:
            "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
     r = reading_of(out, finished=True)
     assert r.ran and r.failed == {"reaches_probe"} and "not implemented" in r.excerpt
-    # The failure body is kept from the head and cut on a line. A slice of
-    # the first N characters ends inside the long line; the bound does not.
+    # The failure body is kept from the head. A panic message longer than
+    # the bound is shortened and marked, never dropped: it is the observed
+    # value, and a cut back to the last line end kept the header alone.
     long = "x" * 2000
     wide = ("running 1 test\ntest reaches_probe ... FAILED\n\nfailures:\n\n"
             "---- reaches_probe stdout ----\n\nthread 'reaches_probe' panicked at "
             "src/wrap.rs:9:9:\n" + long + "\nKEPT-OFF\n\nfailures:\n    "
             "reaches_probe\n\ntest result: FAILED. 0 passed; 1 failed\n")
     wide_reading = reading_of(wide, finished=True)
-    assert wide_reading.excerpt == (
-        "reaches_probe: thread 'reaches_probe' panicked at src/wrap.rs:9:9:")
+    assert wide_reading.excerpt.startswith(
+        "reaches_probe: thread 'reaches_probe' panicked at src/wrap.rs:9:9:\nxxx")
+    assert wide_reading.excerpt.endswith(HEAD_CUT_MARK) and len(wide_reading.excerpt) == 1500
     assert "KEPT-OFF" not in wide_reading.excerpt
 
 
@@ -384,8 +389,59 @@ def test_the_prompt_states_every_check_the_judge_refuses_on() -> None:
     for refusal in PinRefusal:
         stated = [c for c in PIN_CRITERIA if refusal in c.refusals]
         assert len(stated) == 1 and stated[0].statement in prompt, refusal
-    assert "replaced by an empty body" in prompt
-    assert "observable result of the call that reaches the body" not in prompt
+
+
+_DIAG = "error[E0425]: cannot find function `fetch` in this scope"
+_COMPILE_WHY = (f"{PinRefusal.ORIGINAL_DID_NOT_RUN}: the file did not build "
+                f"or run on the original crate: {_DIAG}")
+
+
+def test_a_compile_failure_is_sent_back_as_the_same_file() -> None:
+    """Run `4184066-ce008393` (2026-10-19): five replies did not compile, and
+    the next attempt was asked to write a new file. The attempt after a
+    compile failure is that file and its diagnostics. A file that compiled,
+    a sibling's compile failure, and a did-not-run with no compiler line
+    stay a request for a new file."""
+    body = site_label(_SITE)
+    other = site_label(FnSite("src/wrap.rs", "other", "impl Fetch for Wrapper < U >"))
+    repair = _prompt(previous=[(body, _FILE, _COMPILE_WHY)])
+    assert "did not compile" in repair and "Write ONE" not in repair
+    assert "fn reaches_probe()" in repair and _DIAG in repair
+    assert "How the file is judged" in repair
+    fresh = _prompt(previous=[(body, _FILE,
+                               f"{PinRefusal.ORIGINAL_FAILED}: left: None")])
+    assert "Write ONE" in fresh and "CANDIDATE 1" in fresh
+    sibling = _prompt(previous=[(other, _FILE, _COMPILE_WHY)])
+    assert "Write ONE" in sibling and "CANDIDATE 1" in sibling
+    timeout = _prompt(previous=[(body, _FILE,
+                                 f"{PinRefusal.ORIGINAL_DID_NOT_RUN}: did not run: timed out")])
+    assert "Write ONE" in timeout
+    assert compiler_diagnostics(_COMPILE_WHY) == (
+        "the file did not build or run on the original crate: " + _DIAG)
+    assert compiler_diagnostics(
+        f"{PinRefusal.REBUILT_DID_NOT_RUN}: error: could not compile `krate`") is not None
+    second = "#[test]\nfn reaches_probe() {\n    assert!(kept_marker());\n}\n"
+    assert repair_of(body, [(body, _FILE, _COMPILE_WHY),
+                            (body, second, _COMPILE_WHY)]) == (second, compiler_diagnostics(_COMPILE_WHY))
+    assert repair_of(body, [(body, _FILE, _COMPILE_WHY),
+                            (body, _FILE, f"{PinRefusal.ORIGINAL_FAILED}: left")]) is None
+
+
+def test_the_pass_returns_a_file_that_did_not_compile(tmp_path: Path) -> None:
+    """The attempt prompt is the builder. After a compile refusal the next
+    prompt the pass sends is the repair, not a second fresh request."""
+    no_run = TestRun(False, excerpt=_DIAG + "\n")
+    prompts: list[str] = []
+    deps = _deps(tmp_path, [f"```rust\n{_FILE}```", f"```rust\n{_FILE}```"],
+                 [(no_run, TestRun(False), frozenset()),
+                  (no_run, TestRun(False), frozenset())],
+                 prompts, [])
+    deps = _with(deps, max_attempts=2)
+    assert run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps) == 0
+    assert len(prompts) == 2
+    assert "Write ONE" in prompts[0] and "Write ONE" not in prompts[1]
+    assert "did not compile" in prompts[1] and _DIAG in prompts[1]
+    assert "fn reaches_probe()" in prompts[1]
 
 
 def test_a_judge_check_with_no_sentence_for_the_writer_fails() -> None:
@@ -618,3 +674,53 @@ def test_the_recorded_candidate_loses_only_the_failed_test() -> None:
                          TestRun(True, failed=frozenset({kept})),
                          frozenset({kept}))
     assert admitted.admitted and admitted.pinning == {kept}
+
+
+_THREE = _TWO + "\n#[test]\nfn reaches_probe_after() {\n    assert!(fetch().is_some());\n}\n"
+
+
+def test_a_failure_the_re_run_reveals_is_withdrawn_too(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """The re-run on the rest can fail a test that passed beside the
+    withdrawn one. It is withdrawn in a second round and the rest is judged.
+    Negative control: one round leaves a mixed file and the judge raises,
+    which nothing above the pin pass catches."""
+    import pipeline_core.application.pinning_tests as pt
+
+    def _original(*a: Any) -> TestRun:
+        text = a[3]
+        if "reaches_probe_guessed" in text:
+            return TestRun(True, frozenset({"reaches_probe", "reaches_probe_after"}),
+                           frozenset({"reaches_probe_guessed"}), excerpt="guessed")
+        if "reaches_probe_after" in text:
+            return TestRun(True, frozenset({"reaches_probe"}),
+                           frozenset({"reaches_probe_after"}), excerpt="state")
+        return TestRun(True, frozenset({"reaches_probe"}))
+
+    def _run() -> tuple[int, list[str], list[str]]:
+        prompts: list[str] = []
+        admitted: list[str] = []
+        events: list[str] = []
+        deps = _deps(tmp_path, [f"```rust\n{_THREE}```"] * 3,
+                     [(_OK_ORIG, _RED_REBUILT, frozenset({"reaches_probe"}))] * 3,
+                     prompts, admitted)
+        deps = _with(deps, run_original=_original,
+                     emit=lambda name, **_k: events.append(name))
+        n = run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps)
+        assert n == 1, events
+        return n, admitted, events
+
+    _n, admitted, events = _run()
+    assert events[:3] == ["task4.pin_withdrawn", "task4.pin_withdrawn", "task4.pin_admitted"]
+    text = admitted[0].split("\n", 1)[1]
+    assert "fn reaches_probe()" in text
+    assert "reaches_probe_guessed" not in text and "reaches_probe_after" not in text
+
+    once = withdraw_original_failures
+
+    def _first_round_only(text: str, original: TestRun) -> Any:
+        return once(text, original) if "reaches_probe_guessed" in text else None
+
+    monkeypatch.setattr(pt, "withdraw_original_failures", _first_round_only)
+    with pytest.raises(RuntimeError, match="can be removed"):
+        _run()

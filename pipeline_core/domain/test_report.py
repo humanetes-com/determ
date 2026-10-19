@@ -1126,15 +1126,25 @@ def cap_at_line_boundary(text: str, cap: int) -> str:
     return tail[nl + 1:] if 0 <= nl < len(tail) - 1 else tail
 
 
-def head_at_line_boundary(text: str, cap: int) -> str:
-    """Trim `text` to at most `cap` chars, keeping the HEAD and cutting at a
-    line boundary so an excerpt never ends mid-line. If the first line alone
-    exceeds `cap`, hard-slice the head."""
+HEAD_CUT_MARK = " [… cut]"
+
+
+def head_with_cut_mark(text: str, cap: int) -> str:
+    """Trim `text` to at most `cap` chars, keeping the HEAD. A cut inside a
+    line keeps that line up to the bound and ends it with `HEAD_CUT_MARK`,
+    so the reader sees the line went on; a cut on a line end needs no mark.
+
+    The line that crosses the bound is kept, not dropped back to the last
+    line end. In a failure body the panic message is the line after
+    `thread '…' panicked at <file>:<line>:<col>:`, and a long one (an
+    `assert_eq!` of two Debug values) is the observed value the next writer
+    needs: a boundary cut kept the header alone and lost the whole message."""
     if len(text) <= cap:
         return text
-    head = text[:cap]
-    nl = head.rfind("\n")
-    return head[:nl] if nl > 0 else head
+    if text[cap] == "\n":
+        return text[:cap]
+    keep = max(cap - len(HEAD_CUT_MARK), 0)
+    return text[:keep] + HEAD_CUT_MARK
 
 
 @dataclass(frozen=True, slots=True)

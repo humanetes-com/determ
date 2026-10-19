@@ -233,8 +233,12 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
             why = f"{judgement.refusal}: {judgement.detail}"
         else:
             original = deps.run_original(project_dir, module, stem, text, world)
-            cut = withdraw_original_failures(text, original)
-            if cut is not None:
+            # Until nothing is left to cut: the re-run on the rest can fail a
+            # test that passed beside the withdrawn one (state a withdrawn
+            # test left in the process, a flaky test). Each round removes at
+            # least one test and withdrawal never empties the file, so this
+            # ends, and `judge_pin` never sees a file it would have to raise on.
+            while (cut := withdraw_original_failures(text, original)) is not None:
                 gone = ", ".join(sorted(cut.withdrawn))
                 deps.log(f"  [t4/pin] {label} ({wname}) attempt {attempt}: withdrew "
                          f"{gone} (failed on the original crate); the rest of the "

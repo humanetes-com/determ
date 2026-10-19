@@ -62,15 +62,18 @@ a `should_panic` test passes on exactly the stub it is meant to pin.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
 from pipeline_core.domain.oracle_admission import weakening_reason
 from pipeline_core.domain.rust_scan import attributed_test_fn_names, without_test_fns
+from pipeline_core.domain.test_results import is_compiler_output_line
 
 __all__ = ["PinRefusal", "PinCriterion", "PIN_CRITERIA", "TestRun", "PinJudgement",
            "check_criteria", "judge_pin", "pin_shape_refusal", "observes_blocking",
-           "PinWithdrawal", "withdraw_original_failures"]
+           "PinWithdrawal", "withdraw_original_failures",
+           "compiler_diagnostics", "repair_of"]
 
 
 class PinRefusal(StrEnum):
@@ -136,6 +139,66 @@ PIN_CRITERIA: tuple[PinCriterion, ...] = (
         "be emptied, or that run does not build, the file is refused too."),
 )
 
+
+
+_DID_NOT_RUN = frozenset({
+    PinRefusal.ORIGINAL_DID_NOT_RUN, PinRefusal.REBUILT_DID_NOT_RUN,
+})
+
+
+def compiler_diagnostics(why: str) -> str | None:
+    """The text of a did-not-run refusal whose body contains a rustc
+    diagnostic, or None.
+
+    A run that produced no test verdict is `original_did_not_run` or
+    `rebuilt_did_not_run`. That is a compile failure only when a line of it
+    is a compiler line (`error[E0425]:`, `error:`). A timeout and a missing
+    file use the same refusal and are not this: there is no diagnostic to
+    resolve. On run `4184066-ce008393` (2026-10-19) five of six pin replies
+    were this kind, and the next attempt was still asked for a new file."""
+    kind, sep, rest = why.partition(": ")
+    if not sep or kind not in _DID_NOT_RUN:
+        return None
+    if not any(_has_compiler_diagnostic(line) for line in rest.splitlines()):
+        return None
+    return rest
+
+
+def _has_compiler_diagnostic(line: str) -> bool:
+    """A rustc diagnostic owns the line, or sits after the judge's sentence.
+
+    The stored reason is `original_did_not_run: the file did not build …: `
+    plus the compiler text, so the first diagnostic is not at column 0."""
+    stripped = line.strip()
+    if is_compiler_output_line(stripped):
+        return True
+    for mark in ("error[", "error:", "warning[", "warning:"):
+        at = stripped.find(mark)
+        if at > 0 and is_compiler_output_line(stripped[at:]):
+            return True
+    return False
+
+
+def repair_of(body: str,
+              previous: Sequence[tuple[str, str, str]]) -> tuple[str, str] | None:
+    """`(file, diagnostics)` when this body's latest attempt did not compile
+    and a file was stored. None when that attempt is missing, compiled, or
+    left no file.
+
+    Only the latest attempt for `body` counts. An earlier compile failure
+    followed by a file that did compile is answered as a new file, and a
+    sibling body's compile failure is not this body's file."""
+    last: tuple[str, str] | None = None
+    for site, text, why in previous:
+        if site == body:
+            last = (text, why)
+    if last is None:
+        return None
+    text, why = last
+    diagnostics = compiler_diagnostics(why)
+    if diagnostics is None or not text.strip():
+        return None
+    return text, diagnostics
 
 
 def check_criteria(criteria: tuple[PinCriterion, ...]) -> None:

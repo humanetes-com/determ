@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.test_report import (
+    HEAD_CUT_MARK,
     BlameVerdict,
     FailureExcerpt,
     FailureKind,
@@ -10,7 +11,7 @@ from pipeline_core.domain.test_report import (
     U2Decision,
     U2Verdict,
     cap_at_line_boundary,
-    head_at_line_boundary,
+    head_with_cut_mark,
     parse_test_output,
     partition_blame,
     self_aborted_tests,
@@ -26,11 +27,16 @@ def test_cap_at_line_boundary_keeps_whole_lines() -> None:
     assert out.endswith("line-three\n")
 
 
-def test_head_at_line_boundary_drops_a_partial_line() -> None:
+def test_head_with_cut_mark_keeps_the_crossed_line_and_marks_it() -> None:
+    """The line the bound crosses is kept up to it, never dropped back to
+    the last line end. Negative control: a boundary cut of the same text
+    keeps only the first line."""
     text = "keep me\n" + ("x" * 50) + "\nlater\n"
-    assert head_at_line_boundary(text, 20) == "keep me"
-    assert head_at_line_boundary("no-newline-" + "x" * 40, 10) == "no-newline"[:10]
-    assert head_at_line_boundary("short\n", 100) == "short\n"
+    out = head_with_cut_mark(text, 30)
+    assert len(out) == 30 and out.startswith("keep me\nxxx") and out.endswith(HEAD_CUT_MARK)
+    assert text[:text[:30].rfind("\n")] == "keep me"
+    assert head_with_cut_mark("keep me\nlater", 7) == "keep me"
+    assert head_with_cut_mark("short\n", 100) == "short\n"
 
 
 def test_failure_excerpt_keeps_all_names_caps_bodies() -> None:
