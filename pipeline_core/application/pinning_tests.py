@@ -87,6 +87,9 @@ class PinningDeps:
     log: Callable[[str], None]
     emit: Callable[..., Any]
     max_attempts: int = 3
+    # The sites this pass pinned. A blocking body absent from the tuple is
+    # still a gap and is asked again after the tree changes.
+    on_pinned: Callable[[tuple[FnSite, ...]], None] = lambda _sites: None
 
 
 def admit_oracle_file(project_dir: Path, rel: str, text: str, *,
@@ -145,16 +148,20 @@ def _observed(project_dir: Path, module: str, stem: str, text: str, world: Any,
               deps: PinningDeps) -> PinJudgement:
     """The judgement after the observation run: the candidate on the
     original crate with the world's blocking bodies emptied
-    (`observes_blocking`). Refused when every pinning test still passes;
-    kept, and logged as not measured, when no reading could be taken."""
+    (`observes_blocking`). Refused when every pinning test still passes.
+    Refused when no reading could be taken: a value-returning body cannot
+    be emptied to `{}`, and a run that did not build is not evidence."""
     emptied, units = deps.run_original_emptied(project_dir, module, stem, text,
                                                world, blocking)
     seen = observes_blocking(judgement.pinning, emptied)
     if seen is None:
-        deps.log("  [t4/pin] no blocking body could be emptied on the original "
-                 "(each returns a value, or has no record there), or that run gave "
-                 "no reading — whether the test observes them is not measured.")
-        return judgement
+        deps.log("  [t4/pin] the emptied run on the original gave no reading "
+                 "(nothing returns nothing, or that run did not build) — "
+                 "the pin is refused.")
+        return PinJudgement(
+            False, PinRefusal.UNMEASURED,
+            "the emptied run on the original gave no reading, so whether "
+            "the test observes the blocking bodies is not measured")
     if seen:
         return judgement
     return PinJudgement(
@@ -286,4 +293,5 @@ def run_pinning_pass(project_dir: Path, module: str, verdict: EndVerdict,
                      "it stays a named gap of the end gate.")
     deps.log(f"  [t4/pin] {admitted} pinning test file(s) admitted; "
              f"{len(pinned)} of {len(verdict.blocking)} blocking body(ies) pinned.")
+    deps.on_pinned(tuple(s for s in verdict.blocking if s in pinned))
     return admitted

@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.reconstruction_step import (
 )
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.end_verdict import EndVerdict
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.reconstruction import IterationState
 from pipeline_core.domain.stub_inventory import StubInventory, StubSite
@@ -352,12 +353,13 @@ def test_reconstructor_plateau_disabled_by_default(tmp_path: Path) -> None:
     assert "module.nonconverged" not in fa.events
 
 
-def _analysis_with(fa: FakeAdapter, *, lessons: Any = None, pins: Any = None) -> FailureAnalysisStep:
+def _analysis_with(fa: FakeAdapter, *, lessons: Any = None, pins: Any = None,
+                   open_gaps: Any = None) -> FailureAnalysisStep:
     return FailureAnalysisStep(
         analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
         coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
         genesis_audit_interval=5, render_strategy=lambda _ctx, text: text,
-        lessons=lessons, pins=pins)
+        lessons=lessons, pins=pins, open_gaps=open_gaps)
 
 
 def test_reconstructor_reenters_after_every_failed_iteration_with_artifacts(
@@ -469,6 +471,44 @@ def test_a_blocked_end_gate_is_a_failed_iteration_that_pins_and_reenters(
     finally:
         rs.orchestrator.lock_or_complete = real  # type: ignore[assignment]
     assert exc_old.value.code == 1 and ("OLD",) not in pinned
+
+
+def test_a_red_iteration_still_pins_a_blocking_body_the_end_gate_left_open(
+        tmp_path: Path) -> None:
+    """A pin pass left one body without a test. The next iteration is red
+    because of the pin that landed, and that body is asked again. The
+    genesis update still runs: the suite failed. Negative control: no
+    stored gap, and the pin pass is not called on the red iteration."""
+    site = FnSite("src/ctx.rs", "provide", "impl E for W")
+    gap = EndVerdict(blocking=(site,))
+    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""),
+                     best=None,
+                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    seen: list[tuple[FnSite, ...]] = []
+    coord = ModuleReconstructor(
+        step=_step(fa),
+        analysis=_analysis_with(
+            fa, lessons=lambda _c, _i: 0,
+            pins=lambda _c, _i, v: seen.append(v.blocking) or 0,
+            open_gaps=lambda _c: gap),
+        telemetry=fa, reenter=lambda _pd, _m, n: n > 0)
+    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert seen == [(site,)]
+    assert "task4" in fa.calls
+    assert not res.converged and "module.reenter" not in fa.events
+
+    seen_none: list[Any] = []
+    fa2 = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""),
+                      best=None,
+                      task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+    coord2 = ModuleReconstructor(
+        step=_step(fa2),
+        analysis=_analysis_with(
+            fa2, lessons=lambda _c, _i: 0,
+            pins=lambda _c, _i, v: seen_none.append(v) or 0),
+        telemetry=fa2, reenter=lambda _pd, _m, n: n > 0)
+    coord2.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
+    assert seen_none == []
 
 
 # --- the best-tree slot only ever holds a MEASURED tree ---------------------

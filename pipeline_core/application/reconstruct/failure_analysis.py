@@ -51,6 +51,7 @@ class FailureAnalysisStep:
         render_strategy: Callable[[RunContext, str], str],
         lessons: Callable[[RunContext, int], int] | None = None,
         pins: Callable[[RunContext, int, EndVerdict], int] | None = None,
+        open_gaps: Callable[[RunContext], EndVerdict | None] | None = None,
     ) -> None:
         self._analyst = analyst
         self._journal = journal
@@ -71,12 +72,16 @@ class FailureAnalysisStep:
         self._lessons = lessons
         self.lessons_admitted = 0
         # The end gate's retro (`pinning_tests.run_pinning_pass`): for each
-        # blocking body, a test that reaches it through the public API,
-        # admitted to the oracle only when the original passes it while
-        # executing the body and the rebuilt tree fails it. Returns how many
-        # were admitted; each turns a blocking body into a red test the next
-        # t2a owns. None writes no pin.
+        # blocking body, a test that reaches it through the public API.
+        # Admitted only when the original fails once the bodies that return
+        # nothing are emptied, and the rebuilt tree fails inside the body.
+        # Returns how many files were admitted. None writes no pin.
         self._pins = pins
+        # Bodies a pin pass left without a test (`domain.pin_gaps`). On a
+        # later iteration whose suite is red, the tree may have changed
+        # which body a call panics in, so those sites are asked again.
+        # None asks only when the end gate itself blocked this iteration.
+        self._open_gaps = open_gaps
 
     def run(
         self, ctx: RunContext, state: IterationState, outcome: StepOutcome, *,
@@ -100,15 +105,26 @@ class FailureAnalysisStep:
                 self.lessons_admitted += admitted
                 artifacts += admitted
         verdict = outcome.end_verdict
+        # The live end gate, or bodies an earlier pass left unpinned that
+        # are still unimplemented. The second is asked on a red iteration:
+        # that is when the tree may have changed which body a call panics
+        # in. A clean suite with no end-gate verdict does not consult it.
+        gap = verdict
+        if gap is None and self._open_gaps is not None:
+            gap = self._open_gaps(ctx)
+        pin_for = verdict if verdict is not None else (
+            gap if gap is not None and not gap.clean else None)
+        if pin_for is not None and self._pins is not None:
+            detail = ("pinning tests for blocking bodies" if verdict is not None
+                      else "pinning tests for bodies a pass left unpinned")
+            with phase_scope("t4", module=ctx.module_name, attempt=it,
+                             detail=detail):
+                artifacts += self._pins(ctx, it, pin_for)
         if verdict is not None:
             # The suite passed; the end gate did not. The genesis update reads
             # a failing test output, and there is none: what this failure
             # needs is a test that reaches the blocking body, which is the
             # pinning pass.
-            if self._pins is not None:
-                with phase_scope("t4", module=ctx.module_name, attempt=it,
-                                 detail="pinning tests for blocking bodies"):
-                    artifacts += self._pins(ctx, it, verdict)
             current_pass = parse_test_counts(test_output)[0]
             self._tel.log(f"  TASK 4 genesis update skipped: the suite passed and "
                           f"the end gate blocked on {', '.join(verdict.labels())}.")

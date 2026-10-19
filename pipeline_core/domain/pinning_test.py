@@ -34,8 +34,10 @@ run panicked in: the rebuilt `context()` wraps every error as the crate's
 own before adding context, so a test whose original path runs one `provide`
 impl panics in the other on the rebuilt tree, and emptying only that one on
 the original changes nothing the test reads. A body that returns a value
-has no neutral body to write generically; it is not emptied, and when no
-blocking body could be the check is not measured, which the pass logs.
+has no neutral body to write generically; it is not emptied. When no
+blocking body could be emptied, or that run does not build, the check is
+not measured and the candidate is refused: a missing reading is not
+evidence the test observes the body.
 
 A test that passes on the rebuilt tree is evidence the route it took does not
 reach the body there; it is refused, never admitted as a green addition. A
@@ -64,6 +66,7 @@ class PinRefusal(StrEnum):
     REBUILT_PASSED = "rebuilt_passed"
     REBUILT_FAILED_ELSEWHERE = "rebuilt_failed_elsewhere"
     UNOBSERVED = "unobserved"                    # passes with the body emptied
+    UNMEASURED = "unmeasured"                    # the emptied run gave no reading
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +141,8 @@ def judge_pin(text: str, original: TestRun, rebuilt: TestRun,
 def observes_blocking(pinning: frozenset[str], emptied: TestRun) -> bool | None:
     """Whether a pinning test (it passed on the original) fails on the
     original with the blocking bodies emptied. None when that run gave no
-    reading (did not build, reported no test, nothing could be emptied):
-    not measured, not refused."""
+    reading (did not build, reported no test, nothing could be emptied).
+    None is not a pass: the caller refuses the candidate."""
     if not emptied.ran:
         return None
     return bool(pinning & emptied.failed)

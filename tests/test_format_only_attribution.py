@@ -138,6 +138,76 @@ def test_format_only_test_owns_the_implementer_not_the_dispatcher() -> None:
     assert any("formatting implementer" in ln for ln in lines)
 
 
+def test_a_stub_located_test_is_not_given_a_format_owner(tmp_path: Path) -> None:
+    """The same source the hop attributes, once the failure is a stub panic
+    located in a body. Identifier owners would stay; this source names none,
+    and the format owner is not added. Negative control: the assertion
+    failure, on the same records, still owns the implementer."""
+    src = tmp_path / "src"
+    src.mkdir()
+    body = "fn debug() { unimplemented!() }\n"
+    (src / "fmt.rs").write_text(body)
+    recs = [dict(r) for r in _FMT_RECS]
+    for rec in recs:
+        if rec["fn_name"] == "debug" and rec["file"] == "src/fmt.rs":
+            rec["sig_byte_start"] = 0
+            rec["body_byte_end"] = len(body)
+    deps, _lines = _deps(recs)
+    texts = {"tests/test_fmt.rs": _TEST_FMT}
+    control, _sites, _srcs = behavior_frontier_from_texts(
+        deps, _ALTDEBUG_FAILED, texts, tmp_path)
+    owners = {f"{k.file}::{k.fn_name}"
+              for k, v in control.items() if "test_altdebug" in v}
+    assert owners == {"src/fmt.rs::debug"}, owners
+    panic = (
+        "running 1 test\ntest test_altdebug ... FAILED\n\nfailures:\n\n"
+        "---- test_altdebug stdout ----\n\n"
+        "thread 'test_altdebug' panicked at src/fmt.rs:1:1:\n"
+        "not implemented\n")
+    pairs: set[Any] = set()
+    frontier, sites, _srcs = behavior_frontier_from_texts(
+        deps, panic, texts, tmp_path, pairs_out=pairs)
+    assert not any("test_altdebug" in v for v in frontier.values())
+    assert not any("test_altdebug" in v for v in sites.values())
+    assert pairs == set()
+    # The same skip when the caller already resolved the name and the
+    # output itself does not locate (no span on the records).
+    bare_deps, bare_lines = _deps(_FMT_RECS)
+    named, _s, _t = behavior_frontier_from_texts(
+        bare_deps, _ALTDEBUG_FAILED, texts, Path("/x"),
+        stub_located={"test_altdebug"})
+    assert not any("test_altdebug" in v for v in named.values())
+    assert not any("formatting implementer" in ln for ln in bare_lines)
+
+
+def test_a_stub_located_test_keeps_its_identifier_owner() -> None:
+    """The hop is the only thing skipped. A test that names a function and
+    also formats keeps that function. Negative control: the same source
+    with no stub location owns the function and the implementer."""
+    recs = _FMT_RECS + [
+        {"file": "src/error.rs", "fn_name": "probe", "container": ""}]
+    named = (
+        "use anyhow::Error;\n"
+        "#[test]\n"
+        "fn test_altdebug() {\n"
+        "    probe();\n"
+        "    assert_eq!(1, format!(\"{:#?}\", Error::msg(\"x\")).len());\n"
+        "}\n"
+    )
+    texts = {"tests/t.rs": named}
+    out = "test test_altdebug ... FAILED\n---- test_altdebug stdout ----\nboom\n"
+    deps, _lines = _deps(recs)
+    both, _s, _t = behavior_frontier_from_texts(deps, out, texts, Path("/x"))
+    owners = {f"{k.file}::{k.fn_name}"
+              for k, v in both.items() if "test_altdebug" in v}
+    assert owners == {"src/error.rs::probe", "src/fmt.rs::debug"}, owners
+    only, _s, _t = behavior_frontier_from_texts(
+        deps, out, texts, Path("/x"), stub_located={"test_altdebug"})
+    kept = {f"{k.file}::{k.fn_name}"
+            for k, v in only.items() if "test_altdebug" in v}
+    assert kept == {"src/error.rs::probe"}, kept
+
+
 def test_self_contained_fmt_is_its_own_owner() -> None:
     # NEGATIVE CONTROL for the follow-the-call clause: a crate whose matching
     # Debug fmt does NOT delegate to a sibling formatter (it IS the implementer)

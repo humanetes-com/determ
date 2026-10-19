@@ -222,6 +222,8 @@ from pipeline_core.adapters.per_fn_ask import conversation_factory
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
+from pipeline_core.adapters.pin_gaps_store import load_pin_gaps as _load_pin_gaps
+from pipeline_core.adapters.pin_gaps_store import save_pin_gaps as _save_pin_gaps
 from pipeline_core.adapters.pin_inputs import (
     example_header as _pin_example_header,
 )
@@ -767,6 +769,7 @@ from pipeline_core.domain.coverage_annotation import (
 from pipeline_core.domain.coverage_annotation import (
     partition_uncovered_lines as _cov_partition_uncovered_lines,
 )
+from pipeline_core.domain.end_verdict import EndVerdict as _EndVerdict
 from pipeline_core.domain.enums import (
     Backend,
     PhaseCDriver,
@@ -777,6 +780,7 @@ from pipeline_core.domain.enums import (
 from pipeline_core.domain.failure_classification import (
     classify_failure as _classify_failure,
 )
+from pipeline_core.domain.fn_execution import site_label as _site_label
 from pipeline_core.domain.generation import (
     SkeletonConfig,
     Task1Config,
@@ -839,6 +843,10 @@ from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _split_api_surface_by_file,
 )
 from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.pin_gaps import gaps_left as _gaps_left
+from pipeline_core.domain.pin_gaps import (
+    gaps_still_unimplemented as _gaps_still_unimplemented,
+)
 from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.refine import (
     parse_retrospective_categories as _parse_retro_categories,
@@ -2523,7 +2531,9 @@ def build_app(
         emit=lambda ev, **k: telemetry.emit(ev, **k))
     # The end gate's retro (`application/pinning_tests`): a pinning test per
     # blocking body, judged on the original crate and on the rebuilt tree.
-    def _pin_deps(ctx: RunContext) -> PinningDeps:
+    def _pin_deps(ctx: RunContext, *,
+                  on_pinned: Callable[[tuple[FnSite, ...]], None] = lambda _sites: None,
+                  ) -> PinningDeps:
         clusters = list(ctx.clusters)
         worlds = construction_facts.facts(ctx.project_dir, clusters, may_measure=False)
         return PinningDeps(
@@ -2553,7 +2563,7 @@ def build_app(
                     fn_records=lambda root: helpers.structure_via_app.enumerate_fns(root)
                     or [])),
             admit=_admit_pinning_test, log=ports.log, emit=ports.emit,
-            max_attempts=cfg.pin_test_max_attempts)
+            max_attempts=cfg.pin_test_max_attempts, on_pinned=on_pinned)
 
     def _admit_pinning_test(project_dir: Path, module: str, rel: str, text: str) -> bool:
         """The one writer of a test into the oracle after strip: the file,
@@ -2570,8 +2580,40 @@ def build_app(
             seal_clean=_seal_clean, log=ports.log)
 
     def _run_pins(ctx: RunContext, it: int, verdict: Any) -> int:
-        return run_pinning_pass(ctx.project_dir, ctx.module_name, verdict,
-                                _pin_deps(ctx), crate=ctx.module_name.replace("-", "_"))
+        pinned: list[FnSite] = []
+        n = run_pinning_pass(ctx.project_dir, ctx.module_name, verdict,
+                             _pin_deps(ctx, on_pinned=pinned.extend),
+                             crate=ctx.module_name.replace("-", "_"))
+        left = _gaps_left(verdict.blocking, pinned)
+        _save_pin_gaps(ctx.project_dir, left)
+        if left:
+            ports.log(
+                f"  [t4/pin] {len(left)} blocking body(ies) still unpinned — "
+                "the next iteration asks again: "
+                + ", ".join(_site_label(s) for s in left))
+        return n
+
+    def _open_gaps(ctx: RunContext) -> _EndVerdict | None:
+        """Blocking bodies a pin pass left unpinned, still unimplemented.
+
+        Asked on a red iteration: the pin that landed may have changed
+        which body a call panics in. A body the fill has since written
+        leaves the set. Nothing is asked before the end gate has named
+        a gap — an empty store is not a scan of every stub."""
+        pending = _load_pin_gaps(ctx.project_dir)
+        if not pending:
+            return None
+        live = [s.site for s in scan_unimplemented_functions(ctx.project_dir).sites]
+        still = _gaps_still_unimplemented(pending, live)
+        if len(still) != len(pending):
+            _save_pin_gaps(ctx.project_dir, still)
+        if not still:
+            return None
+        ports.log(
+            f"  [t4/pin] {len(still)} blocking body(ies) a pass left unpinned "
+            "are still unimplemented — asking again: "
+            + ", ".join(_site_label(s) for s in still))
+        return _EndVerdict(blocking=still)
 
     def _run_lessons(ctx: RunContext, it: int) -> int:
         return run_test_lessons(ctx.project_dir, [c.name for c in ctx.clusters],
@@ -2587,6 +2629,7 @@ def build_app(
             construction_facts.facts(ctx.project_dir, ctx.clusters, may_measure=False)),
         lessons=_run_lessons,
         pins=_run_pins,
+        open_gaps=_open_gaps,
     )
     def _reenter(project_dir: Path, module: str, artifacts: int) -> bool:
         # Same keys restart_from.sh task2a clears — the manual escape hatch,

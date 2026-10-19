@@ -17,8 +17,9 @@ The plan's sentences, each with its negative control (the route-row reading,
 - a landing graded flat convicts only while that body is on the tree with
   its premise standing; off the tree, or under moved evidence, it does not;
 - a reverted unit is a re-buy;
-- a landing graded advanced pays; a row that cashed on a sibling does not
-  make a unit graded flat pay;
+- a landing graded proven pays; a landing graded advanced is served, so a
+  unit not yet tried sorts ahead of it; a row that cashed on a sibling
+  does not make a unit graded flat pay;
 - the grade is found by run id and body sha, whatever iteration the sweep
   stamped;
 - an identical run's FLAT row does not bypass the per-unit verdict;
@@ -137,7 +138,7 @@ def test_a_reverted_unit_is_a_rebuy() -> None:
 
 def test_paying_is_the_unit_s_grade_not_the_row_s_cash() -> None:
     rows = [_row([_A, _B], RunOutcome.CASHED, kept=[_A, _B], delta=1)]
-    ev = _ev({_A: ("sa", "advanced"), _B: ("sb", "flat")})
+    ev = _ev({_A: ("sa", "proven"), _B: ("sb", "flat")})
     sched = schedule([_per_fn([_A]), _per_fn([_B])], rows, oracle_fp="o",
                      hollow={}, unit_evidence=ev)
     by = {frozenset(s.run.targets): s.reason for s in sched.ordered}
@@ -147,6 +148,23 @@ def test_paying_is_the_unit_s_grade_not_the_row_s_cash() -> None:
     assert by[frozenset({_B})] == "served"
     control = schedule([_per_fn([_B])], rows, oracle_fp="o", hollow={})
     assert control.ordered[0].reason == "paying"
+
+
+def test_an_advanced_landing_sorts_behind_a_unit_not_yet_tried() -> None:
+    """A failure that moved past the unit is not a cash. The never-served
+    file opens first. Negative control: the same landing graded proven
+    pays, and still sorts behind the unit not yet tried."""
+    rows = [_row([_A], RunOutcome.CASHED, kept=[_A], delta=1)]
+    advanced = schedule([_per_fn([_A]), _OTHER], rows, oracle_fp="o", hollow={},
+                        unit_evidence=_ev({_A: ("sa", "advanced")}))
+    assert advanced.ordered[0].run.label == "file src/q.rs"
+    by = {s.run.label: s.reason for s in advanced.ordered}
+    assert by["per-fn batch"] == "served"
+    proven = schedule([_per_fn([_A]), _OTHER], rows, oracle_fp="o", hollow={},
+                      unit_evidence=_ev({_A: ("sa", "proven")}))
+    reasons = {s.run.label: s.reason for s in proven.ordered}
+    assert reasons["per-fn batch"] == "paying"
+    assert proven.ordered[0].run.label == "file src/q.rs"
 
 
 def test_the_grade_is_joined_by_run_and_body_whatever_iteration_the_sweep_stamped() -> None:

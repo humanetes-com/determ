@@ -914,7 +914,11 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
 
 
 #: Body-ledger grades that say the landing moved the tests it was bought on.
-_PAYING_GRADES = frozenset({"advanced", "proven"})
+# `proven` moved a verdict this unit's tests read. `advanced` moved the
+# failure past the unit: the landing is not a cash, and it ranks served
+# so a unit not yet tried sorts ahead of it (run `1680589-7a6824f8`,
+# 2026-10-19, the formatter file opened while the successor was untried).
+_PAYING_GRADES = frozenset({"proven"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1346,7 +1350,9 @@ class UnitService:
           whole (``RouteLedgerRow.collateral``) is a verdict on the set; the
           identical set comes back through its identity row (`_rank_of`),
           and a different set is a new try for the unit;
-        - the sweep graded the landed body advanced or proven: paying;
+        - the sweep graded the landed body proven: paying. A grade of
+          advanced is not a cash (the failure moved past the unit) and
+          falls through to served;
         - that body is still on the tree and its FLAT claim still stands
           (:attr:`UnitEvidence.standing_flat`): the flat re-buy;
         - no grade, and the row paid: paying;

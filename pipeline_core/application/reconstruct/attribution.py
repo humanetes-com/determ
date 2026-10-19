@@ -13,7 +13,7 @@ Cargo-output parsing goes through the structured `domain.test_report` parser
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -718,6 +718,7 @@ def behavior_frontier_from_texts(
     unrepairable_tests: frozenset[str] = frozenset(),
     pairs_out: set[FormatterPair] | None = None,
     observables_out: dict[str, str] | None = None,
+    stub_located: Collection[str] = (),
 ) -> tuple[Frontier, SiteFrontier, dict[str, tuple[str, str]]]:
     """Core of :func:`behavior_frontier` over already-loaded test texts
     ({rel_path: content}) — the phase-c TDD loop holds the cluster's test pairs
@@ -736,13 +737,30 @@ def behavior_frontier_from_texts(
     falls inside its own fn, the text that failure is about
     (`failing_observable.observable_source`). Every question of the form
     "does this failure render through a format trait" reads it; a test
-    absent from it is read on its whole source."""
+    absent from it is read on its whole source.
+
+    A test already located as a stub panic (`extract_tdd_frontier`, plus
+    `stub_located` when a caller already resolved the names) keeps the
+    identifier owners below and is not given a format owner. The format
+    hop reads the whole source when the failure has no observable, which
+    is that panic, and the schedule then prefers the formatter and
+    withholds the panic site (run `1680589-7a6824f8`, 2026-10-19)."""
     failed = failing_test_names(test_output)
     if unrepairable_tests:
         failed = [t for t in failed
                   if t.split("::")[-1] not in unrepairable_tests]
     if not failed or not texts:
         return {}, {}, {}
+    # Derived here, not by each caller: a new caller of this function
+    # cannot forget the skip. `stub_located` adds names a caller already
+    # resolved against another tree.
+    _located = set(stub_located)
+    _rt, _rt_sites = extract_tdd_frontier(deps, test_output, fns_root)
+    for _names in _rt.values():
+        _located.update(_names)
+    for _names in _rt_sites.values():
+        _located.update(_names)
+    _located_bare = {n.rsplit("::", 1)[-1] for n in _located}
     index = build_test_name_index(texts)
     by_name: dict[str, list[dict[str, Any]]] = {}
     for r in deps.structure.enumerate_fns(fns_root) or []:
@@ -794,6 +812,12 @@ def behavior_frontier_from_texts(
                                       rec.get("container", "") or "")),
                     set()).add(tname)
                 _owned = True
+        if tname in _located or bare in _located_bare:
+            # The runtime path already owns this test at the panic site.
+            # Identifier owners above stay. The format hop does not run:
+            # with no failing observable it would read the whole source
+            # and hand the test to a formatter.
+            continue
         if not _owned or format_traits_used(
                 _observed if _observed is not None else tsrc):
             # A formatting-macro test names no crate fn and so owns no unit;

@@ -103,7 +103,10 @@ def _deps(tmp_path: Path, replies: list[str], runs: list[tuple[TestRun, TestRun,
         gate_line=lambda _w: "#![cfg(alt)]\n",
         run_original=lambda *_a: runs[0][0],
         run_rebuilt=_rebuilt,
-        run_original_emptied=lambda *_a: (TestRun(False), frozenset()),
+        run_original_emptied=lambda *_a: (
+            TestRun(True, failed=frozenset({"reaches_probe"}),
+                    excerpt="assertion failed"),
+            frozenset()),
         admit=lambda _pd, _m, rel, text: admitted.append(rel + "\n" + text) is None,
         log=lambda _m: None, emit=lambda *_a, **_k: None, max_attempts=3)
 
@@ -164,13 +167,16 @@ def test_a_candidate_written_for_one_body_that_pins_another_is_admitted_for_it(
                               for s in sites}
 
     deps = _deps(tmp_path, [f"```rust\n{_FILE}```"] * 4, [], prompts, admitted)
+    got_pins: list[tuple[FnSite, ...]] = []
     deps = PinningDeps(**{**{f: getattr(deps, f) for f in deps.__dataclass_fields__},
                           "run_original": lambda *_a: _OK_ORIG, "run_rebuilt": _rebuilt,
-                          "worlds_for": lambda _pd, _s: [world]})
+                          "worlds_for": lambda _pd, _s: [world],
+                          "on_pinned": got_pins.append})
     n = run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE, other)), deps)
     assert n == 1 and calls[0] == (_SITE, other)
     assert all(c == (_SITE,) for c in calls[1:])        # only the unpinned one after
     assert len(prompts) == 3      # max_attempts for _SITE, the first of which pinned `other`
+    assert got_pins == [(other,)]  # the body the panic landed in, not the one asked
 
 
 def test_the_file_name_takes_the_first_free_index() -> None:
@@ -250,9 +256,12 @@ def test_a_poke_the_original_passes_with_the_body_emptied_is_refused(tmp_path: P
     assert _observing(tmp_path, red)[0] == 1
 
 
-def test_a_body_that_could_not_be_emptied_keeps_its_pin_unmeasured(tmp_path: Path) -> None:
-    green = TestRun(True, passed=frozenset({"reaches_probe"}))
-    assert _observing(tmp_path, green, unit=False)[0] == 1
+def test_a_body_that_could_not_be_emptied_is_refused(tmp_path: Path) -> None:
+    """No reading is not a yes. Nothing could be emptied, or that run did
+    not build, so the pin is refused. Negative control: the same candidate
+    the emptied original fails is admitted (`test_a_poke_...`)."""
+    n, prompts, _ = _observing(tmp_path, TestRun(False), unit=False)
+    assert n == 0 and len(prompts) == 3 and "unmeasured" in prompts[1]
 
 
 def test_emptying_drops_the_body_of_a_named_unit_fn_only(tmp_path: Path) -> None:
