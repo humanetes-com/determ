@@ -19,6 +19,10 @@ needs is a red test owned by that body, and this pass writes one:
 - an admitted file is written to `tests/` through the one writer that moves
   the oracle seal with it (`admit`), so the seal and every clock keyed on the
   oracle move by rule, not by drift;
+- a test of the candidate that the original fails is withdrawn from it
+  (`withdraw_original_failures`) and goes on the record with the original's
+  excerpt, so later attempts see it; the rest is run on the original again
+  and judged without it;
 - a refused candidate goes back into the next attempt's prompt with its
   reason, up to `max_attempts`. The record is kept per build world, not per
   body: the judge decides on the world's whole blocking set, so a refusal
@@ -49,6 +53,7 @@ from pipeline_core.domain.pinning_test import (
     judge_pin,
     observes_blocking,
     pin_shape_refusal,
+    withdraw_original_failures,
 )
 from pipeline_core.domain.text import extract_code_content
 from pipeline_core.prompts.pinning_test import build_pinning_test_prompt
@@ -228,6 +233,18 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
             why = f"{judgement.refusal}: {judgement.detail}"
         else:
             original = deps.run_original(project_dir, module, stem, text, world)
+            cut = withdraw_original_failures(text, original)
+            if cut is not None:
+                gone = ", ".join(sorted(cut.withdrawn))
+                deps.log(f"  [t4/pin] {label} ({wname}) attempt {attempt}: withdrew "
+                         f"{gone} (failed on the original crate); the rest of the "
+                         "file is judged without it.")
+                deps.emit("task4.pin_withdrawn", data={
+                    "site": label, "world": wname, "attempt": attempt,
+                    "withdrawn": sorted(cut.withdrawn), "detail": cut.detail[:2000]})
+                previous.append((label, text, f"{PinRefusal.ORIGINAL_FAILED}: {cut.detail}"))
+                text = cut.text
+                original = deps.run_original(project_dir, module, stem, text, world)
             rebuilt, hits_by_site = deps.run_rebuilt(
                 project_dir, module, stem, text, world, unpinned)
             hits = frozenset(t for ts in hits_by_site.values() for t in ts)
@@ -268,7 +285,11 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
             "site": label, "world": wname, "attempt": attempt,
             "reason": str(judgement.refusal) if judgement and judgement.refusal else "no_file",
             "detail": why[:2000]})
-        previous.append((label, text or reply[:4000], why[:1500]))
+        # Stored whole: the evidence in it is already bounded, once and on a
+        # line boundary, where the run is read (`pin_runs.reading_of`). A
+        # second head cut here dropped the end of the compiler's output on
+        # run `4184066-ce008393` (2026-10-19).
+        previous.append((label, text or reply[:4000], why))
     return tuple(pinned_all), files
 
 

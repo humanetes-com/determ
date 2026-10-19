@@ -1386,6 +1386,49 @@ def locate_item_declaration(
     return nested[0] if len(nested) == 1 else None
 
 
+def without_test_fns(text: str, names: Iterable[str]) -> str | None:
+    """`text` with each named `#[test]` fn removed whole: its attributes, the
+    `///` doc lines directly above it, and the lines it occupies. None when a
+    name is not a test fn of `text`, cannot be located uniquely, or the
+    removal would take any other test with it.
+
+    The span is the structural one `locate_item_declaration` gives (outer
+    attributes included), widened to whole lines. Doc lines go with the item
+    because a `///` left with nothing after it is a compile error; plain `//`
+    comments stay, so a file-level marker comment above the first test is
+    never removed. Every other test is checked to survive by name, which is
+    what a caller withdrawing some tests and judging the rest relies on."""
+    want = sorted(set(names))
+    declared = attributed_test_fn_names(text)
+    if not want or any(n not in declared for n in want):
+        return None
+    out = text
+    for name in want:
+        span = locate_item_declaration(out, "fn", name)
+        if span is None:
+            return None
+        start, end = span
+        line_start = out.rfind("\n", 0, start) + 1
+        if out[line_start:start].strip():
+            return None
+        start = line_start
+        while start > 0:
+            prev = out.rfind("\n", 0, start - 1) + 1
+            row = out[prev:start].strip()
+            if not (row.startswith("///") and not row.startswith("////")):
+                break
+            start = prev
+        nl = out.find("\n", end)
+        if out[end:(len(out) if nl == -1 else nl)].strip():
+            return None
+        end = len(out) if nl == -1 else nl + 1
+        out = out[:start] + out[end:]
+    left = attributed_test_fn_names(out)
+    if sorted(left) != sorted(n for n in declared if n not in want):
+        return None
+    return out
+
+
 _MEMBER_KINDS = frozenset({"struct", "enum", "union"})
 
 

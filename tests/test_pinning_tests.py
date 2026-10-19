@@ -37,7 +37,9 @@ from pipeline_core.domain.pinning_test import (
     TestRun,
     check_criteria,
     judge_pin,
+    withdraw_original_failures,
 )
+from pipeline_core.domain.rust_scan import without_test_fns
 from pipeline_core.prompts.pinning_test import build_pinning_test_prompt
 
 _SITE = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < T >")
@@ -422,3 +424,121 @@ def test_a_refusal_reached_for_one_body_is_shown_to_its_sibling(tmp_path: Path) 
     base = SimpleNamespace(name="base", cfg_true=[], cfg_false=["alt"])
     apart = _run({_SITE: [alt], other: [base]})
     assert "CANDIDATE " not in apart[3]
+
+
+# --- a test the original fails is withdrawn, not held against the file --------
+
+_TWO = ("use krate::*;\n\n"
+        "#[test]\nfn reaches_probe() {\n    let v = fetch();\n    assert!(v.is_some());\n}\n\n"
+        "/// Guessed: the original returns nothing here.\n"
+        "#[test]\nfn reaches_probe_guessed() {\n    assert!(fetch_other().is_some(), \"guessed\");\n}\n")
+
+
+def test_the_named_test_goes_whole_and_the_others_stay() -> None:
+    """The removed test takes its attribute and its doc line, and a test at
+    the end of the file leaves no dangling text. Negative controls: a name
+    that is not a test of the file, and a file with nothing left to
+    compare, are refused rather than guessed."""
+    rest = without_test_fns(_TWO, ["reaches_probe_guessed"])
+    assert rest is not None
+    assert "reaches_probe_guessed" not in rest and "///" not in rest
+    assert "fn reaches_probe()" in rest and rest.rstrip().endswith("}")
+    assert without_test_fns(_TWO, ["fetch"]) is None
+    assert without_test_fns(_TWO, []) is None
+    marked = "// determ-pipeline generated integration test\n#[test]\nfn a() {}\n#[test]\nfn b() {}\n"
+    kept = without_test_fns(marked, ["a"])
+    assert kept == "// determ-pipeline generated integration test\n#[test]\nfn b() {}\n"
+    nested = "mod t {\n    #[test]\n    fn a() {}\n    #[test]\n    fn b() {}\n}\n"
+    assert without_test_fns(nested, ["b"]) == "mod t {\n    #[test]\n    fn a() {}\n}\n"
+
+
+def test_a_test_that_cannot_be_cut_alone_is_not_cut() -> None:
+    """Each shape where the cut would take more or less than the named test
+    is refused: an item sharing its line with the test before or after it,
+    two same-named tests in sibling modules, and a same-named test left
+    behind at another depth. A refused cut leaves the file to the judge,
+    which refuses it whole."""
+    assert without_test_fns("#[test]\nfn a() {} #[test] fn b() {}\n", ["b"]) is None
+    assert without_test_fns("#[test]\nfn a() {} fn helper() {}\n#[test]\nfn b() {}\n",
+                            ["a"]) is None
+    siblings = ("mod m {\n    #[test]\n    fn a() {}\n}\nmod n {\n    #[test]\n"
+                "    fn a() {}\n}\n#[test]\nfn b() {}\n")
+    assert without_test_fns(siblings, ["a"]) is None
+    shadowed = "#[test]\nfn a() {}\nmod m {\n    #[test]\n    fn a() {}\n}\n#[test]\nfn b() {}\n"
+    assert without_test_fns(shadowed, ["a"]) is None
+    one_line = "#[test]\nfn a() {} #[test] fn b() {}\n"
+    red = TestRun(True, frozenset({"a"}), frozenset({"b"}))
+    assert withdraw_original_failures(one_line, red) is None
+
+
+def test_only_measured_failures_are_withdrawn_and_never_the_whole_file() -> None:
+    both = TestRun(True, frozenset({"reaches_probe"}), frozenset({"reaches_probe_guessed"}),
+                   excerpt="guessed")
+    cut = withdraw_original_failures(_TWO, both)
+    assert cut is not None and cut.withdrawn == {"reaches_probe_guessed"}
+    assert "reaches_probe_guessed" in cut.detail and "guessed" in cut.detail
+    every = TestRun(True, failed=frozenset({"reaches_probe", "reaches_probe_guessed"}))
+    assert withdraw_original_failures(_TWO, every) is None
+    assert withdraw_original_failures(_TWO, TestRun(False, excerpt="error[E0425]")) is None
+    unreported = TestRun(True, frozenset({"reaches_probe"}))
+    assert withdraw_original_failures(_TWO, unreported) is None
+
+
+def test_a_file_whose_other_test_pins_is_admitted_without_the_failing_one(
+        tmp_path: Path, monkeypatch: Any) -> None:
+    """Run `4184066-ce008393` (2026-10-19): the one candidate that built
+    declared two tests; the original failed one, and the other passed every
+    check on its own. The file-level rule refused both and the pass ended
+    with no pin. Withdrawn, the rest is judged and admitted, and the
+    withdrawn test is on the record later attempts are shown. Negative
+    control: the pre-fix file-level rule refuses the same replies on every
+    attempt."""
+    import pipeline_core.application.pinning_tests as pt
+
+    def _run(withdraw: bool) -> tuple[int, list[str], list[str], list[str]]:
+        prompts: list[str] = []
+        admitted: list[str] = []
+        events: list[str] = []
+        if not withdraw:
+            monkeypatch.setattr(pt, "withdraw_original_failures", lambda *_a: None)
+        else:
+            monkeypatch.setattr(pt, "withdraw_original_failures", withdraw_original_failures)
+        deps = _deps(tmp_path, [f"```rust\n{_TWO}```"] * 3,
+                     [(_OK_ORIG, _RED_REBUILT, frozenset({"reaches_probe"}))] * 3,
+                     prompts, admitted)
+        deps = _with(
+            deps,
+            run_original=lambda *a: (
+                TestRun(True, frozenset({"reaches_probe"}),
+                        frozenset({"reaches_probe_guessed"}), excerpt="guessed")
+                if "reaches_probe_guessed" in a[3]
+                else TestRun(True, frozenset({"reaches_probe"}))),
+            emit=lambda name, **_k: events.append(name))
+        n = run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps)
+        return n, prompts, admitted, events
+
+    n, prompts, admitted, events = _run(True)
+    assert n == 1 and len(prompts) == 1
+    assert events[:2] == ["task4.pin_withdrawn", "task4.pin_admitted"]
+    text = admitted[0].split("\n", 1)[1]
+    assert "fn reaches_probe()" in text and "reaches_probe_guessed" not in text
+    n, prompts, admitted, _ = _run(False)
+    assert n == 0 and admitted == [] and len(prompts) == 3
+    assert "original_failed" in prompts[1]
+
+
+def test_the_withdrawn_test_is_shown_to_the_next_attempt(tmp_path: Path) -> None:
+    """When the rest of the file is refused too, the next prompt carries both
+    records: the withdrawn test with the original's words, and the rest
+    with its own refusal."""
+    prompts: list[str] = []
+    green = TestRun(True, passed=frozenset({"reaches_probe"}))
+    deps = _deps(tmp_path, [f"```rust\n{_TWO}```"] * 2,
+                 [(_OK_ORIG, green, frozenset())] * 2, prompts, [])
+    deps = _with(deps, max_attempts=2, run_original=lambda *a: (
+        TestRun(True, frozenset({"reaches_probe"}),
+                frozenset({"reaches_probe_guessed"}), excerpt="left: None")
+        if "reaches_probe_guessed" in a[3] else TestRun(True, frozenset({"reaches_probe"}))))
+    assert run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps) == 0
+    assert "refused: original_failed: on the original crate reaches_probe_guessed" in prompts[1]
+    assert "left: None" in prompts[1] and "refused: rebuilt_passed" in prompts[1]

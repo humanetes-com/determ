@@ -39,6 +39,17 @@ blocking body could be emptied, or that run does not build, the check is
 not measured and the candidate is refused: a missing reading is not
 evidence the test observes the body.
 
+A test the original fails is withdrawn from the candidate, not held against
+the file (`withdraw_original_failures`): the oracle's rule is per test, and
+the behaviour emitter already withdraws a capture the original fails
+(`emit_behaviour_tests._withdraw`). On run `4184066-ce008393` (2026-10-19)
+the one candidate that built declared two tests; the original failed one
+and passed the other, and the other passed every check on its own (the
+rebuilt tree panicked inside the blocking body, the emptied original failed
+it). The file-level rule refused both, and the pass ended with no pin. The
+rest of the file is run again on the original and judged by the unchanged
+checks; a file whose every test the original fails stays refused.
+
 A test that passes on the rebuilt tree is evidence the route it took does not
 reach the body there; it is refused, never admitted as a green addition. A
 test that fails on the rebuilt tree somewhere else is evidence about another
@@ -52,10 +63,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from pipeline_core.domain.oracle_admission import weakening_reason
-from pipeline_core.domain.rust_scan import attributed_test_fn_names
+from pipeline_core.domain.rust_scan import attributed_test_fn_names, without_test_fns
 
 __all__ = ["PinRefusal", "PinCriterion", "PIN_CRITERIA", "TestRun", "PinJudgement",
-           "check_criteria", "judge_pin", "pin_shape_refusal", "observes_blocking"]
+           "check_criteria", "judge_pin", "pin_shape_refusal", "observes_blocking",
+           "PinWithdrawal", "withdraw_original_failures"]
 
 
 class PinRefusal(StrEnum):
@@ -97,7 +109,9 @@ PIN_CRITERIA: tuple[PinCriterion, ...] = (
     PinCriterion(
         frozenset({PinRefusal.ORIGINAL_DID_NOT_RUN, PinRefusal.ORIGINAL_FAILED}),
         "It is built and run against the ORIGINAL crate: it must build, and "
-        "every test in it must pass. Assert only what the public API "
+        "every test in it must pass. A test that fails there is removed from "
+        "the file and the rest is judged without it; when every test fails "
+        "there, the file is refused. Assert only what the public API "
         "documents or what the call must do; a guessed value fails here."),
     PinCriterion(
         frozenset({PinRefusal.REBUILT_DID_NOT_RUN, PinRefusal.REBUILT_PASSED,
@@ -166,6 +180,43 @@ def pin_shape_refusal(text: str) -> PinJudgement | None:
     if weak:
         return PinJudgement(False, PinRefusal.SHAPE, weak)
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class PinWithdrawal:
+    """The candidate without the tests the original failed: the text that is
+    judged instead, the tests taken out, and the reason the writer is shown
+    for them."""
+
+    text: str
+    withdrawn: frozenset[str]
+    detail: str
+
+
+def withdraw_original_failures(text: str, original: TestRun) -> PinWithdrawal | None:
+    """The candidate with every test the original run FAILED removed, or None
+    when there is nothing to withdraw: the run gave no reading, no declared
+    test failed, every declared test failed (nothing is left to judge; the
+    file stays `original_failed`), or the failed tests cannot be removed
+    without touching another test (`without_test_fns`).
+
+    Only measured failures are withdrawn. A declared test the run did not
+    report is not evidence of anything; it stays in the file and the
+    judge's `declared <= original.passed` refuses it after the re-run."""
+    if not original.ran:
+        return None
+    declared = frozenset(attributed_test_fn_names(text))
+    failed = declared & original.failed
+    if not failed or failed == declared:
+        return None
+    rest = without_test_fns(text, failed)
+    if rest is None:
+        return None
+    names = ", ".join(sorted(failed))
+    return PinWithdrawal(
+        rest, failed,
+        f"on the original crate {names} did not pass, so {names} was removed "
+        "from the file and the rest was judged without it: " + original.excerpt)
 
 
 def judge_pin(text: str, original: TestRun, rebuilt: TestRun,
