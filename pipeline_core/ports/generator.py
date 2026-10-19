@@ -161,6 +161,7 @@ class FillEngine(Protocol):
         cluster_env: dict[str, str], leaf_counts: dict[str, int] | None,
         fr_path: Path | None, test_cmd_builder: Any, tag: str,
         heal_file: Any = ..., score_only: bool = ...,
+        worlds: Any = ...,
     ) -> ClusterFillResult: ...
     def fill_fns_one_by_one(
         self, *, project_dir: Path, target_src_dir: Path,
@@ -190,10 +191,6 @@ class FillEngine(Protocol):
     def scan_unimplemented_functions(
         self, src_dir: Path,
     ) -> StubInventory: ...
-    def merge_cluster_outputs(
-        self, *, project_dir: Path, cluster_specs: dict[str, BuildCluster],
-        successes: list[dict[str, Any]], prefer_cluster: str | None = ...,
-    ) -> dict[str, Any]: ...
     def generate_fix_loop(
         self, *, project_dir: Path, check_cmd: str, source_paths: list[Path],
         existing_test_files: set[str], model: str | None = ...,

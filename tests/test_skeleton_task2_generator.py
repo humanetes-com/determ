@@ -4,8 +4,8 @@ The 4-phase skeleton generator is a use-case over the `ports.generator` roles
 (Cargo, FillEngine, Clusters, GenTests, SourceScan, Telemetry, Workspace). These
 tests inject one fake object satisfying every role (mirroring `_Task2Adapter`)
 and drive each branch — happy paths (per-group, per-fn fn_walk, per-fn tdd),
-resume skips, abort guards, the validate-revert loop, and the post-merge loop
-(pass / stall / timeout / fill). No cargo, no LLM, no real pipeline.py.
+resume skips, abort guards, the validate-revert loop, the one-tree loop over
+every world, and the publish. No cargo, no LLM, no real pipeline.py.
 """
 from __future__ import annotations
 
@@ -275,8 +275,7 @@ def _cfg(*, per_fn: bool, tdd: bool, parallelism: int = 1,
     return SkeletonConfig(
         task2_model="m", parallelism=parallelism, phase_c_per_fn=per_fn,
         phase_c_tdd=tdd, phase_c_max_passes=1, validate_iters=2,
-        post_merge_max_stalls=2, post_merge_hard_cap=hard_cap,
-        post_merge_test_timeout=10, recently_filled_max=5,
+        recently_filled_max=5,
     )
 
 
@@ -384,7 +383,7 @@ def test_skeleton_fix_loop_aborts_cluster(tmp_path: Path) -> None:
     pd = _make_project(tmp_path, [c])
     # cluster aborts but generate() still completes (merge of zero successes).
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("cluster aborted" in m for m in fake.logs)
+    assert any("tree aborted" in m for m in fake.logs)
 
 
 def test_skeleton_fix_loop_exhaustion_salvaged_when_tree_still_compiles(
@@ -401,7 +400,7 @@ def test_skeleton_fix_loop_exhaustion_salvaged_when_tree_still_compiles(
     fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
     pd = _make_project(tmp_path, [c])
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert not any("cluster aborted" in m for m in fake.logs)
+    assert not any("tree aborted" in m for m in fake.logs)
     assert any("salvaging" in m for m in fake.logs)
 
 
@@ -412,32 +411,7 @@ def test_cluster_exception_caught(tmp_path: Path) -> None:
     pd = _make_project(tmp_path, [c])
     with pytest.raises(PipelineCodeCrash):
         _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
-    assert any("cluster crashed" in m for m in fake.logs)
-
-
-def test_clusters_run_serially_even_with_parallelism(tmp_path: Path) -> None:
-    # Cluster-level parallelism is gone — shared-fn seeding needs the
-    # previous cluster's accepted bodies on disk before the next cluster starts.
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")])
-    pd = _make_project(tmp_path, cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True, parallelism=2))) is True
-    assert any("runs clusters serially" in m for m in fake.logs)
-
-
-def test_completed_cluster_is_checkpointed_per_cluster(tmp_path: Path) -> None:
-    # Without a per-cluster marker, re-entering task2a replays cluster 1's whole
-    # Phase A→D before reaching the cluster that needs work. A cluster that ran
-    # to completion records its own key.
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")])
-    pd = _make_project(tmp_path, cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    keys = [k for k, status, _ in fake.marks if status == "done"]
-    assert "task2a/crate/default" in keys
-    assert "task2a/crate/nightly" in keys
+    assert any("tree crashed" in m for m in fake.logs)
 
 
 def test_aborted_cluster_is_not_checkpointed(tmp_path: Path) -> None:
@@ -450,175 +424,23 @@ def test_aborted_cluster_is_not_checkpointed(tmp_path: Path) -> None:
     fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
     pd = _make_project(tmp_path, [c])
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("cluster aborted" in m for m in fake.logs)
-    assert "task2a/crate/default" not in [k for k, _s, _d in fake.marks]
-
-
-def test_a_cluster_whose_fill_crashed_is_not_checkpointed_or_called_exhausted(
-        tmp_path: Path) -> None:
-    """Run `486681-a304b30a` (2026-10-10): the TDD driver caught a TypeError
-    at both clusters' first fill and returned ok, so each was logged
-    `EXHAUSTED ... after its budgets were spent` and checkpointed done; a
-    resume would never have re-entered them. The crash is named and no marker
-    is written. Policy decided 2026-10-17: the next cluster is read by its
-    entry sweep only, the merge does not run, and the run ends on a
-    PipelineCodeCrash."""
-    import json
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")])
-    calls: list[tuple[str, bool]] = []
-
-    def _fill(**kw: Any) -> ClusterFillResult:
-        calls.append((kw["cluster"].name, bool(kw.get("score_only"))))
-        if kw["cluster"].name == "default":
-            return ClusterFillResult(
-                failed_tests=frozenset({"t"}), ran_tests=frozenset({"t"}),
-                crashed="TypeError: run() got an unexpected keyword argument 'x'",
-                crash_traceback="Traceback (most recent call last): ...")
-        return ClusterFillResult(failed_tests=frozenset({"u"}),
-                                 ran_tests=frozenset({"t", "u"}),
-                                 scored_only=True)
-    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
-    merged: list[str] = []
-
-    def _merge(**kw: Any) -> dict[str, Any]:
-        merged.extend(str(s.get("cluster")) for s in kw["successes"])
-        return {"files_written": 1, "cfg_gated_fns": 0}
-    fake.merge_cluster_outputs = _merge  # type: ignore[method-assign]
-    pd = _make_project(tmp_path, cs)
-    with pytest.raises(PipelineCodeCrash) as exc:
-        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
-    assert calls == [("default", False), ("nightly", True)], (
-        "the cluster after the crash is read, never filled")
-    assert exc.value.crash.cluster == "default"
-    assert "unexpected keyword argument" in exc.value.crash.exception
-    assert [(c.cluster, c.how, c.failed) for c in exc.value.scores] == [
-        ("default", "crashed", ("t",)), ("nightly", "scored only", ("u",))]
-    done = [k for k, status, _ in fake.marks if status == "done"]
-    assert not [k for k in done if k.startswith("task2a/")], (
-        "neither the crashed nor the scored cluster, nor the stage, is done")
-    assert any("'default' CRASHED, not exhausted: TypeError" in m for m in fake.logs)
-    assert not any("is EXHAUSTED" in m for m in fake.logs)
-    evidence = json.loads(
-        (pd / ".skeleton" / "_cluster_evidence.json").read_text())
-    assert evidence["default"]["exit"] == "crashed"
-    assert merged == [], "the merge does not run after a pipeline crash"
-
-
-def test_an_escaped_fill_exception_scores_the_rest_and_skips_the_merge(
-        tmp_path: Path) -> None:
-    """An exception that escapes the cluster (no ClusterFillResult at all)
-    is the same crash: the traceback is kept, cluster 2 is read by its entry
-    sweep only, nothing merges. Control: the same two clusters ending
-    normally fill both, pass no score_only, and merge."""
-    cs = [_cluster("default"), _cluster("nightly")]
-
-    def _world(raise_on_first: bool) -> tuple[FakeAdapter, list[tuple[str, bool]],
-                                              list[str]]:
-        fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                           run_results=[(0, "ok")])
-        calls: list[tuple[str, bool]] = []
-        merged: list[str] = []
-
-        def _fill(**kw: Any) -> ClusterFillResult:
-            calls.append((kw["cluster"].name, bool(kw.get("score_only"))))
-            if raise_on_first and kw["cluster"].name == "default":
-                raise TypeError("run() got an unexpected keyword argument 'y'")
-            return ClusterFillResult(ran_tests=frozenset({"t"}),
-                                     scored_only=bool(kw.get("score_only")))
-
-        def _merge(**kw: Any) -> dict[str, Any]:
-            merged.extend(str(s.get("cluster")) for s in kw["successes"])
-            return {"files_written": 1, "cfg_gated_fns": 0}
-        fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
-        fake.merge_cluster_outputs = _merge  # type: ignore[method-assign]
-        return fake, calls, merged
-
-    fake, calls, merged = _world(raise_on_first=True)
-    pd = _make_project(tmp_path / "crash", cs)
-    with pytest.raises(PipelineCodeCrash) as exc:
-        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
-    assert calls == [("default", False), ("nightly", True)]
-    assert "TypeError" in exc.value.crash.exception
-    assert "Traceback" in exc.value.crash.traceback
-    assert merged == []
-    assert exc.value.report()[0].startswith("HEALTH ‼ PIPELINE_CODE_CRASH")
-
-    fake, calls, merged = _world(raise_on_first=False)
-    pd = _make_project(tmp_path / "normal", cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert calls == [("default", False), ("nightly", False)]
-    assert sorted(merged) == ["default", "nightly"]
-
-
-def test_checkpointed_cluster_is_skipped_but_still_seeds_the_next(
-        tmp_path: Path) -> None:
-    # The resume the whole change exists for: cluster 1 is done and its tree is
-    # on disk, cluster 2 is not. Cluster 1's Phase A→D must not re-run — and
-    # cluster 2 must still be seeded FROM ITS TREE, since the seed is read off
-    # the tree, not off the run that produced it.
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")],
-                       phase_valid_keys={"task2a/crate/default"})
-    pd = _make_project(tmp_path, cs)
-    done_tree = pd / ".skeleton-filled" / "default" / "src"
-    done_tree.mkdir(parents=True)
-    (done_tree / "lib.rs").write_text("fn foo() -> i32 {\n    42\n}\n",
-                                      encoding="utf-8")
-    filled_for: list[str] = []
-
-    def _fill(**kw: Any) -> ClusterFillResult:
-        filled_for.append(Path(kw["target_src_dir"]).name)
-        lib = kw["target_src_dir"] / "src" / "lib.rs"
-        assert "42" in lib.read_text(encoding="utf-8")
-        return _PER_FN_RESULT
-
-    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert filled_for == ["nightly"]
-    assert any("already reconstructed" in m for m in fake.logs)
+    assert any("tree aborted" in m for m in fake.logs)
+    assert "task2a/crate" not in [k for k, s_, _d in fake.marks if s_ == "done"]
 
 
 def test_checkpointed_cluster_reruns_when_its_tree_is_gone(tmp_path: Path) -> None:
-    # Marker without artifact is the stale-checkpoint case task2b/task2c already
-    # guard: the cluster runs, it is not fabricated as ok.
+    # Marker without artifact is the stale-checkpoint case task2b already
+    # guards: the tree's loop runs, it is not fabricated as ok.
     cs = [_cluster("default")]
     fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
                        run_results=[(0, "ok")],
-                       phase_valid_keys={"task2a/crate/default"})
+                       phase_valid_keys={"task2a/crate"})
     pd = _make_project(tmp_path, cs)
     ran: list[str] = []
     fake.run_phase_c_tdd = lambda **kw: (  # type: ignore[method-assign]
         ran.append(kw["cluster"].name) or _PER_FN_RESULT)
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
     assert ran == ["default"]
-
-
-def test_second_cluster_seeds_shared_bodies_from_first(tmp_path: Path) -> None:
-    # The default cluster fills `foo`; the nightly cluster must start
-    # from that body (seeded into its stub) instead of re-filling it.
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")])
-    seen_at_fill: list[str] = []
-
-    def _fill(**kw: Any) -> ClusterFillResult:
-        lib = kw["target_src_dir"] / "src" / "lib.rs"
-        text = lib.read_text(encoding="utf-8")
-        seen_at_fill.append(text)
-        if "unimplemented!()" in text:
-            lib.write_text("fn foo() -> i32 {\n    42\n}\n", encoding="utf-8")
-        return _PER_FN_RESULT
-
-    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
-    pd = _make_project(tmp_path, cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    # default saw the stub; nightly saw the ALREADY-SEEDED body.
-    assert "unimplemented!()" in seen_at_fill[0]
-    assert "42" in seen_at_fill[1] and "unimplemented!()" not in seen_at_fill[1]
-    assert any("[ownership] seeded 1 shared fn" in m for m in fake.logs)
 
 
 def test_a_fresh_cluster_tree_is_a_crate_before_its_first_check(
@@ -639,7 +461,7 @@ def test_a_fresh_cluster_tree_is_a_crate_before_its_first_check(
               if ".skeleton-filled" in d.parts]
     assert filled, "the entry checks ran on the cluster trees"
     assert all(has for _d, has in filled), filled
-    tree = pd / ".skeleton-filled" / "nightly"
+    tree = pd / ".skeleton-filled" / "default"
     assert (tree / "tests").is_symlink()
     assert (tree / "src" / "lib.gen_tests_1.rs").is_file()
 
@@ -660,30 +482,6 @@ def test_control_without_the_crate_root_the_entry_check_has_no_manifest(
     assert filled and not filled[0]
 
 
-def test_premerge_backfill_adopts_sibling_body(tmp_path: Path) -> None:
-    # A stub left in one cluster's tree adopts the body a sibling
-    # cluster accepted, so the merge never emits a dead unimplemented!() variant.
-    cs = [_cluster("default"), _cluster("nightly")]
-    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
-                       run_results=[(0, "ok")])
-    calls = {"n": 0}
-
-    def _fill(**kw: Any) -> ClusterFillResult:
-        calls["n"] += 1
-        if calls["n"] == 2:  # only the SECOND cluster produces a body
-            (kw["target_src_dir"] / "src" / "lib.rs").write_text(
-                "fn foo() -> i32 {\n    7\n}\n", encoding="utf-8")
-        return _PER_FN_RESULT
-
-    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
-    pd = _make_project(tmp_path, cs)
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("pre-merge backfill: 1 stub body(ies) adopted" in m
-               for m in fake.logs)
-    default_lib = pd / ".skeleton-filled" / "default" / "src" / "lib.rs"
-    assert "unimplemented!()" not in default_lib.read_text(encoding="utf-8")
-
-
 def test_resume_skips_all_phases(tmp_path: Path) -> None:
     c = _cluster()
     fake = FakeAdapter(
@@ -698,7 +496,7 @@ def test_resume_skips_all_phases(tmp_path: Path) -> None:
     fd.mkdir(parents=True)
     (fd / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("task2a (per-cluster reconstruction) already done" in m
+    assert any("task2a (the one tree) already done" in m
                for m in fake.logs)
 
 
@@ -739,59 +537,6 @@ def _post(fake: FakeAdapter, pd: Path, cfg: SkeletonConfig) -> None:
         functional_req="")
 
 
-def test_post_merge_hard_cap_zero_noop(tmp_path: Path) -> None:
-    c = _cluster()
-    fake = FakeAdapter(clusters_list=[c])
-    pd = _make_project(tmp_path, [c])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True, hard_cap=0))
-    assert not fake.events
-
-
-def test_post_merge_pass_first_iter(tmp_path: Path) -> None:
-    c = _cluster()
-    fake = FakeAdapter(clusters_list=[c], run_results=[(0, "ok")])
-    pd = _make_project(tmp_path, [c])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.fill.iter" in fake.events
-
-
-def test_post_merge_green_exit_sweeps_every_cluster_oracle(
-        tmp_path: Path) -> None:
-    """The default-env run measures only the default cluster's cfg-set — on
-    2026-08-12 this loop logged `PASSED (13 passed)` with the 17 extra_cap
-    tests unmeasured. A sibling cluster RED under its own env must stop the
-    stage from standing behind the tree (no task2c `done` marker)."""
-    c1, c2 = _cluster(), _cluster("extra_cap")
-    fake = FakeAdapter(
-        clusters_list=[c1, c2],
-        # default-env sweep green; per-cluster sweep: default green,
-        # extra_cap RED under its own cfg.
-        run_results=[(0, "ok"), (0, "ok"),
-                     (101, "test t9 ... FAILED\n"
-                           "test result: FAILED. 3 passed; 1 failed; 0 ignored")])
-    pd = _make_project(tmp_path, [c1, c2])
-    ok = _gen(fake, _cfg(per_fn=True, tdd=True))._post_merge_fill_pass(
-        project_dir=pd, clusters=fake.clusters_list, module="crate",
-        functional_req="")
-    assert ok is False
-    assert "post_merge.cluster_oracle_red" in fake.events
-
-
-def test_post_merge_green_exit_returns_true_when_all_clusters_green(
-        tmp_path: Path) -> None:
-    # NEGATIVE CONTROL: both clusters green under their own env → unchanged
-    # green exit.
-    c1, c2 = _cluster(), _cluster("extra_cap")
-    fake = FakeAdapter(clusters_list=[c1, c2],
-                       run_results=[(0, "ok"), (0, "ok"), (0, "ok")])
-    pd = _make_project(tmp_path, [c1, c2])
-    ok = _gen(fake, _cfg(per_fn=True, tdd=True))._post_merge_fill_pass(
-        project_dir=pd, clusters=fake.clusters_list, module="crate",
-        functional_req="")
-    assert ok is True
-    assert "post_merge.cluster_oracle_red" not in fake.events
-
-
 _ORIGINAL_ALSO_FAILS = (
     "     Running tests/basic.rs (target/debug/deps/basic-1)\n"
     "\nrunning 2 tests\ntest a ... ok\ntest b ... ok\n\n"
@@ -817,240 +562,6 @@ def _reference_failing(cluster: str, output: str) -> Any:
         cluster=cluster, passed=passed, failed=failed,
         announced=len(passed) + len(failed), reported=len(passed) + len(failed),
         rc=101)})
-
-
-def test_post_merge_cluster_failing_only_what_the_original_fails_is_not_red(
-        tmp_path: Path) -> None:
-    """Run 185710-f6135a93 (2026-09-17): task2a closed `nightly` on the
-    reference floor (its one failure is a trybuild test the original crate also
-    fails), task3 passed it on the same floor, and this sweep alone refused the
-    merged tree as RED under its own cfg, so task2c was never marked done. The
-    per-cluster sweep rules on the same floor."""
-    import dataclasses
-    c1, c2 = _cluster(), _cluster("extra_cap")
-    fake = FakeAdapter(clusters_list=[c1, c2],
-                       run_results=[(0, "ok"), (0, "ok"),
-                                    (101, _ORIGINAL_ALSO_FAILS)])
-    pd = _make_project(tmp_path, [c1, c2])
-    ref = _reference_failing("extra_cap", _ORIGINAL_ALSO_FAILS)
-    gen = dataclasses.replace(_gen(fake, _cfg(per_fn=True, tdd=True)),
-                              reference_measurement=lambda _pd: ref)
-    ok = gen._post_merge_fill_pass(project_dir=pd, clusters=fake.clusters_list,
-                                   module="crate", functional_req="")
-    assert ok is True
-    assert "post_merge.cluster_floor_met" in fake.events
-    assert "post_merge.cluster_oracle_red" not in fake.events
-
-
-def test_post_merge_cluster_red_without_a_reference_or_past_its_floor(
-        tmp_path: Path) -> None:
-    # NEGATIVE CONTROLS: the same sweep with no reference wired (the pre-fix
-    # gate), and with a reference whose original PASSES the failing test, both
-    # still refuse the merged tree.
-    import dataclasses
-    passing_ui = _ORIGINAL_ALSO_FAILS.replace(
-        "test ui ... FAILED", "test ui ... ok").replace(
-        "FAILED. 0 passed; 1 failed", "ok. 1 passed; 0 failed")
-    for wired in (None, _reference_failing("extra_cap", passing_ui)):
-        c1, c2 = _cluster(), _cluster("extra_cap")
-        fake = FakeAdapter(clusters_list=[c1, c2],
-                           run_results=[(0, "ok"), (0, "ok"),
-                                        (101, _ORIGINAL_ALSO_FAILS)])
-        pd = _make_project(tmp_path / str(wired is None), [c1, c2])
-        gen = _gen(fake, _cfg(per_fn=True, tdd=True))
-        if wired is not None:
-            gen = dataclasses.replace(gen, reference_measurement=lambda _pd, r=wired: r)
-        ok = gen._post_merge_fill_pass(
-            project_dir=pd, clusters=fake.clusters_list, module="crate",
-            functional_req="")
-        assert ok is False
-        assert "post_merge.cluster_oracle_red" in fake.events
-
-
-def test_post_merge_timeout(tmp_path: Path) -> None:
-    c = _cluster()
-    fake = FakeAdapter(clusters_list=[c], run_results=[(-1, "")])
-    pd = _make_project(tmp_path, [c])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.fill.iter" in fake.events
-
-
-def test_post_merge_fill_then_stall_exit(tmp_path: Path) -> None:
-    c = _cluster()
-    frontier = {("src/lib.rs", "foo"): {"t"}}
-    fake = FakeAdapter(
-        clusters_list=[c],
-        # iter1 fails+fills, iter2 no-improve, iter3 no-improve → stall_exit
-        run_results=[(1, "fail"), (1, "fail"), (1, "fail")],
-        attribute_seq=[(dict(frontier), FailureKind.RUNTIME),
-                       (dict(frontier), FailureKind.RUNTIME),
-                       (dict(frontier), FailureKind.RUNTIME)],
-    )
-    pd = _make_project(tmp_path, [c])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert fake.events.count("post_merge.fill.iter") >= 1
-
-
-def test_post_merge_wave_is_capped_and_the_cursor_walks(
-        tmp_path: Path, monkeypatch) -> None:
-    """One post-merge iteration was one unbounded wager: the whole eligible
-    frontier went to the engine with no mid-wave sweep, so run
-    `3579062-476abc3b` landed 120 fills over 6 h and one crashing binary
-    voided all of them on a single reading. The cap slices the frontier and
-    the stall budget charges per completed traversal, so the plateau exit
-    still buys `max_stalls` traversals, not `max_stalls` slices."""
-    monkeypatch.setenv("POST_MERGE_MAX_DISPATCH", "2")
-    c = _cluster()
-    frontier = {(f"src/f{i}.rs", f"fn{i}"): {"t"} for i in range(5)}
-    flat = (101, "test result: FAILED. 3 passed; 2 failed")
-    fake = FakeAdapter(
-        clusters_list=[c], run_results=[flat] * 12,
-        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 12)
-    batches: list[set] = []
-    fake.fill_fns_one_by_one = lambda **kw: (
-        batches.append(set(kw["tdd_frontier_keys"])), _PER_FN_RESULT)[1]
-    pd = _make_project(tmp_path, [c])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert batches and all(len(b) <= 2 for b in batches), \
-        "the cap must hold every iteration"
-    # Two full traversals before the plateau exit (max_stalls=2): 3 batches
-    # each, every unit dispatched in each traversal. The rank fills the last
-    # batch of a pass with the longest-waiting unit rather than leaving its
-    # slot empty, so a unit may be offered a third time; none is offered
-    # fewer than twice.
-    assert len(batches) == 6, f"got {len(batches)} batch(es)"
-    for half in (batches[:3], batches[3:]):
-        assert set().union(*half) == set(frontier), (
-            "a capped flat run must spend whole traversals — a partial "
-            "cohort at the exit is the premature close the 2026-08-18 night "
-            "recorded")
-    stop = [ln for ln in fake.logs if "plateau" in ln and "stopping" in ln]
-    assert stop and "5 of 5 frontier fn(s) were dispatched" in stop[0]
-
-
-def test_post_merge_below_floor_needs_a_reproduced_breach(
-        tmp_path: Path) -> None:
-    """A crashed binary removes numerator and denominator together, so one
-    below-floor reading can be noise: the overnight run's `32/2` (96 tests
-    announced-but-silent) convicted and destroyed the 120-fill wave three
-    times. Only a reproduced breach earns the destructive restore."""
-    c = _cluster()
-    frontier = {("src/lib.rs", "foo"): {"t"}}
-    good = (101, "test result: FAILED. 5 passed; 1 failed")
-    crashy = (101, "test result: FAILED. 1 passed; 1 failed")
-    fake = FakeAdapter(
-        clusters_list=[c],
-        # iter1 sets the floor at 5; iter2 reads a 1 (noise); the confirm
-        # re-sweep reads 5 again → keep the tree.
-        run_results=[good, crashy, good, good],
-        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 4)
-    pd = _make_project(tmp_path, [c])
-    (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.breach_not_reproduced" in fake.events
-    assert "post_merge.tree_restored" not in fake.events, (
-        "a single unreproduced below-floor reading destroyed the wave — "
-        "the recorded crash-noise conviction")
-
-
-def test_post_merge_reproduced_breach_restores_then_resweeps(
-        tmp_path: Path) -> None:
-    """A reproduced breach restores — and the iteration then re-enters for a
-    fresh sweep instead of filling from the discarded tree's attribution
-    (the recorded run filled the restored tree from the crashed wave's
-    output, then exhausted units on the mismatch). A restored tree that
-    re-measures below the floor re-bases the high-water rather than looping
-    restore -> sweep -> restore."""
-    c = _cluster()
-    frontier = {("src/lib.rs", "foo"): {"t"}}
-    good = (101, "test result: FAILED. 5 passed; 1 failed")
-    crashy = (101, "test result: FAILED. 1 passed; 1 failed")
-    fake = FakeAdapter(
-        clusters_list=[c],
-        # iter1 floor=5; iter2 reads 1, confirm reads 1 (reproduced) →
-        # restore + continue; iter3 fresh sweep still 1 → re-base, no second
-        # restore.
-        run_results=[good, crashy, crashy, crashy, crashy, crashy],
-        attribute_seq=[(dict(frontier), FailureKind.RUNTIME)] * 6)
-    fills_by_iter: list[int] = []
-    fake.fill_fns_one_by_one = lambda **kw: (
-        fills_by_iter.append(1), _PER_FN_RESULT)[1]
-    pd = _make_project(tmp_path, [c])
-    (pd / "src" / "lib.rs").write_text("fn foo() {}\n", encoding="utf-8")
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.tree_restored" in fake.events
-    restore_count = fake.events.count("post_merge.tree_restored")
-    assert restore_count == 1, (
-        f"{restore_count} restores — the restore/re-sweep pair must not loop")
-    assert "post_merge.highwater_rebased" in fake.events
-    # The iteration that restored did not fill from the stale attribution:
-    # iter1 filled, iter2 restored+continued (no fill), iter3+ resumed.
-    assert any("re-based" in ln for ln in fake.logs)
-
-
-def test_post_merge_batch_that_breaks_a_cfg_world_is_reverted(
-        tmp_path: Path, monkeypatch) -> None:
-    """The second cfg-world seam: a fill written INTO the merged tree passes
-    only default-world gates (the engine's splice check, the sweep), so a
-    body reading an item another world's cfg removes ships clean and
-    surfaces at task3 — one boundary after the merge-time world check. The
-    gate is per batch: a divergent world that was green and went red after
-    the batch convicts the batch fns its own compiler implicates."""
-    c1, c2 = _cluster(), _cluster("nightly")
-    c2.env_extra = {"RUSTFLAGS": "--cfg error_generic_member_access"}
-    key = ("src/lib.rs", "foo")
-    flat = (101, "test result: FAILED. 3 passed; 2 failed")
-    fake = FakeAdapter(
-        clusters_list=[c1, c2],
-        # baseline world check green; iter1 sweep flat; post-batch world
-        # check RED; post-revert recheck green; iter2 sweep flat + world
-        # green; iter3 sweep flat → plateau exit.
-        run_results=[(0, "ok"), flat, (101, "error[E0609]: no field"),
-                     (0, "ok"), flat, (0, "ok"), flat],
-        attribute_seq=[({key: {"t"}}, FailureKind.RUNTIME)] * 3,
-        diag_results=[(101, "error[E0609]: no field",
-                       [_Diag("src/lib.rs", "E0609", "no field")])],
-        implicated=[key],
-    )
-    reverts: list[list] = []
-    monkeypatch.setattr(
-        StaticSkeletonTask2Generator, "_revert_implicated",
-        lambda self, tag, implicated, *a, **k: (
-            reverts.append(list(implicated)), len(implicated))[1])
-    pd = _make_project(tmp_path, [c1, c2])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.world_broken_by_batch" in fake.events
-    data = dict(fake.event_data)["post_merge.world_broken_by_batch"]
-    assert data["world"] == "nightly"
-    assert reverts == [[key]], (
-        "the batch fn the red world's compiler implicates must be reverted "
-        "— the default-world splice gate accepted a body one world cannot "
-        "build")
-
-
-def test_post_merge_world_red_at_entry_is_inherited_not_relitigated(
-        tmp_path: Path, monkeypatch) -> None:
-    """A world already red when the loop starts was broken upstream (the
-    merge-time check names it); charging every later batch with it would
-    revert innocent fills each iteration."""
-    c1, c2 = _cluster(), _cluster("nightly")
-    c2.env_extra = {"RUSTFLAGS": "--cfg error_generic_member_access"}
-    key = ("src/lib.rs", "foo")
-    flat = (101, "test result: FAILED. 3 passed; 2 failed")
-    red = (101, "error[E0609]: no field")
-    fake = FakeAdapter(
-        clusters_list=[c1, c2],
-        # baseline RED; every post-batch check stays red.
-        run_results=[red, flat, red, flat, red, flat],
-        attribute_seq=[({key: {"t"}}, FailureKind.RUNTIME)] * 3,
-    )
-    monkeypatch.setattr(
-        StaticSkeletonTask2Generator, "_revert_implicated",
-        lambda self, *a, **k: (_ for _ in ()).throw(
-            AssertionError("an inherited world break convicted a batch")))
-    pd = _make_project(tmp_path, [c1, c2])
-    _post(fake, pd, _cfg(per_fn=True, tdd=True))
-    assert "post_merge.world_broken_by_batch" not in fake.events
 
 
 def test_validate_reverts_every_same_name_fn(tmp_path: Path) -> None:
@@ -1319,104 +830,107 @@ def test_the_env_handed_to_the_loop_is_the_clusters_own_not_the_active_scopes(
     assert "RUSTUP_TOOLCHAIN" not in old
 
 
-def test_the_post_merge_rank_holds_a_crash_culprit_the_localizer_names(
-        tmp_path: Path) -> None:
-    """The post-merge loop ranked with no crash facts, so a merged tree's
-    crash origin could sit past the dispatch cap (task2a's was rank 17 of
-    12 on run `14235-bf24f931` iter 3). With the localizer bound, a frontier
-    unit it convicts is held with the tests its crash stopped. Controls: no
-    localizer, or no dead binary, holds nothing."""
-    from types import SimpleNamespace
-
-    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
-    from pipeline_core.domain.models import FnLocator
-    culprit = FnLocator("src/lib.rs", "make")
-    other = FnLocator("src/lib.rs", "other")
-    site = CrashSite(
-        binary_label="tests/t.rs", test_name="t1", signal="SIGSEGV",
-        frames=(CrashFrame("src/lib.rs", 10, "make", "make"),),
-        origin_frames=(CrashFrame("src/lib.rs", 9, "make", "make"),),
-        origin_capable=True)
-    fake = FakeAdapter(clusters_list=[_cluster()])
-    gen = replace(_gen(fake, _cfg(per_fn=True, tdd=True)),
-                  localize_crashes=lambda *_a, **_k: (site,))
-    gap = SimpleNamespace(silent_binaries=("tests/t.rs",), missing=1)
-    eligible = {culprit: {"t1"}, other: {"t2"}}
-    got = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
-                                   gap, eligible)
-    assert set(got.culprits) == {culprit} and "t1" in got.culprits[culprit]
-    assert got.sites == (site,)
-    assert any("crash culprit(s) held in the batch" in m for m in fake.logs)
-    quiet = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
-                                     None, eligible)
-    assert quiet.culprits == {} and quiet.sites == ()
-    gen = replace(gen, localize_crashes=None)
-    quiet = gen._post_merge_culprits("[m]", 1, "out", "cargo test", tmp_path,
-                                     gap, eligible)
-    assert quiet.culprits == {} and quiet.sites == ()
 
 
-def test_post_merge_convicting_drops_a_crashed_test_from_a_non_culprit(
-        tmp_path: Path) -> None:
-    """The post-merge builder is the loop, not a helper it might skip. One
-    site names one culprit for one test. A second unit stays in the batch,
-    convicted by that test and by another that completed. Its
-    convicting_for omits the crashed test and keeps the completed one.
-    The crashed test stays on its dispatch. Negative control: no site, and
-    the map is the raw attribution map. One localizer call feeds both the
-    rank and the judgment."""
-    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
-    from pipeline_core.domain.models import FnLocator
-    culprit = FnLocator("src/lib.rs", "make")
-    other = FnLocator("src/lib.rs", "other")
-    frontier = {
-        culprit: {"t_crash", "t_done"},
-        other: {"t_crash", "t_done"},
-    }
-    site = CrashSite(
-        binary_label="tests/t.rs", test_name="t_crash", signal="SIGSEGV",
-        frames=(CrashFrame("src/lib.rs", 10, "make", "make"),),
-        origin_frames=(CrashFrame("src/lib.rs", 9, "make", "make"),),
-        origin_capable=True)
-    silent = (
-        "Running tests/t.rs (target/debug/deps/t-abc)\n"
-        "running 2 tests\n")
-    calls = {"n": 0}
+# --- one tree, one loop, every world ---------------------------------------
 
-    def _loc(*_a, **_k):
-        calls["n"] += 1
-        return (site,)
 
+def _two_worlds() -> list[BuildCluster]:
+    return [_cluster("default"),
+            replace(_cluster("nightly"), active_cfg=["egma"],
+                    env_extra={"RUSTFLAGS": "--cfg egma"})]
+
+
+def test_two_worlds_are_one_loop_over_one_tree(tmp_path: Path) -> None:
+    """On run `1680589-7a6824f8` (2026-10-19) task 2a ran one loop per
+    cluster and the two filled trees came out byte-identical. Two worlds now
+    run ONE loop, on the default world's tree, whose env makes every test run
+    cover each world, over the tests of both worlds; nothing merges, and the
+    stage keeps one checkpoint."""
+    from pipeline_core.domain.cluster_env import ALL_WORLDS_VAR, WORLD_VAR
+    cs = _two_worlds()
+    fake = FakeAdapter(clusters_list=cs, run_results=[(0, "ok")])
+    by_world = {"default": [("tests/it.rs", "x")],
+                "nightly": [("tests/it.rs", "x"), ("tests/n.rs", "y")]}
+    fake.filter_tests_for_cluster = (  # type: ignore[method-assign]
+        lambda pairs, c: list(by_world[c.name]))
+    calls: list[dict[str, Any]] = []
+    fake.run_phase_c_tdd = lambda **kw: (  # type: ignore[method-assign]
+        calls.append(kw) or _PER_FN_RESULT)
+    merged: list[Any] = []
+    fake.merge_cluster_outputs = lambda **kw: (  # type: ignore[method-assign]
+        merged.append(kw) or {"files_written": 1, "cfg_gated_fns": 0})
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["cluster"].name == "default"
+    assert kw["target_src_dir"] == pd / ".skeleton-filled" / "default"
+    assert sorted(w.name for w in kw["worlds"]) == ["default", "nightly"]
+    assert kw["cluster_env"][ALL_WORLDS_VAR] == "1"
+    assert kw["cluster_env"][WORLD_VAR] == "default"
+    assert sorted(r for r, _t in kw["cluster_tests"]) == ["tests/it.rs", "tests/n.rs"]
+    assert merged == []
+    done = [k for k, st, _ in fake.marks if st == "done"]
+    assert "task2a/crate" in done
+    assert not [k for k in done if k.startswith("task2a/crate/")]
+    assert not (pd / ".skeleton-filled" / "nightly").exists()
+
+
+def test_one_world_is_the_loop_it_always_was(tmp_path: Path) -> None:
+    """Control: a crate with one world runs that world's own identity, and
+    its env does not ask the runner for other worlds."""
+    from pipeline_core.domain.cluster_env import ALL_WORLDS_VAR
     c = _cluster()
-    fake = FakeAdapter(clusters_list=[c], run_results=[(101, silent)])
-    fake.attribute_failures = lambda *_a, **_k: AttributionResult(
-        dict(frontier), FailureKind.RUNTIME, dict(frontier))
-    seen: list = []
-    fake.fill_fns_one_by_one = lambda **kw: (
-        seen.append(kw["tdd_frontier_tests"]), _PER_FN_RESULT)[1]
-    gen = replace(_gen(fake, _cfg(per_fn=True, tdd=True, hard_cap=1)),
-                  localize_crashes=_loc)
+    fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    calls: list[dict[str, Any]] = []
+    fake.run_phase_c_tdd = lambda **kw: (  # type: ignore[method-assign]
+        calls.append(kw) or _PER_FN_RESULT)
     pd = _make_project(tmp_path, [c])
-    gen._post_merge_fill_pass(
-        project_dir=pd, clusters=fake.clusters_list, module="crate",
-        functional_req="")
-    assert len(seen) == 1 and calls["n"] == len(seen)
-    ff = seen[0]
-    assert other in ff.dispatch and "t_crash" in ff.tests_for(other)
-    assert "t_crash" not in ff.convicting_for(other)
-    assert "t_done" in ff.convicting_for(other)
-    assert "t_crash" in ff.convicting_for(culprit)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    assert calls[0]["cluster"] is c
+    assert ALL_WORLDS_VAR not in calls[0]["cluster_env"]
 
-    fake2 = FakeAdapter(clusters_list=[c], run_results=[(101, silent)])
-    fake2.attribute_failures = lambda *_a, **_k: AttributionResult(
-        dict(frontier), FailureKind.RUNTIME, dict(frontier))
-    seen2: list = []
-    fake2.fill_fns_one_by_one = lambda **kw: (
-        seen2.append(kw["tdd_frontier_tests"]), _PER_FN_RESULT)[1]
-    _gen(fake2, _cfg(per_fn=True, tdd=True, hard_cap=1))._post_merge_fill_pass(
-        project_dir=pd, clusters=fake2.clusters_list, module="crate",
-        functional_req="")
-    assert len(seen2) == 1
-    raw = seen2[0]
-    assert "t_crash" in raw.convicting_for(other)
-    assert "t_done" in raw.convicting_for(other)
+
+def test_the_published_src_is_the_tree_the_loop_judged(tmp_path: Path) -> None:
+    from pipeline_core.application.reconstruct.publish import published_drift
+    cs = _two_worlds()
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+
+    def _fill(**kw: Any) -> ClusterFillResult:
+        (kw["target_src_dir"] / "src" / "lib.rs").write_text(
+            "fn foo() -> i32 {\n    7\n}\n", encoding="utf-8")
+        return _PER_FN_RESULT
+    fake.run_phase_c_tdd = _fill  # type: ignore[method-assign]
+    pd = _make_project(tmp_path, cs)
+    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
+    tree = pd / ".skeleton-filled" / "default"
+    assert (pd / "src" / "lib.rs").read_bytes() == (tree / "src" / "lib.rs").read_bytes()
+    assert published_drift(tree, pd) == ()
+    (pd / "src" / "lib.rs").write_text("fn foo() -> i32 { 8 }\n", encoding="utf-8")
+    assert published_drift(tree, pd) == ("src/lib.rs",)
+
+
+def test_a_crash_in_the_one_tree_raises_and_publishes_nothing(
+        tmp_path: Path) -> None:
+    """A pipeline exception in the loop ends the run on PipelineCodeCrash
+    (run `486681-a304b30a`, 2026-10-10: a caught TypeError was logged as an
+    exhausted cluster and checkpointed). Nothing is checkpointed and nothing
+    reaches `src/`."""
+    cs = _two_worlds()
+    fake = FakeAdapter(clusters_list=cs, cluster_tests=[("tests/it.rs", "x")],
+                       run_results=[(0, "ok")])
+    fake.run_phase_c_tdd = lambda **kw: ClusterFillResult(  # type: ignore[method-assign]
+        failed_tests=frozenset({"t"}), ran_tests=frozenset({"t"}),
+        crashed="TypeError: run() got an unexpected keyword argument 'x'",
+        crash_traceback="Traceback (most recent call last): ...")
+    pd = _make_project(tmp_path, cs)
+    before = (pd / "src").exists() and sorted((pd / "src").rglob("*"))
+    with pytest.raises(PipelineCodeCrash) as exc:
+        _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True)))
+    assert exc.value.crash.cluster == "default"
+    assert not [k for k, st, _ in fake.marks if st == "done"
+                and k.startswith("task2")]
+    assert ((pd / "src").exists() and sorted((pd / "src").rglob("*"))) == before

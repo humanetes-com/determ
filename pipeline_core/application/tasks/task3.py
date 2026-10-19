@@ -91,6 +91,12 @@ class Task3Deps:
     # cluster's verdict, so the FAIL names each red test and what held it.
     # None prints nothing.
     red_ledger: Callable[[Path, str], Mapping[str, Any]] | None = None
+    # project_dir -> the `src/` files that differ from the tree task 2a
+    # judged and task 2b published (`publish.published_drift`). Task 3
+    # judges the published tree or nothing: a writer of `src/` after the
+    # publish would otherwise be read here and overwritten by the next
+    # publish in silence. None skips the check (fixtures with no tree).
+    published_drift: Callable[[Path], tuple[str, ...]] | None = None
 
 
 def red_ledger_lines(stored: Mapping[str, Any], *, limit: int = 40) -> list[str]:
@@ -266,6 +272,20 @@ def task3(project_dir: Path, test_command: str, iteration: int | str,
     with deps.phase("task", task="task3", attempt=_attempt,
                     data={"command": "per-cluster", "iteration": iteration,
                           "clusters": [c.name for c in clusters]}) as done:
+        _drift = (deps.published_drift(project_dir)
+                  if deps.published_drift is not None else ())
+        if _drift:
+            msg = ("HEALTH ‼ PUBLISH_DRIFT: src/ is not the tree task 2a "
+                   f"judged; {len(_drift)} file(s) differ: "
+                   + ", ".join(_drift[:8])
+                   + ". Task 3 judges the published tree only; whatever "
+                   "wrote src/ after the publish is a writer the loop never "
+                   "measured.")
+            log(f"  [task3] {msg}")
+            emit("health.publish_drift", data={"files": list(_drift)})
+            done["data"] = {"passed": False, "reason": "publish_drift",
+                            "files": list(_drift)}
+            return False, msg
         emit("test.start", attempt=_attempt,
              data={"command": "per-cluster",
                    "clusters": [c.name for c in clusters]})

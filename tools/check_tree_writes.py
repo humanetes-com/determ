@@ -79,8 +79,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
         "writes a scratch view crate, never the fill tree",
     ("application/reconstruct/test_grouping.py", "group_tests"):
         "JSON groups store, not a tree file",
-    ("application/generators/task2_generator.py", "_save_cluster_evidence"):
-        "JSON evidence store, not a tree file",
     ("application/generators/task2_generator.py", "_save_reinstall_streak"):
         "JSON streak store, not a tree file",
     ("application/generators/task2_generator.py", "_generate_one_cluster"):

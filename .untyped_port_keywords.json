@@ -32,7 +32,6 @@
     "model"
   ],
   "attribute_failures": [
-    "cluster",
     "extra_failed",
     "test_texts"
   ],

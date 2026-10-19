@@ -240,7 +240,6 @@ class FillEngineAdapter:
     group_tests_fn: Callable[..., list[dict[str, Any]]]
     cleanup_residuals_fn: Callable[..., dict[str, Any]]
     scan_unimplemented_fn: Callable[[Path], StubInventory]
-    merge_cluster_outputs_fn: Callable[..., dict[str, Any]]
     generate_fix_loop_fn: Callable[..., tuple[bool, str]]
     reset_exhaustion_flags_fn: Callable[[Path, str], object]  # return discarded
     build_test_reverse_map_fn: Callable[..., dict[str, set[FnLocator]]]
@@ -268,9 +267,6 @@ class FillEngineAdapter:
 
     def scan_unimplemented_functions(self, src_dir: Path) -> StubInventory:
         return self.scan_unimplemented_fn(src_dir)
-
-    def merge_cluster_outputs(self, **kw: Any) -> dict[str, Any]:
-        return self.merge_cluster_outputs_fn(**kw)
 
     def generate_fix_loop(self, **kw: Any) -> tuple[bool, str]:
         return self.generate_fix_loop_fn(**kw)

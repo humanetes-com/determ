@@ -33,14 +33,12 @@ def test_positive_budget_fires_at_the_budget_and_not_before() -> None:
     assert plateau_exit_due(4, 3)
 
 
-def test_both_loops_route_their_exit_through_the_predicate() -> None:
+def test_the_loop_routes_its_exit_through_the_predicate() -> None:
     # The raw `stall >= max_stalls` comparison is the defect shape this
-    # module exists to remove; both plateau exits must go through
-    # plateau_exit_due so 0-disables holds everywhere at once.
+    # module exists to remove; the plateau exit goes through
+    # plateau_exit_due so 0-disables holds. (The post-merge loop that had
+    # the second exit was removed with the merge, 2026-10-20.)
     tdd = (_REPO / "pipeline_core/application/reconstruct/"
                    "phase_c_tdd.py").read_text()
-    post_merge = (_REPO / "pipeline_core/application/generators/"
-                          "task2_generator.py").read_text()
-    for src in (tdd, post_merge):
-        assert "plateau_exit_due(stall, max_stalls)" in src
-        assert "if stall >= max_stalls:" not in src
+    assert "plateau_exit_due(stall, max_stalls)" in tdd
+    assert "if stall >= max_stalls:" not in tdd

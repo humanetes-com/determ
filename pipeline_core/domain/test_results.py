@@ -1556,6 +1556,70 @@ def join_capture(stdout: str, stderr: str) -> str:
     return stdout + ("\n" + STDERR_MARK + "\n" + stderr if stderr else "")
 
 
+# The line that opens one world's part of an every-world capture, in stdout and
+# in stderr alike. Written only when a capture joins two or more worlds.
+WORLD_HEADER_PREFIX = "=== cfg world: "
+_WORLD_HEADER_SUFFIX = " ==="
+
+
+def world_header(world: str) -> str:
+    return f"{WORLD_HEADER_PREFIX}{world}{_WORLD_HEADER_SUFFIX}"
+
+
+def _world_of_line(line: str) -> str | None:
+    s = line.strip()
+    if s.startswith(WORLD_HEADER_PREFIX) and s.endswith(_WORLD_HEADER_SUFFIX):
+        return s[len(WORLD_HEADER_PREFIX):-len(_WORLD_HEADER_SUFFIX)]
+    return None
+
+
+def join_world_captures(parts: Sequence[tuple[str, str]]) -> str:
+    """One capture of the same test command run under several build worlds.
+
+    `parts` is (world, :func:`join_capture` capture) in run order. The worlds'
+    stdouts are joined in that order and their stderrs in the same order, each
+    under :func:`world_header`, so a reader that pairs cargo's `Running`
+    lines (stderr) with libtest's sections (stdout) by position still pairs
+    each binary with its own section, and the counts sum over worlds. One
+    part is returned unchanged: a one-world run reads byte for byte as it did
+    before worlds were joined."""
+    if len(parts) == 1:
+        return parts[0][1]
+    outs: list[str] = []
+    errs: list[str] = []
+    for world, capture in parts:
+        out, err = split_capture(capture)
+        outs.append(world_header(world) + "\n" + out)
+        errs.append(world_header(world) + "\n" + err)
+    return join_capture("\n".join(outs), "\n".join(errs))
+
+
+def world_sections(capture: str) -> dict[str, str]:
+    """Each world's own capture out of :func:`join_world_captures`, keyed by
+    world. A capture with no world header is one world's: `{"": capture}`."""
+    out, err = split_capture(capture)
+
+    def _split(text: str) -> dict[str, list[str]]:
+        cur: str | None = None
+        parts: dict[str, list[str]] = {}
+        for line in text.split("\n"):
+            w = _world_of_line(line)
+            if w is not None:
+                cur = w
+                parts.setdefault(w, [])
+                continue
+            if cur is not None:
+                parts[cur].append(line)
+        return parts
+
+    outs = _split(out)
+    if not outs:
+        return {"": capture}
+    errs = _split(err)
+    return {w: join_capture("\n".join(lines), "\n".join(errs.get(w, [])))
+            for w, lines in outs.items()}
+
+
 def split_capture(output: str) -> tuple[str, str]:
     """(stdout, stderr) of a :func:`join_capture` capture, or (output, "")
     when the capture carries no mark (hand-made fixtures, other runners).

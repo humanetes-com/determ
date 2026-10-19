@@ -22,9 +22,11 @@ classification and `BuildCluster` construction live here.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import replace
 
 from pipeline_core import log as _log
 from pipeline_core.domain.cfg import Leaf, parse_cfg_pred
+from pipeline_core.domain.cluster_env import ALL_WORLDS_VAR
 from pipeline_core.domain.models import BuildCluster, CfgOccurrence, ModRecord
 
 # A declared cargo feature must gate at least this many `#[cfg]` occurrences to
@@ -468,6 +470,50 @@ def target_scope_rule(
             "Test these through the ordinary public API; no cfg-gated item "
             "is needed for them.")
     return "\n".join(out)
+
+
+def one_tree_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None:
+    """The identity task 2a's ONE loop runs under, over ONE tree, for every
+    baked world.
+
+    Task 2a used to fill one tree per cluster. On run `1680589-7a6824f8`
+    (2026-10-19) the two filled trees came out byte-identical; the per-cluster
+    order bought no body, and every defect of keeping two trees and a merge in
+    step stayed (a re-entry that skipped both clusters, merged-tree writes the
+    next merge overwrote, four writers each with their own gate).
+
+    One `BuildCluster`, because every reader of the loop takes one, with each
+    field answering the question its readers ask:
+
+    - `name`, `env_extra`, `requires_nightly`, `tarpaulin_exclude_files`: the
+      DEFAULT world's. The tree, its layout and every store keyed by the
+      loop's name are the default world's, and its cargo home build is the
+      default world's. The env also carries `ALL_WORLDS_VAR`, so every test
+      run the loop makes is repeated under each other world and judged as one
+      reading (`cargo_runner.PortBoundCargoRunner.run`).
+    - `active_cfg`, `excluded_cfg`, `default_features`, `prompt_nightly_rule`:
+      the merged view's. An atom the worlds disagree on is undecided, so an
+      item or test compiled in ANY world is in scope for admission, the stub
+      scan and the prompts, and nothing claims a value for it.
+
+    One world returns that world unchanged: the loop is then exactly the
+    per-cluster loop it was."""
+    cs = list(clusters)
+    if not cs:
+        return None
+    if len(cs) == 1:
+        return cs[0]
+    home = next((c for c in cs if c.is_default), cs[0])
+    view = merged_view_cluster(cs)
+    assert view is not None
+    return replace(
+        view,
+        name=home.name,
+        env_extra={**(home.env_extra or {}), ALL_WORLDS_VAR: "1"},
+        tarpaulin_exclude_files=list(home.tarpaulin_exclude_files or []),
+        requires_nightly=home.requires_nightly,
+        is_default=True,
+    )
 
 
 def merged_view_cluster(clusters: Iterable[BuildCluster]) -> BuildCluster | None:

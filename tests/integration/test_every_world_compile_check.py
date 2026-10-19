@@ -210,3 +210,78 @@ def test_control_without_the_refusal_the_runner_reports_the_parents_errors(
     _parent, tree = _nested_tree(tmp_path)
     rc, text, _diags = _check(tree, _runner(every_world=False), "base")
     assert rc != 0 and "missing_value" in text
+
+
+# --- the TEST verdict of the one-tree loop: every world, one capture ---------
+#
+# Run `1680589-7a6824f8` (2026-10-19): task 2a's two cluster trees came out
+# byte-identical; the per-cluster loop judged each in one world. The one-tree
+# loop's env (`cluster_plan.one_tree_cluster`) makes every test run cover
+# each world (`PortBoundCargoRunner.run`), and the readers take the joined
+# capture. That rests on how cargo lays out a test run: `Running` lines on
+# stderr, libtest's sections on stdout, in the same order.
+
+_TESTED = _EVERY_WORLD + f"""
+pub fn answer() -> u8 {{
+    #[cfg({_CFG})]
+    {{ return 2; }}
+    #[cfg(not({_CFG}))]
+    {{ 1 }}
+}}
+"""
+_TEST_FILE = """#[test]
+fn answer_is_one() {
+    assert_eq!(gadgets::answer(), 1);
+}
+"""
+
+
+def _tested_crate(tmp_path: Path) -> Path:
+    root = _crate(tmp_path, _TESTED)
+    (root / "tests").mkdir()
+    (root / "tests" / "answer.rs").write_text(_TEST_FILE)
+    return root
+
+
+def _loop_env() -> dict[str, str]:
+    from pipeline_core.domain.cluster_plan import one_tree_cluster
+    return cluster_cargo_env(one_tree_cluster(_clusters()))
+
+
+def test_premise_one_test_passes_in_one_world_and_fails_in_the_other(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.test_results import parse_failed_tests
+    root = _tested_crate(tmp_path)
+    runner = _runner(every_world=False)
+    base = {c.name: c for c in _clusters()}
+    rc_b, out_b = runner.run("cargo test --offline --no-fail-fast", root,
+                             cluster_cargo_env(base["base"]), 600)
+    rc_a, out_a = runner.run("cargo test --offline --no-fail-fast", root,
+                             cluster_cargo_env(base["alt"]), 600)
+    assert rc_b == 0 and not parse_failed_tests(out_b)
+    assert rc_a != 0 and set(parse_failed_tests(out_a)) == {"answer_is_one"}
+
+
+def test_the_loop_test_run_reads_both_worlds_as_one_capture(tmp_path: Path) -> None:
+    from pipeline_core.domain.test_results import (
+        parse_binary_results,
+        parse_failed_tests,
+        parse_test_counts,
+        world_sections,
+    )
+    root = _tested_crate(tmp_path)
+    rc, out = _runner(every_world=True).run(
+        "cargo test --offline --no-fail-fast", root, _loop_env(), 600)
+    assert rc != 0
+    assert set(parse_failed_tests(out)) == {"answer_is_one"}
+    sections = world_sections(out)
+    assert sorted(sections) == ["alt", "base"]
+    assert parse_test_counts(sections["base"])[:2] == (1, 0)
+    assert parse_test_counts(sections["alt"])[:2] == (0, 1)
+    alt = {b.label: b for b in parse_binary_results(sections["alt"])}
+    assert any("answer_is_one" in b.failed for b in alt.values())
+    # Control: the same env with no worlds bound runs the home world only and
+    # reads the tree as green.
+    rc_home, out_home = _runner(every_world=False).run(
+        "cargo test --offline --no-fail-fast", root, _loop_env(), 600)
+    assert rc_home == 0 and not parse_failed_tests(out_home)

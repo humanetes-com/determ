@@ -88,3 +88,75 @@ def test_error_excerpt_is_bounded_and_head_kept(tmp_path, monkeypatch) -> None:
     assert not ok
     assert excerpt.startswith("error[E0554]")
     assert len(excerpt) <= 5000
+
+
+# --- every world builds the crate ------------------------------------------
+#
+# 304's addendum (2026-10-02): `compile_check(pd, cluster, cluster)` judged a
+# component under the authoring cluster's env only, so a definition was
+# accepted without ever compiling in the other world, and a registry existed
+# to arbitrate the result (2026-08-06: `pass=0 fail=112`). The one-tree loop
+# re-seeds proven bodies through the same kind of one-world check.
+
+
+class _ByWorld:
+    """Fails the build in the worlds named in `red`; records each build's
+    world and the source it saw."""
+
+    def __init__(self, red: set[str], lib: Path) -> None:
+        self.red, self.lib = red, lib
+        self.seen: list[tuple[str, str]] = []
+
+    def __call__(self, argv, **kw):  # noqa: ANN001, ANN204
+        env = dict(kw.get("env") or {})
+        world = env.get("DETERM_CLUSTER_WORLD", "")
+        self.seen.append((world, self.lib.read_text(encoding="utf-8")))
+        rc = 1 if world in self.red else 0
+        return type("P", (), {"returncode": rc,
+                              "stderr": f"error[E0609]: no field in {world}",
+                              "stdout": ""})()
+
+
+_BASE = _cluster("stable")
+_ALT = _cluster("nightly", env_extra={"RUSTFLAGS": "--cfg egma"}, nightly=True)
+_PROBE = ("// __LAYOUT_PIN_PROBE_BEGIN__\nconst _: () = assert!(true);\n"
+          "// __LAYOUT_PIN_PROBE_END__\n")
+
+
+def test_a_layout_that_fails_in_the_other_world_is_refused(tmp_path, monkeypatch) -> None:
+    pd = _skeleton(tmp_path, "stable")
+    lib = pd / ".skeleton" / "stable" / "src" / "lib.rs"
+    lib.write_text("pub fn f() { unimplemented!() }\n" + _PROBE, encoding="utf-8")
+    rec = _ByWorld({"nightly"}, lib)
+    monkeypatch.setattr(subprocess, "run", rec)
+    ok, why = sc.compile_skeleton_check(pd, "stable", cluster=_BASE,
+                                        worlds=[_BASE, _ALT])
+    assert not ok and "FAILS in cfg world `nightly`" in why
+    assert [w for w, _src in rec.seen] == ["stable", "nightly"]
+    # The home build saw its pins; the other world's build did not, and the
+    # pins are back in the source afterwards.
+    assert "LAYOUT_PIN_PROBE" in rec.seen[0][1]
+    assert "LAYOUT_PIN_PROBE" not in rec.seen[1][1]
+    assert "LAYOUT_PIN_PROBE" in lib.read_text(encoding="utf-8")
+
+
+def test_control_one_world_builds_once(tmp_path, monkeypatch) -> None:
+    pd = _skeleton(tmp_path, "stable")
+    lib = pd / ".skeleton" / "stable" / "src" / "lib.rs"
+    rec = _ByWorld({"nightly"}, lib)
+    monkeypatch.setattr(subprocess, "run", rec)
+    ok, _ = sc.compile_skeleton_check(pd, "stable", cluster=_BASE)
+    assert ok and [w for w, _ in rec.seen] == ["stable"]
+
+
+def test_a_reseed_that_breaks_the_other_world_is_refused(tmp_path, monkeypatch) -> None:
+    tree = tmp_path / ".skeleton-filled" / "stable" / "src"
+    tree.mkdir(parents=True)
+    (tree / "lib.rs").write_text("pub fn f() -> u8 { 1 }\n", encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text("[package]\nname='x'\n", encoding="utf-8")
+    rec = _ByWorld({"nightly"}, tree / "lib.rs")
+    monkeypatch.setattr(subprocess, "run", rec)
+    ok, why = sc.compile_filled_check(tmp_path, _BASE, worlds=[_BASE, _ALT])
+    assert not ok and "nightly" in why
+    ok, _ = sc.compile_filled_check(tmp_path, _BASE)
+    assert ok

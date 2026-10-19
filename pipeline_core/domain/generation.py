@@ -130,9 +130,6 @@ class SkeletonConfig:
     phase_c_tdd: bool
     phase_c_max_passes: int = 3
     validate_iters: int = 3
-    post_merge_max_stalls: int = 3
-    post_merge_hard_cap: int = 10_000
-    post_merge_test_timeout: int = 180
     recently_filled_max: int = 50
 
 

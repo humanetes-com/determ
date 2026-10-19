@@ -36,7 +36,7 @@ from pipeline_core.domain.assertion_position import (
     leaf,
 )
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
-from pipeline_core.domain.cluster_env import world_of_env
+from pipeline_core.domain.cluster_env import judges_every_world, world_of_env
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
@@ -78,6 +78,7 @@ from pipeline_core.domain.test_results import (
     failure_bodies_for,
     hung_sections,
     join_capture,
+    join_world_captures,
     parse_binary_results,
     parse_failed_tests,
     render_regression_detail,
@@ -1114,7 +1115,33 @@ class PortBoundCargoRunner:
 
     def run(self, cmd: str, cwd: Path, env: dict[str, str],
             timeout: int = 180) -> tuple[int, str]:
-        return run_cargo(self.cargo, cmd, cwd, env, timeout)
+        """One cargo run; a TEST run whose env judges every world
+        (`cluster_env.ALL_WORLDS_VAR`, set by the one-tree loop's identity)
+        is repeated under each other world, in that world's own target dir
+        and toolchain, and read as one capture (`join_world_captures`).
+
+        The keep gates, the sweep and every probe of the loop take their test
+        verdict here, so none of them can judge a body in one world by not
+        asking: a body that passes the default world's suite and fails one
+        nightly test fails this run. The return code is the first non-zero
+        one, and a world that timed out makes the whole run a timeout (-1):
+        a world that gave no reading is not a world that passed."""
+        home = run_cargo(self.cargo, cmd, cwd, env, timeout)
+        if (self.worlds is None or not judges_every_world(env)
+                or not is_isolatable_test_run(cmd)):
+            return home
+        others = self.worlds.others(env)
+        if not others:
+            return home
+        parts = [(world_of_env(env), home[1])]
+        rcs = [home[0]]
+        for cluster in others:
+            rc, text = run_cargo(self.cargo, cmd_for_world(cmd, cluster), cwd,
+                                 self.worlds.env_for(cluster, cwd, env), timeout)
+            parts.append((str(cluster.name), text))
+            rcs.append(rc)
+        rc_all = -1 if -1 in rcs else next((r for r in rcs if r != 0), 0)
+        return rc_all, join_world_captures(parts)
 
     def check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
                    timeout: int = 180) -> tuple[int, str, list[Diagnostic]]:

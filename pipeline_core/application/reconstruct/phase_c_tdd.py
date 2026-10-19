@@ -287,7 +287,6 @@ from pipeline_core.domain.reasoning_cap import (
 from pipeline_core.domain.red_ledger import RunFacts, red_ledger, render_red_ledger
 from pipeline_core.domain.reference_floor import (
     ReferenceMeasurement,
-    judge_cluster_binaries,
     pairs_of,
     reference_floor_close_reason,
 )
@@ -349,6 +348,7 @@ from pipeline_core.domain.test_results import (
 )
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
 from pipeline_core.domain.workspace_layout import SKELETON_DIR
+from pipeline_core.domain.world_floor import failed_pairs, judge_every_world
 from pipeline_core.domain.write_set import bind_observed as bind_observed_cycles
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
@@ -882,6 +882,11 @@ def run_phase_c_tdd(
     # sweep's reading, report its red list, fill nothing (`domain/
     # pipeline_crash.py`).
     score_only: bool = False,
+    # Every build world the sweep judges. The one-tree loop passes the baked
+    # clusters, and its env makes every test run cover each of them; the
+    # per-world readers here (the expected-test inventory, the original
+    # crate's floor) read each world's part. Empty is the one world `cluster`.
+    worlds: Sequence[BuildCluster] = (),
 ) -> ClusterFillResult:
     """TDD-scoped Phase C driver.
 
@@ -903,6 +908,7 @@ def run_phase_c_tdd(
     # root, and the syn extractor records `file` fields the same way. Passing
     # `project_root/src` would produce double-prefixed paths and zero matches.
     src_dir = target_src_dir
+    _worlds: tuple[BuildCluster, ...] = tuple(worlds) or (cluster,)
     # Filter to direct children of tests/ — only those are cargo --test targets.
     test_stems = sorted({
         Path(rel).stem
@@ -1578,12 +1584,12 @@ def run_phase_c_tdd(
         if deps.reference_measurement is None:
             return frozenset()
         _refm_w = deps.reference_measurement(project_dir)
-        _v_w = judge_cluster_binaries(
+        _v_w = judge_every_world(
             _refm_w if isinstance(_refm_w, ReferenceMeasurement) else None,
-            cluster.name, parse_binary_results(output))
+            output, cluster.name)
         if _v_w is None:
             return frozenset()
-        _failed_w = pairs_of(parse_binary_results(output))[1]
+        _failed_w = failed_pairs(output)
         _excused = {bare_test_name(n_) for _l, n_ in
                     _failed_w - _v_w.unexcused_failures}
         _kept = {bare_test_name(n_) for _l, n_ in _v_w.unexcused_failures}
@@ -1862,16 +1868,24 @@ def run_phase_c_tdd(
     # which only 6 were the one real `tests/test_downcast.rs` crash. The other
     # 20 were a denominator the tree never contained, and each sweep aimed a
     # crash retrigger at them.
-    _expected_count, _expected_names = (
-        deps.active_test_inventory(
-            target_src_dir, cluster, frozenset(test_stems), _sweep_lib)
-        if deps.active_test_inventory is not None else (0, frozenset()))
-    # Walked once per cluster beside the inventory, not per sweep: the same
-    # files, and the channel that reads it fires at most a handful of times.
-    _test_files: dict[str, str] = (
-        deps.test_file_index(target_src_dir, cluster, frozenset(test_stems),
-                             _sweep_lib)
-        if deps.test_file_index is not None else {})
+    # Per WORLD, summed: the one-tree loop's sweep runs the command under
+    # every world (`cargo_runner.PortBoundCargoRunner.run`), so cargo reports
+    # each world's active tests, and the denominator is their sum. A test
+    # active in two worlds is two verdicts.
+    _expected_count, _expected_names = 0, frozenset[str]()
+    _test_files: dict[str, str] = {}
+    for _w in _worlds:
+        if deps.active_test_inventory is not None:
+            _n_w, _names_w = deps.active_test_inventory(
+                target_src_dir, _w, frozenset(test_stems), _sweep_lib)
+            _expected_count += _n_w
+            _expected_names = _expected_names | _names_w
+        # Walked once per cluster beside the inventory, not per sweep: the
+        # same files, and the channel that reads it fires at most a handful
+        # of times.
+        if deps.test_file_index is not None:
+            _test_files.update(deps.test_file_index(
+                target_src_dir, _w, frozenset(test_stems), _sweep_lib))
     # Cause-C (runtime crash) retrigger: consecutive sweeps whose oracle was
     # short; at the threshold the frozen component the crashes implicate gets
     # re-authored (see the trigger block below the stall accounting).
@@ -3332,9 +3346,9 @@ def run_phase_c_tdd(
                 and rc != 0 and fail_count > 0
                 and not _sweep_compile_broke and _oracle.intact):
             _refm = deps.reference_measurement(project_dir)
-            _floor_verdict = judge_cluster_binaries(
+            _floor_verdict = judge_every_world(
                 _refm if isinstance(_refm, ReferenceMeasurement) else None,
-                cluster.name, parse_binary_results(output))
+                output, cluster.name)
             _floor_why = reference_floor_close_reason(
                 rc=rc, fail_count=fail_count,
                 compile_broke=_sweep_compile_broke,

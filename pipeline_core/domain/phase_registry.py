@@ -237,14 +237,14 @@ PHASES: tuple[Phase, ...] = (
        state_keys=("task1/*",)),
     # -------------------------------------------------------------- t2a
     _p("t2a", "t2a", "Reconstruction",
-       "Per cluster, serially with the default cluster first: cargo-check the skeleton, "
-       "group the tests, then fill the stubs in a test-driven loop (sweep, grade, aim, "
-       "frontier, fill) until the stops fire, then clean up residual stubs and validate. "
-       "Later clusters seed shared bodies from earlier ones.",
+       "One tree, judged in every build world: cargo-check the skeleton, gather every "
+       "world's tests, then fill the stubs in a test-driven loop (sweep in every world, "
+       "grade, aim, frontier, fill) until the stops fire, then clean up residual stubs "
+       "and validate.",
        why="This is the reconstruction itself and where the hours go.",
        reads="baked skeleton, tests, requirements, behaviour suite",
-       writes=".skeleton-filled/<cluster>/src",
-       skipped_when="the cluster's checkpoint is valid and its filled tree is on disk",
+       writes=".skeleton-filled/<default world>/src",
+       skipped_when="the checkpoint is valid and the filled tree is on disk",
        per_cluster=True, state_keys=("task2a/*", "task2-4/*")),
     _p("t2a.blueprint", "blueprint", "Blueprint",
        "Top-down design of the crate that per-block fills consume slices of."),
@@ -256,20 +256,13 @@ PHASES: tuple[Phase, ...] = (
     _p("t2a.validate", "validate", "Validate",
        "Cargo check of the filled tree; implicated bodies are reverted to stubs.", per_cluster=True),
     # -------------------------------------------------------------- t2b
-    _p("t2b", "t2b", "Merge",
-       "Combines the per-cluster filled trees into src/ with cfg gating; bodies shared "
-       "across clusters are deduplicated.",
-       why="The crate is one tree; the clusters only exist to build it under each cfg.",
-       reads=".skeleton-filled/<cluster>/src", writes="src/",
-       skipped_when="the merge marker is valid and the merged tree is intact",
+    _p("t2b", "t2b", "Publish",
+       "Copies the one filled tree into src/, byte for byte. No body is chosen or "
+       "gated here; task 3 refuses a src/ that is not the tree.",
+       why="The crate is one tree; the worlds only exist to build and test it under each cfg.",
+       reads=".skeleton-filled/<default world>/src", writes="src/",
+       skipped_when="the publish marker is valid and the published tree is intact",
        state_keys=("task2b/*", "task2-4/*")),
-    # -------------------------------------------------------------- t2c
-    _p("t2c", "t2c", "Merged-tree fill",
-       "Fills the stubs that exist, or only compile, in the merged tree, and accepts "
-       "bodies by test result.",
-       reads="src/, tests", writes="src/",
-       skipped_when="the checkpoint is valid",
-       state_keys=("task2c/*", "task2-4/*")),
     # --------------------------------------------------------------- t3
     _p("t3", "t3", "Test run",
        "Runs the cluster-scoped cargo tests and reads a strict aggregate verdict; "

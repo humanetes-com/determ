@@ -37,6 +37,14 @@ from typing import Any
 # argument threaded to each of them is a call a new site can forget.
 WORLD_VAR = "DETERM_CLUSTER_WORLD"
 
+# The variable that says a test run judges the CRATE, not one world: the run
+# is repeated under every other baked world and the captures are joined
+# (`cargo_runner.PortBoundCargoRunner.run`). Set by the one-tree loop's
+# identity (`cluster_plan.one_tree_cluster`) through its env, so every sweep,
+# gate and keep site the loop runs inherits it, and augmentation, which judges
+# one world by design, never carries it.
+ALL_WORLDS_VAR = "DETERM_ALL_WORLDS"
+
 # The two variables cargo hands to a compiler front end. A cluster APPENDS to
 # them (the base env's `-A warnings` survives); every other key is set.
 _FLAG_VARS = ("RUSTFLAGS", "RUSTDOCFLAGS")
@@ -97,6 +105,11 @@ def overlay_cluster_env(env: dict[str, str], cluster: Any | None) -> None:
     name = str(getattr(cluster, "name", "") or "")
     if name:
         env[WORLD_VAR] = name
+
+
+def judges_every_world(env: Mapping[str, str] | None) -> bool:
+    """True when a test run under `env` is the crate's reading in every world."""
+    return str((env or {}).get(ALL_WORLDS_VAR, "")) == "1"
 
 
 def world_of_env(env: Mapping[str, str] | None) -> str:

@@ -96,7 +96,6 @@ from pipeline_core.adapters.body_ledger_store import (
 )
 from pipeline_core.adapters.build_script import CargoBuildScriptReader
 from pipeline_core.adapters.cargo import cluster_cargo_env
-from pipeline_core.adapters.cluster_merge import ClusterMerger
 from pipeline_core.adapters.cluster_pruning import (
     prune_redundant_clusters as _prune_redundant_clusters,
 )
@@ -565,6 +564,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import PhaseCTddDeps
 from pipeline_core.application.reconstruct.phase_c_tdd import (
     run_phase_c_tdd as _run_phase_c_tdd_impl,
 )
+from pipeline_core.application.reconstruct.publish import published_drift
 from pipeline_core.application.reconstruct.reconstruction_step import ReconstructionStep
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.retrospective import (
@@ -732,7 +732,11 @@ from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
 )
 from pipeline_core.domain.cluster_env import world_key
-from pipeline_core.domain.cluster_plan import merged_view_cluster, nightly_rules_for
+from pipeline_core.domain.cluster_plan import (
+    merged_view_cluster,
+    nightly_rules_for,
+    one_tree_cluster,
+)
 from pipeline_core.domain.cluster_scope import ClusterScope
 from pipeline_core.domain.coverage import CoverageMeasurement
 from pipeline_core.domain.coverage_annotation import (
@@ -2176,6 +2180,13 @@ def build_app(
                 "original crate fails them on this machine too")
 
     _emitter = JsonlEventEmitter(events_log, run_context if run_context is not None else {})
+    def _published_drift(project_dir: Path) -> tuple[str, ...]:
+        loop = one_tree_cluster(_load_baked_clusters(project_dir) or [])
+        if loop is None:
+            return ()
+        return published_drift(
+            project_dir / ".skeleton-filled" / loop.name, project_dir)
+
     _task3_deps = Task3Deps(
         measure_agreement=lambda pd, cl, passed, expected: _measure_agreement(
             project_dir=pd, tree_dir=pd, module=Path(pd).name, cluster=cl, where="task3",
@@ -2192,7 +2203,12 @@ def build_app(
         test_timeout=cfg.test_timeout,
         reference=_reference,
         cluster_env=cluster_cargo_env,
-        red_ledger=_load_red_ledger,
+        # The one-tree loop writes ONE red ledger, under the tree's name, for
+        # every world's red tests; each world's task 3 verdict prints it.
+        red_ledger=lambda pd, _world: _load_red_ledger(
+            pd, getattr(one_tree_cluster(_load_baked_clusters(pd) or []),
+                        "name", _world)),
+        published_drift=_published_drift,
     )
 
     def _task3(project_dir: Path, test_command: str, iteration: Any,
@@ -2247,7 +2263,6 @@ def build_app(
             "attribute_failures")(to, sd, rf, trm, cn, **kw),
         filter_test_targets_fn=filter_test_targets,
     )
-    cluster_merger = ClusterMerger(extractor_bin=cfg.skeleton_extractor_bin, log=ports.log)
     gen_fill = FillEngineAdapter(
         run_phase_c_tdd_fn=lambda **kw: _run_phase_c_tdd_impl(_via_deps_phase_c_tdd(), **kw),
         fill_fns_one_by_one_fn=lambda **kw: helpers.task2_fill_fns_one_by_one(**kw),
@@ -2255,7 +2270,6 @@ def build_app(
         group_tests_fn=task2_group_tests,
         cleanup_residuals_fn=task2_cleanup_residuals,
         scan_unimplemented_fn=scan_unimplemented_functions,
-        merge_cluster_outputs_fn=lambda **kw: cluster_merger.merge_cluster_outputs(**kw),
         generate_fix_loop_fn=generate_fix_loop,
         reset_exhaustion_flags_fn=_reset_exhaustion_flags,
         build_test_reverse_map_fn=build_test_reverse_map,
@@ -2332,9 +2346,6 @@ def build_app(
             phase_c_tdd=live.phase_c_driver is PhaseCDriver.TDD,
             phase_c_max_passes=int(_os.getenv("PHASE_C_MAX_PASSES", "3")),
             validate_iters=int(_os.getenv("PHASE_C_VALIDATE_ITERS", "3")),
-            post_merge_max_stalls=int(_os.getenv("POST_MERGE_MAX_STALLS", "3")),
-            post_merge_hard_cap=int(_os.getenv("POST_MERGE_HARD_CAP", "10000")),
-            post_merge_test_timeout=int(_os.getenv("POST_MERGE_TEST_TIMEOUT", "180")),
             recently_filled_max=int(_os.getenv("TDD_RECENTLY_FILLED_MAX", "50")),
         )
 
@@ -3019,7 +3030,8 @@ def build_app(
             tree_writer=TreeWriter(
                 splice=splice_bodies,
                 signatures=current_signatures, bodies=current_bodies),
-            check_tree_builds=lambda pd, cl: compile_filled_check(pd, cl),
+            check_tree_builds=lambda pd, cl: compile_filled_check(
+                pd, cl, worlds=_load_baked_clusters(pd) or []),
             parse_ok=_validate_parse,
             run_id=_run_id,
             # The oracle scoring the cluster tree, `(src_dir, project_dir,

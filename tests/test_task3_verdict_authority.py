@@ -238,3 +238,52 @@ def test_expected_count_includes_active_cfg_modules(tmp_path: Path) -> None:
     extra = _cluster("extra_cap", active=["extra_cap"], excluded=[])
     # lib 1 + counter 1 + cap 2 + deep 1 + tests/it.rs 1.
     assert _count_active(tmp_path, extra) == 6
+
+
+# --- D: task 3 judges the published tree or nothing ------------------------
+
+
+def _drift_deps(drift: tuple[str, ...], ran: list[str]):
+    from pipeline_core.application.tasks.task3 import Task3Deps
+
+    @contextmanager
+    def fake_phase(kind: str, **kw):
+        d: dict = {}
+        yield d
+
+    return Task3Deps(
+        phase=fake_phase,
+        load_baked_clusters=lambda p: [SimpleNamespace(
+            name="stable", toolchain="", env_extra={})],
+        task3_legacy_single=lambda *a, **k: (False, ""),
+        cargo_env=lambda: {"PATH": "/usr/bin:/bin"},
+        parse_cmd=lambda cmd: ran.append(cmd) or [
+            "sh", "-c", 'echo "test result: ok. 2 passed; 0 failed; 0 ignored"'],
+        count_active_tests_for_cluster=lambda p, c: 2,
+        store_prompt_content=lambda s: "",
+        read=lambda p: "",
+        write=lambda p, s: None,
+        test_timeout=30,
+        published_drift=lambda p: drift,
+    )
+
+
+def test_a_src_that_is_not_the_published_tree_is_not_judged(
+        tmp_path: Path, monkeypatch) -> None:
+    """After the 2026-10-19 task 3 restarts the workspace `src/` differed
+    from the filled tree by 108 lines in 4 files: three writers after the
+    merge, none of whose bodies the next merge kept. Task 3 now refuses to
+    judge a `src/` that is not the tree task 2a judged. Control: no drift,
+    the clusters run and pass."""
+    from pipeline_core.application.tasks.task3 import task3
+    monkeypatch.setattr(pclog, "_log_sink", lambda m: None)
+    monkeypatch.setattr(pclog, "_emit_sink", lambda e, **f: None)
+    ran: list[str] = []
+    passed, out = task3(tmp_path, "cargo test", 1, tmp_path,
+                        tmp_path / "genesis.md",
+                        _drift_deps(("src/context.rs",), ran))
+    assert passed is False and "PUBLISH_DRIFT" in out and "src/context.rs" in out
+    assert ran == []
+    passed, _out = task3(tmp_path, "cargo test", 1, tmp_path,
+                         tmp_path / "genesis.md", _drift_deps((), ran))
+    assert passed is True and ran
