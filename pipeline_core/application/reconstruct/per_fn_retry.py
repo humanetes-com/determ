@@ -140,6 +140,24 @@ class RepairTarget(NamedTuple):
     occurrence: int = 0
 
 
+def repair_targets(keys: list[FnLocator],
+                   definitions: Callable[[str, str], int]) -> list[RepairTarget]:
+    """One target per DEFINITION, in the frontier's order: every definition of
+    a key sits where the key sits. A frontier key is a (file, bare name) and
+    its hop is the distance of that NAME from the failing test, so each of its
+    definitions is that far away too.
+
+    Before, every first definition was queued ahead of every second one. Run
+    `240506-87538963` (2026-10-19): the one red test panicked in the second
+    `provide` of src/context.rs, a hop-0 key, and that definition sat behind
+    39 first definitions reaching three hops out — 24 calls and 90 minutes
+    were spent on them, one of them a 52-minute reasoning runaway."""
+    out: list[RepairTarget] = []
+    for f, fn in keys:
+        out += [RepairTarget(f, fn, i) for i in range(max(1, definitions(f, fn)))]
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class ClusterProbe:
     """One cluster's test invocation. The retry measures the tree through every
@@ -528,20 +546,13 @@ def run_task3_inline_retry(
         keys: list[FnLocator] = sorted(
             frontier.keys(),
             key=lambda k: (hops.get(k, 0), -len(frontier.get(k) or ()), k[0], k[1]))
-        # One target per DEFINITION, not per name. First occurrences first —
-        # they are what every previous run could address, so the cheap,
-        # already-proven candidates are still attempted before the rest.
-        refs: list[RepairTarget] = [RepairTarget(f, fn, 0) for f, fn in keys]
-        _extra: list[RepairTarget] = []
-        for f, fn in keys:
-            _src_rel = f[4:] if f.startswith("src/") else f
-            n_occ = len(_retry_occurrences.get(FnLocator(_src_rel, fn), ()))
-            _extra += [RepairTarget(f, fn, i) for i in range(1, n_occ)]
+        refs = repair_targets(keys, lambda f, fn: len(_retry_occurrences.get(
+            FnLocator(f[4:] if f.startswith("src/") else f, fn), ())))
+        _extra = [t for t in refs if t.occurrence]
         if _extra:
             deps.log(f"  [task3-retry] {len(_extra)} further definition(s) of "
                      f"{len({(t.file, t.fn) for t in _extra})} same-named fn(s) "
                      "are addressable this pass.")
-        refs += _extra
         if not refs:
             return {"abort": True, "reason": "no_actionable_refs"}
         fixed_count = apply_per_fn_fixes(refs, output, _retry_ctx, deps.retry_fix,

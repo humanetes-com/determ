@@ -16,8 +16,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from pipeline_core.domain.models import FnSite
 
-def _annotate_file_view_default(file_text: str, fn_name: str) -> str:
+
+def _annotate_file_view_default(file_text: str, target: FnSite, sig_text: str) -> str:
     return file_text
 
 
@@ -37,7 +39,7 @@ class PromptRuntimeDeps:
     """The pipeline-bound collaborators the prompt builders call. Frozen + typed;
     bound once at the composition root (replaces three mutable globals +
     configure())."""
-    annotate_file_view: Callable[[str, str], str] = _annotate_file_view_default
+    annotate_file_view: Callable[[str, FnSite, str], str] = _annotate_file_view_default
     promoted_error_rules: Callable[[Path | None], str] = _promoted_error_rules_default
     repo_spec_section: Callable[..., str] = _repo_spec_section_default
 
@@ -51,9 +53,11 @@ def bind(deps: PromptRuntimeDeps) -> None:
     _DEPS = deps
 
 
-def annotate_file_view(file_text: str, fn_name: str) -> str:
-    """File view with stub/TARGET annotations (pipeline's `_annotate_file_view`)."""
-    return _DEPS.annotate_file_view(file_text, fn_name)
+def annotate_file_view(file_text: str, target: FnSite, sig_text: str) -> str:
+    """File view with stub/TARGET annotations (pipeline's `_annotate_file_view`).
+    The target is one definition, so a caller hands its container and
+    signature, not only its name."""
+    return _DEPS.annotate_file_view(file_text, target, sig_text)
 
 
 def promoted_error_rules(fr_path: Path | None = None) -> str:

@@ -553,3 +553,43 @@ def test_the_gate_revert_is_a_byte_restore(tmp_path):
     assert count == 1
     assert "NEW" in (tmp_path / "a.rs").read_text(encoding="utf-8")
     assert (tmp_path / "b.rs").read_bytes() == crlf
+
+
+# ── every definition of a key is queued where the key is ─────────────────────
+
+def test_a_second_definition_is_queued_at_its_names_hop() -> None:
+    """Run `240506-87538963` (2026-10-19): the red test panicked in the second
+    same-named definition of a hop-0 key, and the retry queued that definition
+    behind every first definition of a 39-fn frontier reaching three hops out.
+    Here the hop-0 key has two definitions; both come before any farther key."""
+    from pipeline_core.application.reconstruct.per_fn_retry import (
+        RepairTarget,
+        repair_targets,
+    )
+    from pipeline_core.domain.models import FnLocator
+
+    keys = [FnLocator("src/w.rs", "reveal"), FnLocator("src/w.rs", "near"),
+            FnLocator("src/v.rs", "far"), FnLocator("src/v.rs", "farther")]
+    defs = {("src/w.rs", "reveal"): 2, ("src/v.rs", "far"): 3}
+    out = repair_targets(keys, lambda f, fn: defs.get((f, fn), 1))
+    assert out[:2] == [RepairTarget("src/w.rs", "reveal", 0),
+                       RepairTarget("src/w.rs", "reveal", 1)]
+    assert out[3:6] == [RepairTarget("src/v.rs", "far", i) for i in range(3)]
+    assert len(out) == 7
+
+    # Negative control: the previous order, every first definition first.
+    old = ([RepairTarget(f, fn, 0) for f, fn in keys]
+           + [RepairTarget(f, fn, i) for f, fn in keys
+              for i in range(1, defs.get((f, fn), 1))])
+    assert old.index(RepairTarget("src/w.rs", "reveal", 1)) == 4
+
+
+def test_a_key_the_index_does_not_know_is_still_one_target() -> None:
+    from pipeline_core.application.reconstruct.per_fn_retry import (
+        RepairTarget,
+        repair_targets,
+    )
+    from pipeline_core.domain.models import FnLocator
+
+    out = repair_targets([FnLocator("src/w.rs", "lost")], lambda f, fn: 0)
+    assert out == [RepairTarget("src/w.rs", "lost", 0)]

@@ -10,7 +10,7 @@ smoke tests through the pipeline.py aliases):
 
 from pathlib import Path
 
-from pipeline_core.domain.models import DispatchFamily
+from pipeline_core.domain.models import DispatchFamily, FnSite
 from pipeline_core.prompts import runtime
 from pipeline_core.prompts.sections import (
     build_dispatch_family_section,
@@ -41,13 +41,15 @@ def test_runtime_defaults_and_bind() -> None:
     old = runtime._DEPS
     try:
         runtime.bind(runtime.PromptRuntimeDeps())  # inert defaults
-        assert runtime.annotate_file_view("fn a() {}", "a") == "fn a() {}"
+        site = FnSite("src/lib.rs", "a", "")
+        assert runtime.annotate_file_view("fn a() {}", site, "fn a()") == "fn a() {}"
         assert runtime.promoted_error_rules(Path("/nonexistent")) == ""
         runtime.bind(runtime.PromptRuntimeDeps(
-            annotate_file_view=lambda text, fn: f"ANNOTATED:{fn}",
+            annotate_file_view=lambda text, target, sig: f"ANNOTATED:{target.fn_name}",
             promoted_error_rules=lambda fr_path=None: "RULES",
         ))
-        assert runtime.annotate_file_view("x", "f") == "ANNOTATED:f"
+        assert runtime.annotate_file_view(
+            "x", FnSite("src/lib.rs", "f", ""), "fn f()") == "ANNOTATED:f"
         assert runtime.promoted_error_rules() == "RULES"
     finally:
         runtime.bind(old)  # frozen deps → restore the pipeline-bound instance

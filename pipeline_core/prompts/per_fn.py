@@ -14,6 +14,7 @@ from pipeline_core.domain.coverage_slice import instruction_opener
 from pipeline_core.domain.joint_write import JOINT_OUTPUT_CLAUSE
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
+from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
@@ -67,7 +68,8 @@ def build_per_fn_prompt(
     else:
         tests_section = ("(no tests directly reference this fn — it may be "
                          "invoked indirectly via a macro; consult MACROS below)")
-    annotated = annotate_file_view(file_text, fn_name)
+    annotated = annotate_file_view(
+        file_text, FnSite(file_rel, fn_name, container), sig_text)
     notes_block = tag_block("MODEL_NOTES", notes_section)
     coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(
@@ -246,7 +248,8 @@ def build_per_fn_fix_prompt(
         tests_section = "\n\n".join(parts)
     else:
         tests_section = "(no tests directly reference this fn — see MACROS)"
-    annotated = annotate_file_view(file_text, fn_name)
+    annotated = annotate_file_view(
+        file_text, FnSite(file_rel, fn_name, container), sig_text)
     notes_block = tag_block("MODEL_NOTES", notes_section)
     coupled_block = tag_block("COUPLED_BODIES", sections.coupled)
     crash_block = tag_block(

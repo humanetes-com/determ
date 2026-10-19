@@ -18,9 +18,14 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.domain.doc_render import condense_doc_attrs, strip_crate_attrs
-from pipeline_core.domain.models import ConstRecord, TypeRecord
-from pipeline_core.domain.rust_fn_headers import fn_headers
-from pipeline_core.domain.rust_idents import contains_fn_decl
+from pipeline_core.domain.impl_block_ranges import parse_impl_block_ranges
+from pipeline_core.domain.models import ConstRecord, FnSite, TypeRecord
+from pipeline_core.domain.rust_fn_headers import HeaderMatch, fn_headers
+from pipeline_core.domain.rust_idents import (
+    canon_container,
+    canon_token_text,
+    contains_fn_decl,
+)
 from pipeline_core.domain.rust_scan import is_type_decl_line
 
 
@@ -175,22 +180,64 @@ def condense_rust_to_signatures(source: str, filename: str = "code.rs") -> str:
     return ''.join(result_lines)
 
 
-def annotate_file_view(file_text: str, target_fn: str, *,
+def target_header_starts(text: str, headers: list[HeaderMatch],
+                         target: FnSite, sig_text: str) -> frozenset[int]:
+    """The header starts in ``text`` that ARE the target definition.
+
+    A name alone does not name a definition: one file routinely holds several
+    same-named fns (a `provide` per `StdError` impl, a `fmt` per Debug/Display
+    impl). The tiers are the splicer's (`locate_fn_by_record`): name, then the
+    canonical container of the impl block that encloses the header, then the
+    signature. A tier narrows only when something survives it, so a target the
+    text cannot place is still marked by name, never left unmarked.
+
+    Run `240506-87538963` (2026-10-19), task 3 retry: the prompt for
+    `provide` in `impl StdError for ContextError<C, E>` marked BOTH `provide`
+    definitions TARGET, the reply was spliced into that one, and the test kept
+    panicking in the stub of `impl<C> StdError for ContextError<C, Error>`
+    while the retry walked 37 further fns three hops out."""
+    named = [h for h in headers if h.name == target.fn_name]
+    if len(named) < 2:
+        return frozenset(h.start for h in named)
+    ranges = parse_impl_block_ranges(text)
+
+    def _enclosing(pos: int) -> str:
+        inner = [r for r in ranges if r.body_open < pos < r.body_close]
+        if not inner:
+            return ""
+        r = max(inner, key=lambda r: r.body_open)
+        return canon_container(text[r.header_start:r.body_open])
+
+    want = canon_container(target.container)
+    by_impl = [h for h in named if _enclosing(h.start) == want]
+    cands = by_impl or named
+    if sig_text and len(cands) > 1:
+        want_sig = canon_token_text(sig_text)
+        by_sig = [h for h in cands
+                  if canon_token_text(text[h.start:h.brace_open]).startswith(want_sig)]
+        cands = by_sig or cands
+    return frozenset(h.start for h in cands)
+
+
+def annotate_file_view(file_text: str, target: FnSite, sig_text: str, *,
                        doc_keep_full_limit: int) -> str:
     """A view of ``file_text`` where every unimplemented stub is prefixed with a
-    status comment (the TARGET fn marked distinctly), so the model treats stubs
-    as "to-be-filled later" rather than permanent gaps. Doc comments are kept in
-    FULL when the view fits under ``doc_keep_full_limit`` (the crate's own usage
-    examples are concrete guidance); only large views are
-    condensed. Non-doc crate attrs are always dropped. PROMPT view only — the
-    on-disk file is untouched."""
+    status comment (the TARGET definition marked distinctly), so the model treats
+    stubs as "to-be-filled later" rather than permanent gaps. The target is a
+    DEFINITION (:func:`target_header_starts`), not a name: a same-named
+    definition in another impl is shown as any other stub. Doc comments are kept
+    in FULL when the view fits under ``doc_keep_full_limit`` (the crate's own
+    usage examples are concrete guidance); only large views are condensed.
+    Non-doc crate attrs are always dropped. PROMPT view only — the on-disk file
+    is untouched."""
     # Big view → condense docs to protect budget; else drop only #![...] crate attrs.
     file_text = (condense_doc_attrs(file_text) if len(file_text) > doc_keep_full_limit
                  else strip_crate_attrs(file_text))
+    headers = fn_headers(file_text, line_anchored=False)
+    targets = target_header_starts(file_text, headers, target, sig_text)
     out: list[str] = []
     last_fn_end = 0
-    for h in fn_headers(file_text, line_anchored=False):
-        fn_name = h.name
+    for h in headers:
         sig_start = h.start
         body_start = h.brace_open + 1
         depth = 1
@@ -213,7 +260,7 @@ def annotate_file_view(file_text: str, target_fn: str, *,
             else:
                 break
         out.append(file_text[last_fn_end:sig_start])
-        if fn_name == target_fn:
+        if sig_start in targets:
             annot = (f"{indent}// >>> TARGET — implement THIS function below; the body is "
                      f"currently `unimplemented!()`. <<<\n")
         elif is_stub:
