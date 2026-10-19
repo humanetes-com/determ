@@ -1126,6 +1126,17 @@ def cap_at_line_boundary(text: str, cap: int) -> str:
     return tail[nl + 1:] if 0 <= nl < len(tail) - 1 else tail
 
 
+def head_at_line_boundary(text: str, cap: int) -> str:
+    """Trim `text` to at most `cap` chars, keeping the HEAD and cutting at a
+    line boundary so an excerpt never ends mid-line. If the first line alone
+    exceeds `cap`, hard-slice the head."""
+    if len(text) <= cap:
+        return text
+    head = text[:cap]
+    nl = head.rfind("\n")
+    return head[:nl] if nl > 0 else head
+
+
 @dataclass(frozen=True, slots=True)
 class FailureExcerpt:
     """One place the excerpt rule lives: the failing-test NAME list is

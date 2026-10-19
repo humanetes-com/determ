@@ -6,13 +6,17 @@ that into work for t2a. The pass writes a test that reaches the body through
 the public API, admits it only when the original crate passes it and the
 rebuilt tree fails it inside the body, and moves the oracle seal with it.
 
-Invented sites and shapes only.
+Invented sites and shapes only, except one recorded candidate kept as
+bytes: the remover has to cut that file, and a stand-in with the same
+outline does not.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 from pipeline_core.adapters.pin_inputs import (
     example_header,
@@ -29,6 +33,7 @@ from pipeline_core.application.pinning_tests import (
 from pipeline_core.domain.end_verdict import EndVerdict
 from pipeline_core.domain.fn_execution import site_label
 from pipeline_core.domain.fn_routes import FnRoutes, PublicRoute, WorldFacts
+from pipeline_core.domain.generation import PIPELINE_GEN_TEST_ORIGIN
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.pinning_test import (
     PIN_CRITERIA,
@@ -39,7 +44,7 @@ from pipeline_core.domain.pinning_test import (
     judge_pin,
     withdraw_original_failures,
 )
-from pipeline_core.domain.rust_scan import without_test_fns
+from pipeline_core.domain.rust_scan import attributed_test_fn_names, without_test_fns
 from pipeline_core.prompts.pinning_test import build_pinning_test_prompt
 
 _SITE = FnSite("src/wrap.rs", "probe", "impl Fetch for Wrapper < T >")
@@ -228,6 +233,17 @@ def test_a_run_that_reported_no_test_is_not_a_run() -> None:
            "test result: FAILED. 0 passed; 1 failed; 0 ignored\n")
     r = reading_of(out, finished=True)
     assert r.ran and r.failed == {"reaches_probe"} and "not implemented" in r.excerpt
+    # The failure body is kept from the head and cut on a line. A slice of
+    # the first N characters ends inside the long line; the bound does not.
+    long = "x" * 2000
+    wide = ("running 1 test\ntest reaches_probe ... FAILED\n\nfailures:\n\n"
+            "---- reaches_probe stdout ----\n\nthread 'reaches_probe' panicked at "
+            "src/wrap.rs:9:9:\n" + long + "\nKEPT-OFF\n\nfailures:\n    "
+            "reaches_probe\n\ntest result: FAILED. 0 passed; 1 failed\n")
+    wide_reading = reading_of(wide, finished=True)
+    assert wide_reading.excerpt == (
+        "reaches_probe: thread 'reaches_probe' panicked at src/wrap.rs:9:9:")
+    assert "KEPT-OFF" not in wide_reading.excerpt
 
 
 # --- the test must observe the body --------------------------------------------
@@ -491,8 +507,8 @@ def test_a_file_whose_other_test_pins_is_admitted_without_the_failing_one(
     check on its own. The file-level rule refused both and the pass ended
     with no pin. Withdrawn, the rest is judged and admitted, and the
     withdrawn test is on the record later attempts are shown. Negative
-    control: the pre-fix file-level rule refuses the same replies on every
-    attempt."""
+    control: skipping the withdrawal does not refuse the file. The judge
+    raises, because the failing test can still be cut out."""
     import pipeline_core.application.pinning_tests as pt
 
     def _run(withdraw: bool) -> tuple[int, list[str], list[str], list[str]]:
@@ -522,9 +538,8 @@ def test_a_file_whose_other_test_pins_is_admitted_without_the_failing_one(
     assert events[:2] == ["task4.pin_withdrawn", "task4.pin_admitted"]
     text = admitted[0].split("\n", 1)[1]
     assert "fn reaches_probe()" in text and "reaches_probe_guessed" not in text
-    n, prompts, admitted, _ = _run(False)
-    assert n == 0 and admitted == [] and len(prompts) == 3
-    assert "original_failed" in prompts[1]
+    with pytest.raises(RuntimeError, match="can be removed"):
+        _run(False)
 
 
 def test_the_withdrawn_test_is_shown_to_the_next_attempt(tmp_path: Path) -> None:
@@ -542,3 +557,64 @@ def test_the_withdrawn_test_is_shown_to_the_next_attempt(tmp_path: Path) -> None
     assert run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps) == 0
     assert "refused: original_failed: on the original crate reaches_probe_guessed" in prompts[1]
     assert "left: None" in prompts[1] and "refused: rebuilt_passed" in prompts[1]
+
+
+def test_a_cuttable_mixed_file_is_not_judged_as_a_whole_file_failure() -> None:
+    """The pre-fix judge returned original_failed for a file whose other
+    test had passed. That return is gone: the failure can be cut out, so
+    judging the uncut file raises. A failure that shares its line with the
+    next item still cannot be cut, and the file stays original_failed."""
+    both = TestRun(True, frozenset({"reaches_probe"}),
+                   frozenset({"reaches_probe_guessed"}), excerpt="guessed")
+    with pytest.raises(RuntimeError, match="can be removed"):
+        judge_pin(_TWO, both, _RED_REBUILT, frozenset({"reaches_probe"}))
+    shared = "#[test]\nfn a() {} fn helper() {}\n#[test]\nfn b() {}\n"
+    red = TestRun(True, frozenset({"b"}), frozenset({"a"}))
+    judged = judge_pin(shared, red, TestRun(True, failed=frozenset({"b"})),
+                       frozenset({"b"}))
+    assert judged.refusal is PinRefusal.ORIGINAL_FAILED
+
+
+def test_a_long_refusal_reaches_the_next_prompt_intact(tmp_path: Path) -> None:
+    """The reason stored for the next attempt is the whole judgement. A
+    second slice at 1500 characters dropped the end of a diagnostic that
+    was already bounded once. The marker sits past that slice."""
+    marker = "UNIQUE-TAIL-MARKER"
+    excerpt = ("help: look at the bound\n" * 80) + marker
+    assert len(excerpt) > 1500
+    prompts: list[str] = []
+    deps = _deps(tmp_path, [f"```rust\n{_FILE}```"] * 2,
+                 [(_OK_ORIG, _RED_REBUILT, frozenset())] * 2, prompts, [])
+    deps = _with(deps, max_attempts=2,
+                 run_original=lambda *_a: TestRun(False, excerpt=excerpt))
+    assert run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps) == 0
+    refused = prompts[1].index("refused: ")
+    assert prompts[1].index(marker) - refused > 1500
+
+
+def test_the_recorded_candidate_loses_only_the_failed_test() -> None:
+    """The candidate the 2026-10-19 pin pass built, as bytes. The original
+    failed the later test. The cut keeps the earlier test, the gate and the
+    origin line. Judging the uncut file raises; judging the cut file with
+    the remaining test passed on the original and failed in the body admits."""
+    body = (Path(__file__).resolve().parent / "fixtures" / "pin"
+            / "recorded_two_test_candidate.rs").read_text()
+    names = attributed_test_fn_names(body)
+    assert len(names) == 2
+    kept, failed = names[0], names[1]
+    gated = "#![cfg(nightly)]\n// " + PIPELINE_GEN_TEST_ORIGIN + "\n" + body
+    original = TestRun(True, frozenset({kept}), frozenset({failed}),
+                       excerpt="panicked at the assert")
+    cut = withdraw_original_failures(gated, original)
+    assert cut is not None and cut.withdrawn == {failed}
+    assert f"fn {failed}(" not in cut.text
+    assert f"fn {kept}(" in cut.text
+    assert PIPELINE_GEN_TEST_ORIGIN in cut.text
+    assert cut.text.startswith("#![cfg(nightly)]\n")
+    with pytest.raises(RuntimeError, match="can be removed"):
+        judge_pin(gated, original, TestRun(True, failed=frozenset({kept})),
+                  frozenset({kept}))
+    admitted = judge_pin(cut.text, TestRun(True, frozenset({kept})),
+                         TestRun(True, failed=frozenset({kept})),
+                         frozenset({kept}))
+    assert admitted.admitted and admitted.pinning == {kept}

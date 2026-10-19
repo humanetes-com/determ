@@ -32,7 +32,11 @@ from ..domain.attribution import canon_site
 from ..domain.installable_fns import fn_decl_shape
 from ..domain.models import FnSite
 from ..domain.pinning_test import TestRun
-from ..domain.test_report import cap_at_line_boundary, parse_test_output
+from ..domain.test_report import (
+    cap_at_line_boundary,
+    head_at_line_boundary,
+    parse_test_output,
+)
 from .process import run_bounded
 
 __all__ = ["reading_of", "run_on_original", "run_on_rebuilt", "run_original_emptied",
@@ -49,11 +53,13 @@ def _leaf(name: str) -> str:
 
 
 def reading_of(output: str, *, finished: bool) -> TestRun:
-    """The run's verdicts by leaf name, and an excerpt for the next prompt:
-    the failures' own text when tests ran, else the output's tail (the
-    compiler's errors), cut on a line boundary so it never opens mid-line.
-    This is the one bound on a refusal's evidence: the pin pass stores the
-    reason built on it whole."""
+    """The run's verdicts by leaf name, and an excerpt for the next prompt.
+
+    Compiler output (the process did not finish, or no test was reported)
+    keeps the tail. A run that reported tests keeps the head of the failure
+    bodies. Both end on a line boundary. This is the only cut: the pin pass
+    stores the reason built on this excerpt whole. A line longer than the
+    bound is sliced, because there is no boundary inside it."""
     if not finished:
         return TestRun(False, excerpt=cap_at_line_boundary(output, _EXCERPT))
     report = parse_test_output(output)
@@ -63,7 +69,7 @@ def reading_of(output: str, *, finished: bool) -> TestRun:
         return TestRun(False, excerpt=cap_at_line_boundary(output, _EXCERPT))
     words = "\n".join(f"{f.test_name}: {(f.body or '').strip()}"
                       for f in report.failures)
-    return TestRun(True, passed, failed, words[:_EXCERPT])
+    return TestRun(True, passed, failed, head_at_line_boundary(words, _EXCERPT))
 
 
 def run_on_original(project_dir: Path, module: str, stem: str, text: str,

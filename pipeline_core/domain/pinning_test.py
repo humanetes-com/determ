@@ -47,8 +47,11 @@ the one candidate that built declared two tests; the original failed one
 and passed the other, and the other passed every check on its own (the
 rebuilt tree panicked inside the blocking body, the emptied original failed
 it). The file-level rule refused both, and the pass ended with no pin. The
-rest of the file is run again on the original and judged by the unchanged
-checks; a file whose every test the original fails stays refused.
+rest of the file is run again on the original and then judged. `judge_pin`
+raises when the file still contains a failure that can be removed, so a
+caller that skips the withdrawal cannot refuse the whole file as
+`original_failed`. A file whose every test the original fails, or whose
+failing test cannot be cut out, stays refused.
 
 A test that passes on the rebuilt tree is evidence the route it took does not
 reach the body there; it is refused, never admitted as a green addition. A
@@ -223,10 +226,21 @@ def judge_pin(text: str, original: TestRun, rebuilt: TestRun,
               body_hits: frozenset[str]) -> PinJudgement:
     """Admit or refuse. `body_hits` are the rebuilt run's tests whose first
     panic lies inside the blocking body (the caller resolves panic sites to
-    sites with the extractor's records of the rebuilt tree)."""
+    sites with the extractor's records of the rebuilt tree).
+
+    A file that still contains a test the original failed, when that test can
+    be removed without touching another, is not a judgement. The caller
+    removes it, re-runs the original, and judges what remains. Returning
+    `original_failed` for that file is how a skipped withdrawal refuses the
+    tests that passed, so this raises instead."""
     shape = pin_shape_refusal(text)
     if shape is not None:
         return shape
+    if withdraw_original_failures(text, original) is not None:
+        raise RuntimeError(
+            "a test the original failed can be removed from the file; "
+            "judge_pin refuses the file only when every test failed or "
+            "the failing test cannot be cut out")
     declared = frozenset(attributed_test_fn_names(text))
     if not original.ran:
         return PinJudgement(False, PinRefusal.ORIGINAL_DID_NOT_RUN,
