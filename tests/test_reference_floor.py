@@ -558,7 +558,8 @@ def test_module_loop_stops_without_calling_task4() -> None:
     class _Step:
         def run(self, *a: object, **k: object) -> object:
             return SimpleNamespace(locked=False, failure_type="test",
-                                   test_output="failures:\n    ui\n")
+                                   test_output="failures:\n    ui\n",
+                                   end_verdict=None)
 
     class _Tel:
         def log(self, *a: object, **k: object) -> None: ...

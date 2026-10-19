@@ -13,8 +13,10 @@ from dataclasses import dataclass
 
 from pipeline_core.application.reconstruct.reconstruction_step import StepOutcome
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.end_verdict import EndVerdict
 from pipeline_core.domain.failure_classification import pass_count_is_measured
 from pipeline_core.domain.reconstruction import IterationState
+from pipeline_core.domain.test_results import parse_test_counts
 from pipeline_core.phases import phase_scope
 from pipeline_core.ports.reconstruct import (
     Analyst,
@@ -33,6 +35,12 @@ class AnalysisResult:
     state: IterationState
     total_iters: int
     coverage_strategy: str
+    # What this iteration's retro gave the next t2a: lessons admitted for
+    # red tests plus pinning tests admitted for blocking bodies. The module
+    # loop re-enters t2a on a positive count and ends the module red on 0
+    # (`ModuleReconstructor`): a re-entry with nothing new would send the
+    # prompts it already sent.
+    artifacts: int = 0
 
 
 class FailureAnalysisStep:
@@ -42,6 +50,7 @@ class FailureAnalysisStep:
         docs: DocsMetrics, telemetry: Telemetry, genesis_audit_interval: int,
         render_strategy: Callable[[RunContext, str], str],
         lessons: Callable[[RunContext, int], int] | None = None,
+        pins: Callable[[RunContext, int, EndVerdict], int] | None = None,
     ) -> None:
         self._analyst = analyst
         self._journal = journal
@@ -61,6 +70,13 @@ class FailureAnalysisStep:
         # how many were admitted; None runs no such pass.
         self._lessons = lessons
         self.lessons_admitted = 0
+        # The end gate's retro (`pinning_tests.run_pinning_pass`): for each
+        # blocking body, a test that reaches it through the public API,
+        # admitted to the oracle only when the original passes it while
+        # executing the body and the rebuilt tree fails it. Returns how many
+        # were admitted; each turns a blocking body into a red test the next
+        # t2a owns. None writes no pin.
+        self._pins = pins
 
     def run(
         self, ctx: RunContext, state: IterationState, outcome: StepOutcome, *,
@@ -76,24 +92,43 @@ class FailureAnalysisStep:
         t4_source_context = self._artifacts.collect_source_context(
             ctx.project_dir, ctx.module_manifest, ctx.existing_test_files)
         self._tel.set_current(ctx.project_dir, f"task4/{ctx.module_name} / genesis update (iter {it})")
+        artifacts = 0
         if self._lessons is not None:
             with phase_scope("t4", module=ctx.module_name, attempt=it,
                              detail="per-test lessons"):
-                self.lessons_admitted += self._lessons(ctx, it)
-        with phase_scope("t4", module=ctx.module_name, attempt=it):
-            _t4_ok, current_pass = self._analyst.task4(
-                ctx.genesis_path, ctx.module_req_path, test_output, it, ctx.project_dir,
-                failure_type=failure_type,
-                failure_log=self._journal.load_failure_log(ctx.failure_log_path),
-                prev_pass_count=state.prev_pass_count, prev_test_output=state.prev_test_output,
-                source_context=t4_source_context,
-                api_surface=self._artifacts.load_api_surface(ctx.project_dir, ctx.module_name))
-        genesis_after = self._artifacts.read(ctx.genesis_path)
-
-        # Anti-corruption: detect genesis stall (TASK 4 produced no update).
-        t4_valid, t4_reason = self._analyst.validate_task4_output(
-            genesis_before, genesis_after, test_output, failure_type)
-        if not t4_valid:
+                admitted = self._lessons(ctx, it)
+                self.lessons_admitted += admitted
+                artifacts += admitted
+        verdict = outcome.end_verdict
+        if verdict is not None:
+            # The suite passed; the end gate did not. The genesis update reads
+            # a failing test output, and there is none: what this failure
+            # needs is a test that reaches the blocking body, which is the
+            # pinning pass.
+            if self._pins is not None:
+                with phase_scope("t4", module=ctx.module_name, attempt=it,
+                                 detail="pinning tests for blocking bodies"):
+                    artifacts += self._pins(ctx, it, verdict)
+            current_pass = parse_test_counts(test_output)[0]
+            self._tel.log(f"  TASK 4 genesis update skipped: the suite passed and "
+                          f"the end gate blocked on {', '.join(verdict.labels())}.")
+        else:
+            with phase_scope("t4", module=ctx.module_name, attempt=it):
+                _t4_ok, current_pass = self._analyst.task4(
+                    ctx.genesis_path, ctx.module_req_path, test_output, it, ctx.project_dir,
+                    failure_type=failure_type,
+                    failure_log=self._journal.load_failure_log(ctx.failure_log_path),
+                    prev_pass_count=state.prev_pass_count, prev_test_output=state.prev_test_output,
+                    source_context=t4_source_context,
+                    api_surface=self._artifacts.load_api_surface(ctx.project_dir, ctx.module_name))
+            genesis_after = self._artifacts.read(ctx.genesis_path)
+            # Anti-corruption: detect genesis stall (TASK 4 produced no update).
+            t4_valid, t4_reason = self._analyst.validate_task4_output(
+                genesis_before, genesis_after, test_output, failure_type)
+        if verdict is not None:
+            t4_summary = "end gate blocked; genesis not updated."
+            failure_type_logged = failure_type
+        elif not t4_valid:
             self._tel.log(f"  TASK 4 anti-corruption: {t4_reason}")
             t4_summary = f"genesis_stall: {t4_reason}"
             failure_type_logged = "genesis_stall"
@@ -170,4 +205,5 @@ class FailureAnalysisStep:
             current_pass=current_pass, test_output=test_output,
             source_context=t4_source_context)
         return AnalysisResult(state=next_state, total_iters=total_iters,
-                              coverage_strategy=coverage_strategy)
+                              coverage_strategy=coverage_strategy,
+                              artifacts=artifacts)

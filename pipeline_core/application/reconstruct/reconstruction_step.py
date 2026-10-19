@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pipeline_core.application import orchestrator
 from pipeline_core.application.gen_tests_reattach import ReattachDeps, reattach_gen_tests
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.end_verdict import EndVerdict
 from pipeline_core.domain.reconstruction import (
     PROC_MACRO_CONSTRAINTS,
     IterationState,
@@ -32,13 +33,21 @@ from pipeline_core.ports.reconstruct import (
 NO_IMPROVEMENT_THRESHOLD_DEFAULT = 3
 
 
+#: The failure type of an iteration whose suite passed and whose end gate
+#: did not: a body reachable under a baked cfg-set is still unimplemented and
+#: no oracle test reaches it (`domain/end_verdict`).
+BLOCKING_BODY = "blocking_body"
+
+
 @dataclass(frozen=True, slots=True)
 class StepOutcome:
     """Result of one reconstruction iteration: either the module locked (loop
-    ends) or a typed failure to feed TASK 4."""
+    ends) or a typed failure to feed TASK 4. `end_verdict` is set exactly
+    when the failure is the end gate's (`failure_type == BLOCKING_BODY`)."""
     locked: bool
     failure_type: str = ""
     test_output: str = ""
+    end_verdict: EndVerdict | None = None
 
 
 class ReconstructionStep:
@@ -72,14 +81,25 @@ class ReconstructionStep:
     def _lock(self, ctx: RunContext, state: IterationState, *, commit_message: str,
               detail: str, set_current_label: str, locked_commit_msg: str,
               success_log: str, tag: str | None = None,
-              complete_commit_msg: str | None = None) -> None:
-        orchestrator.lock_or_complete(
+              complete_commit_msg: str | None = None) -> EndVerdict | None:
+        return orchestrator.lock_or_complete(
             ctx.project_dir, ctx.module_name, ctx.module_dir, ctx.module_manifest,
             is_multi_module=ctx.is_multi_module, locked_modules=ctx.locked_modules,
             src_hash=ctx.src_hash, commit_message=commit_message, detail=detail,
             set_current_label=set_current_label, locked_commit_msg=locked_commit_msg,
             success_log=success_log, tag=tag, complete_commit_msg=complete_commit_msg,
             deps=self._lock_deps)
+
+    def _locked_or_blocked(self, verdict: EndVerdict | None,
+                           test_output: str) -> StepOutcome:
+        """The outcome of a lock attempt: locked, or the end gate's failure
+        carried as a failed iteration with its verdict as evidence."""
+        if verdict is None or verdict.clean:
+            return StepOutcome(True)
+        self._tel.emit("end_gate.blocked", data={"blocking": list(verdict.labels())})
+        return StepOutcome(False, BLOCKING_BODY,
+                           test_output + "\n" + verdict.report(),
+                           end_verdict=verdict)
 
     def run(self, ctx: RunContext, state: IterationState, *, coverage_strategy: str) -> StepOutcome:
         it = state.iteration
@@ -140,7 +160,7 @@ class ReconstructionStep:
         self._tel.log(f"  TASK 3 result: {t3_status} — {t3_reason}")
 
         if t3_status == "pass":
-            self._lock(
+            verdict = self._lock(
                 ctx, state,
                 commit_message=f"pipeline: task3 iter {it} — {ctx.module_name} tests pass",
                 tag=f"passing-{ctx.module_name}-{it}", detail=f"iteration {it}",
@@ -148,18 +168,18 @@ class ReconstructionStep:
                 locked_commit_msg=f"pipeline: locked — {ctx.module_name}",
                 success_log=f"\nSUCCESS: all tests passed on iteration {it}.",
                 complete_commit_msg=f"pipeline: complete — all tests pass iter {it}")
-            return StepOutcome(True)
+            return self._locked_or_blocked(verdict, test_output)
 
         if t3_status == "no_files":
             self._tel.log("  Module has no test files — locking on build success.")
-            self._lock(
+            verdict = self._lock(
                 ctx, state,
                 commit_message=f"pipeline: build passed (no tests) — {ctx.module_name} iter {it}",
                 detail=f"no tests iter {it}",
                 set_current_label=f"task2-4/{ctx.module_name} / LOCKED (no tests)",
                 locked_commit_msg=f"pipeline: locked (no tests) — {ctx.module_name}",
                 success_log="\nSUCCESS: build passed with no module tests.")
-            return StepOutcome(True)
+            return self._locked_or_blocked(verdict, test_output)
 
         if t3_status == "no_tests":
             failure_type, test_output = self._fixer.diagnose_no_tests(
@@ -180,7 +200,7 @@ class ReconstructionStep:
                     ctx.project_dir, ctx.module_test_cmd, f"{label}-fixverify",
                     ctx.project_dir, ctx.genesis_path)
             if reverified:
-                self._lock(
+                verdict = self._lock(
                     ctx, state,
                     commit_message=f"pipeline: task3 iter {it} — {ctx.module_name} tests pass (fix loop)",
                     tag=f"passing-{ctx.module_name}-{it}", detail=f"iteration {it} (fix loop)",
@@ -188,6 +208,6 @@ class ReconstructionStep:
                     locked_commit_msg=f"pipeline: locked — {ctx.module_name}",
                     success_log="\nSUCCESS: all tests passed after fix loop.",
                     complete_commit_msg=f"pipeline: complete — all tests pass iter {it}")
-                return StepOutcome(True)
+                return self._locked_or_blocked(verdict, test_output)
 
         return StepOutcome(False, self._fixer.classify_failure(test_output), test_output)

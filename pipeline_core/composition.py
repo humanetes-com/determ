@@ -222,6 +222,15 @@ from pipeline_core.adapters.per_fn_ask import conversation_factory
 from pipeline_core.adapters.phase_c_log import (
     write_phase_c_test_fix_log as _write_phase_c_test_fix_log,
 )
+from pipeline_core.adapters.pin_inputs import (
+    example_header as _pin_example_header,
+)
+from pipeline_core.adapters.pin_inputs import route_lines as _pin_route_lines
+from pipeline_core.adapters.pin_inputs import signature_text as _pin_signature_text
+from pipeline_core.adapters.pin_inputs import worlds_compiling as _pin_worlds_compiling
+from pipeline_core.adapters.pin_runs import run_on_original as _pin_run_on_original
+from pipeline_core.adapters.pin_runs import run_on_rebuilt as _pin_run_on_rebuilt
+from pipeline_core.adapters.pin_runs import run_original_emptied as _pin_run_original_emptied
 from pipeline_core.adapters.pipeline_db import (
     compile_patterns_read as _compile_patterns_read,
 )
@@ -443,6 +452,8 @@ from pipeline_core.application.orchestrator import (
 from pipeline_core.application.parallel import (
     generate_in_parallel as _gen_in_parallel_impl,
 )
+from pipeline_core.application.pinning_tests import PinningDeps, run_pinning_pass
+from pipeline_core.application.pinning_tests import admit_oracle_file as _admit_oracle_file
 from pipeline_core.application.preserve_inline_tests import (
     PreserveInlineTestsDeps,
     preserve_inline_tests,
@@ -467,6 +478,7 @@ from pipeline_core.application.reconstruct.assert_probe_runner import (
 from pipeline_core.application.reconstruct.attribution import (
     AttributionDeps,
     escalate_frontier_to_producers,
+    extract_tdd_frontier,
     not_body_repairable_tests,
 )
 from pipeline_core.application.reconstruct.body_reseed import TreeWriter
@@ -691,6 +703,7 @@ from pipeline_core.application.tasks.task4 import Task4Deps
 from pipeline_core.application.tasks.task4 import task4 as _task4_run
 from pipeline_core.application.test_worlds import (
     TestWorldsDeps,
+    gate_line,
     settle_test_gate,
     world_is_measurable,
 )
@@ -974,7 +987,7 @@ class CompositionConfig:
     no_improvement_threshold: int
     genesis_audit_interval: int
     module_plateau_abort: int
-    stall_refill_iters: int
+    pin_test_max_attempts: int
     test_timeout: int
     build_check_retries: int
     task2_build_max_stalls: int
@@ -2508,13 +2521,61 @@ def build_app(
         save_lessons=_save_lessons, test_files=_lesson_test_files,
         unit_bodies=_lesson_unit_bodies, log=ports.log,
         emit=lambda ev, **k: telemetry.emit(ev, **k))
-    _lessons_since_refill = {"n": 0}
+    # The end gate's retro (`application/pinning_tests`): a pinning test per
+    # blocking body, judged on the original crate and on the rebuilt tree.
+    def _pin_deps(ctx: RunContext) -> PinningDeps:
+        clusters = list(ctx.clusters)
+        worlds = construction_facts.facts(ctx.project_dir, clusters, may_measure=False)
+        return PinningDeps(
+            ask=lambda prompt: ports.ask(prompt, model=settings.task_models.task0c),
+            worlds_for=lambda pd, site: _pin_worlds_compiling(
+                site, scan_unimplemented_functions(pd).site_preds(), clusters),
+            routes_for=lambda pd, world, site: _pin_route_lines(
+                worlds, str(getattr(world, "name", "")), site),
+            signature_of=lambda pd, site: _pin_signature_text(
+                helpers.structure_via_app.enumerate_fns(pd) or [], pd, site),
+            api_surface=lambda pd, module: _load_api_surface(pd, module),
+            example_header=lambda pd, world: _pin_example_header(
+                pd, gate_line(cluster_cfg_attr(world))),
+            gate_line=lambda world: gate_line(cluster_cfg_attr(world)),
+            run_original=lambda pd, module, stem, text, world: _pin_run_on_original(
+                pd, module, stem, text, world, cluster_env=cluster_cargo_env,
+                timeout=cfg.build_timeout),
+            run_rebuilt=lambda pd, module, stem, text, world, sites: _pin_run_on_rebuilt(
+                pd, module, stem, text, world, sites, cluster_env=cluster_cargo_env,
+                timeout=cfg.build_timeout,
+                stub_panic_sites=lambda out, root: extract_tdd_frontier(
+                    _attr_deps, out, root)[1]),
+            run_original_emptied=lambda pd, module, stem, text, world, sites: (
+                _pin_run_original_emptied(
+                    pd, module, stem, text, world, sites, cluster_env=cluster_cargo_env,
+                    timeout=cfg.build_timeout,
+                    fn_records=lambda root: helpers.structure_via_app.enumerate_fns(root)
+                    or [])),
+            admit=_admit_pinning_test, log=ports.log, emit=ports.emit,
+            max_attempts=cfg.pin_test_max_attempts)
+
+    def _admit_pinning_test(project_dir: Path, module: str, rel: str, text: str) -> bool:
+        """The one writer of a test into the oracle after strip: the file,
+        its commit, and the seal moved to that commit, so the launch-time
+        drift check reads the extended oracle as sealed and every clock
+        keyed on the oracle identity restarts by rule."""
+        def _seal_clean() -> bool:
+            drift = _workspace_oracle_drift(project_dir, module)
+            return drift is not None and drift.clean
+        return _admit_oracle_file(
+            project_dir, rel, text,
+            commit=lambda message: git_commit(project_dir, message),
+            tag=lambda: git_tag(project_dir, _oracle_tag(module)),
+            seal_clean=_seal_clean, log=ports.log)
+
+    def _run_pins(ctx: RunContext, it: int, verdict: Any) -> int:
+        return run_pinning_pass(ctx.project_dir, ctx.module_name, verdict,
+                                _pin_deps(ctx), crate=ctx.module_name.replace("-", "_"))
 
     def _run_lessons(ctx: RunContext, it: int) -> int:
-        n = run_test_lessons(ctx.project_dir, [c.name for c in ctx.clusters],
-                             _lessons_deps, iteration=str(it))
-        _lessons_since_refill["n"] += n
-        return n
+        return run_test_lessons(ctx.project_dir, [c.name for c in ctx.clusters],
+                                _lessons_deps, iteration=str(it))
 
     failure_analysis = FailureAnalysisStep(
         analyst=analyst, journal=failure_journal, ratchet=BestTreeRatchet(),
@@ -2525,28 +2586,28 @@ def build_app(
             ctx.project_dir, text,
             construction_facts.facts(ctx.project_dir, ctx.clusters, may_measure=False)),
         lessons=_run_lessons,
+        pins=_run_pins,
     )
-    def _stall_refill(project_dir: Path, module: str) -> bool:
+    def _reenter(project_dir: Path, module: str, artifacts: int) -> bool:
         # Same keys restart_from.sh task2a clears — the manual escape hatch,
-        # now fired automatically on a stalled repair loop. Only when task 4
-        # admitted a lesson since the last re-entry: without one the next
-        # t2a would send the prompts it already sent.
+        # fired by the module loop after every failed iteration whose retro
+        # gave the writer something new. Without one the next t2a would send
+        # the prompts it already sent.
         if (helpers.settings_now().phase_c_driver is PhaseCDriver.TDD
-                and _lessons_since_refill["n"] <= 0):
+                and artifacts <= 0):
             # The TDD driver writes the red ledger the lessons are read
-            # from; the legacy driver writes none, so it keeps re-entering.
+            # from and owns the pinned tests; the legacy driver writes
+            # neither, so it keeps re-entering.
             return False
-        _lessons_since_refill["n"] = 0
         for _key in (f"task2a/{module}", f"task2b/{module}", f"task2c/{module}"):
             mark_phase(project_dir, _key, "pending",
-                       detail="auto-reset: stalled repair iterations")
+                       detail="auto-reset: the retro admitted new artifacts")
         return True
 
     module_reconstructor = ModuleReconstructor(
         step=reconstruction_step, analysis=failure_analysis, telemetry=telemetry,
         plateau_abort=cfg.module_plateau_abort,
-        stall_refill_iters=cfg.stall_refill_iters,
-        stall_refill=_stall_refill,
+        reenter=_reenter,
         out_of_reach=_out_of_reach,
     )
     # Attribution deps built as a local first — the TDD driver's futility

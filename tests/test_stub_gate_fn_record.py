@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from pipeline_core.application.orchestrator import (
     LockDeps,
     classify_remaining_stubs,
@@ -108,17 +106,21 @@ def test_the_single_module_completion_exits_zero_on_unreached_stubs_only() -> No
             scan_unimplemented_functions=lambda *a, **k: _inventory(_UNREACHED),
             augmentation_fn_records=lambda _p: records)
 
-    def _complete(deps: LockDeps) -> int:
-        with pytest.raises(SystemExit) as exc:
-            lock_or_complete(
+    def _complete(deps: LockDeps) -> object:
+        try:
+            return lock_or_complete(
                 Path("/p"), "m", Path("/p"), Path("/p/.gen"), is_multi_module=False,
                 locked_modules=set(), src_hash=None, commit_message="cm", detail="d",
                 set_current_label="s", locked_commit_msg="l", success_log="SUCCESS",
                 deps=deps)
-        return int(exc.value.code or 0)
+        except SystemExit as exc:
+            return int(exc.code or 0)
 
     assert _complete(_deps([_RECORD])) == 0
-    assert _complete(_deps([])) == 1               # control: the pre-record gate
+    # Control: the pre-record gate blocks. Not an exit any more — the verdict
+    # goes back to the module loop as a failed iteration.
+    blocked = _complete(_deps([]))
+    assert not isinstance(blocked, int) and blocked.blocking  # type: ignore[union-attr]
 
 
 def test_the_cluster_close_reports_each_stub_by_the_record() -> None:

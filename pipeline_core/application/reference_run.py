@@ -371,3 +371,49 @@ def _names(pairs: Iterable[tuple[str, str]], cap: int = 8) -> str:
     shown = sorted(f"{a}::{b}" for a, b in pairs)
     return ", ".join(shown[:cap]) + (f", … (+{len(shown) - cap})"
                                      if len(shown) > cap else "")
+
+
+def run_test_file_on_original(project_dir: Path, rel_test: str, text: str, *,
+                              env: dict[str, str], timeout: int,
+                              prepare: Callable[[Path], object] | None = None,
+                              target_name: str = "pin-target",
+                              ) -> tuple[bool, str]:
+    """Run ONE test file against the pristine crate: materialise the
+    worktree, write `rel_test` into it, `cargo test --test <stem>` under
+    `env`, and remove the worktree whatever happens. Returns (the run
+    finished, its output). Only the verdict leaves this function: the
+    worktree, its source and the file are gone before it returns.
+
+    The end gate's pinning pass (`application/pinning_tests`) asks the
+    original whether what a candidate asserts is the crate's behaviour. The
+    target dir is a sibling of the worktree, outside `project_dir`, and kept
+    across calls: the original's dependencies build once per world.
+
+    `prepare(worktree)` runs after the file is written and before cargo: the
+    pass's observation check empties a body there (the checkout gives every
+    file a fresh mtime, so the crate is rebuilt from what is on disk)."""
+    ref_name = pristine_ref(project_dir)
+    if not ref_name:
+        return False, "no pristine ref in the workspace repo"
+    dest = reference_dir(project_dir) / "pin-tree"
+    if not _add_worktree(project_dir, ref_name, dest):
+        return False, "the pristine tree could not be materialised"
+    try:
+        target = dest / rel_test
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        if prepare is not None:
+            prepare(dest)
+        run_env = dict(env)
+        run_env["CARGO_TARGET_DIR"] = str(reference_dir(project_dir) / target_name)
+        try:
+            res = subprocess.run(
+                ["cargo", "test", "--test", Path(rel_test).stem, "--",
+                 "--test-threads=1"],
+                cwd=dest, capture_output=True, text=True, errors="replace",
+                timeout=timeout, env=run_env)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, f"did not run: {exc}"
+        return True, (res.stdout or "") + "\n" + (res.stderr or "")
+    finally:
+        _remove_worktree(project_dir, dest)

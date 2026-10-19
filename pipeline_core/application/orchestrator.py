@@ -25,6 +25,7 @@ from pipeline_core.application.tasks.task0d import run_task0d
 from pipeline_core.domain.attribution import canon_site
 from pipeline_core.domain.cfg import CfgSet, unreachable_under_every_cfg_set
 from pipeline_core.domain.coverage import CoverageMeasurement
+from pipeline_core.domain.end_verdict import EndVerdict
 from pipeline_core.domain.enums import Backend
 from pipeline_core.domain.fn_execution import (
     FnCoverageRecord,
@@ -80,6 +81,10 @@ class StubVerdict:
     """
 
     orphaned: tuple[FnLocator, ...] = ()
+    # The same stubs as `orphaned`, by site (container kept): what the end
+    # gate's retro needs to look a body's public routes up and to tell two
+    # same-named impl methods apart.
+    orphaned_sites: tuple[FnSite, ...] = ()
     unreachable: tuple[FnLocator, ...] = ()
     upstream_hollow: tuple[FnLocator, ...] = ()
     unreached_by_tests: tuple[FnLocator, ...] = ()
@@ -163,6 +168,8 @@ def classify_remaining_stubs(
     return StubVerdict(
         orphaned=tuple(FnLocator(s.file, s.fn_name) for s in candidates
                        if s not in unreached and s not in dead),
+        orphaned_sites=tuple(s for s in candidates
+                             if s not in unreached and s not in dead),
         dead_in_tree=tuple(FnLocator(s.file, s.fn_name) for s in dead),
         dead_executed_upstream=tuple(
             site_label(s) for s in dead if s in executed),
@@ -284,6 +291,36 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
             "attempted.")
         return False
     return True
+
+
+def end_verdict(
+    project_dir: Path,
+    *,
+    scan_unimplemented_functions: Callable[..., StubInventory],
+    load_baked_clusters: Callable[[Path], list[Any]],
+    reference_hollow: Callable[[Path], frozenset[tuple[str, str]]],
+    augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]],
+    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]],
+    log: Callable[[str], None],
+) -> EndVerdict:
+    """The one end gate: classify the remaining stubs, report every bucket,
+    and return what blocks success. Every completion path takes its decision
+    from this value — the single-module completion returns it to the module
+    loop (`ReconstructionStep`), which runs a retro and re-enters t2a; the
+    multi-module FINAL, which has no loop around it, exits on it."""
+    verdict, n_sets = remaining_stub_verdict(
+        project_dir,
+        scan_unimplemented_functions=scan_unimplemented_functions,
+        load_baked_clusters=load_baked_clusters,
+        reference_hollow=reference_hollow,
+        augmentation_fn_records=augmentation_fn_records,
+        dead_stub_sites=dead_stub_sites)
+    report_stub_verdict(verdict, log, n_sets)
+    return EndVerdict(
+        blocking=verdict.orphaned_sites,
+        executed_upstream=frozenset(
+            s for s in verdict.orphaned_sites
+            if FnLocator(s.file, s.fn_name) in verdict.executed_upstream))
 
 # The --phase-*-only / --skeleton-backend standalone subcommands, in dispatch
 # order. Each maps an `args` flag attribute to a handler keyed by the same name.
@@ -732,14 +769,48 @@ def lock_or_complete(
     tag: str | None = None,
     complete_commit_msg: str | None = None,
     deps: LockDeps,
-) -> None:
+) -> EndVerdict | None:
     """Commit+mark a passing module, then either LOCK it (multi-module: record
-    in `locked_modules`, commit the lock) or COMPLETE the run (single-module:
-    optionally commit the completion, then exit 0). Single-module mode does not
-    return — `deps.sys_exit(0)` raises. The three call sites (t3 pass, no_files
-    build-pass, fix-loop reverified pass) differ only in the message/label/tag
-    arguments; the skeleton is identical."""
+    in `locked_modules`, commit the lock, return None) or COMPLETE the run
+    (single-module: the end gate first; clean, optionally commit the
+    completion and exit 0). The three call sites (t3 pass, no_files
+    build-pass, fix-loop reverified pass) differ only in the
+    message/label/tag arguments; the skeleton is identical.
+
+    A single-module end gate that is NOT clean returns its `EndVerdict`
+    instead of exiting: the module is not marked done, the tree is
+    committed as a checkpoint, and the caller treats the verdict as a failed
+    iteration. Until 2026-10-19 this called `sys_exit(1)`, which put the one
+    failure a green suite can still have outside the module loop: run
+    `1680589-7a6824f8` ended with two reachable `provide` stubs and no retro,
+    no re-entry, no second iteration."""
     with phase_scope("lock", module=module_name):
+        if not is_multi_module:
+            # The SAME verdict as the multi-module FINAL in `run_pipeline` —
+            # single-module projects (the common case: anyhow, hardcrate,
+            # most real crates) complete HERE, not there. It used to be the
+            # same SCAN and not the same verdict: this path called the
+            # cfg-blind `scan_unimplemented_functions` and had no notion of a
+            # stub no baked cfg-set can compile, while the multi-module path
+            # did — a fully green `anyhow` exited 1 on the three
+            # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs`.
+            verdict = end_verdict(
+                project_dir,
+                scan_unimplemented_functions=deps.scan_unimplemented_functions,
+                load_baked_clusters=deps.load_baked_clusters,
+                reference_hollow=deps.reference_hollow,
+                augmentation_fn_records=deps.augmentation_fn_records,
+                dead_stub_sites=deps.dead_stub_sites,
+                log=deps.log)
+            if not verdict.clean:
+                deps.git_commit(
+                    project_dir,
+                    f"{commit_message} — end gate: {len(verdict.blocking)} "
+                    "blocking body(ies)")
+                deps.log(f"  [end-gate] {module_name}: not done — "
+                         f"{len(verdict.blocking)} blocking body(ies); the "
+                         "module loop takes this as a failed iteration.")
+                return verdict
         deps.commit_and_mark(
             project_dir, f"task2-4/{module_name}", "done",
             commit_message=commit_message, tag=tag, detail=detail, source_hash=src_hash,
@@ -749,34 +820,12 @@ def lock_or_complete(
             deps.lock_module(project_dir, module_name, module_dir, module_manifest)
             locked_modules.add(module_name)
             deps.git_commit(project_dir, locked_commit_msg)
-        else:
-            # The SAME stub verdict as the multi-module final check in
-            # `run_pipeline` — single-module projects (the common case: anyhow,
-            # hardcrate, most real crates) complete HERE, not there, so without
-            # this the whole-tree check would never run for them.
-            #
-            # It used to be the same SCAN and not the same verdict: this path called
-            # the cfg-blind `scan_unimplemented_functions` and had no notion of a
-            # stub no baked cfg-set can compile, while the multi-module path did.
-            # A fully green `anyhow` therefore still exited 1 on the three
-            # `#[cfg(anyhow_build_probe)]` bodies in `src/nightly.rs` — two of which
-            # are byte-identical to the `unimplemented!()` upstream writes there.
-            _verdict, _n_sets = remaining_stub_verdict(
-                project_dir,
-                scan_unimplemented_functions=deps.scan_unimplemented_functions,
-                load_baked_clusters=deps.load_baked_clusters,
-                reference_hollow=deps.reference_hollow,
-                augmentation_fn_records=deps.augmentation_fn_records,
-                dead_stub_sites=deps.dead_stub_sites)
-            _clean = report_stub_verdict(_verdict, deps.log, _n_sets)
-            if not _clean:
-                if complete_commit_msg is not None:
-                    deps.git_commit(project_dir, complete_commit_msg)
-                deps.sys_exit(1)
-            deps.log(success_log)
-            if complete_commit_msg is not None:
-                deps.git_commit(project_dir, complete_commit_msg)
-            deps.sys_exit(0)
+            return None
+        deps.log(success_log)
+        if complete_commit_msg is not None:
+            deps.git_commit(project_dir, complete_commit_msg)
+        deps.sys_exit(0)
+        return None
 
 
 def filter_module_test_files(
@@ -1635,14 +1684,18 @@ def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
         # hollow is not a hole this run failed to fill. `classify_remaining_stubs`
         # applies both filters in order and is shared with `lock_or_complete`,
         # which is where single-module crates actually finish.
-        _verdict, _n_sets = remaining_stub_verdict(
+        # No module loop surrounds this check (every module already locked),
+        # so a blocking body here ends the run red. The single-module path
+        # re-enters t2a on the same verdict instead (`lock_or_complete`).
+        _end = end_verdict(
             project_dir,
             scan_unimplemented_functions=deps.scan_unimplemented_functions,
             load_baked_clusters=deps.load_baked_clusters,
             reference_hollow=deps.reference_hollow,
             augmentation_fn_records=deps.augmentation_fn_records,
-            dead_stub_sites=deps.dead_stub_sites)
-        if not report_stub_verdict(_verdict, deps.log, _n_sets):
+            dead_stub_sites=deps.dead_stub_sites,
+            log=deps.log)
+        if not _end.clean:
             sys.exit(1)
         deps.log("\nSUCCESS: all tests passed.")
         sys.exit(0)

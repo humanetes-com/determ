@@ -962,10 +962,15 @@ def classify(
         if outcomes.refuses:
             return BodyState.REFUTED, delta + tuple(
                 (t, "regressed") for t in outcomes.earlier_tests)
+        # A convicting test still red that stops later is recorded whatever
+        # else the landing did: the next sweep's attribution reads it
+        # (`premise_advance`), and a landing that turned some tests green
+        # and moved the rest past itself used to be graded `proven` with the
+        # moves dropped (run `1680589-7a6824f8`, fill 11, `src/fmt.rs`).
+        advanced = tuple((t, "advanced") for t in outcomes.later_tests)
         if not outcomes.gained:
             if outcomes.later:
-                return BodyState.ADVANCED, delta + tuple(
-                    (t, "advanced") for t in outcomes.later_tests)
+                return BodyState.ADVANCED, delta + advanced
             return BodyState.FLAT, delta
         if (entry.kept_green is not None
                 and not (outcomes.gained & frozenset(entry.kept_green))):
@@ -973,7 +978,7 @@ def classify(
             # landing's keep (its own comparison recorded none of them): a
             # sibling keep paid them. A graded try that bought nothing.
             return BodyState.FLAT, delta
-        return BodyState.PROVEN, delta
+        return BodyState.PROVEN, delta + advanced
     if not (names & after.passed):
         return BodyState.UNMEASURED, delta
     # No attributed test was red when the body landed, and they pass now:

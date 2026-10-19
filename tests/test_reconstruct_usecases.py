@@ -6,6 +6,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from pipeline_core.application import orchestrator
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.reconstruct.failure_analysis import FailureAnalysisStep
@@ -16,8 +18,9 @@ from pipeline_core.application.reconstruct.reconstruction_step import (
 )
 from pipeline_core.application.reconstruct.requirements_phase import RequirementsPhase
 from pipeline_core.application.reconstruct.run_context import RunContext
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.reconstruction import IterationState
-from pipeline_core.domain.stub_inventory import StubInventory
+from pipeline_core.domain.stub_inventory import StubInventory, StubSite
 
 
 class FakeAdapter:
@@ -349,32 +352,123 @@ def test_reconstructor_plateau_disabled_by_default(tmp_path: Path) -> None:
     assert "module.nonconverged" not in fa.events
 
 
-def test_reconstructor_stall_refill_clears_checkpoints(tmp_path: Path) -> None:
-    """A stalled repair loop must re-open the deep engine: every
-    `stall_refill_iters` non-improving iterations the injected callback fires
-    (composition clears task2a/b/c markers) so the next TASK 2 re-enters
-    per-cluster reconstruction instead of skip→shallow-fix-loop forever."""
-    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
-                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
-    refills: list[tuple[Path, str]] = []
-    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
-                                telemetry=fa, plateau_abort=5,
-                                stall_refill_iters=2,
-                                stall_refill=lambda pd, m: refills.append((pd, m)))
-    coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    # Streak reaches 2 and 4 before the plateau cap (5) fires → two refills.
-    assert len(refills) == 2
-    assert all(m == _ctx(tmp_path).module_name for _, m in refills)
-    assert "module.stall_refill" in fa.events
+def _analysis_with(fa: FakeAdapter, *, lessons: Any = None, pins: Any = None) -> FailureAnalysisStep:
+    return FailureAnalysisStep(
+        analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
+        coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
+        genesis_audit_interval=5, render_strategy=lambda _ctx, text: text,
+        lessons=lessons, pins=pins)
 
 
-def test_reconstructor_stall_refill_disabled_by_default(tmp_path: Path) -> None:
+def test_reconstructor_reenters_after_every_failed_iteration_with_artifacts(
+        tmp_path: Path) -> None:
+    """Every failed end whose retro admitted something new re-opens t2a at
+    once — no stall streak first. Run `1680589-7a6824f8` had re-entry only
+    every TASK2A_STALL_REFILL_ITERS (2) non-improving iterations."""
     fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
                      task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
-    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
-                                telemetry=fa, plateau_abort=3)
+    calls: list[int] = []
+    coord = ModuleReconstructor(
+        step=_step(fa), analysis=_analysis_with(fa, lessons=lambda _c, _i: 1),
+        telemetry=fa, plateau_abort=3,
+        reenter=lambda pd, m, n: calls.append(n) is None)
     coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    assert "module.stall_refill" not in fa.events
+    iters = fa.events.count("module.iter")
+    assert calls == [1] * iters and fa.events.count("module.reenter") == iters
+
+
+def test_reconstructor_ends_red_when_the_retro_admits_nothing(tmp_path: Path) -> None:
+    """A retro with nothing new ends the module red at that iteration instead
+    of iterating to the plateau cap. Control: the same loop with an admitted
+    lesson keeps iterating to the cap."""
+    def _run(admitted: int) -> tuple[Any, FakeAdapter]:
+        fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""),
+                         best=None, task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
+        coord = ModuleReconstructor(
+            step=_step(fa), analysis=_analysis_with(fa, lessons=lambda _c, _i: admitted),
+            telemetry=fa, plateau_abort=4, reenter=lambda pd, m, n: n > 0)
+        return coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s"), fa
+
+    res, fa = _run(0)
+    assert not res.converged and "admitted nothing new" in res.out_of_reach
+    assert fa.events.count("module.iter") == 1
+    _res2, fa2 = _run(1)
+    assert fa2.events.count("module.iter") == 5, "runs to the plateau cap"
+
+
+_BODY = FnLocator("src/ctx.rs", "provide")
+
+
+def _blocking_step(fa: FakeAdapter, inventories: list[StubInventory]) -> ReconstructionStep:
+    """A single-module step whose end gate reads the scripted inventories in
+    order: a stub on the first lock, none after."""
+    deps = orchestrator.LockDeps(
+        commit_and_mark=lambda *a, **k: fa.calls.append("commit_and_mark"),
+        set_current=lambda *a: None, lock_module=lambda *a: 0,
+        git_commit=lambda *a: fa.calls.append("git_commit") is None,
+        log=fa.log, sys_exit=lambda c: (_ for _ in ()).throw(SystemExit(c)),
+        scan_unimplemented_functions=lambda *a, **k: inventories.pop(0))
+    return ReconstructionStep(generator=fa, tests=fa, fixer=fa, artifacts=fa,
+                              telemetry=fa, lock_deps=deps,
+                              reattach_deps=_reattach_deps())
+
+
+def test_a_blocked_end_gate_is_a_failed_iteration_that_pins_and_reenters(
+        tmp_path: Path) -> None:
+    """The instance: a green suite and a reachable body still stubbed. The
+    end gate returns its verdict instead of exiting; the retro asks the pin
+    pass (not the genesis update) for that body; the loop re-enters t2a, and
+    the next iteration completes. Negative control: the same gate as it was
+    (`sys_exit(1)` on a not-clean verdict) never reaches the retro."""
+    site = StubSite(FnSite(_BODY.file, _BODY.fn_name, ""), ())
+    fa = FakeAdapter(task2=True, task3=(True, "test result: ok. 9 passed; 0 failed;"))
+    pinned: list[tuple[str, ...]] = []
+    coord = ModuleReconstructor(
+        step=_blocking_step(fa, [StubInventory((site,)), StubInventory()]),
+        analysis=_analysis_with(
+            fa, lessons=lambda _c, _i: 0,
+            pins=lambda _c, _i, v: (pinned.append(v.labels()), 1)[1]),
+        telemetry=fa, reenter=lambda pd, m, n: n > 0,
+        out_of_reach=lambda _c, _o: "every failure is the original's")
+    with pytest.raises(SystemExit) as exc:
+        coord.run(_ctx(tmp_path, is_multi_module=False), total_iters=0,
+                  coverage_strategy="s")
+    assert exc.value.code == 0
+    assert pinned == [("src/ctx.rs::provide",)]
+    assert "task4" not in fa.calls                     # no genesis update on a green suite
+    assert fa.events.count("module.reenter") == 1 and "end_gate.blocked" in fa.events
+    assert fa.calls.count("commit_and_mark") == 1      # marked done only when clean
+
+    fa_old = FakeAdapter(task2=True, task3=(True, "test result: ok. 9 passed; 0 failed;"))
+    old_deps = orchestrator.LockDeps(
+        commit_and_mark=lambda *a, **k: None, set_current=lambda *a: None,
+        lock_module=lambda *a: 0, git_commit=lambda *a: True, log=fa_old.log,
+        sys_exit=lambda c: (_ for _ in ()).throw(SystemExit(c)),
+        scan_unimplemented_functions=lambda *a, **k: StubInventory((site,)))
+
+    import pipeline_core.application.reconstruct.reconstruction_step as rs
+    real = rs.orchestrator.lock_or_complete
+
+    def _exiting_lock(*a: Any, **k: Any) -> None:
+        verdict = real(*a, **{**k, "deps": old_deps})
+        if verdict is not None and not verdict.clean:
+            old_deps.sys_exit(1)                       # the gate as it was
+
+    step_old = ReconstructionStep(generator=fa_old, tests=fa_old, fixer=fa_old,
+                                  artifacts=fa_old, telemetry=fa_old,
+                                  lock_deps=old_deps, reattach_deps=_reattach_deps())
+    rs.orchestrator.lock_or_complete = _exiting_lock  # type: ignore[assignment]
+    try:
+        coord_old = ModuleReconstructor(
+            step=step_old, analysis=_analysis_with(
+                fa_old, pins=lambda _c, _i, v: pinned.append(("OLD",)) or 1),
+            telemetry=fa_old, reenter=lambda pd, m, n: n > 0)
+        with pytest.raises(SystemExit) as exc_old:
+            coord_old.run(_ctx(tmp_path, is_multi_module=False), total_iters=0,
+                          coverage_strategy="s")
+    finally:
+        rs.orchestrator.lock_or_complete = real  # type: ignore[assignment]
+    assert exc_old.value.code == 1 and ("OLD",) not in pinned
 
 
 # --- the best-tree slot only ever holds a MEASURED tree ---------------------
@@ -410,28 +504,3 @@ def test_analysis_restores_the_best_tree_when_the_build_breaks(tmp_path: Path) -
                       StepOutcome(False, "build", "error[E0308]"),
                       total_iters=0, coverage_strategy="x")
     assert "restore_best" in fa.calls and "save_best" not in fa.calls
-
-
-def test_reconstructor_ends_red_when_the_refill_has_nothing_new(tmp_path: Path) -> None:
-    """The re-entry into t2a is gated on task 4 having admitted a lesson
-    since the last one: without one, the next t2a would send the prompts it
-    already sent. The module ends non-converged at the first refill point
-    instead of iterating to the plateau cap. Control: a refill that re-enters
-    (True) keeps iterating."""
-    fa = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
-                     task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
-    coord = ModuleReconstructor(step=_step(fa), analysis=_analysis(fa),
-                                telemetry=fa, plateau_abort=8,
-                                stall_refill_iters=2,
-                                stall_refill=lambda pd, m: False)
-    res = coord.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    assert not res.converged and "no new lesson" in res.out_of_reach
-    assert fa.events.count("module.iter") == 3, "baseline + 2 non-improving"
-    fa2 = FakeAdapter(task2=True, fix=(False, "x"), validate_task4=(True, ""), best=None,
-                      task3=(False, "test result: FAILED. 0 passed; 1 failed;"))
-    coord2 = ModuleReconstructor(step=_step(fa2), analysis=_analysis(fa2),
-                                 telemetry=fa2, plateau_abort=8,
-                                 stall_refill_iters=2,
-                                 stall_refill=lambda pd, m: True)
-    coord2.run(_ctx(tmp_path), total_iters=0, coverage_strategy="s")
-    assert fa2.events.count("module.iter") == 9, "runs to the plateau cap"

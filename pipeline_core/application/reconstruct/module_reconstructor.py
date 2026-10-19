@@ -37,8 +37,7 @@ class ModuleReconstructor:
     def __init__(
         self, *, step: ReconstructionStep, analysis: FailureAnalysisStep,
         telemetry: Telemetry, plateau_abort: int = 0,
-        stall_refill_iters: int = 0,
-        stall_refill: Callable[[Path, str], bool | None] | None = None,
+        reenter: Callable[[Path, str, int], bool] | None = None,
         out_of_reach: Callable[[RunContext, str], str] | None = None,
     ) -> None:
         self._step = step
@@ -62,18 +61,19 @@ class ModuleReconstructor:
         # hardcrate `cap_limit` hang). 0 = disabled. Must exceed the whole-project
         # context-escalation threshold so escalation gets to act first.
         self._plateau_abort = plateau_abort
-        # Stalled-iteration re-fill: every `stall_refill_iters` consecutive
-        # non-improving iterations, `stall_refill(project_dir, module)` clears
-        # the task2a/b/c checkpoints so the NEXT iteration's TASK 2 re-enters
-        # the deep per-fn/per-impl reconstruction engines instead of skipping
-        # straight to the shallow whole-file fix loop forever (once those
-        # markers read "done", TASK 2 does nothing and only the fix loop moves
-        # code — observed cycling ~15h on anyhow with zero pass-count change).
-        # Fills persist in .skeleton-filled/, so a re-entry resumes from all
-        # accumulated work/notes/retros; a re-entry with nothing new plateaus
-        # out in a few cheap cargo runs. 0 or None = disabled.
-        self._stall_refill_iters = stall_refill_iters
-        self._stall_refill = stall_refill
+        # Re-entry into the per-cluster reconstruction: after EVERY failed
+        # iteration, `reenter(project_dir, module, artifacts)` is told how
+        # many artifacts the retro admitted (lessons for red tests, pinning
+        # tests for blocking bodies) and either clears the task2a/b/c
+        # checkpoints so the next iteration's TASK 2 re-enters the deep
+        # per-fn/per-impl engines (fills persist in .skeleton-filled/), or
+        # returns False: nothing new for the writer, and the module ends red
+        # here with its verdict. It used to fire only every
+        # TASK2A_STALL_REFILL_ITERS non-improving iterations, with the shallow
+        # whole-file fix loop as the only writer in between, and never on the
+        # end gate's failure, which exited the process instead (run
+        # `1680589-7a6824f8`, 2026-10-19). None = never re-enter.
+        self._reenter = reenter
 
     def run(
         self, ctx: RunContext, *, total_iters: int, coverage_strategy: str,
@@ -96,7 +96,12 @@ class ModuleReconstructor:
             if outcome.locked:
                 break
 
-            if self._out_of_reach is not None:
+            # A stopping rule about red TESTS. An end-gate failure is not one:
+            # its suite passed, and its output still lists the failures the
+            # original shares (nightly `ui` on run `1680589-7a6824f8`), which
+            # read as "nothing repairable" and would end the module before the
+            # retro that can pin the blocking body.
+            if self._out_of_reach is not None and outcome.end_verdict is None:
                 why = self._out_of_reach(ctx, outcome.test_output)
                 if why:
                     self._tel.log(
@@ -116,30 +121,27 @@ class ModuleReconstructor:
             total_iters = result.total_iters
             coverage_strategy = result.coverage_strategy
 
-            if (self._stall_refill is not None and self._stall_refill_iters
-                    and state.no_improvement_streak > 0
-                    and state.no_improvement_streak % self._stall_refill_iters == 0):
-                self._tel.log(
-                    f"\n  [stall-refill] {ctx.module_name}: "
-                    f"{state.no_improvement_streak} non-improving iteration(s) — "
-                    "clearing task2a/b/c checkpoints so the next iteration "
-                    "re-enters per-cluster reconstruction (fills persist; the "
-                    "deep engine resumes from the remaining frontier).")
-                self._tel.emit("module.stall_refill", module=ctx.module_name,
-                               data={"iteration": state.iteration,
-                                     "streak": state.no_improvement_streak})
-                if self._stall_refill(ctx.project_dir, ctx.module_name) is False:
-                    # Nothing new for the writer: t4 admitted no lesson since
-                    # the last re-entry, so another t2a would ask what it
-                    # already asked. The module ends here, red, with its red
-                    # ledger, instead of iterating to the plateau cap.
-                    why = ("no new lesson since the last t2a re-entry — "
-                           "another fill would send what it already sent")
-                    self._tel.log(f"\n  [stall-refill] {ctx.module_name}: {why}; "
+            if self._reenter is not None:
+                if self._reenter(ctx.project_dir, ctx.module_name, result.artifacts):
+                    self._tel.log(
+                        f"\n  [re-enter] {ctx.module_name}: the retro admitted "
+                        f"{result.artifacts} artifact(s) — clearing task2a/b/c so "
+                        "the next iteration re-enters per-cluster reconstruction "
+                        "(fills persist; the deep engine resumes from the "
+                        "remaining frontier and reads what the retro wrote).")
+                    self._tel.emit("module.reenter", module=ctx.module_name,
+                                   data={"iteration": state.iteration,
+                                         "artifacts": result.artifacts,
+                                         "failure_type": outcome.failure_type})
+                else:
+                    why = ("the retro admitted nothing new since the last t2a "
+                           "re-entry — another fill would send what it already sent")
+                    self._tel.log(f"\n  [re-enter] {ctx.module_name}: {why}; "
                                   "module is non-converged.")
                     self._tel.emit("module.nonconverged", module=ctx.module_name,
                                    data={"iteration": state.iteration,
-                                         "reason": "no_new_lesson"})
+                                         "reason": "no_new_artifact",
+                                         "failure_type": outcome.failure_type})
                     return ModuleResult(total_iters, coverage_strategy, False, why)
 
             if self._plateau_abort and state.stuck(self._plateau_abort):

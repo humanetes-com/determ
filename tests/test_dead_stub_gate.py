@@ -15,8 +15,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from pipeline_core.application.dead_stub_reading import (
     DeadStubDeps,
     read_dead_stub_sites,
@@ -190,16 +188,19 @@ def test_the_single_module_completion_exits_zero_on_dead_stubs_only() -> None:
             log=lambda _m: None, sys_exit=_exit,
             scan_unimplemented_functions=lambda *a, **k: _inventory(_HELPER),
             dead_stub_sites=lambda _p, _c: dead)
-        with pytest.raises(SystemExit) as exc:
-            lock_or_complete(
+        try:
+            verdict = lock_or_complete(
                 Path("/p"), "m", Path("/p"), Path("/p/.gen"), is_multi_module=False,
                 locked_modules=set(), src_hash=None, commit_message="cm", detail="d",
                 set_current_label="s", locked_commit_msg="l", success_log="SUCCESS",
                 deps=deps)
-        return int(exc.value.code or 0)
+        except SystemExit as exc:
+            return int(exc.code or 0)
+        assert verdict is not None and verdict.blocking
+        return -1                                  # blocked: back to the module loop
 
     assert _complete(frozenset({_HELPER})) == 0
-    assert _complete(frozenset()) == 1            # control: no reading
+    assert _complete(frozenset()) == -1           # control: no reading
 
 
 # --- the use case: which worlds are asked -----------------------------------

@@ -272,6 +272,12 @@ from pipeline_core.domain.plateau import (
     plateau_exit_disabled,
     plateau_exit_due,
 )
+from pipeline_core.domain.premise_advance import (
+    advanced_past,
+    owning_view,
+    stranded,
+    without_advanced,
+)
 from pipeline_core.domain.reasoning_cap import (
     collect_stream_meta,
     summarize_capped,
@@ -4109,6 +4115,42 @@ def run_phase_c_tdd(
             test_texts=dict(cluster_tests),
             extra_failed=frozenset(_oracle.vanished),
         )
+        # A unit whose own keep moved a still-red test's failure to a later
+        # assertion is not that test's owner at the new failure
+        # (`premise_advance`): read off the ledger rows the grade writes,
+        # under the oracle scoring the tree now. Applied here, to the one
+        # product every dispatch consumer reads, and again to the coverage
+        # owners below; a test nothing else owns gets the unit back there.
+        # The standing row is the one about the body ON the tree (the view
+        # dispatch reads): an advance graded on a body since rewritten says
+        # nothing about this tree.
+        _adv_body_now: dict[LedgerKey, str] | None = None
+        if deps.tree_writer is not None:
+            _adv_body_now = {}
+            for _row_a in _ledger_entries():
+                if (_row_a.key in _adv_body_now
+                        or not any(k_ == "advanced" for _t, k_ in _row_a.verdict_delta)):
+                    continue
+                with suppress(OSError, TypeError, ValueError):
+                    _adv_body_now[_row_a.key] = body_sha(deps.tree_writer.bodies(
+                        FnLocator(_row_a.key.file, _row_a.key.fn_name),
+                        target_src_dir))
+        _advanced = advanced_past(
+            _ledger_entries(), oracle_fp=_oracle_fp(iter_n),
+            failing={bare_test_name(t) for t in cur_failed},
+            body_now=_adv_body_now)
+        if _advanced:
+            _attr = without_advanced(_attr, _advanced)
+            deps.log(f"  {tag} [phase-c/attribution] {len(_advanced)} test(s) "
+                     "taken off the unit(s) whose own keep moved their failure "
+                     "to a later assertion: "
+                     + "; ".join(f"{t} ← not "
+                                 + ", ".join(sorted(f"{u.file}::{u.fn_name}" for u in us))
+                                 for t, us in sorted(_advanced.items())[:8]))
+            deps.emit("phase_c.attribution.premise_advanced", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "tests": {t: sorted(f"{u.file}::{u.fn_name}" for u in us)
+                          for t, us in sorted(_advanced.items())}})
         # The pairs and the site frontier are units the locator filter never
         # sees: a pair with a dead member is dropped whole, here, so no pair
         # route, dispatch map or session hop downstream can write one.
@@ -5640,6 +5682,15 @@ def run_phase_c_tdd(
             t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
             for t, us in _recorded_failing.items()}
         _owners_read.update(_recorded_rank)
+        # Ownership, not entry: a unit whose own keep moved a still-red
+        # test's failure later no longer owns it (`premise_advance`). One
+        # view for every reader that turns execution into ownership — this
+        # map (ranking, both owner-admission steps) and the session slices
+        # below; the reading itself stays a measurement.
+        _owned_by_attr = frozenset(
+            bare_test_name(t) for ts in _attr.frontier.values() for t in ts)
+        _owners_read = owning_view(_owners_read, _advanced,
+                                   owned_elsewhere=_owned_by_attr)
         _recorded_sites = recorded_locator_sites(
             _recorded_failing, _attr.site_frontier)
         for _t, _ks in _stack_sites.items():
@@ -5779,11 +5830,15 @@ def run_phase_c_tdd(
                 "grace": DEFAULT_UNPAID_GRACE,
                 "still_withholding": sorted(_paired_tests),
             })
+        # The coverage owners as ownership (`owning_view` above), read by
+        # both owner steps.
+        _owners_by_test: dict[str, frozenset[FnLocator]] = {
+            bare_test_name(t): frozenset(
+                FnLocator(s.file, s.fn_name) for s in ks)
+            for t, ks in (_owners_read or {}).items()}
         if _cov is not None and _owners_read:
             _owner_admits = escalate_to_measured_owners(
-                owners={bare_test_name(t): frozenset(
-                    FnLocator(s.file, s.fn_name) for s in ks)
-                    for t, ks in _owners_read.items()},
+                owners=_owners_by_test,
                 units_by_test=_units_for_owners,
                 graded=_flat_keys | permanently_exhausted,
                 unable=_dead_keys | _red_dead,
@@ -5840,9 +5895,7 @@ def run_phase_c_tdd(
         _owner_attach: dict[FnLocator, set[str]] = {}
         if _cov is not None and _owners_read:
             _owner_attach = attach_to_eligible_owners(
-                owners={bare_test_name(t): frozenset(
-                    FnLocator(s.file, s.fn_name) for s in ks)
-                    for t, ks in _owners_read.items()},
+                owners=_owners_by_test,
                 units_by_test=_units_for_owners,
                 eligible=eligible,
                 graded=_flat_keys | permanently_exhausted,
@@ -5869,6 +5922,23 @@ def run_phase_c_tdd(
                         f"{k.file}::{k.fn_name}": sorted(ts)
                         for k, ts in sorted(_owner_attach.items())},
                 })
+        # Never strand a test: an advanced test that neither attribution nor
+        # coverage gives another owner gets its advanced-past units back.
+        if _advanced:
+            _owned_now: dict[str, set[FnLocator]] = {}
+            for _loc, _ts in eligible.items():
+                for _t in _ts:
+                    _owned_now.setdefault(bare_test_name(_t), set()).add(_loc)
+            _back = stranded(_advanced, _owned_now)
+            for _t, _us in _back.items():
+                for _u in _us:
+                    eligible.setdefault(_u, set()).add(_t)
+                    if all(k != _u for k, _ in ordered):
+                        ordered.append((_u, eligible[_u]))
+            if _back:
+                deps.log(f"  {tag} [phase-c/attribution] {len(_back)} advanced "
+                         "test(s) have no other owner — their advanced-past "
+                         "unit(s) keep them: " + ", ".join(sorted(_back)[:8]))
         _owner_map_units |= set(_owner_admits) | set(_owner_attach)
         # This sweep's measured owners, for the prompt grade (MEASURED_OWNER)
         # and the keep gates' test scope; not the futility set.
@@ -6016,7 +6086,9 @@ def run_phase_c_tdd(
                 _session_from_cov.setdefault(
                     bare_test_name(t), set()).update(ks)
             _cov_owners = {t: _admission.admit_sites(ks)
-                           for t, ks in _session_from_cov.items()}
+                           for t, ks in owning_view(
+                               _session_from_cov, _advanced,
+                               owned_elsewhere=_owned_by_attr).items()}
             _session_owners = dict(_cov_owners)
             # Eligible is the filter, not the source. Walking eligible and
             # inserting FnSite(file, fn, "") when the site frontier had no
@@ -6034,8 +6106,12 @@ def run_phase_c_tdd(
                 units_by_test=_units_for_session,
                 pairs=((p.dispatcher, p.implementer) for p in _attr.pairs),
                 paired_tests=_paired_tests)
+            # After the pair hop, too: a hop from a dispatcher the test
+            # still reaches would put the advanced-past implementer back.
             _session_slices = {t: _admission.admit_sites(sl)
-                               for t, sl in _session_slices.items()}
+                               for t, sl in owning_view(
+                                   _session_slices, _advanced,
+                                   owned_elsewhere=_owned_by_attr).items()}
         _rd_only = _red_dead - _dead_keys
         # RE-BUY DETECTOR, on the whole frontier, BEFORE the cut.
         # Run `9933-efe68f37` computed this after the batch cut, so the
