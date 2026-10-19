@@ -325,7 +325,7 @@ from pipeline_core.adapters.skeleton_compile import compile_filled_check
 from pipeline_core.adapters.state import (
     log_state_summary as _state_log_state_summary,
 )
-from pipeline_core.adapters.state import mark_phase, phase_valid, set_current
+from pipeline_core.adapters.state import mark_phase, phase_valid, reopen_phase, set_current
 from pipeline_core.adapters.state import mark_phase as _state_mark_phase
 from pipeline_core.adapters.state import read_state as _state_read_state
 from pipeline_core.adapters.state import state_path as _state_path
@@ -922,7 +922,7 @@ from pipeline_core.prompts.crate_idioms import (
     extract_crate_idioms as _extract_crate_idioms,
 )
 from pipeline_core.prompts.output_format import FILE_FORMAT_INSTRUCTION
-from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt
+from pipeline_core.prompts.per_fn import build_per_fn_fix_prompt, build_per_fn_prompt
 from pipeline_core.prompts.per_impl import (
     build_per_impl_prompt as _build_per_impl_prompt,
 )
@@ -2642,9 +2642,11 @@ def build_app(
             # from and owns the pinned tests; the legacy driver writes
             # neither, so it keeps re-entering.
             return False
+        # With every sub-key: a phase that checkpoints its parts is re-opened
+        # only when each part is (`reopen_phase`).
         for _key in (f"task2a/{module}", f"task2b/{module}", f"task2c/{module}"):
-            mark_phase(project_dir, _key, "pending",
-                       detail="auto-reset: the retro admitted new artifacts")
+            reopen_phase(project_dir, _key,
+                         detail="auto-reset: the retro admitted new artifacts")
         return True
 
     module_reconstructor = ModuleReconstructor(
@@ -3401,6 +3403,8 @@ def build_app(
                 filter_test_targets=filter_test_targets,
                 expand_frontier_by_calls=functools.partial(
                     _attribution.expand_frontier_by_calls, _attr_deps),
+                stub_hold=functools.partial(
+                    _attribution.sweep_stub_hold, _attr_deps),
             ),
             enumerator=Task3Enumerate(
                 cluster_filter_type_members=fill_roles.ws.cluster_filter_type_members,
@@ -3419,6 +3423,7 @@ def build_app(
                 locate_all_fns=_domain_locate_all_fns,
                 gather_fix_context=fill_roles.prompt.gather,
                 build_per_fn_fix_prompt=build_per_fn_fix_prompt,
+                build_per_fn_prompt=build_per_fn_prompt,
                 ask_per_fn_body=fill_roles.prompt.ask_per_fn_body,
                 open_conversation=fill_roles.prompt.open_conversation,
                 splice_fn_body=fill_roles.mut.splice_fn_body,

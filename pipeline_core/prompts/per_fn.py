@@ -16,6 +16,7 @@ from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.prompt_holdings import FileView, file_block
+from pipeline_core.domain.refill_evidence import Attribution
 from pipeline_core.prompts.context import PerFnFixSections, PerFnSections
 from pipeline_core.prompts.runtime import (
     annotate_file_view,
@@ -213,6 +214,7 @@ def build_per_fn_fix_prompt(
     attempt_history: list[dict[str, Any]] | None = None,
     kind: LastErrorKind | None = None,
     joint_output: bool = False,
+    attribution: Attribution | None = None,
 ) -> str:
     """Re-prompt for a fn whose previous fill failed.
 
@@ -221,6 +223,15 @@ def build_per_fn_fix_prompt(
     and the excerpt tag follow :func:`last_error_prefix`. Omit ``kind``
     (or pass COMPILE) and the text stays the cargo-check / COMPILE_ERRORS
     form.
+
+    ``attribution`` is set when the ask is not a retry of an attempt but
+    the first ask over a body a sweep graded (`refill_evidence.
+    site_attribution`); ``error_excerpt`` is then that grade's rendered
+    evidence. A NAMED body is one nothing convicts, and its opener says so
+    instead of "return a corrected body": the evidence below it says
+    "return it UNCHANGED" when it is right, and an opener ordering a change
+    would contradict it. No attempt of this ask was reverted, so the file
+    header does not claim one was.
 
     When `allow_sig_change` is True (fired by the per-fn loop after
     attempt 5), the prompt invites the model to optionally return a
@@ -360,7 +371,15 @@ def build_per_fn_fix_prompt(
                 + "\n---\n".join(rendered)
                 + "\n</PRIOR_ATTEMPTS>\n"
             )
-    if _ran:
+    if attribution is Attribution.NAMED:
+        _opener = (
+            "RE-check ONE Rust function. A failing test's path runs through "
+            f"a fn named `{fn_name}`; nothing singles out THIS body. Return "
+            "a corrected body only if it is wrong for its own bounds and "
+            "trait contract; if it is already right, return it UNCHANGED."
+        )
+        _err_open, _err_close = "<FAILING_TESTS>", "</FAILING_TESTS>"
+    elif _ran:
         _opener = (
             "RE-implement ONE Rust function. "
             + last_error_prefix(error_excerpt, kind).rstrip()
@@ -373,6 +392,8 @@ def build_per_fn_fix_prompt(
             "Diagnose the errors, return a corrected body. Don't repeat the previous body."
         )
         _err_open, _err_close = "<COMPILE_ERRORS>", "</COMPILE_ERRORS>"
+    _file_head = ("FILE (stubs annotated):" if attribution is not None
+                  else "FILE (previous attempt reverted; stubs annotated):")
     return f"""{_opener}
 
 Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name}
@@ -383,7 +404,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
 {crash_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
-FILE (previous attempt reverted; stubs annotated):
+{_file_head}
 {file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}
 <PREVIOUS_BODY>

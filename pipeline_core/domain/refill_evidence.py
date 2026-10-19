@@ -43,6 +43,7 @@ from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, body_sha
 from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.models import FnLocator, ImplBlock
+from pipeline_core.domain.refill_stamp import convicting_tests_for_member
 from pipeline_core.domain.test_report import OTHER_COPY_MARK, parse_panic_location
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
 
@@ -322,31 +323,20 @@ def collect_refill_evidence(
     under `impl Display` is not CRASHED for a fault in `impl Debug`'s
     `fmt` (:class:`~pipeline_core.domain.crash_site.CrashSites`)."""
     out: list[RefillEvidence] = []
-    at_site = crash_sites or CrashSites()
     for m in block.refill_members:
         key = FnLocator(block.file, m.fn_name)
         tests = (tests_in_prompt(frontier, key, max_tests=max_tests,
                                  observed_only=False)
                  if frontier is not None else ())
-        # An observed fault outranks every verdict-derived grade, and it has
-        # to be tested FIRST rather than as a fallback: a crashed binary
-        # reports no verdict, so `convicting_for` is empty for exactly the
-        # units the crash implicates and the fault would otherwise fall
-        # through to NAMED ("return it unchanged"). See `Attribution`.
-        # A convicting test outranks the escalation: the unit's own failure is
-        # better evidence than the measurement that its consumers were futile.
-        if at_site.blames(crashed, block.file, m.fn_name, block.container):
-            grade = Attribution.CRASHED
-        elif frontier is not None and frontier.convicting_for(key):
-            grade = Attribution.DIRECT
-        elif key in escalated:
-            grade = Attribution.ESCALATED
-        elif key in measured_owner:
-            grade = Attribution.MEASURED_OWNER
-        elif at_site.evidences(aimed, block.file, m.fn_name, block.container):
-            grade = Attribution.AIMED
-        else:
-            grade = Attribution.NAMED
+        homonyms = tuple(
+            b.container for b in blocks
+            if b.file == block.file
+            and any(r.fn_name == m.fn_name for r in b.members))
+        grade = site_attribution(
+            frontier, block.file, m.fn_name, block.container, homonyms,
+            crashed=crashed, escalated=escalated,
+            measured_owner=measured_owner, aimed=aimed,
+            crash_sites=crash_sites)
         siblings = tuple(
             b.container for b in blocks
             if b.file == block.file and b.container != block.container
@@ -358,6 +348,56 @@ def collect_refill_evidence(
             excerpts=sweep_excerpts(tests, frontier, read_source=read_source),
             history=tries))
     return tuple(out)
+
+
+def site_attribution(
+    frontier: FailureFrontier | None,
+    file: str,
+    fn_name: str,
+    container: str,
+    homonyms: Sequence[str] = (),
+    *,
+    crashed: frozenset[FnLocator] = frozenset(),
+    escalated: frozenset[FnLocator] = frozenset(),
+    measured_owner: frozenset[FnLocator] = frozenset(),
+    aimed: frozenset[FnLocator] = frozenset(),
+    crash_sites: CrashSites | None = None,
+) -> Attribution:
+    """How the record implicates ONE definition — the grade every route that
+    asks the model to rewrite a compiling body states in its prompt.
+
+    `homonyms` is every container in `file` that declares `fn_name`. DIRECT
+    is read through `convicting_tests_for_member`, the rule the refill stamp
+    already uses to decide which tests may revert a member: a test whose
+    failure is a stub panic inside a same-named sibling convicts that
+    sibling, not this body. The locator union graded both definitions of a
+    name DIRECT when one of them held the failure: on run `641699-ae684bdb`
+    (2026-10-19) the pin test panicked in the `unimplemented!()` of `provide`
+    under `impl StdError for ContextError<C, Error>`, and the `<C, E>`
+    definition, whose `self.error.provide(request)` was right, was asked to
+    repair the same panic.
+
+    An observed fault outranks every verdict-derived grade, and it has to be
+    tested FIRST rather than as a fallback: a crashed binary reports no
+    verdict, so the convicting map is empty for exactly the units the crash
+    implicates and the fault would otherwise fall through to NAMED ("return
+    it unchanged"). A convicting test outranks the escalation: the unit's own
+    failure is better evidence than the measurement that its consumers were
+    futile. See :class:`Attribution`."""
+    key = FnLocator(file, fn_name)
+    at_site = crash_sites or CrashSites()
+    if at_site.blames(crashed, file, fn_name, container):
+        return Attribution.CRASHED
+    if frontier is not None and convicting_tests_for_member(
+            frontier, file, fn_name, container, homonyms):
+        return Attribution.DIRECT
+    if key in escalated:
+        return Attribution.ESCALATED
+    if key in measured_owner:
+        return Attribution.MEASURED_OWNER
+    if at_site.evidences(aimed, file, fn_name, container):
+        return Attribution.AIMED
+    return Attribution.NAMED
 
 
 def sweep_excerpts(

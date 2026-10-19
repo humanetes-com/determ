@@ -143,6 +143,43 @@ def mark_phase(project_dir: Path, phase_key: str, status: str,
         write_state(project_dir, state)
 
 
+def _is_under(key: str, phase_key: str) -> bool:
+    return key == phase_key or key.startswith(phase_key + "/")
+
+
+def reopen_phase(project_dir: Path, phase_key: str, detail: str = "") -> list[str]:
+    """Mark `phase_key` and every `phase_key/…` sub-key pending; return the
+    keys reset.
+
+    A phase that checkpoints its parts under sub-keys is re-opened only when
+    every part is: `task2a/<module>` alone left `task2a/<module>/<cluster>`
+    done, and the module loop's automatic re-entry skipped every cluster as
+    "checkpoint valid" while logging that it re-entered them (run
+    `240506-87538963`, 2026-10-19). `restart_from.sh` already clears a key
+    with its sub-keys; this is the same rule for the in-process caller.
+    Same lock and atomic write as :func:`mark_phase`."""
+    def _apply() -> list[str]:
+        state = read_state(project_dir)
+        reset = [k for k in state["phases"] if _is_under(k, phase_key)]
+        if phase_key not in reset:
+            reset.append(phase_key)
+        for k in reset:
+            state["phases"][k] = {"status": "pending", "hash": "-",
+                                  "detail": detail}
+        write_state(project_dir, state)
+        return reset
+
+    lock_path = project_dir / ".pipeline_state.lock"
+    try:
+        lock_path.touch(exist_ok=True)
+        import fcntl as _fcntl
+        with open(lock_path, "w") as _lf:
+            _fcntl.flock(_lf.fileno(), _fcntl.LOCK_EX)
+            return _apply()
+    except OSError:
+        return _apply()
+
+
 def set_current(project_dir: Path, current: str) -> None:
     """Update the 'current:' line without changing any phase entry."""
     state = read_state(project_dir)

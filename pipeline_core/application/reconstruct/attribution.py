@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pipeline_core.application.reconstruct.fill_rules import is_unimplemented_body
 from pipeline_core.application.reconstruct.test_targets import (
     is_test_fn_record,
     test_fn_keys,
@@ -56,6 +57,7 @@ from pipeline_core.domain.rust_idents import (
     test_fn_names,
 )
 from pipeline_core.domain.rust_lex import code_mask
+from pipeline_core.domain.test_outcome import StubHold, stub_hold_of
 from pipeline_core.domain.test_report import FailureKind as TestFailureKind
 from pipeline_core.domain.test_report import (
     failure_evidence_by_test,
@@ -170,6 +172,26 @@ def make_fn_site_locator(
         return FnSite(rel, rec["fn_name"], rec.get("container", "") or "")
 
     return locate
+
+
+def sweep_stub_hold(deps: AttributionDeps, output: str,
+                    src_dir: Path) -> StubHold:
+    """Which still-stubbed DEFINITION each failing test of `output` first
+    fails in (`test_outcome.StubHold`), for a caller with no stub scan of
+    its own — the task 3 retry.
+
+    A definition is a stub by its own body (`is_unimplemented_body`), not by
+    its name: `src/context.rs` holds two `provide`, one filled and one
+    `unimplemented!()`, and a name-keyed stub set would call both stubs. The
+    panic site is resolved by the same container-qualified locator the
+    attribution paths use, so the hold names the definition the test stops
+    in and no other."""
+    stubs = {
+        FnSite(r.get("file", ""), r.get("fn_name", ""), r.get("container", "") or "")
+        for r in deps.structure.enumerate_fns(src_dir) or []
+        if is_unimplemented_body(r.get("body_text", ""), r.get("fn_name", ""))}
+    return stub_hold_of(output, make_fn_site_locator(deps.structure, src_dir),
+                        is_stub=lambda site: site in stubs)
 
 
 def extract_tdd_frontier(deps: AttributionDeps,

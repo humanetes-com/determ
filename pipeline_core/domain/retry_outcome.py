@@ -14,7 +14,7 @@ escalate. This module names both:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 # A tree that produces no test verdicts at all is WORSE than any number of
@@ -55,6 +55,15 @@ class ClusterReading:
     ran: bool
     failures: int
     diag_count: int = 0
+    # The failing tests counted in `failures`, and the cargo text the reading
+    # was taken from. Neither takes part in a comparison; they are what a
+    # revert hands the next ask of the same definition. The gate used to read
+    # each cluster and drop its output, so a body reverted `broke_build` left
+    # no diagnostic anywhere: on run `641699-ae684bdb` (2026-10-19) the
+    # rejected `self.error.as_ref().provide(request)` and the one nightly
+    # error it caused were in no later prompt.
+    failing: frozenset[str] = field(default=frozenset(), compare=False)
+    output: str = field(default="", compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +101,22 @@ class BodyVerdict(StrEnum):
                                          # or new compile errors while broken
 
 
+@dataclass(frozen=True, slots=True)
+class BodyJudgement:
+    """A body's verdict and the cluster readings that decided it — `before`
+    and `after` are None exactly when the verdict is KEEP."""
+
+    verdict: BodyVerdict
+    before: ClusterReading | None = None
+    after: ClusterReading | None = None
+
+
 def body_verdict(*, before: TreeReading, after: TreeReading) -> BodyVerdict:
+    """:func:`judge_body`'s verdict alone."""
+    return judge_body(before=before, after=after).verdict
+
+
+def judge_body(*, before: TreeReading, after: TreeReading) -> BodyJudgement:
     """Accept a body only if it regresses NO cluster that builds the file.
 
     Judged per cluster rather than on the total: a body that fixes one failing
@@ -120,13 +144,13 @@ def body_verdict(*, before: TreeReading, after: TreeReading) -> BodyVerdict:
             continue
         if not bef.ran:
             if not aft.ran and aft.diag_count > bef.diag_count:
-                return BodyVerdict.REVERT_REGRESSED
+                return BodyJudgement(BodyVerdict.REVERT_REGRESSED, bef, aft)
             continue
         if not aft.ran:
-            return BodyVerdict.REVERT_BROKE_BUILD
+            return BodyJudgement(BodyVerdict.REVERT_BROKE_BUILD, bef, aft)
         if aft.failures > bef.failures:
-            return BodyVerdict.REVERT_REGRESSED
-    return BodyVerdict.KEEP
+            return BodyJudgement(BodyVerdict.REVERT_REGRESSED, bef, aft)
+    return BodyJudgement(BodyVerdict.KEEP)
 
 
 class RetryMode(StrEnum):

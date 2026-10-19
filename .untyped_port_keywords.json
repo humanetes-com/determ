@@ -53,20 +53,6 @@
   "build_gen_tests_decl": [
     "cluster_cfg_attr"
   ],
-  "build_per_fn_fix_prompt": [
-    "cluster_name",
-    "error_excerpt",
-    "file_rel",
-    "file_text",
-    "fn_name",
-    "fr_path",
-    "kind",
-    "module_name",
-    "prev_body",
-    "sections",
-    "sig_text",
-    "test_blocks"
-  ],
   "build_test_cmd_fn": [
     "include_lib"
   ],

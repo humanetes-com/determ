@@ -19,6 +19,7 @@ from pipeline_core.application.reconstruct.per_fn_retry import (
     env_for_cluster,
     run_task3_inline_retry,
 )
+from pipeline_core.domain.test_outcome import StubHold
 from tests.conversation_fakes import idle_conversation
 
 
@@ -44,7 +45,7 @@ def _deps(*, run=None, check_diag=None, parse_ok=None, unattributed=False,
         attribution=Task3Attribution(
             attribute_failures=_unused, build_test_reverse_map=_unused,
             frontier_from_diags=_frontier, filter_test_targets=_filter,
-            expand_frontier_by_calls=_unused),
+            expand_frontier_by_calls=_unused, stub_hold=_unused),
         enumerator=Task3Enumerate(
             cluster_filter_type_members=lambda recs, cl: [],
             enumerate_types=lambda root: [], fn_container_index=lambda root: {},
@@ -55,7 +56,8 @@ def _deps(*, run=None, check_diag=None, parse_ok=None, unattributed=False,
         retry_fix=RetryDeps(
             locate_fn=_unused, locate_all_fns=_unused,
             gather_fix_context=_unused,
-            build_per_fn_fix_prompt=_unused, ask_per_fn_body=_unused,
+            build_per_fn_fix_prompt=_unused, build_per_fn_prompt=_unused,
+            ask_per_fn_body=_unused,
             open_conversation=idle_conversation,
             splice_fn_body=_unused, splice_body_scoped=_unused,
             find_tests_for_fn=_unused,
@@ -187,13 +189,17 @@ def test_the_prompt_says_what_the_cluster_name_means(tmp_path: Path) -> None:
         focus_cargo_errors=lambda out, rel: "",
         build_per_fn_fix_prompt=lambda **kw: seen.update(
             sections=kw["sections"]) or "prompt",
+        build_per_fn_prompt=lambda **kw: seen.update(
+            sections=kw["sections"]) or "prompt",
         ask_per_fn_body=lambda *a, **kw: (None, ""),
     )
     attr = replace(
         deps.attribution,
         build_test_reverse_map=lambda files, root: {},
         attribute_failures=lambda *a, **kw: type(
-            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
+            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}},
+                      "convicting": {}, "sources": {}})(),
+        stub_hold=lambda out, root: StubHold({}),
         filter_test_targets=lambda fr, root, **_k: fr,
         expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
     )
@@ -251,13 +257,17 @@ def test_the_prompt_names_the_cfg_atoms_not_just_the_cluster_names(
         focus_cargo_errors=lambda out, rel: "",
         build_per_fn_fix_prompt=lambda **kw: seen.update(
             sections=kw["sections"]) or "prompt",
+        build_per_fn_prompt=lambda **kw: seen.update(
+            sections=kw["sections"]) or "prompt",
         ask_per_fn_body=lambda *a, **kw: (None, ""),
     )
     attr = replace(
         deps.attribution,
         build_test_reverse_map=lambda files, root: {},
         attribute_failures=lambda *a, **kw: type(
-            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}}})(),
+            "R", (), {"frontier": {("src/lib.rs", "f"): {"t_0"}},
+                      "convicting": {}, "sources": {}})(),
+        stub_hold=lambda out, root: StubHold({}),
         filter_test_targets=lambda fr, root, **_k: fr,
         expand_frontier_by_calls=lambda fr, root, **kw: (fr, dict.fromkeys(fr, 0)),
     )

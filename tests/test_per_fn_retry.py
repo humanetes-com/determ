@@ -53,6 +53,7 @@ def _deps(**overrides) -> RetryDeps:
         "gather_fix_context": MagicMock(return_value=MagicMock(
             container="", types_section="", notes_section="", bound_methods_section="")),
         "build_per_fn_fix_prompt": lambda **kw: "prompt",
+        "build_per_fn_prompt": lambda **kw: "prompt",
         "ask_per_fn_body": lambda prompt, fn, log, **kw: (None, ""),
         "open_conversation": idle_conversation,
         "splice_fn_body": lambda fp, fn, body, **kw: SpliceOutcome(True, "ok", 0),
