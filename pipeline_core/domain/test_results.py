@@ -1592,12 +1592,6 @@ def binary_key(world: str, label: str) -> str:
     return f"{world}{WORLD_KEY_SEP}{label}" if world else label
 
 
-def label_of_key(key: str) -> str:
-    """The cargo label inside a :func:`binary_key`."""
-    _world, sep, label = key.partition(WORLD_KEY_SEP)
-    return label if sep else key
-
-
 def world_header(world: str, *, timed_out: bool = False) -> str:
     tag = _TIMED_OUT_TAG if timed_out else ""
     return f"{WORLD_HEADER_PREFIX}{world}{tag}{_WORLD_HEADER_SUFFIX}"

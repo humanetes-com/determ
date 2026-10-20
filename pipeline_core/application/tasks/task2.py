@@ -33,6 +33,16 @@ class Task2Deps:
     build_max_stalls: int
     build_timeout: int
     task2_model: str
+    # True when the generator publishes a tree another loop judged (the
+    # skeleton backend: `publish.publish_tree` copies the one filled tree
+    # into `src/`). The build check after it then only checks: a fix written
+    # into `src/` there is a body no loop measured, which task 3 refuses as
+    # drift or the next publish overwrites (found in review, 2026-10-20).
+    generator_publishes: Callable[[], bool] = lambda: False
+    # (check command, crate dir, timeout) -> (rc, output): the build check
+    # with no writer, for a publishing generator. None reads every such
+    # check as passing.
+    check_build: Callable[[str, Path, int], tuple[int, str]] | None = None
 
 
 def task2(project_dir: Path, genesis_path: Path, functional_req_path: Path,
@@ -136,6 +146,27 @@ def task2_inner_loop(project_dir: Path, genesis_path: Path, functional_req_path:
                  attempt=attempt_num,
                  data={"ok": True, "build_checked": False})
             return True  # No build check available; proceed to full tests.
+
+        if deps.generator_publishes():
+            rc, out = (deps.check_build(build_check_cmd, project_dir, deps.build_timeout)
+                       if deps.check_build is not None else (0, ""))
+            if rc == 0:
+                log("  Build check PASSED (published tree, check only).")
+                emit("compile.success", module=current_module, attempt=attempt_num)
+                emit("task.done", task="task2", module=current_module,
+                     duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+                     attempt=attempt_num,
+                     data={"ok": True, "build_checked": True})
+                return True
+            log("  Build check FAILED on the published tree. Nothing writes src/ "
+                "here: the loop that judged the tree owns its repair.")
+            emit("compile.fail", module=current_module, attempt=attempt_num,
+                 data={"output": deps.store_prompt_content(out or "")})
+            emit("task.done", task="task2", module=current_module,
+                 duration_ms=int((time.monotonic() - _t2_t0) * 1000),
+                 attempt=attempt_num,
+                 data={"ok": False, "reason": "published_tree_does_not_build"})
+            return False
 
         # Use generate_fix_loop: run build check, if it fails ask LLM to fix only
         # the broken files rather than regenerating everything on the next attempt.

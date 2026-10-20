@@ -248,7 +248,6 @@ from pipeline_core.adapters.pipeline_db import (
 from pipeline_core.adapters.pipeline_db import type_signals_write as _db_type_signals_write
 from pipeline_core.adapters.private_surface_store import load_private_surface, save_private_surface
 from pipeline_core.adapters.progress import ChunkProgress
-from pipeline_core.adapters.ratchet import BestTreeRatchet
 from pipeline_core.adapters.reach_store import load_reach, save_reach
 from pipeline_core.adapters.reconstruct_roles import (
     AnalystAdapter,
@@ -2371,8 +2370,11 @@ def build_app(
                 model=settings.task_models.task2,
                 dispatch_families=lambda *a, **k: enumerate_dispatch_families(*a, **k)))
 
+    def _task2_backend() -> Task2Backend:
+        return Task2Backend.coerce(_os.getenv("TASK2_GENERATOR"), Task2Backend.FILELIST)
+
     def _task2_generator_factory() -> Task2Generator:
-        backend = Task2Backend.coerce(_os.getenv("TASK2_GENERATOR"), Task2Backend.FILELIST)
+        backend = _task2_backend()
         common: dict[str, Any] = {"tel": gen_telemetry, "llm": gen_llm, "ws": gen_workspace,
                                   "docs": gen_docs, "cfg": _build_task2_config()}
         if backend is Task2Backend.LLM:
@@ -2396,6 +2398,9 @@ def build_app(
         build_max_stalls=cfg.task2_build_max_stalls,
         build_timeout=cfg.build_timeout,
         task2_model=settings.task_models.task2,
+        generator_publishes=lambda: _task2_backend() is Task2Backend.SKELETON,
+        check_build=lambda cmd, cwd, timeout: helpers.run_cargo(
+            cmd, cwd, ports.cargo_env(), timeout),
     )
 
     def _task2_inner_loop(project_dir: Path, genesis_path: Path,
@@ -2594,7 +2599,7 @@ def build_app(
                                 _lessons_deps, iteration=str(it))
 
     failure_analysis = FailureAnalysisStep(
-        analyst=analyst, journal=failure_journal, ratchet=BestTreeRatchet(),
+        analyst=analyst, journal=failure_journal,
         artifacts=workspace_artifacts, coverage_docs=coverage_docs,
         audit=flow_audit, docs=docs_metrics, telemetry=telemetry,
         genesis_audit_interval=cfg.genesis_audit_interval,

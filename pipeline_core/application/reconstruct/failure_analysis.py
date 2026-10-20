@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from pipeline_core.application.reconstruct.reconstruction_step import StepOutcome
 from pipeline_core.application.reconstruct.run_context import RunContext
 from pipeline_core.domain.end_verdict import EndVerdict
-from pipeline_core.domain.failure_classification import pass_count_is_measured
 from pipeline_core.domain.reconstruction import IterationState
 from pipeline_core.domain.test_results import parse_test_counts
 from pipeline_core.phases import phase_scope
@@ -25,7 +24,6 @@ from pipeline_core.ports.reconstruct import (
     DocsMetrics,
     FailureJournal,
     FlowAudit,
-    Ratchet,
     Telemetry,
 )
 
@@ -45,7 +43,7 @@ class AnalysisResult:
 
 class FailureAnalysisStep:
     def __init__(
-        self, *, analyst: Analyst, journal: FailureJournal, ratchet: Ratchet,
+        self, *, analyst: Analyst, journal: FailureJournal,
         artifacts: Artifacts, coverage_docs: CoverageDocs, audit: FlowAudit,
         docs: DocsMetrics, telemetry: Telemetry, genesis_audit_interval: int,
         render_strategy: Callable[[RunContext, str], str],
@@ -55,7 +53,6 @@ class FailureAnalysisStep:
     ) -> None:
         self._analyst = analyst
         self._journal = journal
-        self._ratchet = ratchet
         self._artifacts = artifacts
         self._coverage_docs = coverage_docs
         self._audit = audit
@@ -178,33 +175,13 @@ class FailureAnalysisStep:
             self._tel.log(f"\nGenesis audit triggered ({_why})")
             self._analyst.genesis_audit(ctx.genesis_path)
 
-        # Best-tree ratchet: snapshot on a new-best pass count; restore the best
-        # tree if this iteration regressed below it.
-        src_rel = [rel for rel in self._artifacts.load_manifest(ctx.module_manifest)
-                   if rel not in ctx.existing_test_files]
-        best = self._ratchet.best_tree_pass_count(ctx.project_dir)
-        # The SAVE arm requires a pass count that was actually measured; the
-        # RESTORE arm deliberately does not, because an unmeasurable iteration
-        # (a tree that no longer compiles) is exactly when a good snapshot is
-        # worth having back. See `pass_count_is_measured` for the run that
-        # stored a non-parsing tree as "best" at 0 passing and locked its own
-        # restore arm shut.
-        measured = pass_count_is_measured(failure_type)
-        if measured and current_pass > (best if best is not None else -1):
-            saved_n = self._ratchet.save_best_tree(ctx.project_dir, src_rel, current_pass, iteration=it)
-            self._tel.emit("ratchet.save", data={"pass_count": current_pass,
-                                                  "files": saved_n, "iter": it})
-        elif not measured and best is None:
-            self._tel.log(f"  [ratchet] NOT snapshotting: failure is "
-                          f"'{failure_type}' — {current_pass} passing is the "
-                          f"absence of a measurement, not a floor.")
-            self._tel.emit("ratchet.save_refused", data={
-                "failure_type": failure_type, "pass_count": current_pass,
-                "iter": it})
-        elif best is not None and current_pass < best:
-            restored = self._ratchet.restore_best_tree(ctx.project_dir)
-            self._tel.emit("ratchet.restore", data={"best": best, "current": current_pass,
-                                                     "files": len(restored), "iter": it})
+        # No best-tree snapshot here. Task 4 used to save `src/` as the best
+        # tree by summed pass count and restore it on a regression; the save
+        # deleted the whole `.best_tree/`, the durable tier t2a heals from,
+        # and a restore wrote `src/` behind the publish, which the next
+        # publish overwrites or task 3 refuses as drift (found in review,
+        # 2026-10-20). The tree t2a fills is the only tree, and its own
+        # batch ratchet and best tree are the snapshot.
         self._tel.log(f"\n  Keeping '{ctx.module_name}' tree for repair iteration "
                       f"{it + 1} (no wipe — docs updated, fix loop continues).")
         self._audit.run(f"iter {it}")

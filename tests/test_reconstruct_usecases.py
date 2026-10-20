@@ -234,7 +234,7 @@ def test_a_red_task3_goes_back_to_the_module_loop_with_no_writer(tmp_path: Path)
 
 def _analysis(fa: FakeAdapter, render: Any = None) -> FailureAnalysisStep:
     return FailureAnalysisStep(
-        analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
+        analyst=fa, journal=fa, artifacts=fa,
         coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
         genesis_audit_interval=5,
         render_strategy=render or (lambda _ctx, text: text))
@@ -248,7 +248,7 @@ def test_analysis_advances_state_and_regens_on_update(tmp_path: Path) -> None:
     assert res.coverage_strategy == "new-strategy"   # regenerated on real update
     assert res.state.iteration == 2 and res.state.prev_pass_count == 4
     assert res.state.no_improvement_streak == 0       # 4 > 2 improved
-    assert "save_best" in fa.calls                    # new best (best was None)
+    assert "save_best" not in fa.calls                # t2a's ratchet owns the tree
 
 
 def test_a_regenerated_reply_reaches_the_next_iteration_rendered(tmp_path: Path) -> None:
@@ -283,12 +283,16 @@ def test_analysis_genesis_stall_skips_regen(tmp_path: Path) -> None:
     assert res.state.no_improvement_streak == 1       # 1 not > 1
 
 
-def test_analysis_regression_restores_best(tmp_path: Path) -> None:
+def test_analysis_regression_touches_no_best_tree(tmp_path: Path) -> None:
+    """Task 4's best-tree save deleted the whole `.best_tree/`, the durable
+    tier t2a heals from, and its restore wrote `src/` behind the publish
+    (review, 2026-10-20). A regression now restores nothing here: t2a's own
+    ratchet owns the tree. The fake still offers both calls; neither is made."""
     fa = FakeAdapter(task4=(True, 1), validate_task4=(True, ""), best=5)
     res = _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=5),
                             StepOutcome(False, "test", "o"),
                             total_iters=0, coverage_strategy="x")
-    assert "restore_best" in fa.calls                 # current 1 < best 5
+    assert "restore_best" not in fa.calls and "save_best" not in fa.calls
     assert res.total_iters == 1
     assert "genesis_audit" in fa.calls                # regression fires audit off-interval
 
@@ -353,7 +357,7 @@ def test_reconstructor_plateau_disabled_by_default(tmp_path: Path) -> None:
 def _analysis_with(fa: FakeAdapter, *, lessons: Any = None, pins: Any = None,
                    open_gaps: Any = None) -> FailureAnalysisStep:
     return FailureAnalysisStep(
-        analyst=fa, journal=fa, ratchet=fa, artifacts=fa,
+        analyst=fa, journal=fa, artifacts=fa,
         coverage_docs=fa, audit=fa, docs=fa, telemetry=fa,
         genesis_audit_interval=5, render_strategy=lambda _ctx, text: text,
         lessons=lessons, pins=pins, open_gaps=open_gaps)
@@ -510,34 +514,3 @@ def test_a_red_iteration_still_pins_a_blocking_body_the_end_gate_left_open(
 
 # --- the best-tree slot only ever holds a MEASURED tree ---------------------
 
-def test_analysis_refuses_to_snapshot_an_unmeasurable_tree(tmp_path: Path) -> None:
-    """A build failure reports 0 passing because nothing compiled, not because
-    the tree is empty. Run `3274139-76ff8d08` snapshotted 12 files at "0
-    passing" while both clusters failed to parse, and the flow audit called it
-    `1 save(s) strictly improving` — 0 beats an empty slot."""
-    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=None)
-    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=0),
-                      StepOutcome(False, "build", "error[E0592]: duplicate"),
-                      total_iters=0, coverage_strategy="x")
-    assert "save_best" not in fa.calls
-    assert any("absence of a measurement" in line for line in fa.logs)
-
-
-def test_analysis_negative_control_a_measured_zero_still_snapshots(tmp_path: Path) -> None:
-    """The control: same 0, same empty slot, but the tests RAN. That is a real
-    floor and the pre-fix behaviour is retained for it."""
-    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=None)
-    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=0),
-                      StepOutcome(False, "test", "0 passed; 12 failed"),
-                      total_iters=0, coverage_strategy="x")
-    assert "save_best" in fa.calls
-
-
-def test_analysis_restores_the_best_tree_when_the_build_breaks(tmp_path: Path) -> None:
-    """The restore arm must NOT be gated on measurability: a tree that stopped
-    compiling is exactly when a good snapshot is worth having back."""
-    fa = FakeAdapter(task4=(True, 0), validate_task4=(True, ""), best=197)
-    _analysis(fa).run(_ctx(tmp_path), IterationState(prev_pass_count=197),
-                      StepOutcome(False, "build", "error[E0308]"),
-                      total_iters=0, coverage_strategy="x")
-    assert "restore_best" in fa.calls and "save_best" not in fa.calls

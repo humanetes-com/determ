@@ -117,17 +117,6 @@ class FailureJournal(Protocol):
 
 
 @runtime_checkable
-class Ratchet(Protocol):
-    """Best-tree ratchet: snapshot on a new-best pass count, restore on regress."""
-
-    def best_tree_pass_count(self, project_dir: Path) -> int | None: ...
-    def save_best_tree(
-        self, project_dir: Path, files: list[str], pass_count: int, *, iteration: int,
-    ) -> int: ...
-    def restore_best_tree(self, project_dir: Path) -> list[str]: ...
-
-
-@runtime_checkable
 class Artifacts(Protocol):
     """Read-side workspace artefacts the reconstruction phases consult."""
 

@@ -124,3 +124,30 @@ def test_inner_loop_detects_proc_macro_and_passes_constraint(tmp_path: Path) -> 
 
 # --------------------------------------------------------------------------- fix loop
 
+
+
+def test_a_published_tree_is_checked_and_never_written(tmp_path: Path) -> None:
+    """After the skeleton generator publishes the one tree into `src/`, a
+    failing build check ran `generate_fix_loop` over `src/`: a body no loop
+    measured, which task 3 refuses as drift or the next publish overwrites
+    (review, 2026-10-20). A publishing generator's check only checks; a
+    failure goes back to the module loop. Control: a generator that writes
+    `src/` itself still gets the fix loop."""
+    def _no_writer(**_k: Any) -> tuple[bool, str]:
+        raise AssertionError("nothing may write a published tree")
+
+    checks: list[str] = []
+    deps = _deps(_Gen(True), fix_loop=_no_writer,
+                 generator_publishes=lambda: True,
+                 check_build=lambda cmd, cwd, t: (checks.append(cmd) or (101, "E0425")))
+    assert task2_inner_loop(tmp_path, build_check_cmd="cargo build", deps=deps,
+                            **_COMMON) is False
+    assert checks == ["cargo build"]
+    ok_deps = replace(deps, check_build=lambda cmd, cwd, t: (0, ""))
+    assert task2_inner_loop(tmp_path, build_check_cmd="cargo build", deps=ok_deps,
+                            **_COMMON) is True
+    fixed: list[bool] = []
+    control = _deps(_Gen(True), fix_loop=lambda **_k: (fixed.append(True) or (True, "")))
+    assert task2_inner_loop(tmp_path, build_check_cmd="cargo build", deps=control,
+                            **_COMMON) is True
+    assert fixed == [True]

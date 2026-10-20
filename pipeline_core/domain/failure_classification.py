@@ -47,30 +47,6 @@ class FailureCategory(StrEnum):
     TEST = "test"            # catch-all for other test failures
 
 
-def pass_count_is_measured(failure_type: str) -> bool:
-    """Did this iteration's pass count come from tests that actually RAN?
-
-    Three categories answer no, and they all report the same 0 a genuinely
-    empty tree would: BUILD (nothing compiled), NO_TESTS (nothing ran) and
-    TIMEOUT (the runner never finished). That 0 is the ABSENCE of a
-    measurement, and anything that treats it as one is describing a tree it has
-    never scored.
-
-    The instance this exists for, run `3274139-76ff8d08` at 00:35:16Z on
-    2026-08-11: the iteration's best-tree ratchet snapshotted 12 files at
-    "0 passing" while both clusters failed to PARSE (`src/error.rs:676: error:
-    expected `{`, found keyword `fn``, 70 and 59 errors), because 0 beats an
-    empty slot; the flow audit then printed `C6 ratchet-sanity PASS 1 save(s)
-    strictly improving`. Three hours earlier the same tree had compiled at
-    197/227 and was never snapshotted. Storing the 0 also disabled the RESTORE
-    arm permanently — it fires on `current < best`, and nothing is below 0 — so
-    the one mechanism that could have undone the damage was locked shut by the
-    damage itself.
-    """
-    return failure_type not in (
-        FailureCategory.BUILD, FailureCategory.NO_TESTS, FailureCategory.TIMEOUT)
-
-
 def first_diagnostic(text: str) -> str:
     """The first compiler diagnostic line in ``text``, for log lines that must
     say WHY a compile failed without dumping the whole excerpt.

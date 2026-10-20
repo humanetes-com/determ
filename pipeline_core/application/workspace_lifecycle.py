@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from pathlib import Path
 
-from pipeline_core.domain.best_tree_mark import UNKNOWN_TREE_SHA, BestTreeMark
+from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.log import log
 
 
@@ -134,46 +134,6 @@ _BEST_META = "_meta.json"
 _BEST_LAYOUT = "_layout"
 
 
-def best_tree_pass_count(project_dir: Path) -> int | None:
-    """Pass count of the snapshotted best tree, or None if no snapshot."""
-    import json
-    meta = project_dir / BEST_TREE_DIR / _BEST_META
-    try:
-        return int(json.loads(meta.read_text(encoding="utf-8"))["pass_count"])
-    except (OSError, ValueError, KeyError):
-        return None
-
-
-def save_best_tree(
-    project_dir: Path, rel_files: Collection[str], pass_count: int,
-    iteration: int = 0,
-) -> int:
-    """Snapshot `rel_files` (source files, tests excluded by the caller) into
-    .best_tree/ with their pass count. Returns files saved."""
-    import json
-    import shutil
-    best = project_dir / BEST_TREE_DIR
-    if best.exists():
-        shutil.rmtree(best)
-    saved = 0
-    for rel in rel_files:
-        src = project_dir / rel
-        if not src.is_file():
-            continue
-        dst = best / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        saved += 1
-    if saved:
-        best.mkdir(exist_ok=True)
-        (best / _BEST_META).write_text(
-            json.dumps({"pass_count": pass_count, "iteration": iteration}),
-            encoding="utf-8")
-        log(f"  [ratchet] best tree snapshotted: {saved} file(s), "
-            f"{pass_count} passing (iter {iteration}).")
-    return saved
-
-
 def load_cluster_best_tree_mark(
     project_dir: Path, cluster: str,
 ) -> BestTreeMark | None:
@@ -287,8 +247,7 @@ def restore_cluster_best_tree(
     neither could return the tree: `load_cluster_best_tree_mark` reads the
     score to decide whether a sweep may REPLACE the slot, and heal's
     `BEST_TREE_COPY` tier reads ONE file when that file is unparseable.
-    `restore_best_tree` exists but is module scope over the whole `.best_tree/`
-    dir inside a task3/task4 repair. So a cluster's durable best tree was
+    No other reader returned it. So a cluster's durable best tree was
     write-only AS A TREE, and a re-climb that failed after a deliberate
     re-stub was permanent by construction: measured over runs
     `1082156-4da4faf7` → `669347-cf33eae3` (2026-08-14/15), the retrigger
@@ -354,82 +313,3 @@ def cluster_best_tree_has_layout(project_dir: Path, cluster: str) -> bool:
     return (project_dir / BEST_TREE_DIR / cluster / _BEST_LAYOUT).is_dir()
 
 
-# The merged tree gets its own slot under the same root. It cannot use
-# `save_best_tree`/`restore_best_tree`: those own the WHOLE `.best_tree/` dir
-# and `rmtree` it on every save, which would delete the per-cluster snapshots
-# heal restores from. `_merged` is a name no cluster can take — cluster names
-# come from the baked cfg scan and are cfg atoms.
-MERGED_BEST = "_merged"
-
-
-def save_merged_best_tree(project_dir: Path, pass_count: int,
-                          iteration: int = 0, tree_sha: str = UNKNOWN_TREE_SHA,
-                          oracle_size: int = 0) -> int:
-    """Snapshot the merged `src/` at its best. task2c tracked `best_pass` only
-    to compute `improved`; nothing kept the tree that earned it, so the stage
-    ended on whatever its last iteration produced. task2a has had this ratchet
-    all along."""
-    return save_cluster_best_tree(
-        project_dir, MERGED_BEST, project_dir / "src",
-        BestTreeMark(pass_count=pass_count, iteration=iteration,
-                     tree_sha=tree_sha, oracle_size=oracle_size))
-
-
-def merged_best_pass_count(project_dir: Path) -> int | None:
-    """Pass count of the merged snapshot, or None if there is none."""
-    mark = load_cluster_best_tree_mark(project_dir, MERGED_BEST)
-    return None if mark is None else mark.pass_count
-
-
-def restore_merged_best_tree(project_dir: Path) -> list[str]:
-    """Copy the merged snapshot back over `src/`. Returns restored rel paths."""
-    best = project_dir / BEST_TREE_DIR / MERGED_BEST
-    if not best.is_dir():
-        return []
-    import os as _os
-    import shutil
-    restored: list[str] = []
-    for src in sorted(best.rglob("*.rs")):
-        if not src.is_file():
-            continue
-        # Project-relative, like `restore_best_tree` — the snapshot is rooted
-        # at `src/` but every caller and log line speaks in project paths.
-        rel = Path("src") / src.relative_to(best)
-        dst = project_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        # Same freshness bump as `restore_cluster_best_tree`: `copy2` hands
-        # the file the snapshot's mtime, older than cargo's fingerprints, so
-        # without it the next `cargo test` re-runs the DISCARDED tree's
-        # binaries. Measured on THIS slot 2026-08-19 (run `3579062-476abc3b`):
-        # after the 106-tree restore at post-merge iter 2, iters 3 and 4 both
-        # re-read the crashed wave's 32/2 in 1.9s.
-        _os.utime(dst)
-        restored.append(str(rel))
-    if restored:
-        log(f"  [ratchet] restored merged best tree ({len(restored)} file(s), "
-            f"{merged_best_pass_count(project_dir)} passing) — iteration ended "
-            "below the floor.")
-    return restored
-
-
-def restore_best_tree(project_dir: Path) -> list[str]:
-    """Copy the snapshotted best tree back over the working tree. Returns the
-    restored relative paths ([] if no snapshot)."""
-    best = project_dir / BEST_TREE_DIR
-    if not best.is_dir():
-        return []
-    import shutil
-    restored: list[str] = []
-    for src in sorted(best.rglob("*")):
-        if not src.is_file() or src.name == _BEST_META:
-            continue
-        rel = str(src.relative_to(best))
-        dst = project_dir / rel
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-        restored.append(rel)
-    if restored:
-        log(f"  [ratchet] restored best tree ({len(restored)} file(s), "
-            f"{best_tree_pass_count(project_dir)} passing) — iteration ended below the floor.")
-    return restored

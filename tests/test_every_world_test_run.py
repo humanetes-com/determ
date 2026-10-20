@@ -129,6 +129,7 @@ def test_the_loop_identity_is_the_default_worlds_tree_and_the_merged_view() -> N
 
 
 def test_one_world_is_its_own_loop_identity() -> None:
+    assert one_tree_cluster([]) is None
     assert one_tree_cluster([BASE]) is BASE
     env: dict[str, str] = {}
     overlay_cluster_env(env, BASE)
