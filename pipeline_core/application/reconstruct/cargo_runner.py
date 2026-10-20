@@ -1141,7 +1141,10 @@ class PortBoundCargoRunner:
             parts.append((str(cluster.name), text))
             rcs.append(rc)
         rc_all = -1 if -1 in rcs else next((r for r in rcs if r != 0), 0)
-        return rc_all, join_world_captures(parts)
+        # Each world runs under its own deadline, so the one that timed out
+        # is named by its own return code, not by its place in the order.
+        cut = {w for (w, _t), rc in zip(parts, rcs, strict=True) if rc == -1}
+        return rc_all, join_world_captures(parts, timed_out=cut)
 
     def check_diag(self, cmd: str, cwd: Path, env: dict[str, str],
                    timeout: int = 180) -> tuple[int, str, list[Diagnostic]]:

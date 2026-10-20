@@ -174,8 +174,16 @@ def cargo_target_of(binary_label: str) -> str | None:
     """The cargo target name of an integration-test binary as the sweep
     labels it: `tests/foo.rs` and `tests/foo/main.rs` -> `foo`. None for
     any other label (the lib's unit tests, doc tests): those are one binary
-    per crate and need no disambiguation by name."""
-    parts = binary_label.replace("\\", "/").split("/")
+    per crate and need no disambiguation by name.
+
+    A world-qualified key (`nightly::tests/foo.rs`, `test_results.
+    binary_key`, from a capture that joined build worlds) names the same
+    target: the world is not part of the cargo target, and reading the key
+    whole dropped every failure of another world from the coverage map
+    (found in review, 2026-10-20). Split inline: this module may not import
+    `test_results`, which imports it."""
+    _world, _sep, label = binary_label.partition("::")
+    parts = (label if _sep else binary_label).replace("\\", "/").split("/")
     if len(parts) == 2 and parts[0] == "tests" and parts[1].endswith(".rs"):
         return parts[1][:-3] or None
     if len(parts) == 3 and parts[0] == "tests" and parts[2] == "main.rs":

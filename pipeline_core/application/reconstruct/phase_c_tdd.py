@@ -349,6 +349,7 @@ from pipeline_core.domain.test_results import (
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
 from pipeline_core.domain.workspace_layout import SKELETON_DIR
 from pipeline_core.domain.world_floor import failed_pairs, judge_every_world
+from pipeline_core.domain.world_score import WorldScore
 from pipeline_core.domain.write_set import bind_observed as bind_observed_cycles
 from pipeline_core.domain.zero_payoff import (
     SweepOutcome,
@@ -1497,6 +1498,9 @@ def run_phase_c_tdd(
     state = LoopState()
     stall = 0
     best_pass = UNSET_PASS
+    # The high-water's per-world pass counts (`domain/world_score.py`): the
+    # summed `best_pass` moves only when no world lost passes against this.
+    _best_score: WorldScore | None = None
     best_fail = None
     # Dispatch batching. The sweep is the only measurement and it costs ~1s of
     # cargo; what separated two of them was a batch of the WHOLE frontier, which
@@ -1768,6 +1772,9 @@ def run_phase_c_tdd(
     _batch_ratchet = os.getenv("PHASE_C_TDD_BATCH_RATCHET", "1") not in ("", "0", "false")
     _src_root = target_src_dir / "src"
     _bratchet_best = UNSET_PASS
+    # The snapshot's per-world pass counts: a tree that lost passes in any
+    # world against the snapshot breaches, whatever its summed count.
+    _bratchet_score: WorldScore | None = None
     _bratchet_snap: dict[str, str] | None = None
     _bratchet_sha: str | None = None   # tree the snapshot was taken from
     # Tests passing in COMPLETED binaries at the snapshot. The ratchet scores a
@@ -2491,6 +2498,11 @@ def run_phase_c_tdd(
         # exactly when the tree is at its best.
         _breach = ratchet_breach(pass_count, _bratchet_best,
                                  _sweep.passing, _bratchet_passing)
+        if not _breach:
+            _lost_w = WorldScore.of_capture(output).lost_against(_bratchet_score)
+            if _lost_w:
+                _breach = (f"world(s) {', '.join(_lost_w)} lost passes against "
+                           "the best-known tree")
         _withheld = breach_withheld(_breach, _grace)
         if _breach and not _withheld and not _rec0.reconciled:
             # A tainted score cannot charge a breach: the counters and the
@@ -2970,11 +2982,14 @@ def run_phase_c_tdd(
                         "rolled_back": False, "probes": _res_r.probes,
                         "pass_before": _pass_pre_r,
                         "pass_after": pass_count})
+        _score_snap = WorldScore.of_capture(output)
         if _batch_ratchet \
-                and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha):
+                and snapshot_due(pass_count, _bratchet_best, _tree_sha, _bratchet_sha) \
+                and not _score_snap.lost_against(_bratchet_score):
             _snap = snapshot_src_tree(_src_root)
             if _snap is not None:
                 _bratchet_best = pass_count
+                _bratchet_score = _score_snap
                 _bratchet_snap = _snap
                 _bratchet_sha = _tree_sha
                 _bratchet_passing = _sweep.passing
@@ -3744,9 +3759,18 @@ def run_phase_c_tdd(
         # improvement it sets the floor to 0 and resets the stall budget, so the
         # cluster reads "improving" on the iteration it is most broken —
         # observed live at `nightly` iter 1 (`pass=0 fail=124 improved=True`).
-        improved = pass_count > best_pass and not _sweep_compile_broke
+        _score_now = WorldScore.of_capture(output)
+        _lost_now = _score_now.lost_against(_best_score)
+        improved = (pass_count > best_pass and not _sweep_compile_broke
+                    and not _lost_now)
+        if pass_count > best_pass and _lost_now and not _sweep_compile_broke:
+            deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: pass {pass_count} "
+                     f"beats {best_pass} in sum, but world(s) "
+                     f"{', '.join(_lost_now)} lost passes against the best "
+                     "tree — not an improvement.")
         if improved:
             best_fail = fail_count
+            _best_score = _score_now
         # Hook 3 — detect a causal regression BEFORE recording, so the note
         # rides this iter's Attempt (frozen) and surfaces in context(). A test
         # that flipped pass→fail right after last iter's fill is attributable
@@ -3817,6 +3841,7 @@ def run_phase_c_tdd(
             _stale = _highwater.best
             _highwater = _highwater.rebased(pass_count)
             best_pass = _highwater.best
+            _best_score = _score_now
             state.best_metric = float(best_pass)
             # The re-admission baseline follows, or the release gate stays shut
             # for the whole re-climb: `readmission_warranted` asks for a score

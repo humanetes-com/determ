@@ -44,7 +44,11 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from pipeline_core.domain.generation import parse_gen_tests_filename
-from pipeline_core.domain.test_results import binary_output_sections, world_sections
+from pipeline_core.domain.test_results import (
+    binary_key,
+    binary_output_sections,
+    world_sections,
+)
 
 #: Reads an oracle test file by the path a panic printed (relative to the
 #: package root). Returns None for any path that is not an oracle test file,
@@ -369,7 +373,7 @@ def assertion_positions(capture: str, source_of: TestSource) -> dict[TestKey, in
         # as `TestStateReading.keyed` keys them (`BinaryResult.key`).
         for w, text in worlds.items():
             for k, line in assertion_positions(text, source_of).items():
-                out[TestKey(f"{w}/{k.binary}", k.test)] = line
+                out[TestKey(binary_key(w, k.binary), k.test)] = line
         return out
     cache: dict[tuple[str, str], frozenset[int] | None] = {}
     for sec in binary_output_sections(capture or ""):

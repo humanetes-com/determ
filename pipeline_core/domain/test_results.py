@@ -11,7 +11,7 @@ extractor. No new patterns are authored; the bodies are moved as-is.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, NamedTuple
@@ -1384,8 +1384,8 @@ class BinaryResult:
     @property
     def key(self) -> str:
         """The binary's identity in a reading: its label, qualified by its
-        world when the capture joined worlds."""
-        return f"{self.world}/{self.label}" if self.world else self.label
+        world when the capture joined worlds (:func:`binary_key`)."""
+        return binary_key(self.world, self.label)
 
 
 @dataclass(frozen=True)
@@ -1575,18 +1575,59 @@ WORLD_HEADER_PREFIX = "=== cfg world: "
 _WORLD_HEADER_SUFFIX = " ==="
 
 
-def world_header(world: str) -> str:
-    return f"{WORLD_HEADER_PREFIX}{world}{_WORLD_HEADER_SUFFIX}"
+# Written after the world's name when that world's own run was cut by the
+# caller's timeout: the world that hung is named by its own run, wherever in
+# the order it ran.
+_TIMED_OUT_TAG = " (timed out)"
+
+# Between a world and a binary label in a binary's key. A cargo label never
+# holds it (`tests/foo.rs`, `unittests src/lib.rs`, `Doc-tests crate`), and a
+# world name may hold `/` (a feature world is named like `feature/x`).
+WORLD_KEY_SEP = "::"
 
 
-def _world_of_line(line: str) -> str | None:
+def binary_key(world: str, label: str) -> str:
+    """A binary's identity in a reading: `label`, qualified by `world` when
+    the capture joined worlds."""
+    return f"{world}{WORLD_KEY_SEP}{label}" if world else label
+
+
+def label_of_key(key: str) -> str:
+    """The cargo label inside a :func:`binary_key`."""
+    _world, sep, label = key.partition(WORLD_KEY_SEP)
+    return label if sep else key
+
+
+def world_header(world: str, *, timed_out: bool = False) -> str:
+    tag = _TIMED_OUT_TAG if timed_out else ""
+    return f"{WORLD_HEADER_PREFIX}{world}{tag}{_WORLD_HEADER_SUFFIX}"
+
+
+def _header_of_line(line: str) -> tuple[str, bool] | None:
+    """(world, its run timed out) of a world header line, else None."""
     s = line.strip()
     if s.startswith(WORLD_HEADER_PREFIX) and s.endswith(_WORLD_HEADER_SUFFIX):
-        return s[len(WORLD_HEADER_PREFIX):-len(_WORLD_HEADER_SUFFIX)]
+        name = s[len(WORLD_HEADER_PREFIX):-len(_WORLD_HEADER_SUFFIX)]
+        if name.endswith(_TIMED_OUT_TAG):
+            return name[:-len(_TIMED_OUT_TAG)], True
+        return name, False
     return None
 
 
-def join_world_captures(parts: Sequence[tuple[str, str]]) -> str:
+def _world_of_line(line: str) -> str | None:
+    head = _header_of_line(line)
+    return None if head is None else head[0]
+
+
+def timed_out_worlds(capture: str) -> frozenset[str]:
+    """The worlds of a joined capture whose own run the timeout cut."""
+    out, _err = split_capture(capture)
+    return frozenset(h[0] for h in map(_header_of_line, out.split("\n"))
+                     if h is not None and h[1])
+
+
+def join_world_captures(parts: Sequence[tuple[str, str]],
+                        timed_out: Collection[str] = ()) -> str:
     """One capture of the same test command run under several build worlds.
 
     `parts` is (world, :func:`join_capture` capture) in run order. The worlds'
@@ -1602,8 +1643,9 @@ def join_world_captures(parts: Sequence[tuple[str, str]]) -> str:
     errs: list[str] = []
     for world, capture in parts:
         out, err = split_capture(capture)
-        outs.append(world_header(world) + "\n" + out)
-        errs.append(world_header(world) + "\n" + err)
+        head = world_header(world, timed_out=world in timed_out)
+        outs.append(head + "\n" + out)
+        errs.append(head + "\n" + err)
     return join_capture("\n".join(outs), "\n".join(errs))
 
 
@@ -1862,14 +1904,14 @@ def parse_binary_results(
     binaries."""
     _worlds = world_sections(test_output)
     if "" not in _worlds:
-        # Worlds run one after another, so only the LAST one can have been
-        # cut by the caller's timeout; an earlier world's open section is a
-        # crash of that world's binary, as in one capture.
-        _last = list(_worlds)[-1]
+        # The world whose OWN run the timeout cut is the one that hung,
+        # wherever it ran in the order; its header says so. Every world runs
+        # under its own deadline, so a home world that hung is followed by
+        # worlds that completed.
+        _cut = timed_out_worlds(test_output)
         return tuple(replace(b, world=w)
                      for w, text in _worlds.items()
-                     for b in parse_binary_results(
-                         text, timed_out=timed_out and w == _last))
+                     for b in parse_binary_results(text, timed_out=w in _cut))
     labels: list[tuple[str, str | None]] = []
     for raw in test_output.splitlines():
         _lab = _target_label(raw.strip())
@@ -2140,6 +2182,11 @@ class RegressionComparison:
     # aimed tests green; the route ledger recorded only the +2, and the
     # third test's unpaid-buy count restarted on a row that never moved it.
     newly_green: frozenset[str] = frozenset()
+    # The same comparison inside each build world, when the readings joined
+    # worlds (`join_world_captures`). A world's verdict is its own: a net gain
+    # in one world may still trade a red test inside that world, but no world
+    # pays for another's loss.
+    per_world: tuple[tuple[str, RegressionComparison], ...] = ()
 
     @property
     def net_pass_delta(self) -> int:
@@ -2162,6 +2209,12 @@ class RegressionComparison:
             return True
         if self.newly_hung:
             return True
+        if self.per_world:
+            # The sum over worlds is not a verdict: +2 in one world and -1 in
+            # another is a body that broke the second world's crate (the
+            # review of the one-tree loop, 2026-10-20: this gate kept it as a
+            # net gain). Each world is judged by the rule below on its own.
+            return any(c.regressed for _w, c in self.per_world)
         if self.net_pass_delta > 0:
             return False
         return bool(self.net_pass_delta < 0
@@ -2250,7 +2303,17 @@ def compare_readings(base: TestStateReading,
     was passing — an all-red binary that starts crashing lost nothing that
     worked (only the failure mode moved, panic → abort), so it is reported
     separately and costs zero. Whether a cost convicts is
-    :attr:`RegressionComparison.regressed`'s call, not this function's."""
+    :attr:`RegressionComparison.regressed`'s call, not this function's.
+
+    Readings that joined build worlds are also compared world by world
+    (:attr:`RegressionComparison.per_world`)."""
+    worlds = sorted({b.world for b in (*base.binaries, *cur.binaries)})
+    per_world: tuple[tuple[str, RegressionComparison], ...] = ()
+    if len(worlds) > 1:
+        per_world = tuple(
+            (w, compare_readings(_reading_of_world(base, w),
+                                 _reading_of_world(cur, w)))
+            for w in worlds)
     base_by, cur_by = base.by_label(), cur.by_label()
     measured: list[str] = []
     newly_crashed: list[str] = []
@@ -2308,7 +2371,18 @@ def compare_readings(base: TestStateReading,
         crash_lost_pass=crash_lost,
         newly_hung=tuple(sorted(newly_hung)),
         hung_tests=tuple(sorted(hung_tests)),
-        newly_green=frozenset(newly_green))
+        newly_green=frozenset(newly_green),
+        per_world=per_world)
+
+
+def _reading_of_world(reading: TestStateReading, world: str) -> TestStateReading:
+    """`reading` restricted to the binaries of one build world."""
+    prefix = binary_key(world, "")
+    return TestStateReading(
+        binaries=tuple(b for b in reading.binaries if b.world == world),
+        positions={k: v for k, v in reading.positions.items()
+                   if k.binary.startswith(prefix) or (not world and
+                                                      WORLD_KEY_SEP not in k.binary)})
 
 
 def regression_detail_kind(cmp: RegressionComparison) -> LastErrorKind:

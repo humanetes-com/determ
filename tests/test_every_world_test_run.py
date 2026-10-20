@@ -280,8 +280,8 @@ def test_a_joined_capture_reconciles_its_counts_with_its_verdicts() -> None:
                     fail_count=failed, passed=frozenset(), failed=frozenset(),
                     passed_pairs=p_pairs, failed_pairs=f_pairs)
     assert m.reconcile().reconciled
-    assert ("base/tests/a.rs", "t_shared") in p_pairs
-    assert ("alt/tests/a.rs", "t_shared") in p_pairs
+    assert ("base::tests/a.rs", "t_shared") in p_pairs
+    assert ("alt::tests/a.rs", "t_shared") in p_pairs
     # Control: the same binaries keyed by label alone lose a world's copy.
     bare = {(b.label, n) for b in bins for n in b.passed}
     assert len(bare) == passed - 1
@@ -292,6 +292,93 @@ def test_a_reading_keeps_both_worlds_copies_of_a_binary() -> None:
     joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
     reading = TestStateReading(binaries=parse_binary_results(joined))
     assert sorted(reading.by_label()) == [
-        "alt/tests/a.rs", "alt/tests/compiletest.rs", "base/tests/a.rs"]
+        "alt::tests/a.rs", "alt::tests/compiletest.rs", "base::tests/a.rs"]
     one = TestStateReading(binaries=parse_binary_results(BASE_RUN))
     assert sorted(one.by_label()) == ["tests/a.rs"]
+
+
+# --- review fixes, 2026-10-20 -------------------------------------------------
+
+
+def test_no_world_pays_for_another_worlds_loss_at_the_keep() -> None:
+    """The keep gate kept a body on a summed net gain: +2 in one world and -1
+    in the other read `net_pass_delta=+1`, `regressed=False`. Each world is
+    now judged on its own by the same rule; a world's own net gain still
+    trades a red test inside that world."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.test_results import TestStateReading, compare_readings
+    base_base = _capture({"tests/a.rs": {"t1": True, "t2": False, "t3": False}})
+    base_alt = _capture({"tests/a.rs": {"t1": True}})
+    cur_base = _capture({"tests/a.rs": {"t1": True, "t2": True, "t3": True}})
+    cur_alt = _capture({"tests/a.rs": {"t1": False}})
+
+    def _reading(home: str, other: str) -> TestStateReading:
+        return TestStateReading(binaries=parse_binary_results(
+            join_world_captures([("base", home), ("alt", other)])))
+
+    cmp = compare_readings(_reading(base_base, base_alt), _reading(cur_base, cur_alt))
+    assert cmp.net_pass_delta == 1
+    assert cmp.regressed
+    assert dict(cmp.per_world)["alt"].regressed
+    assert not dict(cmp.per_world)["base"].regressed
+    # Control: the summed rule alone keeps it.
+    assert not replace(cmp, per_world=()).regressed
+    # The other world unchanged: a keep.
+    assert not compare_readings(_reading(base_base, base_alt),
+                                _reading(cur_base, base_alt)).regressed
+
+
+def test_the_high_water_moves_only_when_no_world_lost() -> None:
+    from pipeline_core.domain.world_score import WorldScore
+    best = WorldScore.of_capture(join_world_captures(
+        [("base", _capture({"tests/a.rs": {"t1": True, "t2": False}})),
+         ("alt", _capture({"tests/a.rs": {"t1": True}}))]))
+    traded = WorldScore.of_capture(join_world_captures(
+        [("base", _capture({"tests/a.rs": {"t1": True, "t2": True}})),
+         ("alt", _capture({"tests/a.rs": {"t1": False}}))]))
+    gained = WorldScore.of_capture(join_world_captures(
+        [("base", _capture({"tests/a.rs": {"t1": True, "t2": True}})),
+         ("alt", _capture({"tests/a.rs": {"t1": True}}))]))
+    assert traded.lost_against(best) == ("alt",)
+    assert gained.lost_against(best) == ()
+    assert WorldScore.of_capture(BASE_RUN).lost_against(None) == ()
+    # A one-world mark carried over a resume proves no loss.
+    assert gained.lost_against(WorldScore({"": 99})) == ()
+
+
+def test_the_world_that_timed_out_is_the_hung_one_wherever_it_ran(tmp_path) -> None:
+    """A home-world timeout followed by a completed world read as no sweep:
+    only the LAST world was parsed as cut, so the home world's open section
+    was a crash and no binary was hung."""
+    open_section = join_capture(
+        "\nrunning 2 tests\ntest t_shared ... ok\ntest t_slow ... ",
+        "     Running tests/a.rs (target/debug/deps/a-0123456789abcdef)")
+    joined = join_world_captures([("base", open_section), ("alt", ALT_RUN)],
+                                 timed_out={"base"})
+    bins = parse_binary_results(joined)
+    home = [b for b in bins if b.world == "base"]
+    assert home and home[0].hung and home[0].dangling == "t_slow"
+    assert any(b.world == "alt" and "ui" in b.failed for b in bins)
+    # Control: the last world cut is still read as hung there.
+    last = join_world_captures([("alt", ALT_RUN), ("base", open_section)],
+                               timed_out={"base"})
+    assert [b.hung for b in parse_binary_results(last) if b.world == "base"] == [True]
+    # The runner names the world by its own return code.
+    cargo = _Cargo({"base": (-1, ""), "alt": (101, ALT_RUN)})
+    rc, text = _runner(cargo).run("cargo test", tmp_path, _loop_env())
+    assert rc == -1 and "=== cfg world: base (timed out) ===" in text
+
+
+def test_a_world_qualified_failure_maps_to_its_cargo_target() -> None:
+    from pipeline_core.domain.measurement import (
+        cargo_target_of,
+        failing_binaries_by_name,
+        qualified_verdicts,
+    )
+    assert cargo_target_of("nightly::tests/foo.rs") == "foo"
+    assert cargo_target_of("feature/x::tests/foo/main.rs") == "foo"
+    assert cargo_target_of("tests/foo.rs") == "foo"
+    joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
+    _p, failed, _i = qualified_verdicts(parse_binary_results(joined))
+    assert failing_binaries_by_name(failed) == {"ui": frozenset({"compiletest"})}

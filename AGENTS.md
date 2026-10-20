@@ -35,8 +35,25 @@ What follows from it:
 - Every cluster gets scored. A cluster that cannot reach green must not stop
   the next cluster from being scored silently: the run reports which tests
   are still red and through which units, and that run counts as failed.
-- Validate on the goal's own reading: a from-scratch run, judged by its final
-  per-cluster verdicts.
+- The goal is judged on its own reading: a from-scratch run, judged by its
+  final per-cluster verdicts.
+- A fix is validated LOCALLY, not end to end. Launch the cheapest lever that
+  executes the changed phase on a tree that can show the reading ("Pick the
+  restart lever by the phase your fix lives in"): `restart_from.sh task2a`
+  for a loop change, `--keep-fills` when the filled tree is the measurement,
+  `task3` for a test-phase change, the construction levers only when the fix
+  is in construction. A from-scratch run costs hours of GPU before the phase
+  under test even starts, and every hour spent re-reaching a phase is an
+  hour not spent on the next fix. The from-scratch run is taken when the
+  localized readings of the open fixes are on-theory, as the end goal's own
+  check, not as the validation of each fix.
+- Before launching, name the lever and why it is the cheapest one that can
+  show the reading. "The end goal is e2e" is not a reason to start at task0c.
+  The instance, 2026-10-20: plan 355's loop changes (one tree, every-world
+  sweeps, publish, task 3 measure-only) were read with `restart_from.sh
+  task0c`, and the run spent its first 3 h in t0c augmentation, which none
+  of those changes touch; `restart_from.sh task2a` reaches the same loop in
+  seconds. Only the t1.5 layout-gate half of the plan needed construction.
 
 ## A live run continues only to gather insight
 
