@@ -180,6 +180,7 @@ from pipeline_core.domain.dispatch_rank import (
     absence_notice,
     asked_unchanged,
     off_batch_reasons,
+    promise_deadlines,
     rank,
     rotation_bound,
     service_of,
@@ -193,7 +194,7 @@ from pipeline_core.domain.escalation_lifetime import (
     attributed_cohorts,
     escalate_to_measured_owners,
     escalation_fire_due,
-    measured_owners_on_frontier,
+    measured_owners_owed,
     product_addition_keys,
     red_dead_after_sweep,
     sustain_escalation_products,
@@ -714,6 +715,7 @@ def _floor_snapshot(
     products: Mapping[str, FiredProduct] | None = None,
     producers: Mapping[str, frozenset[FnLocator]] | None = None,
     unclaimed: Mapping[FnLocator, int] | None = None,
+    promised: Mapping[FnLocator, int] | None = None,
 ) -> dict[str, Any]:
     """The floor as the loop persists it — ONE spelling for both saves.
 
@@ -769,6 +771,9 @@ def _floor_snapshot(
         unclaimed=tuple(sorted(
             (f"{_l.file}::{_l.fn_name}", _n)
             for _l, _n in (unclaimed or {}).items() if _n > 0)),
+        promised=tuple(sorted(
+            (f"{_l.file}::{_l.fn_name}", max(0, _n))
+            for _l, _n in (promised or {}).items())),
     ).to_dict()
 
 
@@ -1159,7 +1164,7 @@ def run_phase_c_tdd(
     _red_dead_prev: frozenset[FnLocator] = frozenset()
     # Every unit the owner map admitted or attached a test to, this sweep or
     # an earlier one. The schedule checks the ones still in `ordered`
-    # (`measured_owners_on_frontier`) for a candidate that writes them.
+    # (`measured_owners_owed`) for a candidate that writes them.
     _owner_map_units: set[FnLocator] = set()
     _measured_owner_keys: frozenset[FnLocator] = frozenset()
     # Escalated test -> (the futile unit-set that EARNED its fire, the
@@ -1538,6 +1543,9 @@ def run_phase_c_tdd(
     # nothing; it is not persisted, so a new process may grant that stay
     # once more.
     _unclaimed: dict[FnLocator, int] = {}
+    # The rank's promise per waiting evidenced unit
+    # (`dispatch_rank.promise_deadlines`), persisted beside the streak.
+    _promised: dict[FnLocator, int] = {}
     _fault_retried: frozenset[FnLocator] = frozenset()
     # The rungs an owed function climbs before its test is spent: a unit
     # route, then the slice session when sessions run (`candidate_tiers`).
@@ -2382,7 +2390,7 @@ def run_phase_c_tdd(
             served=_served_at, served_verified=_served_verified,
             futility=prev_test_units,
             products=escalation_products, producers=escalation_producers,
-            unclaimed=_unclaimed))
+            unclaimed=_unclaimed, promised=_promised))
 
     # The cluster's function record, read once: what it proved unreachable
     # (from rustc's MIR and the public index, at task0c) is a static fact of
@@ -3597,6 +3605,10 @@ def run_phase_c_tdd(
                 _uc_file, _, _uc_fn = _uc_key.partition("::")
                 if _uc_fn:
                     _unclaimed[FnLocator(_uc_file, _uc_fn)] = _uc_n
+            for _pr_key, _pr_n in _resume.promised:
+                _pr_file, _, _pr_fn = _pr_key.partition("::")
+                if _pr_fn:
+                    _promised[FnLocator(_pr_file, _pr_fn)] = _pr_n
             if _resume.futility:
                 for _fut_test, _fut_units in _resume.futility:
                     _seeded = frozenset(
@@ -6476,7 +6488,8 @@ def run_phase_c_tdd(
         _bound = rotation_bound(_by_class.get(RankClass.EVIDENCED, 0),
                                 _by_class.get(RankClass.HELD, 0),
                                 _dispatch_cap)
-        _starved = starved(_facts, _batch.keys, _dispatch_cap)
+        _promised = promise_deadlines(_facts, _dispatch_cap, _promised)
+        _starved = starved(_facts, _batch.keys, _dispatch_cap, _promised)
         _off_starved = off_batch_reasons(
             list(_starved), _ranked, _batch.keys, _not_ranked, _dispatch_cap)
         _shown = absence_notice(_off, _off_starved)
@@ -6517,8 +6530,9 @@ def run_phase_c_tdd(
         if _starved:
             deps.log(
                 f"  HEALTH ‼ EVIDENCED_STARVED iter {iter_n}: "
-                f"{len(_starved)} evidenced unit(s) left out on the sweep "
-                f"that meets the rotation bound ({_bound}): "
+                f"{len(_starved)} evidenced unit(s) left out after the "
+                f"earliest deadline a sweep promised them (bound now "
+                f"{_bound}): "
                 + ", ".join(f"{k.file}::{k.fn_name} (streak {n})"
                             for k, n in sorted(
                                 _starved.items(),
@@ -7610,8 +7624,9 @@ def run_phase_c_tdd(
                     # targets miss crash_blamed, as a flat re-buy.
                     unmeasurable_tests=_unmeasured,
                     attributed=_attributed_locs,
-                    measured_owners=measured_owners_on_frontier(
-                        _owner_map_units, (k for k, _ in ordered)),
+                    measured_owners=measured_owners_owed(
+                        _owner_map_units, (k for k, _ in ordered),
+                        batch=_batch.keys, starved=_starved),
                     due=frozenset(_due_fill),
                     due_rungs={u_: _due.rung_of(u_) for u_ in _due_fill},
                     unit_evidence=_unit_evidence,

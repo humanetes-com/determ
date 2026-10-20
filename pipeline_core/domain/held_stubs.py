@@ -156,6 +156,10 @@ class Blockers:
     def culprits(self) -> frozenset[FnLocator]:
         return frozenset(self.blamed)
 
+    def tests_stopped_by(self, unit: FnLocator) -> frozenset[str]:
+        """The red tests `unit` stops: held in it, or crashed on it."""
+        return self.held.tests_held_by(unit) | self.blamed.get(unit, frozenset())
+
     @property
     def units(self) -> frozenset[FnLocator]:
         """Every blocker: the held stubs and the crash culprits."""

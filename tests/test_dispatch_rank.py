@@ -931,3 +931,51 @@ def test_a_served_unit_with_an_unasked_fingerprint_is_evidenced() -> None:
     batch2 = take(rank({**others, "late": plain}), (), 2,
                   cohort=None, traversed=())
     assert "late" not in batch2.keys
+
+
+def test_a_shrinking_class_does_not_call_an_earlier_wait_a_broken_promise():
+    """Run `1804897-1ad432ba` (2026-10-20): the class went 43 -> 36 -> 27
+    and the bound 43 -> 9 -> 3; at iter 3 sixteen units with streak 2 were
+    named starved against the bound of 3, though the sweeps they waited
+    through had promised 43 and 9. Plan sentence: a unit is starved only
+    when the earliest deadline any sweep promised it has passed.
+    NEGATIVE CONTROL: the streak-against-today's-bound reading (no recorded
+    promise) names it."""
+    from pipeline_core.domain.dispatch_rank import promise_deadlines
+
+    def facts(n_evidenced: int, streak: int) -> dict[str, UnitFacts]:
+        return {f"u{i}": UnitFacts(static_index=i, service=Service.NEVER,
+                                   unclaimed=streak if i == 0 else 0)
+                for i in range(n_evidenced)}
+
+    cap = 12
+    # Iter 1: 43 evidenced, bound 4 with no held stub; u0 is new.
+    d1 = promise_deadlines(facts(43, 0), cap)
+    assert d1["u0"] == rotation_bound(43, 0, cap) - 1 == 3
+    # Iter 2: class 36 (bound 3), u0 waited one sweep: min(3-1, 3-1) = 2.
+    d2 = promise_deadlines(facts(36, 1), cap, d1)
+    assert d2["u0"] == 2
+    # Iter 3: class 12 (bound 1), u0 waited two sweeps: min(2-1, 0) = 0,
+    # and the bound of 1 made today's promise due today: starved.
+    f3 = facts(12, 2)
+    d3 = promise_deadlines(f3, cap, d2)
+    assert d3["u0"] == 0 and starved(f3, (), cap, d3) != {}
+
+    # The recorded shape: bounds 43 -> 9 -> 3 (held stubs fill the cap).
+    big = facts(43, 0)
+    big.update({f"h{i}": UnitFacts(static_index=100 + i, service=Service.NEVER,
+                                   held_tests=1) for i in range(11)})
+    a = promise_deadlines(big, cap)
+    assert rotation_bound(43, 11, cap) == 43 and a["u0"] == 42
+    mid = facts(36, 1)
+    mid.update({f"h{i}": UnitFacts(static_index=100 + i, service=Service.NEVER,
+                                   held_tests=1) for i in range(8)})
+    b = promise_deadlines(mid, cap, a)
+    assert rotation_bound(36, 8, cap) == 9 and b["u0"] == 8
+    last = facts(27, 2)
+    last["h0"] = UnitFacts(static_index=100, service=Service.NEVER, held_tests=1)
+    c = promise_deadlines(last, cap, b)
+    assert rotation_bound(27, 1, cap) == 3 and c["u0"] == 2
+    assert "u0" not in starved(last, ("h0",), cap, c)
+    # NEGATIVE CONTROL: today's bound against the streak names it.
+    assert "u0" in starved(last, ("h0",), cap)

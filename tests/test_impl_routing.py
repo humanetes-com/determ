@@ -829,3 +829,33 @@ def test_twin_headers_resolve_to_the_first_listed_as_before() -> None:
                         target="impl Other for X", related=[twin, twin])
     assert [rb.container for rb in r.routed] == [twin]
     assert r.dropped == ()
+
+
+def test_an_empty_block_routes_to_the_one_free_declaration_of_a_shared_name() -> None:
+    """Run `1804897-1ad432ba` (2026-10-20), `src/nightly.rs`: `provide` is a
+    method of `impl Error for MyError` and a free fn. The reply (response
+    `0f19338d…`) answered both, the second with `block=""`. Plan sentence:
+    once the reply has answered the method with its container named, a bare
+    body of the same name reaches the free declaration. NEGATIVE CONTROLS:
+    a bare body that is the reply's only answer for the name still goes to
+    the target (`test_a_bare_body_for_a_free_fn_routes_to_the_free_fn_not_the_target`),
+    and so does one with no free declaration of the name."""
+    from pipeline_core.domain.impl_routing import FileMember
+
+    method = FileMember("provide", "impl Error for MyError",
+                        "fn provide<'a>(&'a self, request: &mut Request<'a>)")
+    free = FileMember("provide", "",
+                      "pub fn provide<'a>(err: &'a (impl Error + ?Sized), "
+                      "request: &mut Request<'a>)")
+    parsed = [
+        {"fn_name": "provide", "block": "impl Error for MyError", "body": "a"},
+        {"fn_name": "provide", "block": "", "body": "b"},
+    ]
+    out = route_fn_bodies(parsed, target="impl Error for MyError", related=[],
+                          members=(method, free))
+    assert [r.container for r in out.routed] == ["impl Error for MyError", ""]
+    assert out.routed[1].sig_text == free.sig_text
+    two_methods = (method, FileMember("provide", "impl Error for Other", "fn provide"))
+    ctrl = route_fn_bodies(parsed[1:], target="impl Error for MyError",
+                           related=[], members=two_methods)
+    assert [r.container for r in ctrl.routed] == ["impl Error for MyError"]

@@ -1876,6 +1876,29 @@ def _writes_any(run: RouteRun, blockers: Blockers,
                for u in units)
 
 
+def stopped_by_writes(run: RouteRun, blockers: Blockers) -> int:
+    """How many red tests the blockers this run writes stop between them
+    (:meth:`Blockers.tests_stopped_by`, by :meth:`Blockers.writes`): the
+    order within a blockers-first tier.
+
+    The tier says that a run writes a blocker, not which one. Run
+    `3495074-71c576c7` fill 1 (2026-10-20): the sweep's crash evidence named
+    `src/chain.rs::len` (1 test), `::next_back` (1), `::size_hint` (2) and
+    `src/error.rs::drop` (98). Every run writing one of them read tier 0,
+    and novelty broke the tie: the never-served `file src/chain.rs` and a
+    never-served per-fn run opened first, and the per-fn run spent 50 min on
+    `downcast`, whose own line said its tests needed `drop` first. The served
+    impl run holding `drop` opened fourth. Within its in-fill reading that
+    write took the tree from 94 to 223."""
+    session = run.kind is RouteKind.SESSION
+    stopped: set[str] = set()
+    for u in blockers.units:
+        if blockers.writes(u, targets=run.targets,
+                           aimed_tests=run.target_tests, session=session):
+            stopped |= blockers.tests_stopped_by(u)
+    return len(stopped)
+
+
 def _level(run: RouteRun, blockers: Blockers) -> int:
     """The blockers-first tier. 0: the run writes a locator the sweep's
     crash evidence names (a frame-sited crash, or the stub failing tests
@@ -2374,7 +2397,8 @@ def admit_ranked(
     question once:
 
     1. ORDER — blockers-first level, attributed writes before coverage
-       splits, ledger rank, `today_order`, sequence; then a topological
+       splits, the red tests the run's blockers stop (most first), ledger
+       rank, `today_order`, sequence; then a topological
        order over :func:`run_blocks` while a pair's grace lasts.
     2. ADMIT — one pass in that order gives every run exactly one decision:
        deferred for a reason of its own (it aims at nothing; it is a re-buy
@@ -2431,9 +2455,14 @@ def admit_ranked(
         if run.kind is RouteKind.PAIR and unpaid_grace > 0
         and consecutive_unpaid(rows_list, run, oracle_fp) >= unpaid_grace)
 
-    def _sort_key(item: RankedRun) -> tuple[int, int, int, int, int]:
+    order_blockers = Blockers.of(hollow, crash_blamed)
+
+    def _sort_key(item: RankedRun) -> tuple[int, int, int, int, int, int]:
         run, rank, _reason, level = item
-        return (level, int(split_of.get(run.key, False)), rank,
+        # Within a tier, the run whose blockers stop the most red tests goes
+        # first, ahead of novelty (`stopped_by_writes`).
+        return (level, int(split_of.get(run.key, False)),
+                -stopped_by_writes(run, order_blockers), rank,
                 order_index.get(run.kind, len(order_index)), run.seq)
 
     ranked = sorted(ranked, key=_sort_key)

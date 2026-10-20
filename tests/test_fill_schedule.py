@@ -15,6 +15,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     TODAY_ORDER,
@@ -1346,7 +1348,8 @@ def test_a_fill_with_candidates_always_opens_one() -> None:
     assert pre_fix_empty > 0
 
 
-def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_first() -> None:
+def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_first(
+        monkeypatch: pytest.MonkeyPatch) -> None:
     """Plan sentence: among runs that all fill a blocking stub, the one
     writing the locator the sweep's crash evidence names opens first. Run
     `220812-8d346f9c` fill 1 (2026-09-23): `src/error.rs::construct` was the
@@ -1396,7 +1399,13 @@ def test_recorded_220812_fill_1_opens_the_run_holding_the_crash_evidenced_stub_f
     first = sched.ordered[0]
     assert first.run.kind is RouteKind.PER_FN and first.level == 0
     assert FnLocator("src/error.rs", "construct") in first.run.targets
+    # The control is the live code: no crash tier and no within-tier count
+    # of stopped tests (this fixture's hollow map is one synthetic test per
+    # stub, so the count would rank by stub count).
+    import pipeline_core.domain.fill_schedule as _fs
+    monkeypatch.setattr(_fs, "stopped_by_writes", lambda _r, _b: 0)
     control = schedule(runs, rows, **kw)
+    monkeypatch.undo()
     assert [s.run.label for s in control.ordered
             if not s.blocker_writer] == fix["live_order"]
     # The live fill also left `src/error.rs::downcast_mut` — a stub, and

@@ -255,3 +255,58 @@ Rules:
 - `{crate}`'s public items are ALREADY imported (`use {crate}::*;`). Any other import
   goes at the top of <GIVEN> as a normal `use` line.
 """
+
+
+def build_probe_repair_prompt(*, crate: str, given: str, when: str,
+                              observe: str, program: str,
+                              diagnostics: str) -> str:
+    """The probe that did not build, as the harness compiled it, and the
+    compiler's diagnostics: asked back as the same block, corrected. The
+    harness wraps <GIVEN>/<WHEN>/<OBSERVE> into the program shown; only
+    the block is the answer."""
+    return f"""The behaviour probe below did not compile against the crate `{crate}`.
+
+The block you wrote:
+
+  <BEHAVIOUR name="probe">
+  <GIVEN>
+{given}
+  </GIVEN>
+  <WHEN>{when}</WHEN>
+  <OBSERVE>{observe}</OBSERVE>
+  </BEHAVIOUR>
+
+The program the harness built from it:
+
+```rust
+{program}
+```
+
+The compiler said:
+
+```
+{diagnostics}
+```
+
+TASK: return the SAME probe, corrected so it compiles: the same behaviour,
+observed the same way. Change only what the diagnostics name.
+
+Output exactly one block, in the same form, and nothing else:
+
+  <BEHAVIOUR name="probe">
+  <GIVEN>
+  // zero or more Rust statements building the values; no printing, no asserting
+  </GIVEN>
+  <WHEN>a SINGLE Rust expression</WHEN>
+  <OBSERVE>display|debug|alt_debug</OBSERVE>
+  </BEHAVIOUR>
+
+Rules:
+- PUBLIC API ONLY: the crate's public names and the standard library.
+- <WHEN> must evaluate to a RENDERED VALUE, never to a comparison (`==`, `!=`, `<=`,
+  `>=`, `.contains(` are REJECTED). The ONLY booleans allowed are type-identity
+  predicates: `x.is::<T>()` or `x.downcast_ref::<T>().is_some()`.
+- <WHEN> is ONE expression; <GIVEN> may not print and may not assert.
+- `{crate}`'s public items are ALREADY imported (`use {crate}::*;`). Any other import
+  goes at the top of <GIVEN> as a normal `use` line.
+"""

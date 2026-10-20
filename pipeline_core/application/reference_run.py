@@ -377,6 +377,8 @@ def run_test_file_on_original(project_dir: Path, rel_test: str, text: str, *,
                               env: dict[str, str], timeout: int,
                               prepare: Callable[[Path], object] | None = None,
                               target_name: str = "pin-target",
+                              then: Callable[[Path, dict[str, str], str], object]
+                              | None = None,
                               ) -> tuple[bool, str]:
     """Run ONE test file against the pristine crate: materialise the
     worktree, write `rel_test` into it, `cargo test --test <stem>` under
@@ -391,7 +393,12 @@ def run_test_file_on_original(project_dir: Path, rel_test: str, text: str, *,
 
     `prepare(worktree)` runs after the file is written and before cargo: the
     pass's observation check empties a body there (the checkout gives every
-    file a fresh mtime, so the crate is rebuilt from what is on disk)."""
+    file a fresh mtime, so the crate is rebuilt from what is on disk).
+
+    `then(worktree, env, output)` runs after a finished run, in the same
+    worktree and env, before it is removed: a further reading of the same
+    file (each test alone, `adapters.pin_runs.run_on_original`) without
+    materialising the tree twice."""
     ref_name = pristine_ref(project_dir)
     if not ref_name:
         return False, "no pristine ref in the workspace repo"
@@ -414,6 +421,9 @@ def run_test_file_on_original(project_dir: Path, rel_test: str, text: str, *,
                 timeout=timeout, env=run_env)
         except (OSError, subprocess.SubprocessError) as exc:
             return False, f"did not run: {exc}"
-        return True, (res.stdout or "") + "\n" + (res.stderr or "")
+        output = (res.stdout or "") + "\n" + (res.stderr or "")
+        if then is not None:
+            then(dest, run_env, output)
+        return True, output
     finally:
         _remove_worktree(project_dir, dest)

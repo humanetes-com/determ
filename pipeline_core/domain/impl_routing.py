@@ -247,8 +247,10 @@ def route_fn_bodies(
     contract's own spelling of a FREE fn — the tag reader has accepted the
     empty attribute since 2026-08-04, and the model writes it for every free
     fn it answers. It routes to the fn's DECLARATION when the file declares
-    that name exactly once (carrying its `sig_text`), and to the TARGET only
-    when the name is not unique in the file or `members` was not passed — a
+    that name exactly once (carrying its `sig_text`), or to the one FREE
+    declaration of a name the file also declares as a method when the same
+    reply answered that name with a container named; to the TARGET when
+    neither picks one or `members` was not passed — a
     per-impl prompt asked about one container, so a bare body there is about
     that one. Routing a unique free fn to the target was a claim the splice
     silently overruled: `locate_fn_by_record` narrows by container only when
@@ -313,14 +315,33 @@ def route_fn_bodies(
     target_canon = canon_container(target)
     related_canon = [(c, canon_container(c)) for c in related]
     idents = [(c, container_identity(c)) for c in (target, *related)]
+    named_elsewhere = frozenset(
+        str(f.get("fn_name", "")) for f in parsed
+        if str(f.get("block") or "").strip())
     for fn_data in parsed:
         block_attr = fn_data.get("block") or ""
         if not block_attr.strip():
             decls = [m for m in members
                      if m.fn_name == str(fn_data.get("fn_name", ""))]
-            if len(decls) == 1:
+            # A name declared both as a method and as a free fn: a bare body
+            # is the prompt's container's (a per-impl prompt asked about that
+            # one), unless the same reply already answered that name with a
+            # container named. Then the bare body is a second answer, and
+            # the empty attribute spells the free fn. Run
+            # `1804897-1ad432ba` (2026-10-20, src/nightly.rs): the reply
+            # answered `provide` for `impl Error for MyError` and the free
+            # `provide` with `block=""`; both routed to the impl, the second
+            # was refused `target_not_stub`, and the free stub stayed.
+            free = [m for m in decls
+                    if not m.container or mod_container_ident(m.container)]
+            pick = (decls[0] if len(decls) == 1
+                    else free[0] if (len(free) == 1
+                                     and str(fn_data.get("fn_name", ""))
+                                     in named_elsewhere)
+                    else None)
+            if pick is not None:
                 routed.append(RoutedBody(
-                    fn_data, decls[0].container, sig_text=decls[0].sig_text))
+                    fn_data, pick.container, sig_text=pick.sig_text))
             else:
                 routed.append(RoutedBody(fn_data, target))
             continue

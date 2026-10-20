@@ -51,9 +51,11 @@ reason (and, for a hold, the runs it waited on). On that:
   deferral said why. Measured 2026-10-17 over every recorded hit since
   2026-10-12 joined to its sweep's `phase_c.dispatch.rank` batch: 214 of
   214 were owners the rank left past the dispatch cap, 0 were in the batch
-  with no candidate. The check therefore reads the rank's starvation of an
-  owner, which the rank's own bound answers (a served owner with an
-  unasked fingerprint, `dispatch_rank`), not a routing hole.
+  with no candidate. Its input is therefore the owners the sweep owes a
+  writer (`escalation_lifetime.measured_owners_owed`): those in the batch,
+  and those the rank left out at its rotation bound
+  (`dispatch_rank.starved`). An owner past the cap inside the bound is the
+  rank's promise, not a routing hole.
 
 These name no test, unit, trait or crate: the inputs are the schedule's own
 decisions, the hollow stubs and the blamed locators. The same checker runs in

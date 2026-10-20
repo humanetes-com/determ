@@ -24,7 +24,7 @@ an aborted binary.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +68,8 @@ def test_passes_in_world(
     if not (bool(verdict.declared) and verdict.admitted
             and verdict.declared <= passed):
         return False
-    alone_failed = [name for name in sorted(full)
-                    if not _passes_alone(base, name, project_dir, env, timeout)]
+    alone_failed = failing_alone(project_dir, module_name, test_bin, full,
+                                 env=env, timeout=timeout)
     if alone_failed:
         log(f"  [{module_name}] {test_bin}.rs: "
             f"{', '.join(alone_failed)} fail(s) when run alone in its own "
@@ -77,6 +77,23 @@ def test_passes_in_world(
             "only beside the file's other tests, so it is not a pass.")
         return False
     return True
+
+
+def failing_alone(project_dir: Path, module_name: str, test_bin: str,
+                  names: Iterable[str], *, env: dict[str, str],
+                  timeout: int) -> tuple[str, ...]:
+    """The tests of `names` that do not pass alone: each run by its exact
+    path in a test process of its own, under `env`. Every writer that admits
+    a test file reads this one function (the world settle, the behaviour
+    emitter, the pinning pass), each reacting in its own grain: refuse the
+    block, withdraw the capture, refuse the candidate. Names are as libtest
+    reports them (a module path for a test inside a module)."""
+    base = ["cargo", "test"]
+    if module_name:
+        base += ["-p", module_name]
+    base += ["--test", test_bin, "--"]
+    return tuple(name for name in sorted(set(names))
+                 if not _passes_alone(base, name, project_dir, env, timeout))
 
 
 def _passes_alone(base: list[str], name: str, project_dir: Path,

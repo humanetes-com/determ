@@ -160,3 +160,21 @@ def test_the_release_is_reported_on_the_resume() -> None:
     assert r.attempted == ("a::x", "b::y")
     assert r.released == ("c::z",)
     assert "released for retry" in r.note
+
+
+def test_the_rank_promise_resumes_with_the_streak() -> None:
+    """The promise (`dispatch_rank.promise_deadlines`) rides the floor
+    beside the streak, on every resume shape. Control: a floor written
+    before the field parses with none, and the rank then reads each wait
+    against the current bound."""
+    f = replace(_floor(("a::x",)), unclaimed=(("a::x", 2),),
+                promised=(("a::x", 7),))
+    back = TddFloor.from_dict(f.to_dict())
+    assert back is not None and back.promised == (("a::x", 7),)
+    for code in ("MOVED", _KEY["code_id"]):
+        assert resume_floor(back, **{**_KEY, "code_id": code}).promised == (
+            ("a::x", 7),)
+    old = f.to_dict()
+    old.pop("promised")
+    legacy = TddFloor.from_dict(old)
+    assert legacy is not None and legacy.promised == ()

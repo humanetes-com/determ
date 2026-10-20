@@ -81,6 +81,11 @@ from pipeline_core.log import emit, log
 BEHAVIOUR_TEST_STEM = "behaviour"
 # (test binary stem, extra env) -> (process ok, combined stdout+stderr).
 Verify = Callable[[str, Mapping[str, str]], tuple[bool, str]]
+# (test binary stem, the names to run) -> the names that fail alone.
+FailingAlone = Callable[[str, Sequence[str]], Sequence[str]]
+# (the emitted file, its body) -> the gate now on it, or None when it does
+# not pass in its own world (`application.test_worlds.settle_test_gate`).
+Settle = Callable[[Path, str], str | None]
 # Recapture Then under an extra env: raw stdout, or None if the program
 # failed to run. Injected so the emitter does not own cargo.
 Recapture = Callable[[BehaviourSpec, Mapping[str, str]], str | None]
@@ -301,6 +306,8 @@ def emit_behaviour_tests(
     cfg_attr: str = "",
     balanced: Callable[[str], bool] = lambda _s: True,
     recapture: Recapture | None = None,
+    failing_alone: FailingAlone | None = None,
+    settle: Settle | None = None,
 ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
     """Write the replayable captures as one `tests/<stem>_gen_1.rs`, verified.
 
@@ -316,6 +323,21 @@ def emit_behaviour_tests(
     that shipped as drop-the-mover, now the fallback when the other world
     cannot be read. Leaving a mover in the suite as a single Then would
     hand t1.5 a MUST that no tree can satisfy.
+
+    ``failing_alone(stem, names)`` names the tests of the green file that do
+    not pass alone in a process of their own (`adapters.test_worlds`); their
+    captures are withdrawn like a replay disagreement. A test that passes
+    only beside another test's side effect on process state is not a
+    specification of the crate (run `801510-bb22799f`, 2026-10-20: a t0c test
+    passed only after a sibling's `set_var`, and task 3 read it red or green
+    by scheduling).
+
+    ``settle(dest, body)`` measures the verified file's build worlds and
+    rewrites its gate to them (`test_worlds.settle_test_gate`, the reading
+    task 0c's blocks and the doc examples take). Before it, the file stayed
+    gated to the world it was captured in, so a capture that also replays in
+    another world checked nothing there. None from it means the file does
+    not pass where it was written, and nothing is kept.
 
     None with no drops is the expected state for a suite whose captures are all
     legacy free-form blobs. A delimiter-unbalanced render is refused rather
@@ -430,6 +452,24 @@ def emit_behaviour_tests(
             if unrun := _unexecuted(keep, executed):
                 _withdraw_unrun(unrun, perturbed=False)
                 return None, tuple(dropped), misses, ()
+            if failing_alone is not None:
+                alone = frozenset(failing_alone(dest.stem, sorted(executed)))
+                if alone:
+                    keep, went = _withdraw(
+                        keep, alone, _drop,
+                        "passes only beside the file's other tests: red "
+                        "when run alone in its own process")
+                    log(
+                        f"  [task0d] cluster {cfg_cluster}: {len(went)} "
+                        "capture(s) pass only beside the file's other tests "
+                        "and were withdrawn.")
+                    if keep and went:
+                        continue
+                    with suppress(OSError):
+                        dest.unlink()
+                    for s in keep:
+                        _drop(s, "replay red alone on a test naming no capture")
+                    return None, tuple(dropped), misses, ()
 
             # Green under the capture env. Now the axis run-twice cannot see: the
             # same binary under a different environment. A capture whose value
@@ -530,6 +570,13 @@ def emit_behaviour_tests(
                     _withdraw_unrun(unrun, perturbed=True)
                     return None, tuple(dropped), misses, ()
 
+            if settle is not None and settle(dest, body) is None:
+                with suppress(OSError):
+                    dest.unlink()
+                for s in keep:
+                    _drop(s, "does not pass in the world it was captured in "
+                          "when run by the world settle")
+                return None, tuple(dropped), misses, ()
             log(
                 f"  [task0d] cluster {cfg_cluster}: {len(keep)} captured behaviour(s) "
                 f"emitted as {dest.name}, verified against the original"

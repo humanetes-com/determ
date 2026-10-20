@@ -118,8 +118,9 @@ class FillExecutionDeps:
     #: or the spine locators become "attributed".
     attributed: frozenset[FnLocator] = frozenset()
     #: Measured coverage owners the driver admitted (or attached a test to),
-    #: on this sweep or an earlier one, that are still on its ordered
-    #: frontier (`measured_owners_on_frontier`). Each must be a target of
+    #: on this sweep or an earlier one, that this sweep owes a writer: in
+    #: the dispatch batch, or left out of it at the rank's rotation bound
+    #: (`measured_owners_owed`). Each must be a target of
     #: some candidate run, opened or deferred with its reason; one that no
     #: run writes is `owner_unrouted`. Empty (the default) checks nothing.
     measured_owners: frozenset[FnLocator] = frozenset()

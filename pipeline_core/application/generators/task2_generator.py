@@ -1717,39 +1717,20 @@ class StaticSkeletonTask2Generator(Task2Generator):
             else:
                 self.tel.log(f"  {tag} [skeleton-A] retry with +nightly: rc={rc}")
         if rc not in (-1, 0):
-            self.tel.log(f"  {tag} [skeleton-A] cargo check FAILED; invoking fix-loop.")
-            _skel_sources = list((skeleton_dir / "src").rglob("*.rs"))
-            ok, _ = self.fill.generate_fix_loop(
-                project_dir=skeleton_dir,
-                check_cmd=check_cmd,
-                source_paths=_skel_sources,
-                existing_test_files=set(),
-                model=self.cfg.task2_model,
-                max_fix_attempts=3,
-                timeout=180,
-            )
-            if not ok:
-                # The fix loop gave up (floor-stalled) — but that verdict is
-                # about ONE hard fn, not the whole tree: only a tree marked ok
-                # is published, so bailing here discards every OTHER file the
-                # fix loop already got compiling clean along with the one it
-                # couldn't. Re-check compilability
-                # directly rather than trusting the fix loop's own exhausted
-                # verdict: if the tree still doesn't compile, this genuinely
-                # is a full failure (bail, unchanged from before). If it DOES
-                # compile — the exhaustion was over test/behavioral
-                # correctness on specific fn(s), not syntax — fall through to
-                # Phase C below, whose per-fn TDD floor-stall/GENUINELY_HARD
-                # machinery is exactly the right tool for "this one fn is
-                # hard," instead of discarding the whole cluster over it.
-                _rc2, _out2, _ = self.cargo.run_raw(
-                    shlex.split(check_cmd), skeleton_dir, self._cluster_env(cluster), 180)
-                if _rc2 not in (-1, 0):
-                    return {"ok": False, "reason": "skeleton_fix_loop_exhausted"}
-                self.tel.log(f"  {tag} [skeleton-A] fix-loop exhausted but the "
-                             "tree still compiles clean — salvaging: falling "
-                             "through to Phase C instead of discarding this "
-                             "cluster's other files.")
+            # The layout gate (t1.5) admits only a skeleton every world
+            # compiles, so a red skeleton here is a broken invariant. This
+            # used to hand `.skeleton/<cluster>/src` to the generic fix loop,
+            # a body writer outside the fill engine that wrote the layout the
+            # fills answer to. Counted 2026-10-20 over the 101 rotated logs
+            # (355 process starts since 2026-07-28): 0 of 1011 skeleton
+            # checks failed. It now stops the cluster loudly and writes
+            # nothing.
+            self.tel.log(f"  HEALTH ‼ SKELETON_RED {tag} [skeleton-A]: cargo "
+                         f"check on the authored skeleton failed (rc={rc}) — "
+                         "the layout gate admitted a tree that does not "
+                         "build; no writer edits the skeleton.\n"
+                         + ((_out or "") + (_err or ""))[-1500:])
+            return {"ok": False, "reason": "skeleton_red"}
 
         # Per-cluster test scoping.
         phase_step("t2a.tests", cluster=cluster.name)

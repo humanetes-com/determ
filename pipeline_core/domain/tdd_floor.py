@@ -225,6 +225,11 @@ class TddFloor:
     # identity rule (the cluster), not the tree or the code. Defaulted so a
     # floor written before the field parses as "no streak".
     unclaimed: tuple[tuple[str, int], ...] = ()
+    # The rank's promise per waiting `EVIDENCED` unit
+    # (`dispatch_rank.promise_deadlines`): sweeps it may still be left out.
+    # Resumed with the streak; a floor without it starts every waiting unit
+    # on the streak rule.
+    promised: tuple[tuple[str, int], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -243,6 +248,8 @@ class TddFloor:
                 for t, earned, adds, prods in self.escalation_products}}
         if self.unclaimed:
             d["unclaimed"] = dict(self.unclaimed)
+        if self.promised:
+            d["promised"] = dict(self.promised)
         if self.served is not None:
             d["served"] = list(self.served)
         if self.served_verified is not None:
@@ -286,7 +293,8 @@ class TddFloor:
                     if isinstance(units, list))
                     if isinstance(_fut, dict) else ()),
                 escalation_products=_parse_products(_prod),
-                unclaimed=_parse_unclaimed(raw.get("unclaimed")))
+                unclaimed=_parse_unclaimed(raw.get("unclaimed")),
+                promised=_parse_unclaimed(raw.get("promised")))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -393,6 +401,8 @@ class FloorResume:
     # The dispatch rank's unclaimed streak (`TddFloor.unclaimed`), resumed
     # on the cluster identity as the service record is.
     unclaimed: tuple[tuple[str, int], ...] = ()
+    # The rank's promise beside it (`TddFloor.promised`).
+    promised: tuple[tuple[str, int], ...] = ()
 
 
 def resume_mismatch(
@@ -634,6 +644,7 @@ def resume_floor(
             served_verified=saved.served_verified if _ok else None,
             products=(saved.escalation_products or None) if _ok else None,
             unclaimed=saved.unclaimed if _ok else (),
+            promised=saved.promised if _ok else (),
             note=why + " changed"
             + (f"; {_carry.note} resumed anyway — a cursor answers to the "
                "cluster, not to the oracle or the code"
@@ -664,6 +675,7 @@ def resume_floor(
             served_verified=saved.served_verified,
             products=saved.escalation_products or None,
             unclaimed=saved.unclaimed,
+            promised=saved.promised,
             note=(f"stall={saved.stall} resumed; best_pass={saved.best_pass} "
                   f"NOT resumed — tree_sha ({saved.tree_sha} != {tree_sha}) "
                   "changed, so nothing here can restore that peak"
@@ -681,6 +693,7 @@ def resume_floor(
         served_verified=saved.served_verified,
         products=saved.escalation_products or None,
         unclaimed=saved.unclaimed,
+        promised=saved.promised,
         note=(f"best_pass={saved.best_pass} stall={saved.stall}"
               + (f" {carry.note}" if carry.attempted else "")
               + (f" futility evidence={len(saved.futile_units)} test(s)"

@@ -691,27 +691,30 @@ def test_an_admitted_owner_no_candidate_writes_is_named() -> None:
     assert violations([file_run], hollow=None) == ()
 
 
-def test_an_owner_admitted_on_an_earlier_sweep_is_still_checked() -> None:
-    """The checker's input was this sweep's admits and
-    attaches inside the 12-cap batch, so `render`, admitted the sweep
-    before and still in `ordered`, was invisible to it. The input is every
-    owner-map unit still in `ordered` after the flat exclusion and the crash
-    scope. Controls: the same owner inside a deferral with a reason does not
-    fire; a unit `drop_standing_flat` removed has left `ordered`."""
-    from pipeline_core.domain.escalation_lifetime import measured_owners_on_frontier
+def test_an_owner_admitted_on_an_earlier_sweep_is_checked_when_owed() -> None:
+    """`render` (run `486447-5207101c`) was admitted the sweep before and
+    left out of the 12-cap batch from fill 3 to fill 8. The checker reads
+    every owner-map unit still in `ordered` that the sweep owes a writer:
+    in the batch, or left out at the rank's rotation bound
+    (`dispatch_rank.starved`). Controls: the same owner inside a deferral
+    with a reason does not fire; a unit the flat exclusion removed has left
+    `ordered`; an owner past the cap inside the bound is not owed, so it does
+    not fire (run `3495074-71c576c7` fill 1 printed it as HEALTH ‼), while the
+    previous whole-frontier input names it."""
+    from pipeline_core.domain.escalation_lifetime import measured_owners_owed
     from pipeline_core.domain.models import FnLocator
     from pipeline_core.domain.schedule_invariants import Decided, violations
 
     render = FnLocator("src/ensure.rs", "render")
     flat = FnLocator("src/ensure.rs", "flat_one")
     buf = FnLocator("src/ensure.rs", "new")
-    admitted_before = {render, flat}
-    this_sweep: set[FnLocator] = set()
+    waiting = FnLocator("src/chain.rs", "new")
+    admitted_before = {render, flat, waiting}
     batch = {buf}
-    # The old input: this sweep's admits inside the batch — empty.
-    assert (this_sweep & batch) == set()
-    ordered = [buf, render]          # `flat` left with the flat exclusion
-    owners = measured_owners_on_frontier(admitted_before | this_sweep, ordered)
+    ordered = [buf, render, waiting]     # `flat` left with the flat exclusion
+    # `render` has met the rotation bound; `waiting` is inside it.
+    owners = measured_owners_owed(admitted_before, ordered,
+                                  batch=batch, starved={render})
     assert owners == {render}
     file_run = Decided(key="f", label="file src/ensure.rs",
                        targets=frozenset({buf}), opened=True, share_minutes=5.0)
@@ -722,6 +725,10 @@ def test_an_owner_admitted_on_an_earlier_sweep_is_still_checked() -> None:
                      opened=False, reason="hollow")
     assert violations([file_run, hollow], hollow=None,
                       measured_owners=owners) == ()
+    # Negative control: the whole-frontier input names the waiting owner.
+    frontier_input = frozenset(k for k in ordered if k in admitted_before)
+    got_old = violations([file_run], hollow=None, measured_owners=frontier_input)
+    assert any("src/chain.rs::new" in v.detail for v in got_old)
 
 
 def test_a_recorded_event_carries_its_admitted_owners() -> None:

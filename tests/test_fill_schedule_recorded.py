@@ -643,7 +643,53 @@ def test_fill_2_of_the_2157238_run_opens_the_aimed_unit_runs_before_passenger_se
         return 2
 
     monkeypatch.setattr(fs, "_level", _shipped_level)
+    # The shipped order had no within-tier count of stopped tests either;
+    # with it, the unit runs writing the blockers already open first.
+    monkeypatch.setattr(fs, "stopped_by_writes", lambda _r, _b: 0)
     _out, opened_shipped = replay(fix, crash_blamed=blamed, hollow=held)
     assert opened_shipped[:4] == [
         "session[3 test(s), 19 unit(s)] #2", "session[11 test(s), 18 unit(s)] #3",
         "session[9 test(s), 15 unit(s)] #8", "session[3 test(s), 21 unit(s)] #9"]
+
+
+def test_fill_1_of_the_3495074_run_opens_the_writers_of_the_widest_blocker_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fill 1 of run `3495074-71c576c7` (2026-10-20, git `5173dc7`): four
+    crash-evidenced stubs, `src/chain.rs::len`, `::next_back`, `::size_hint`
+    (4 held tests between them) and `src/error.rs::drop` (98). Every run
+    writing one of them read tier 0, novelty broke the tie, and the impl run
+    holding `drop` opened fourth, behind both chain.rs runs; its write
+    later read `pass 94 -> 223` in the fill. Plan sentence: within a tier,
+    every run writing the blocker that stops the most red tests opens
+    before a run whose blockers stop fewer.
+
+    NEGATIVE CONTROL: without the within-tier count, the impl run writing
+    `drop` opens after the chain.rs file and impl runs, the recorded shape."""
+    from pipeline_core.domain import fill_schedule as fs
+    from pipeline_core.domain.models import FnLocator
+
+    fix = load_fill("3495074-71c576c7_iter1")
+    held = recorded_held_of(fix)
+    blamed = recorded_blame_of(fix)
+    drop = FnLocator("src/error.rs", "drop")
+    assert len(Blockers.of(held, blamed).tests_stopped_by(drop)) == 98
+
+    out, opened = replay(fix, crash_blamed=blamed, hollow=held)
+    by_label = {s.run.label: s.run for s in out.schedule.ordered}
+    blockers = Blockers.of(held, blamed)
+    # Writers by the one predicate: a session carrying `drop` for another
+    # test's slice does not write it.
+    writes_drop = [lab for lab in opened if blockers.writes(
+        drop, targets=by_label[lab].targets,
+        aimed_tests=by_label[lab].target_tests,
+        session=by_label[lab].kind is RouteKind.SESSION)]
+    chain = [lab for lab in opened if lab.endswith("src/chain.rs")]
+    assert writes_drop and chain
+    assert max(opened.index(w) for w in writes_drop) < min(
+        opened.index(c) for c in chain)
+
+    monkeypatch.setattr(fs, "stopped_by_writes", lambda _r, _b: 0)
+    _out, opened_old = replay(fix, crash_blamed=blamed, hollow=held)
+    assert opened_old.index("impl src/error.rs") > opened_old.index(
+        "impl src/chain.rs") > opened_old.index("file src/chain.rs")

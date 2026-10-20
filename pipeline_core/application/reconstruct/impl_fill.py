@@ -234,6 +234,7 @@ from pipeline_core.domain.pair_fill import (
     union_pair_callees,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
+from pipeline_core.domain.post_fill_mismatch import still_stubbed_after_accept
 from pipeline_core.domain.reasoning_cap import (
     CallCapReading,
     observe_call,
@@ -2899,14 +2900,16 @@ def prepare_impl_fill(
                     # (their own verdict rows and the fill.revert event),
                     # not a silent splice loss — and with the retry below
                     # they are about to be re-asked.
-                    _left = sorted({
-                        str(r.get("fn_name", "")) for r in
-                        (_scan_unimplemented_records_for_cluster(
-                            target_src_dir, cluster) or [])
-                        if _norm_src_rel(r.get("file", ""))
-                        == _norm_src_rel(file_rel)
-                        and str(r.get("fn_name", "")) in set(stub_names)
-                        and str(r.get("fn_name", "")) not in set(_peel_reverted)})
+                    # Peeled, text-refused and declined names were put
+                    # back on purpose, each with its own line and verdict
+                    # row (`domain/post_fill_mismatch`).
+                    _left = still_stubbed_after_accept(
+                        _scan_unimplemented_records_for_cluster(
+                            target_src_dir, cluster) or [],
+                        file_rel=file_rel, asked=stub_names,
+                        put_back={*_peel_reverted, *(
+                            identity_name(n) for n in _text_refused)},
+                        norm=_norm_src_rel)
                     if _left:
                         # The still-stubbed members were charged where the
                         # reader lost them (the splice refusal above); the

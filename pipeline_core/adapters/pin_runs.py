@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from ..domain.test_report import (
     parse_test_output,
 )
 from .process import run_bounded
+from .test_worlds import failing_alone
 
 __all__ = ["reading_of", "run_on_original", "run_on_rebuilt", "run_original_emptied",
            "PIN_STAGE_DIR"]
@@ -76,9 +78,34 @@ def reading_of(output: str, *, finished: bool) -> TestRun:
 def run_on_original(project_dir: Path, module: str, stem: str, text: str,
                     world: Any, *, cluster_env: Callable[[Any], dict[str, str]],
                     timeout: int) -> TestRun:
+    """The file on the original crate. A test that passes in the file run
+    and fails alone in its own process (`test_worlds.failing_alone`) reads
+    as FAILED on the original: it passes only beside another test's side
+    effect on process state, so it is withdrawn like any original failure
+    (`pinning_test.withdraw_original_failures`). One reader decides "passes
+    on the original" for the pin pass, as `test_passes_in_world` does for
+    the settle (run `801510-bb22799f`, 2026-10-20: a test that passed only
+    after a sibling's `set_var` entered the oracle)."""
+    alone: list[str] = []
+
+    def _each_alone(tree: Path, env: dict[str, str], output: str) -> None:
+        names = parse_test_output(output).passed
+        alone.extend(failing_alone(tree, "", stem, names, env=env,
+                                   timeout=timeout))
+
     finished, output = run_test_file_on_original(
-        project_dir, f"tests/{stem}.rs", text, env=cluster_env(world), timeout=timeout)
-    return reading_of(output, finished=finished)
+        project_dir, f"tests/{stem}.rs", text, env=cluster_env(world),
+        timeout=timeout, then=_each_alone)
+    run = reading_of(output, finished=finished)
+    if not alone or not run.ran:
+        return run
+    gone = frozenset(_leaf(n) for n in alone)
+    return replace(
+        run, passed=run.passed - gone, failed=run.failed | gone,
+        excerpt=(run.excerpt + ("\n" if run.excerpt else "")
+                 + "".join(f"{n}: passes only beside the file's other tests; "
+                           "red when run alone in its own process\n"
+                           for n in sorted(gone))))
 
 
 def _stage(project_dir: Path) -> Path:

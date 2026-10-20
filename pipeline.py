@@ -1303,7 +1303,7 @@ from pipeline_core.domain.generation import (  # noqa: E402
 
 # generate_fix_loop constructs in build_app (app_ref-live deps); pin kept
 # for the e2e routing/stub/fix-gate tests.
-generate_fix_loop: "Callable[..., tuple[bool, str]]" = _APP.task0c_deps.generate_fix_loop
+generate_fix_loop: "Callable[..., tuple[bool, str]]" = _APP.generate_fix_loop
 # pin kept for tests: composed in build_app (ask_client.ask + ports.guard bound).
 generate_in_parallel = _APP.task0c_deps.generate_in_parallel
 

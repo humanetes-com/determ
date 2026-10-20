@@ -132,13 +132,6 @@
     "data",
     "duration_ms"
   ],
-  "emit_tests": [
-    "cfg_attr",
-    "crate",
-    "perturb_env",
-    "recapture",
-    "verify"
-  ],
   "enumerate_types": [
     "cfg_false"
   ],

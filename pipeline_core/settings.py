@@ -172,6 +172,9 @@ class Settings:
     # units are ASKED about; without this a single reply's block count bounded
     # the cargo runs, and each run costs a compile at up to the probe timeout.
     task0d_blocks_per_reply: int = 8
+    # Repair asks for a probe that did not compile, with the compiler's
+    # diagnostics (`application.test_repair`). 0 drops it as before.
+    task0d_probe_repairs: int = 1
     # Behaviour classes requested per cluster, scarcest first.
     task0d_classes_per_cluster: int = 4
     # Capture/guess split: when on, task0c stops listing (and requiring a pin
@@ -297,6 +300,8 @@ class Settings:
             task0d_program_think=os.getenv("TASK0D_PROGRAM_THINK", "1").strip() == "1",
             task0d_blocks_per_reply=int(
                 os.getenv("TASK0D_BLOCKS_PER_REPLY", "8")),
+            task0d_probe_repairs=int(
+                os.getenv("TASK0D_PROBE_REPAIRS", "1")),
             task0d_classes_per_cluster=int(
                 os.getenv("TASK0D_CLASSES_PER_CLUSTER", "4")),
             behaviour_capture_split=os.getenv("BEHAVIOUR_CAPTURE_SPLIT", "1").strip() == "1",

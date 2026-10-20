@@ -96,6 +96,13 @@ class PinningDeps:
     log: Callable[[str], None]
     emit: Callable[..., Any]
     max_attempts: int = 3
+    # (project_dir, module, stem, text, world) -> the text with its gate
+    # rewritten to the worlds the file passes in ON THE ORIGINAL, or None
+    # when it passes in none (`test_worlds.settle_test_gate`). A pin used to
+    # stay gated to the one world that wrote it, so a body both worlds build
+    # was pinned in one of them. Identity by default (no settle).
+    settle: Callable[[Path, str, str, str, Any], str | None] = (
+        lambda _pd, _m, _s, text, _w: text)
     # The sites this pass pinned. A blocking body absent from the tuple is
     # still a gap and is asked again after the tree changes.
     on_pinned: Callable[[tuple[FnSite, ...]], None] = lambda _sites: None
@@ -259,6 +266,15 @@ def _pin_one(project_dir: Path, module: str, crate: str, site: FnSite,
                                if hits_by_site.get(s, frozenset()) & judgement.pinning)
                 judgement = _observed(project_dir, module, stem, text, world,
                                       world_blocking, judgement, deps)
+            if judgement.admitted:
+                settled = deps.settle(project_dir, module, stem, text, world)
+                if settled is None:
+                    judgement = PinJudgement(
+                        False, PinRefusal.ORIGINAL_FAILED,
+                        "the world settle found no world the file passes in "
+                        "on the original crate")
+                else:
+                    text = settled
             if judgement.admitted:
                 if deps.admit(project_dir, module, rel, text):
                     deps.log(f"  [t4/pin] {label} ({wname}): ADMITTED {rel} on attempt "

@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import hashlib
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book, feature_files
+from pipeline_core.application.emit_behaviour_tests import FailingAlone, Recapture, Settle, Verify
+from pipeline_core.application.test_repair import repair_until_built
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
     BehaviourSuite,
@@ -88,6 +90,7 @@ from pipeline_core.domain.rule_probe import (
     rule_probe_asks,
     without_examples,
 )
+from pipeline_core.domain.test_results import is_compiler_output_line
 from pipeline_core.domain.use_cases import UseCaseEdge, edges_to_ask
 from pipeline_core.domain.workspace_layout import (
     BEHAVIOUR_PHASE_PREFIX,
@@ -96,7 +99,11 @@ from pipeline_core.domain.workspace_layout import (
 )
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
-from pipeline_core.prompts.behaviour_rules import build_rule_probe_prompt, build_then_prediction_prompt
+from pipeline_core.prompts.behaviour_rules import (
+    build_probe_repair_prompt,
+    build_rule_probe_prompt,
+    build_then_prediction_prompt,
+)
 from pipeline_core.prompts.behaviour_synthesis import build_behaviour_synthesis_prompt, build_reach_prompt, reach_name
 
 PHASE_PREFIX = BEHAVIOUR_PHASE_PREFIX
@@ -104,6 +111,21 @@ PHASE_PREFIX = BEHAVIOUR_PHASE_PREFIX
 
 def phase_key(cluster_name: str) -> str:
     return behaviour_harvest_key(cluster_name)
+
+
+class EmitTests(Protocol):
+    """The behaviour-test emitter's signature
+    (`application.emit_behaviour_tests.emit_behaviour_tests`), typed so a
+    keyword added to the call is checked against the bound implementation."""
+
+    def __call__(
+        self, project_dir: Path, cfg_cluster: str,
+        specs: Iterable[BehaviourSpec], *, crate: str, verify: Verify,
+        perturb_env: Mapping[str, str] = ..., cfg_attr: str = ...,
+        recapture: Recapture | None = ...,
+        failing_alone: FailingAlone | None = ..., settle: Settle | None = ...,
+    ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]],
+               tuple[BehaviourSpec, ...]]: ...
 
 
 @dataclass(frozen=True)
@@ -144,7 +166,7 @@ class Task0dDeps:
     record_misses: Callable[[Path, str, list[dict[str, str]]], object] = lambda _p, _c, _m: None
     # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`,
     # after compiling and running them against the original.
-    emit_tests: Callable[..., tuple[object, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]] = (
+    emit_tests: EmitTests = (
         lambda *_a, **_k: (None, (), [], ())
     )
     # Compiles and runs ONE emitted test binary under this cluster's env plus
@@ -153,6 +175,13 @@ class Task0dDeps:
     # same rule every other pipeline-authored test is — it must have been seen
     # to pass against the original before it can fail against a fill.
     verify_tests: Callable[..., tuple[bool, str]] = lambda *_a, **_k: (True, "")
+    # (project_dir, cluster, crate, stem, names) -> the names of an emitted
+    # file that fail alone in a process of their own
+    # (`adapters.test_worlds.failing_alone`). None skips the check.
+    tests_failing_alone: Callable[..., Sequence[str]] | None = None
+    # (project_dir, crate, test file, body, cluster) -> the measured gate, or
+    # None (`application.test_worlds.settle_test_gate`). None skips it.
+    settle_test_gate: Callable[..., str | None] | None = None
     # The environment flip that exposes an env-dependent observable, e.g.
     # `RUST_BACKTRACE`. Run-twice cannot see this axis: the value is stable at
     # any fixed environment and still not a property of the crate.
@@ -170,6 +199,10 @@ class Task0dDeps:
     # ASKED about; without this a single reply could spend an unbounded number
     # of cargo runs.
     PROBE_BLOCKS_PER_REPLY: int = 8
+    # Repair asks for a probe that did not compile: the probe and the
+    # compiler's diagnostics go back to the model (`application.test_repair`).
+    # 0 drops a non-building probe as before.
+    PROBE_REPAIR_ATTEMPTS: int = 0
     # Behaviour classes requested per cluster, scarcest first.
     PROBE_CLASSES_PER_CLUSTER: int = 4
     EXERCISES_ENABLED: bool = True
@@ -420,6 +453,11 @@ def _run_probes(
     return admitted, len(admitted), proposed, cargo_runs, misses, edge_reading
 
 
+#: Tail of a non-building probe's stderr handed back with it: the
+#: diagnostics, not the cargo preamble.
+_REPAIR_DIAG_CHARS = 4000
+
+
 def _capture_twice(
     deps: Task0dDeps,
     project_dir: Path,
@@ -444,23 +482,59 @@ def _capture_twice(
     one that failed to COMPILE pays the most expensive cargo call there is
     for an answer already known. `misses=None` records nothing for a failed
     run: an extra rendering the value does not implement is expected."""
-    program = render_probe_program(probe.given, probe.when, probe.observe, crate=module_name)
-    result = deps.run_probe(project_dir, cluster, program, tag)
+    runs = 0
+
+    def _run(p: CapturedProbe) -> tuple[str, Any]:
+        nonlocal runs
+        runs += 1
+        prog = render_probe_program(p.given, p.when, p.observe, crate=module_name)
+        return prog, deps.run_probe(project_dir, cluster, prog, tag)
+
+    def _diagnostics(ran: tuple[str, Any]) -> str | None:
+        _prog, res = ran
+        err = str(getattr(res, "stderr", "") or "")
+        if res.ok or not any(is_compiler_output_line(ln.strip())
+                             for ln in err.splitlines()):
+            return None
+        return err[-_REPAIR_DIAG_CHARS:]
+
+    def _ask_repair(p: CapturedProbe, diag: str) -> CapturedProbe | None:
+        prog = render_probe_program(p.given, p.when, p.observe, crate=module_name)
+        reply = deps.ask(build_probe_repair_prompt(
+            crate=module_name, given=p.given, when=p.when, observe=p.observe,
+            program=prog, diagnostics=diag))
+        blocks = parse_behaviour_specs(reply)
+        if not blocks:
+            return None
+        fixed = replace(p, given=blocks[0].given, when=blocks[0].when)
+        return None if value_bearing_reason(fixed.when) is not None else fixed
+
+    # A primary probe that does not build is asked back with the compiler's
+    # diagnostics (`application.test_repair`); an extra rendering
+    # (`misses=None`) failing to compile is expected and is not repaired.
+    probe, (program, result), repairs = repair_until_built(
+        probe, run=_run, diagnostics=_diagnostics, ask=_ask_repair,
+        attempts=deps.PROBE_REPAIR_ATTEMPTS if misses is not None else 0)
+    if repairs and result.ok and result.stdout.strip():
+        deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} "
+                 f"repaired after {repairs} ask(s) with the compiler's "
+                 "diagnostics.")
     if not (result.ok and result.stdout.strip()):
         if misses is not None:
             why = "no stdout" if result.ok else f"failed: {result.stderr[-300:].strip() or 'no stderr'}"
             misses.append({"unit": unit, "reason": why, "when": probe.when, "program": program})
             deps.log(f"  [task0d] cluster {cluster.name}: probe for {unit} dropped ({why}).")
-        return None, 1
+        return None, runs
     confirm = deps.run_probe(project_dir, cluster, program, f"{tag}_r")
+    runs += 1
     if confirm.stdout != result.stdout:
         if misses is not None:
             misses.append({"unit": unit, "reason": "not reproducible", "when": probe.when, "program": program})
             deps.log(f"  [task0d] cluster {cluster.name}: behaviour for "
                      f"{unit} dropped (output differed between two runs).")
-        return None, 2
+        return None, runs
     return captured_spec(cfg_cluster=cluster.name, probe=probe, n=n, stdout=result.stdout,
-                         default_cluster=default_cluster), 2
+                         default_cluster=default_cluster), runs
 
 
 def _emit_captures(
@@ -496,6 +570,12 @@ def _emit_captures(
         suite.specs,
         crate=module_name,
         verify=lambda stem, extra: deps.verify_tests(project_dir, cluster, module_name, stem, extra),
+        failing_alone=(
+            (lambda stem, names: _alone(project_dir, cluster, module_name, stem, names))
+            if (_alone := deps.tests_failing_alone) is not None else None),
+        settle=(
+            (lambda dest, body: _settle(project_dir, module_name, dest, body, cluster))
+            if (_settle := deps.settle_test_gate) is not None else None),
         perturb_env=deps.perturb_env(cluster),
         cfg_attr=deps.cluster_cfg_attr(cluster),
         recapture=_recapture if deps.PIN_ENV_DEBUG else None,

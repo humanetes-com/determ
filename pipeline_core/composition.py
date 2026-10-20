@@ -11,6 +11,7 @@ state + the boundary providers derived from them. Later stages move the
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import json
 import os as _os
@@ -229,6 +230,7 @@ from pipeline_core.adapters.pin_inputs import (
 from pipeline_core.adapters.pin_inputs import route_lines as _pin_route_lines
 from pipeline_core.adapters.pin_inputs import signature_text as _pin_signature_text
 from pipeline_core.adapters.pin_inputs import worlds_compiling as _pin_worlds_compiling
+from pipeline_core.adapters.pin_runs import PIN_STAGE_DIR
 from pipeline_core.adapters.pin_runs import run_on_original as _pin_run_on_original
 from pipeline_core.adapters.pin_runs import run_on_rebuilt as _pin_run_on_rebuilt
 from pipeline_core.adapters.pin_runs import run_original_emptied as _pin_run_original_emptied
@@ -373,7 +375,7 @@ from pipeline_core.adapters.test_lessons_store import (
     save_lessons as _save_lessons,
 )
 from pipeline_core.adapters.test_runner import CallableTestRunner
-from pipeline_core.adapters.test_worlds import test_passes_in_world
+from pipeline_core.adapters.test_worlds import failing_alone, test_passes_in_world
 from pipeline_core.adapters.vllm_bootstrap import (
     ensure_vllm_ready as _ensure_vllm_ready,
 )
@@ -847,6 +849,7 @@ from pipeline_core.domain.rust_fn_headers import locate_fn as _domain_locate_fn
 from pipeline_core.domain.rust_macros import (
     proc_macro_fallback_requirements as _pm_fallback_reqs,
 )
+from pipeline_core.domain.rust_scan import attributed_test_fn_names
 from pipeline_core.domain.rust_scan import count_test_attrs as _scan_count_test_attrs
 from pipeline_core.domain.rust_scan import (
     has_nonempty_test_fn as _scan_has_nonempty_test_fn,
@@ -1136,6 +1139,9 @@ class App:
     attribution_deps: AttributionDeps
     # Fix-loop deps.
     gen_fix_loop_deps: GenerateFixLoopDeps
+    # The shared whole-file fix loop over those deps (task 2's build check
+    # and the post-task-3 path); test seam pipeline.generate_fix_loop.
+    generate_fix_loop: Callable[..., tuple[bool, str]]
     # Task-0c deps.
     task0c_deps: Task0cDeps
     # Phase-subcommand deps.
@@ -1970,11 +1976,17 @@ def build_app(
         emit_tests=functools.partial(
             emit_behaviour_tests, balanced=_rust_delimiters_balanced),
         verify_tests=_verify_behaviour_tests,
+        settle_test_gate=lambda pd, crate, f, body, cl: _settle_test_gate(
+            Path(pd), crate, Path(f), body, cl),
+        tests_failing_alone=lambda pd, cl, crate, stem, names: failing_alone(
+            Path(pd), crate, stem, names, env=probe_env(cl),
+            timeout=cfg.test_timeout),
         perturb_env=lambda c: perturbed_env(probe_env(c)),
         cluster_cfg_attr=cluster_cfg_attr,
         emit_doc_examples=_emit_doc_examples,
         PROBE_MAX_PER_CLUSTER=settings.task0d_probe_max,
         PROBE_BLOCKS_PER_REPLY=settings.task0d_blocks_per_reply,
+        PROBE_REPAIR_ATTEMPTS=settings.task0d_probe_repairs,
         PROBE_CLASSES_PER_CLUSTER=settings.task0d_classes_per_cluster,
         EXERCISES_ENABLED=settings.task0d_exercises,
         PIN_ENV_DEBUG=settings.behaviour_pin_env_debug,
@@ -2269,7 +2281,6 @@ def build_app(
         group_tests_fn=task2_group_tests,
         cleanup_residuals_fn=task2_cleanup_residuals,
         scan_unimplemented_fn=scan_unimplemented_functions,
-        generate_fix_loop_fn=generate_fix_loop,
         reset_exhaustion_flags_fn=_reset_exhaustion_flags,
         build_test_reverse_map_fn=build_test_reverse_map,
     )
@@ -2541,8 +2552,38 @@ def build_app(
                     timeout=cfg.build_timeout,
                     fn_records=lambda root: helpers.structure_via_app.enumerate_fns(root)
                     or [])),
-            admit=_admit_pinning_test, log=ports.log, emit=ports.emit,
+            admit=_admit_pinning_test, settle=_settle_pin_on_original,
+            log=ports.log, emit=ports.emit,
             max_attempts=cfg.pin_test_max_attempts, on_pinned=on_pinned)
+
+    def _settle_pin_on_original(project_dir: Path, module: str, stem: str,
+                                text: str, world: Any) -> str | None:
+        """The world settle (`settle_test_gate`) for a pin, read on the
+        ORIGINAL crate: after strip the workspace holds the reconstruction,
+        so each world's run is the pin reader's own (`pin_runs.run_on_original`,
+        each test alone included) over the file as the settle has it now."""
+        scratch = project_dir / PIN_STAGE_DIR / "settle" / "tests" / f"{stem}.rs"
+        scratch.parent.mkdir(parents=True, exist_ok=True)
+        scratch.write_text(text, encoding="utf-8")
+
+        def _passes_on_original(_pd: Path, _m: str, _stem: str, _block: str,
+                                cluster: Any) -> bool:
+            cur = scratch.read_text(encoding="utf-8")
+            run = _pin_run_on_original(project_dir, module, stem, cur, cluster,
+                                       cluster_env=cluster_cargo_env,
+                                       timeout=cfg.build_timeout)
+            declared = frozenset(attributed_test_fn_names(cur))
+            return run.ran and bool(declared) and declared <= run.passed
+
+        try:
+            gate = settle_test_gate(
+                project_dir, module, scratch, text, world,
+                dataclasses.replace(_test_worlds_deps,
+                                    passes_in=_passes_on_original))
+            return None if gate is None else scratch.read_text(encoding="utf-8")
+        finally:
+            with contextlib.suppress(OSError):
+                scratch.unlink()
 
     def _admit_pinning_test(project_dir: Path, module: str, rel: str, text: str) -> bool:
         """The one writer of a test into the oracle after strip: the file,
@@ -3199,7 +3240,6 @@ def build_app(
             ask=ask_client.ask,
             extract_files=_extract_files,
             extract_test_mod=_gen_extract_test_mod,
-            generate_fix_loop=generate_fix_loop,
             generate_in_parallel=generate_in_parallel,
             is_test_file=_disc_is_test_file,
             write=_io_write,
@@ -3228,6 +3268,7 @@ def build_app(
                 measure_world_reachability, cluster_env=cluster_cargo_env,
                 timeout=cfg.test_timeout),
         ),
+        generate_fix_loop=generate_fix_loop,
         gen_fix_loop_deps=GenerateFixLoopDeps(
             set_current=set_current,
             BUILD_TIMEOUT=cfg.build_timeout,

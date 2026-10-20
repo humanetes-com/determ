@@ -35,10 +35,20 @@ def sentinel_path() -> Path:
 _STOP_EVENT = threading.Event()
 
 
-def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
-    """Exit cleanly when the graceful-stop sentinel is set. Call from inside
-    every long-running loop — including worker threads — so a graceful stop
-    stays responsive regardless of which thread notices first."""
+def stop_requested() -> bool:
+    """Whether the process has been asked to stop, by any of the three
+    sources (the sentinel, the fill-phase clock, the LLM cut rate), without
+    exiting. Noticing a source sets the process-wide event, exactly as
+    :func:`check_graceful_stop` does.
+
+    A unit in flight reads this at its call boundaries
+    (`unit_clock.ended`) so that it ends through its route's own exit, not
+    through `SystemExit` from inside its fix loop. That exit is where a
+    banked better image is written back. Run `3495074-71c576c7`
+    (2026-10-20) measured `pass 94 -> 223 (net +129) … no regression` on an
+    impl attempt for `Drop for Error`, banked it as salvage, and the stop
+    raised at the next attempt's boundary; the block's exit never ran, and
+    the tree went back to the stub at 94."""
     sentinel = sentinel_path()
     if sentinel.exists():
         with suppress(OSError):
@@ -54,7 +64,14 @@ def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
     # logged `HEALTH ‼ LLM_CUT_STOP` and emitted its event when it fired.
     if reasoning_cap.cut_stop_poll():
         _STOP_EVENT.set()
-    if _STOP_EVENT.is_set():
+    return _STOP_EVENT.is_set()
+
+
+def check_graceful_stop(log: Callable[[str], None], context: str) -> None:
+    """Exit cleanly when the graceful-stop sentinel is set. Call from inside
+    every long-running loop — including worker threads — so a graceful stop
+    stays responsive regardless of which thread notices first."""
+    if stop_requested():
         if reasoning_cap.cut_stop_tripped():
             log(f"  [graceful] LLM cut-rate stop at {context} — exiting cleanly.")
         elif fill_phase_clock.was_tripped():

@@ -191,11 +191,6 @@ class FillEngine(Protocol):
     def scan_unimplemented_functions(
         self, src_dir: Path,
     ) -> StubInventory: ...
-    def generate_fix_loop(
-        self, *, project_dir: Path, check_cmd: str, source_paths: list[Path],
-        existing_test_files: set[str], model: str | None = ...,
-        max_fix_attempts: int = ..., timeout: int = ...,
-    ) -> tuple[bool, str]: ...
     def reset_exhaustion_flags(self, project_dir: Path, reason: str) -> None: ...
     def build_test_reverse_map(
         self, test_files: list[Path], src_dir: Path,

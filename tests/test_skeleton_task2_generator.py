@@ -370,38 +370,26 @@ def test_leak_guard_quarantines_sibling(tmp_path: Path) -> None:
     assert broken.exists()
 
 
-def test_skeleton_fix_loop_aborts_cluster(tmp_path: Path) -> None:
-    c = _cluster()
-    # Two failing raw checks: the initial cargo check, AND the post-exhaustion
-    # recheck that decides whether to salvage (tree compiles) or genuinely
-    # bail (still broken) — this fixture simulates "still broken", so the
-    # recheck must also fail for the abort path to fire.
-    fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-                       raw_results=[(1, "err", "boom"), (1, "err", "boom")],
-                       run_results=[(0, "ok")])
-    fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
-    pd = _make_project(tmp_path, [c])
-    # cluster aborts but generate() still completes (merge of zero successes).
-    assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert any("tree aborted" in m for m in fake.logs)
-
-
-def test_skeleton_fix_loop_exhaustion_salvaged_when_tree_still_compiles(
-        tmp_path: Path) -> None:
-    # Same exhausted fix-loop verdict as above, but this time the
-    # post-exhaustion recheck finds the tree compiles clean (the exhaustion
-    # was over one fn's test/behavioral correctness, not syntax) — the
-    # cluster must NOT abort; it falls through to Phase C instead of
-    # discarding every other file the fix loop already got right.
+def test_a_red_skeleton_stops_the_cluster_and_nothing_writes_it(tmp_path: Path) -> None:
+    """The layout gate admits only a skeleton every world compiles, so a red
+    skeleton at task 2 is a broken invariant. It used to go to the generic
+    fix loop, a body writer on `.skeleton/<cluster>/src` outside the fill
+    engine (0 firings in 1011 skeleton checks over 355 process starts,
+    2026-07-28 to 2026-10-20). Now the cluster stops with `SKELETON_RED`
+    and the skeleton is left as it was."""
     c = _cluster()
     fake = FakeAdapter(clusters_list=[c], cluster_tests=[("tests/it.rs", "x")],
-                       raw_results=[(1, "err", "boom"), (0, "", "")],
+                       raw_results=[(1, "err", "boom")],
                        run_results=[(0, "ok")])
-    fake.generate_fix_loop = lambda **kw: (False, "")  # type: ignore[method-assign]
+    called: list[object] = []
+    fake.generate_fix_loop = lambda **kw: called.append(kw) or (True, "")  # type: ignore[method-assign]
     pd = _make_project(tmp_path, [c])
+    skel = pd / ".skeleton" / c.name / "src"
+    before = {f: f.read_bytes() for f in skel.rglob("*.rs")}
     assert _run(pd, _gen(fake, _cfg(per_fn=True, tdd=True))) is True
-    assert not any("tree aborted" in m for m in fake.logs)
-    assert any("salvaging" in m for m in fake.logs)
+    assert any("HEALTH ‼ SKELETON_RED" in m for m in fake.logs)
+    assert called == []
+    assert {f: f.read_bytes() for f in skel.rglob("*.rs")} == before
 
 
 def test_cluster_exception_caught(tmp_path: Path) -> None:

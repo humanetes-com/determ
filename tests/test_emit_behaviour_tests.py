@@ -24,7 +24,7 @@ reports green: everything is emitted, and nothing is withdrawn.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -567,3 +567,66 @@ def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
     assert dest is not None
     body = dest.read_text(encoding="utf-8")
     assert twin_fn not in body and replay_fn_name(moving) in body
+
+
+def test_a_capture_that_passes_only_beside_another_is_withdrawn(tmp_path: Path) -> None:
+    """The file run is green, and one replay fails when run alone in its own
+    process (`adapters.test_worlds.failing_alone`). That capture depends on
+    another test's side effect on process state; it is withdrawn and the
+    file is re-rendered without it. Run `801510-bb22799f` (2026-10-20) is the
+    t0c instance of the class. NEGATIVE CONTROL: with no alone reading, both
+    stay."""
+    keep, leaner = _spec("keeper"), _spec("leaner")
+    asked: list[tuple[str, tuple[str, ...]]] = []
+
+    def failing_alone(stem: str, names: Sequence[str]) -> Sequence[str]:
+        asked.append((stem, tuple(names)))
+        return [n for n in names if n == replay_fn_name(leaner)]
+
+    dest, dropped, misses = _emit(tmp_path, [keep, leaner], _verifier(tmp_path),
+                                  failing_alone=failing_alone)
+    assert dropped == (leaner.behaviour_id,)
+    assert [m["reason"] for m in misses] == [
+        "passes only beside the file's other tests: red when run alone in its "
+        "own process"]
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert replay_fn_name(keep) in body and replay_fn_name(leaner) not in body
+    assert asked[0][1] == tuple(sorted({replay_fn_name(keep), replay_fn_name(leaner)}))
+
+    ctrl = tmp_path / "ctrl"
+    dest2, dropped2, _m2 = _emit(ctrl, [keep, leaner], _verifier(ctrl))
+    assert dropped2 == () and dest2 is not None
+    assert replay_fn_name(leaner) in dest2.read_text(encoding="utf-8")
+
+
+def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -> None:
+    """After verification the emitter hands the file to the world settle
+    (`test_worlds.settle_test_gate`), which rewrites its gate to the worlds
+    it passes in. A file the settle finds no world for is not kept.
+    NEGATIVE CONTROL: without a settle the file keeps the gate it was
+    written under (`cfg_attr`)."""
+    keep = _spec("keeper")
+    settled: list[str] = []
+
+    def settle(dest: Path, body: str) -> str | None:
+        settled.append(dest.name)
+        dest.write_text(body.split("\n", 1)[1], encoding="utf-8")   # ungated
+        return ""
+
+    dest, dropped, _m = _emit(tmp_path, [keep], _verifier(tmp_path),
+                              cfg_attr="own_world", settle=settle)
+    assert dropped == () and dest is not None and settled == [dest.name]
+    assert not dest.read_text(encoding="utf-8").startswith("#![cfg(")
+
+    nowhere = tmp_path / "nowhere"
+    dest2, dropped2, misses2 = _emit(nowhere, [keep], _verifier(nowhere),
+                                     cfg_attr="own_world",
+                                     settle=lambda _d, _b: None)
+    assert dest2 is None and dropped2 == (keep.behaviour_id,)
+    assert "world settle" in misses2[0]["reason"]
+
+    ctrl = tmp_path / "ctrl"
+    dest3, _d3, _m3 = _emit(ctrl, [keep], _verifier(ctrl), cfg_attr="own_world")
+    assert dest3 is not None
+    assert dest3.read_text(encoding="utf-8").startswith("#![cfg(own_world)]")

@@ -90,10 +90,12 @@ class _Loop:
             read_state=lambda pd: {"phases": {}},
             derive_gentest_prelude=lambda pd: ("", ""),
             prelude_import_names=lambda b: "",
-            generate_fix_loop=lambda **k: (True, ""),
             is_test_file=lambda p, root: False,
             is_gen_tests_file=lambda name: False,
             check_stop=lambda ctx: None,
+            # Phase A's build check: the crate and its admitted tests build.
+            subprocess=SimpleNamespace(run=lambda *a, **k: SimpleNamespace(
+                returncode=0, stdout="", stderr="")),
             test_augmentor_factory=lambda: SimpleNamespace(
                 is_applicable=lambda ct: True,
                 lib_compiles=lambda p, m: (True, ""),
@@ -260,3 +262,24 @@ def test_the_kill_switch_never_calls_the_reader(
     loop.reach = _reader(_mir())
     loop.run()
     assert loop.reach.calls == [] and loop.record.by_construction == ()
+
+
+def test_a_red_build_at_augmentation_stops_the_module_and_writes_no_source(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase A used to hand the module's non-test files — the ORIGINAL
+    crate's `src/` — to the generic fix loop. A build that fails there is a
+    broken admission invariant: the module's augmentation stops loudly and
+    nothing is written. The structural half: task 0c has no fix-loop
+    collaborator left that could write `src/`."""
+    loop = _Loop(tmp_path, monkeypatch, never_counts=[0])
+    before = (loop.ws / "src" / "lib.rs").read_bytes()
+    d = loop.deps()
+    object.__setattr__(d, "subprocess", SimpleNamespace(
+        run=lambda *a, **k: SimpleNamespace(
+            returncode=101, stdout="", stderr="error[E0425]: cannot find value `x`")))
+    task0c_augment_module(loop.ws, "m", loop.ws, d, crate_type="lib")
+    assert any("HEALTH ‼ AUGMENT_TREE_RED" in m for m in loop.logs)
+    assert any(e == "task0c.tree_red" for e, _ in loop.events)
+    assert loop.phase_c_targets == []
+    assert (loop.ws / "src" / "lib.rs").read_bytes() == before
+    assert "generate_fix_loop" not in Task0cDeps.__dataclass_fields__

@@ -326,28 +326,59 @@ def rotation_bound(class_size: int, held: int, cap: int) -> int:
     return -(-class_size // max(cap - held, 1))
 
 
+def promise_deadlines[K: Hashable](
+    facts: Mapping[K, UnitFacts],
+    cap: int,
+    previous: Mapping[K, int] | None = None,
+) -> dict[K, int]:
+    """Per `EVIDENCED` unit, the sweeps it may still be left out, this one
+    included, before the rank has broken a promise.
+
+    Each sweep promises its own class: every member offered within
+    :func:`rotation_bound` sweeps from now. The earliest deadline any sweep
+    set stands, so a waiting unit's deadline is ``min(previous - 1,
+    bound - 1)``. A unit whose streak is 0 starts a fresh wait at
+    ``bound - 1``. A waiting unit with no previous deadline (a floor that
+    predates the field) is read as if its whole wait had been under this
+    sweep's bound: ``bound - 1 - streak``.
+
+    Reading every wait against the CURRENT bound alone counted a broken
+    promise where none was made. Run `1804897-1ad432ba` (2026-10-20): the
+    class went 43 → 36 → 27 as stubs were filled, the bound 43 → 9 → 3,
+    and at iter 3 `HEALTH ‼ EVIDENCED_STARVED` named 16 units with a
+    streak of 2. Their waits had begun under bounds of 43 and 9."""
+    prev = previous or {}
+    evidenced = [k for k, f in facts.items() if f.rank_class is RankClass.EVIDENCED]
+    held = sum(1 for f in facts.values() if f.rank_class is RankClass.HELD)
+    bound = rotation_bound(len(evidenced), held, cap)
+    out: dict[K, int] = {}
+    for k in evidenced:
+        streak = facts[k].unclaimed
+        if streak == 0:
+            out[k] = bound - 1
+        elif k in prev:
+            out[k] = min(prev[k] - 1, bound - 1)
+        else:
+            out[k] = bound - 1 - streak
+    return out
+
+
 def starved[K: Hashable](
     facts: Mapping[K, UnitFacts],
     batch: Collection[K],
     cap: int,
+    deadlines: Mapping[K, int] | None = None,
 ) -> dict[K, int]:
-    """`EVIDENCED` units this batch leaves out on the sweep that meets the
-    rotation bound, with the streak read at rank time.
-
-    The streak climbs after the batch is chosen. A unit already at
-    `bound - 1` that this batch does not take has then been left out for
-    `bound` sweeps. A class that fits in one batch has bound 1, so a
-    streak of 0 left out is already the miss. The class's size moves
-    between sweeps, so the bound is read on this sweep's class. Empty
-    when the rank keeps its promise."""
+    """`EVIDENCED` units this batch leaves out once their deadline
+    (:func:`promise_deadlines`) is spent, with the streak read at rank
+    time. Without ``deadlines`` every wait is read against this sweep's
+    bound (the rule for a floor with no recorded promise). A class that
+    fits in one batch has bound 1, so a unit left out on its first sweep
+    is already the miss. Empty when the rank keeps its promise."""
     batch_set = set(batch)
-    evidenced = [k for k, f in facts.items() if f.rank_class is RankClass.EVIDENCED]
-    held = sum(1 for f in facts.values() if f.rank_class is RankClass.HELD)
-    bound = rotation_bound(len(evidenced), held, cap)
-    # Rank time is before this sweep's climb, so the breaking streak is
-    # one below the bound. `rotation_bound` never returns less than 1.
-    missed = bound - 1
-    return {k: facts[k].unclaimed for k in evidenced if k not in batch_set and facts[k].unclaimed >= missed}
+    due = deadlines if deadlines is not None else promise_deadlines(facts, cap)
+    return {k: facts[k].unclaimed for k, d in due.items()
+            if k not in batch_set and d <= 0}
 
 
 def next_streak[K: Hashable](

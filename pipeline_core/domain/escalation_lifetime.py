@@ -194,18 +194,28 @@ def red_dead_after_sweep(
     return previous if measured is None else measured
 
 
-def measured_owners_on_frontier(
-    admitted: Collection[FnLocator], ordered: Iterable[FnLocator],
+def measured_owners_owed(
+    admitted: Collection[FnLocator], ordered: Iterable[FnLocator], *,
+    batch: Collection[FnLocator], starved: Collection[FnLocator],
 ) -> frozenset[FnLocator]:
     """The measured coverage owners the schedule's `owner_unrouted` check
-    reads: every unit the owner map admitted or attached a test to, on this
-    sweep or an earlier one, that is still in `ordered` after the standing-
-    flat exclusion and the crash scope. This sweep's new admits alone hid
-    an owner admitted the sweep before (`render`, run `486447-5207101c`);
-    the dispatch batch alone hid one past the cap. A unit those exclusions
-    removed has left `ordered` and is not checked."""
+    reads. Every unit the owner map admitted or attached a test to, on this
+    sweep or an earlier one, is still in `ordered` after the standing-flat
+    exclusion and the crash scope, and this sweep owes it a writer: it is in
+    the dispatch batch, or the rank left it out on the sweep that meets its
+    rotation bound (`dispatch_rank.starved`).
+
+    This sweep's new admits alone hid an owner admitted the sweep before
+    (`render`, run `486447-5207101c`, unwritten from fill 3 to fill 8). The
+    whole frontier, the next input, read every owner the rank left past the
+    cap within its bound. That is the rank's promise, not a routing hole:
+    measured 2026-10-17, 214 of 214 recorded hits were such owners, and run
+    `3495074-71c576c7` fill 1 (2026-10-20) printed `HEALTH ‼ … owner_unrouted`
+    for owners the rank had left out under a 7-sweep bound. A unit the
+    exclusions removed has left `ordered` and is not checked."""
     have = frozenset(admitted)
-    return frozenset(k for k in ordered if k in have)
+    owed = frozenset(batch) | frozenset(starved)
+    return frozenset(k for k in ordered if k in have and k in owed)
 
 
 def withholding_paired_tests(

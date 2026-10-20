@@ -161,7 +161,6 @@ class Task0cDeps:
     extract_files: Any
     extract_test_mod: Any
     guard: Any
-    generate_fix_loop: Any
     generate_in_parallel: Any
     is_test_file: Any
     write: Any
@@ -2804,24 +2803,26 @@ project-specific import paths, type construction patterns, and hard constraints.
                               fn_verdicts=tuple(_fn_verdicts.items()))
 
 
-def _diagnose_and_fix_regression(
+def _diagnose_regression(
     *,
     project_dir: Path,
     module_name: str,
-    module_source_paths: list[Path],
-    existing_test_files: set[str],
     delta_lines: int,
     cargo_env: Callable[[], dict[str, str]],
     subprocess: Any,
     build_timeout: int,
-    generate_fix_loop: Callable[..., tuple[bool, str]],
-    model: str,
     log: Callable[[str], None],
+    emit: Callable[..., Any],
 ) -> None:
-    """A large coverage drop usually means a generated test now fails at runtime
-    and corrupts grcov profraw data. Run the tests to confirm, and if they fail,
-    repair them before generating more (which would only pile failures on top).
-    Extracted from the augmentation loop."""
+    """A large coverage drop usually means a generated test now fails at
+    runtime and corrupts the coverage data. Run the tests to say so, loudly.
+
+    Every block was proved to pass on the original before it stayed, alone
+    as well as in its file (`test_worlds.test_passes_in_world`), so a test
+    that fails here is a broken invariant. The repair used to be the generic
+    fix loop over the module's non-test files — the ORIGINAL crate's `src/`
+    — which could rewrite the crate the oracle is measured against. It now
+    writes nothing."""
     log(f"  [{module_name}] Coverage regression {delta_lines:+d} lines — running tests to detect runtime failures.")
     reg_result = subprocess.run(
         ["cargo", "test", "-p", module_name, "--no-fail-fast", "--", "--test-threads=1", "--no-capture"],
@@ -2829,16 +2830,11 @@ def _diagnose_and_fix_regression(
         timeout=build_timeout, env=cargo_env(),
     )
     if reg_result.returncode != 0:
-        log(f"  [{module_name}] Test failures confirmed — running runtime fix loop.")
-        generate_fix_loop(
-            project_dir=project_dir,
-            check_cmd=f"cargo test -p {module_name} -- --test-threads=1",
-            source_paths=module_source_paths,
-            existing_test_files=existing_test_files,
-            model=model,
-            max_fix_attempts=3,
-            timeout=build_timeout,
-        )
+        tail = ((reg_result.stdout or "") + (reg_result.stderr or ""))[-1500:]
+        log(f"  HEALTH ‼ AUGMENT_TESTS_RED [{module_name}]: admitted tests fail "
+            "on the original crate — no writer edits the original's source; "
+            f"the admission that let them in is the defect.\n{tail}")
+        emit("task0c.tests_red", data={"module": module_name, "tail": tail})
     else:
         log(f"  [{module_name}] Tests pass but coverage regressed — likely stale profraw; retrying.")
 
@@ -2921,7 +2917,6 @@ def task0c_augment_module(
     _test_augmentor_factory = deps.test_augmentor_factory
     ask = deps.ask
     extract_files = deps.extract_files
-    generate_fix_loop = deps.generate_fix_loop
     is_test_file = deps.is_test_file
     write = deps.write
     subprocess = deps.subprocess
@@ -3163,27 +3158,29 @@ def task0c_augment_module(
         _log(f"  [{module_name}/{_cluster_label}] Attempt {attempt}/{max_attempts}")
         _emit("task0c.attempt", data={"attempt": attempt, "max_attempt": max_attempts})
 
-        # --- Phase A: compile check + targeted fix ---
-        # Use generate_fix_loop: run compile check, if it fails ask LLM to fix
-        # specific files rather than regenerating from scratch.
-        # Only source files with #[cfg(test)] blocks are candidates — these hold
-        # the generated tests that may have syntax errors.
-        module_source_paths = [
-            f for f in _iter_module_rs(module_dir)
-            if not is_test_file(f, project_dir)
-        ]
-        compile_ok, _ = generate_fix_loop(
-            project_dir=project_dir,
-            check_cmd=f"cargo test -p {module_name} --no-run",
-            source_paths=module_source_paths,
-            existing_test_files=existing_test_files,
-            model=_TASK0C_MODEL,
-            max_fix_attempts=1,  # one fix attempt per outer attempt; outer loop retries
-            timeout=BUILD_TIMEOUT,
-        )
-        if not compile_ok:
-            _log(f"  [{module_name}] Still does not compile after fix — retrying outer loop.")
-            continue
+        # --- Phase A: the crate and its admitted tests still build ---
+        # Every block was proved to build and pass on the original before it
+        # stayed, so a build that fails here is a broken invariant, not a
+        # job for a writer. This check used to hand the module's non-test
+        # files — the ORIGINAL crate's `src/`, since generated tests moved
+        # to `tests/` — to the generic fix loop, which could rewrite the
+        # crate the oracle is measured against. It never fired in the logs
+        # of 2026-10-16 to 2026-10-20; it is now a loud stop of this module's
+        # augmentation and writes nothing.
+        _phase_a = subprocess.run(
+            ["cargo", "test", "-p", module_name, "--no-run"],
+            cwd=project_dir, capture_output=True, text=True, errors="replace",
+            timeout=BUILD_TIMEOUT, env=_cargo_env())
+        if _phase_a.returncode != 0:
+            _tail = ((_phase_a.stdout or "") + (_phase_a.stderr or ""))[-1500:]
+            _log(f"  HEALTH ‼ AUGMENT_TREE_RED [{module_name}] attempt {attempt}: "
+                 "the original crate with its admitted tests does not build — "
+                 "augmentation of this module stops; no writer edits the "
+                 f"original's source.\n{_tail}")
+            _emit("task0c.tree_red", data={"module": module_name,
+                                           "attempt": attempt,
+                                           "tail": _tail})
+            break
 
         # --- Phase B: measure coverage ---
         if _skip_first_measure:
@@ -3283,18 +3280,15 @@ def task0c_augment_module(
         # runtime failures that corrupt grcov profraw data.  Diagnose and fix before
         # generating more tests (which would only pile more failing tests on top). ---
         if prev_covered > 0 and delta_lines < -50:
-            _diagnose_and_fix_regression(
+            _diagnose_regression(
                 project_dir=project_dir,
                 module_name=module_name,
-                module_source_paths=module_source_paths,
-                existing_test_files=existing_test_files,
                 delta_lines=delta_lines,
                 cargo_env=_cargo_env,
                 subprocess=subprocess,
                 build_timeout=BUILD_TIMEOUT,
-                generate_fix_loop=generate_fix_loop,
-                model=_TASK0C_MODEL,
                 log=_log,
+                emit=_emit,
             )
             prev_covered = covered_lines
             continue  # skip Phase C (no new tests until runtime failures are resolved)

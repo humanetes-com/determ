@@ -724,3 +724,72 @@ def test_a_failure_the_re_run_reveals_is_withdrawn_too(
     monkeypatch.setattr(pt, "withdraw_original_failures", _first_round_only)
     with pytest.raises(RuntimeError, match="can be removed"):
         _run()
+
+
+def test_a_pin_test_that_fails_alone_reads_as_failed_on_the_original(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The pin pass's one reader of "passes on the original" folds the
+    alone reading in (`adapters.test_worlds.failing_alone`), so the
+    existing withdrawal removes a test that passes only beside another
+    test's side effect (run `801510-bb22799f`, 2026-10-20, the t0c instance
+    of the class). NEGATIVE CONTROL: with no alone failure the reading is
+    the file run's."""
+    from pipeline_core.adapters import pin_runs
+
+    out = ("running 2 tests\ntest a_sets ... ok\ntest b_reads ... ok\n"
+           "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; "
+           "0 filtered out; finished in 0.00s\n")
+
+    def fake_run(project_dir, rel, text, *, env, timeout, then=None, **_k):  # type: ignore[no-untyped-def]
+        if then is not None:
+            then(tmp_path, env, out)
+        return True, out
+
+    seen: list[tuple[str, frozenset[str]]] = []
+
+    def fake_alone(tree, module, stem, names, *, env, timeout):  # type: ignore[no-untyped-def]
+        seen.append((stem, frozenset(names)))
+        return ("b_reads",) if lonely else ()
+
+    monkeypatch.setattr(pin_runs, "run_test_file_on_original", fake_run)
+    monkeypatch.setattr(pin_runs, "failing_alone", fake_alone)
+    lonely = True
+    run = pin_runs.run_on_original(tmp_path, "m", "pin_x_gen_1", "", None,
+                                   cluster_env=lambda _w: {}, timeout=5)
+    assert seen == [("pin_x_gen_1", frozenset({"a_sets", "b_reads"}))]
+    assert run.passed == {"a_sets"} and run.failed == {"b_reads"}
+    assert "b_reads: passes only beside" in run.excerpt
+    text = ("#[test]\nfn a_sets() { std::env::set_var(\"K\", \"1\"); }\n\n"
+            "#[test]\nfn b_reads() { assert_eq!(std::env::var(\"K\").unwrap(), \"1\"); }\n")
+    cut = withdraw_original_failures(text, run)
+    assert cut is not None and cut.withdrawn == {"b_reads"}
+    lonely = False
+    ctrl = pin_runs.run_on_original(tmp_path, "m", "pin_x_gen_1", "", None,
+                                    cluster_env=lambda _w: {}, timeout=5)
+    assert ctrl.passed == {"a_sets", "b_reads"} and ctrl.failed == frozenset()
+
+
+def test_an_admitted_pin_is_settled_into_the_worlds_it_passes_in(
+        tmp_path: Path) -> None:
+    """The pass hands the judged file to the world settle (read on the
+    original) and admits the text it returns. A file the settle finds no
+    world for is refused. NEGATIVE CONTROL: the default settle (identity)
+    admits the file under the gate of the world that wrote it."""
+    def run(settle: Any) -> tuple[int, list[str]]:
+        admitted: list[str] = []
+        deps = _deps(tmp_path, [f"```rust\n{_FILE}```"] * 3,
+                     [(_OK_ORIG, _RED_REBUILT, frozenset({"reaches_probe"}))] * 3,
+                     [], admitted)
+        if settle is not None:
+            deps = _with(deps, settle=settle)
+        n = run_pinning_pass(tmp_path, "krate", EndVerdict(blocking=(_SITE,)), deps)
+        return n, admitted
+
+    n, admitted = run(lambda _pd, _m, _s, text, _w: text.split("\n", 1)[1])
+    assert n == 1
+    assert not admitted[0].split("\n", 1)[1].startswith("#![cfg(")
+    n_none, admitted_none = run(lambda *_a: None)
+    assert n_none == 0 and admitted_none == []
+    n_ctrl, admitted_ctrl = run(None)
+    assert n_ctrl == 1
+    assert admitted_ctrl[0].split("\n", 1)[1].startswith("#![cfg(alt)]\n")

@@ -41,12 +41,22 @@ file and pair attempt loops, which have no fix loop of their own.
 
 This is not a stop: the process, the fill and the other runs continue. The
 process-level bound stays `fill_phase_clock`.
+
+A requested stop is the third reason (``"stop"``,
+`graceful_stop.stop_requested`). The process is ending, so the unit buys no
+further call, and it leaves through the same exit as a unit past its bound.
+That exit writes back the route's banked better image (the impl and per-fn
+salvage, checked against regression). The stop itself is then taken at the
+next `check_graceful_stop` between units. Before this, the stop was raised
+from inside the fix loop's attempt boundary, so the exit never ran.
 """
 from __future__ import annotations
 
 import threading
 import time
 from collections.abc import Callable, Iterable
+
+from pipeline_core.domain import graceful_stop
 
 _local = threading.local()
 
@@ -94,11 +104,12 @@ def expired() -> bool:
 
 
 def ended(tests: Iterable[str] | None = None) -> str:
-    """Why this thread's unit may not buy another call: ``"premise"`` when
-    the ground under the call has moved, ``"bound"`` when the unit has run
-    past its bound, ``""`` when it may. The premise is asked first, as the
-    claim itself asks it (`fill_schedule.RunClock.refusal`). A thread that
-    never claimed answers ``""``.
+    """Why this thread's unit may not buy another call: ``"stop"`` when the
+    process has been asked to stop, ``"premise"`` when the ground under the
+    call has moved, ``"bound"`` when the unit has run past its bound, ``""``
+    when it may. The premise is asked before the bound, as the claim itself
+    asks it (`fill_schedule.RunClock.refusal`). A thread that never claimed
+    answers ``""`` unless a stop is requested.
 
     ``tests`` is the tests of the NAMES the next call will ask — a retry
     of two peeled names asks on those two names' tests, not on the claim's
@@ -108,6 +119,8 @@ def ended(tests: Iterable[str] | None = None) -> str:
     moved. An empty set is a call that asks no named test and is refused
     once anything in the fill has moved. ``None`` asks on the claim's own
     scope — a unit whose every call asks the same names."""
+    if graceful_stop.stop_requested():
+        return "stop"
     ground = getattr(_local, "ground", None)
     if ground is not None and ground(tests):
         return "premise"
@@ -127,6 +140,11 @@ def note_once() -> bool:
 def end_note(reason: str, *, attempts: int) -> tuple[str, str, dict[str, object]]:
     """The log clause, event name and event payload for a unit that ended
     on ``reason`` (:func:`ended`), so every route says it the same way."""
+    if reason == "stop":
+        return (f"STOP_REQUESTED — the process is stopping, after {attempts} "
+                "attempt(s); no further call, the unit leaves through its "
+                "route's exit and the stop is taken between units",
+                "phase_c.unit.stop_requested", {"attempts": attempts})
     if reason == "premise":
         return (f"PREMISE_MOVED — the tests this unit was claimed on no "
                 f"longer fail where the plan read them, after {attempts} "
