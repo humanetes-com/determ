@@ -742,6 +742,32 @@ def test_a_header_closed_with_the_wrong_bracket_still_routes() -> None:
         result_impl, option_impl, ctx_err_impl]
 
 
+def test_a_header_whose_generic_list_was_never_closed_still_routes() -> None:
+    """A header cut off before its closing angle names the one container the
+    file declares. The canonical form closes the list before the compare.
+    Negative control: the unrepaired spelling, the closer stripped back off,
+    is not the file's canon, so a byte compare of that spelling drops the
+    body. A shorter argument list is a different type and still drops.
+    The shapes are invented."""
+    declared = "impl<T> Holder<T>"
+    trait_impl = "impl<T> Shown for Holder<T>"
+    r = route_fn_bodies(
+        [_fn("take", "impl<T> Holder<T"),
+         _fn("show", "impl<T> Shown for Holder<T")],
+        target=declared, related=[trait_impl])
+    assert r.dropped == ()
+    assert [rb.container for rb in r.routed] == [declared, trait_impl]
+    closed = canon_container(declared)
+    unrepaired = closed[:-1]
+    assert unrepaired != closed
+    assert canon_container("impl<T> Holder<T") == closed
+    wider = "impl<T> Holder<T, Extra>"
+    short = route_fn_bodies(
+        [_fn("take", "impl<T> Holder<T>")], target=wider, related=[])
+    assert short.routed == () and short.dropped_names == ("take",)
+    assert canon_container("impl<T> Holder<T>") != canon_container(wider)
+
+
 def test_a_tuple_self_type_is_not_mistaken_for_a_truncated_header() -> None:
     # `for (A, B)` ends in `)` legitimately (angle depth 0 there): the repair
     # must leave it alone, and an unrelated header is still dropped.

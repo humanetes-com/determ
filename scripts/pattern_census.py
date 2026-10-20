@@ -3034,7 +3034,7 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
         decided_from_event,
         due_from_event,
         hollow_from_event,
-        measured_owners_from_event,
+        owner_facts_from_event,
         violations,
     )
     out: list[str] = []
@@ -3045,8 +3045,8 @@ def p44_schedule_violations(schedule_ev: list[dict]) -> list[str]:
                 decided_from_event(sc), hollow=hollow_from_event(sc),
                 crash_blamed=blamed_from_event(sc),
                 budget_minutes=float(sc.get("budget_minutes") or 0.0),
-                measured_owners=measured_owners_from_event(sc),
-                due=due_from_event(sc)):
+                due=due_from_event(sc),
+                **owner_facts_from_event(sc)):
             out.append(f"iter {sc.get('iter')} {v.kind}: {v.detail}")
     return out
 

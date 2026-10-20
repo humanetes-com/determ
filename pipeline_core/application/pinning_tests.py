@@ -95,14 +95,14 @@ class PinningDeps:
     admit: Callable[[Path, str, str, str], bool]
     log: Callable[[str], None]
     emit: Callable[..., Any]
-    max_attempts: int = 3
     # (project_dir, module, stem, text, world) -> the text with its gate
     # rewritten to the worlds the file passes in ON THE ORIGINAL, or None
     # when it passes in none (`test_worlds.settle_test_gate`). A pin used to
     # stay gated to the one world that wrote it, so a body both worlds build
-    # was pinned in one of them. Identity by default (no settle).
-    settle: Callable[[Path, str, str, str, Any], str | None] = (
-        lambda _pd, _m, _s, text, _w: text)
+    # was pinned in one of them. Required: an identity default admitted the
+    # text under the world that wrote it, with no measurement.
+    settle: Callable[[Path, str, str, str, Any], str | None]
+    max_attempts: int = 3
     # The sites this pass pinned. A blocking body absent from the tuple is
     # still a gap and is asked again after the tree changes.
     on_pinned: Callable[[tuple[FnSite, ...]], None] = lambda _sites: None

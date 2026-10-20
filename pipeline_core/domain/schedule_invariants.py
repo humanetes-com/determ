@@ -51,11 +51,13 @@ reason (and, for a hold, the runs it waited on). On that:
   deferral said why. Measured 2026-10-17 over every recorded hit since
   2026-10-12 joined to its sweep's `phase_c.dispatch.rank` batch: 214 of
   214 were owners the rank left past the dispatch cap, 0 were in the batch
-  with no candidate. Its input is therefore the owners the sweep owes a
-  writer (`escalation_lifetime.measured_owners_owed`): those in the batch,
-  and those the rank left out at its rotation bound
-  (`dispatch_rank.starved`). An owner past the cap inside the bound is the
-  rank's promise, not a routing hole.
+  with no candidate. The checker computes the owed set itself
+  (`escalation_lifetime.measured_owners_owed`) from the admitted owners, the
+  ordered admits, the dispatch batch, and the owners the rank left out at
+  its rotation bound (`dispatch_rank.starved`). It does not take a raw
+  owner set: passing the whole frontier named owners the rank had left
+  inside its bound. An owner past the cap inside the bound is the rank's
+  promise, not a routing hole.
 
 These name no test, unit, trait or crate: the inputs are the schedule's own
 decisions, the hollow stubs and the blamed locators. The same checker runs in
@@ -72,8 +74,9 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
+from pipeline_core.domain.escalation_lifetime import measured_owners_owed
 from pipeline_core.domain.held_stubs import Blockers
 from pipeline_core.domain.models import FnLocator
 
@@ -85,7 +88,7 @@ __all__ = [
     "due_from_event",
     "decided_from_schedule",
     "hollow_from_event",
-    "measured_owners_from_event",
+    "owner_facts_from_event",
     "violations",
 ]
 
@@ -121,7 +124,10 @@ def violations(decided: Sequence[Decided], *,
                crash_blamed: (Mapping[FnLocator, Collection[str]]
                               | Collection[FnLocator]) = (),
                budget_minutes: float = 0.0,
-               measured_owners: Collection[FnLocator] = (),
+               admitted: Collection[FnLocator] = (),
+               ordered: Collection[FnLocator] = (),
+               batch: Collection[FnLocator] = (),
+               starved: Collection[FnLocator] = (),
                due: Collection[FnLocator] = (),
                ) -> tuple[ScheduleViolation, ...]:
     """Every invariant the decision set breaks. ``hollow`` is the held view
@@ -182,13 +188,17 @@ def violations(decided: Sequence[Decided], *,
                 f"{d.label} ({d.reason or 'deferred'})" for d in writers)
                if writers else "; no candidate run writes it")))
 
-    for o in sorted(frozenset(measured_owners) - candidates_write,
+    # Computed here. A caller that handed in the whole frontier named every
+    # owner the rank had left inside its bound; the owed set is only the
+    # batch plus the rotation-bound leftovers, among the ordered admits.
+    owed = measured_owners_owed(
+        admitted, ordered, batch=batch, starved=starved)
+    for o in sorted(owed - candidates_write,
                     key=lambda u: (u.file, u.fn_name)):
         out.append(ScheduleViolation(
             "owner_unrouted",
-            f"{o.file}::{o.fn_name} is a measured coverage owner still on "
-            "the frontier, and no candidate run writes it (the dispatch "
-            "batch left it past the cap, or a planner dropped it)"))
+            f"{o.file}::{o.fn_name} is a measured coverage owner this sweep "
+            "owes a writer, and no candidate run writes it"))
 
     if not opened and any(d.reason != "nothing_aimed" for d in deferred):
         out.append(ScheduleViolation(
@@ -279,13 +289,37 @@ def due_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
     return frozenset(_loc(x) for x in inputs.get("due") or ())
 
 
-def measured_owners_from_event(data: Mapping[str, Any]) -> frozenset[FnLocator]:
-    """The admitted measured owners a recorded event carries (empty for an
-    event that predates the field)."""
+class OwnerFacts(TypedDict, total=False):
+    admitted: tuple[FnLocator, ...]
+    ordered: tuple[FnLocator, ...]
+    batch: tuple[FnLocator, ...]
+    starved: tuple[FnLocator, ...]
+
+
+def owner_facts_from_event(data: Mapping[str, Any]) -> OwnerFacts:
+    """The four facts `violations` computes owed owners from, or empty.
+
+    A recorded event that only carries `measured_owners` is not these facts.
+    That list was, on the events written before the checker computed the
+    owed set itself, the whole frontier, and replaying it named owners the
+    rank had left inside its bound. An event without the four keys checks
+    nothing for `owner_unrouted`."""
     inputs = data.get("inputs")
     if not isinstance(inputs, Mapping):
-        return frozenset()
-    return frozenset(_loc(x) for x in inputs.get("measured_owners") or ())
+        return {}
+    keys = ("owner_admitted", "owner_ordered", "owner_batch", "owner_starved")
+    if not any(k in inputs for k in keys):
+        return {}
+
+    def _locs(key: str) -> tuple[FnLocator, ...]:
+        return tuple(_loc(x) for x in inputs.get(key) or ())
+
+    return {
+        "admitted": _locs("owner_admitted"),
+        "ordered": _locs("owner_ordered"),
+        "batch": _locs("owner_batch"),
+        "starved": _locs("owner_starved"),
+    }
 
 
 def blamed_from_event(

@@ -109,6 +109,10 @@ def _emit(
     tmp: Path, specs: list[BehaviourSpec], verify: Verify, **kw: object
 ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]]]:
     (tmp / "tests").mkdir(parents=True, exist_ok=True)
+    # Explicit empty readings. Omitting either callable is a TypeError; these
+    # are a check that ran and found nothing to withdraw.
+    kw.setdefault("failing_alone", lambda _stem, _names: ())
+    kw.setdefault("settle", lambda _dest, body: body)
     dest, dropped, misses, _emitted = emit_behaviour_tests(
         tmp,
         "stable",
@@ -574,8 +578,8 @@ def test_a_capture_that_passes_only_beside_another_is_withdrawn(tmp_path: Path) 
     process (`adapters.test_worlds.failing_alone`). That capture depends on
     another test's side effect on process state; it is withdrawn and the
     file is re-rendered without it. Run `801510-bb22799f` (2026-10-20) is the
-    t0c instance of the class. NEGATIVE CONTROL: with no alone reading, both
-    stay."""
+    t0c instance of the class. An alone reading that names nobody keeps both.
+    Omitting the reading is refused, not a way to keep both."""
     keep, leaner = _spec("keeper"), _spec("leaner")
     asked: list[tuple[str, tuple[str, ...]]] = []
 
@@ -604,8 +608,8 @@ def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -
     """After verification the emitter hands the file to the world settle
     (`test_worlds.settle_test_gate`), which rewrites its gate to the worlds
     it passes in. A file the settle finds no world for is not kept.
-    NEGATIVE CONTROL: without a settle the file keeps the gate it was
-    written under (`cfg_attr`)."""
+    An explicit settle that returns the body keeps the gate it was written
+    under (`cfg_attr`). Omitting the settle is refused."""
     keep = _spec("keeper")
     settled: list[str] = []
 
@@ -627,6 +631,24 @@ def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -
     assert "world settle" in misses2[0]["reason"]
 
     ctrl = tmp_path / "ctrl"
-    dest3, _d3, _m3 = _emit(ctrl, [keep], _verifier(ctrl), cfg_attr="own_world")
+    dest3, _d3, _m3 = _emit(
+        ctrl, [keep], _verifier(ctrl), cfg_attr="own_world",
+        settle=lambda _dest, body: body)
     assert dest3 is not None
     assert dest3.read_text(encoding="utf-8").startswith("#![cfg(own_world)]")
+
+    bare = tmp_path / "bare"
+    (bare / "tests").mkdir(parents=True)
+    with pytest.raises(TypeError):
+        emit_behaviour_tests(
+            bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),
+            failing_alone=lambda _s, _n: ())
+    with pytest.raises(TypeError):
+        emit_behaviour_tests(
+            bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),
+            settle=lambda _d, body: body)
+    with pytest.raises(TypeError):
+        emit_behaviour_tests(
+            bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),
+            failing_alone=None, settle=lambda _d, body: body)  # type: ignore[arg-type]
+    assert list((bare / "tests").glob("*.rs")) == []

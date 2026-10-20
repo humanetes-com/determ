@@ -121,9 +121,9 @@ class EmitTests(Protocol):
     def __call__(
         self, project_dir: Path, cfg_cluster: str,
         specs: Iterable[BehaviourSpec], *, crate: str, verify: Verify,
+        failing_alone: FailingAlone, settle: Settle,
         perturb_env: Mapping[str, str] = ..., cfg_attr: str = ...,
         recapture: Recapture | None = ...,
-        failing_alone: FailingAlone | None = ..., settle: Settle | None = ...,
     ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]],
                tuple[BehaviourSpec, ...]]: ...
 
@@ -177,10 +177,12 @@ class Task0dDeps:
     verify_tests: Callable[..., tuple[bool, str]] = lambda *_a, **_k: (True, "")
     # (project_dir, cluster, crate, stem, names) -> the names of an emitted
     # file that fail alone in a process of their own
-    # (`adapters.test_worlds.failing_alone`). None skips the check.
+    # (`adapters.test_worlds.failing_alone`). Emission refuses a missing one:
+    # skipping the check admitted the file as written.
     tests_failing_alone: Callable[..., Sequence[str]] | None = None
     # (project_dir, crate, test file, body, cluster) -> the measured gate, or
-    # None (`application.test_worlds.settle_test_gate`). None skips it.
+    # None (`application.test_worlds.settle_test_gate`). Emission refuses a
+    # missing one for the same reason.
     settle_test_gate: Callable[..., str | None] | None = None
     # The environment flip that exposes an env-dependent observable, e.g.
     # `RUST_BACKTRACE`. Run-twice cannot see this axis: the value is stable at
@@ -564,18 +566,21 @@ def _emit_captures(
             return result.stdout
         return None
 
+    alone_check = deps.tests_failing_alone
+    settle_gate = deps.settle_test_gate
+    if alone_check is None or settle_gate is None:
+        raise TypeError(
+            "behaviour emission requires the alone check and the world settle")
     _dest, withdrawn, misses, emitted = deps.emit_tests(
         project_dir,
         cluster.name,
         suite.specs,
         crate=module_name,
         verify=lambda stem, extra: deps.verify_tests(project_dir, cluster, module_name, stem, extra),
-        failing_alone=(
-            (lambda stem, names: _alone(project_dir, cluster, module_name, stem, names))
-            if (_alone := deps.tests_failing_alone) is not None else None),
-        settle=(
-            (lambda dest, body: _settle(project_dir, module_name, dest, body, cluster))
-            if (_settle := deps.settle_test_gate) is not None else None),
+        failing_alone=lambda stem, names: alone_check(
+            project_dir, cluster, module_name, stem, names),
+        settle=lambda dest, body: settle_gate(
+            project_dir, module_name, dest, body, cluster),
         perturb_env=deps.perturb_env(cluster),
         cfg_attr=deps.cluster_cfg_attr(cluster),
         recapture=_recapture if deps.PIN_ENV_DEBUG else None,

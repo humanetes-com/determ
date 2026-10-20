@@ -123,7 +123,8 @@ def _deps(tmp_path: Path, replies: list[str], runs: list[tuple[TestRun, TestRun,
                     excerpt="assertion failed"),
             frozenset()),
         admit=lambda _pd, _m, rel, text: admitted.append(rel + "\n" + text) is None,
-        log=lambda _m: None, emit=lambda *_a, **_k: None, max_attempts=3)
+        log=lambda _m: None, emit=lambda *_a, **_k: None,
+        settle=lambda _pd, _m, _s, text, _w: text, max_attempts=3)
 
 
 def test_a_refused_candidate_goes_back_with_its_reason_and_the_next_is_admitted(
@@ -769,12 +770,22 @@ def test_a_pin_test_that_fails_alone_reads_as_failed_on_the_original(
     assert ctrl.passed == {"a_sets", "b_reads"} and ctrl.failed == frozenset()
 
 
+def test_a_pin_writer_requires_a_settle() -> None:
+    """No default returns the text as written. A construction that omits
+    the settle cannot be built."""
+    import dataclasses
+
+    field = next(f for f in dataclasses.fields(PinningDeps) if f.name == "settle")
+    assert field.default is dataclasses.MISSING
+    assert field.default_factory is dataclasses.MISSING
+
+
 def test_an_admitted_pin_is_settled_into_the_worlds_it_passes_in(
         tmp_path: Path) -> None:
     """The pass hands the judged file to the world settle (read on the
     original) and admits the text it returns. A file the settle finds no
-    world for is refused. NEGATIVE CONTROL: the default settle (identity)
-    admits the file under the gate of the world that wrote it."""
+    world for is refused. An explicit identity settle admits the file under
+    the gate of the world that wrote it. There is no default that does that."""
     def run(settle: Any) -> tuple[int, list[str]]:
         admitted: list[str] = []
         deps = _deps(tmp_path, [f"```rust\n{_FILE}```"] * 3,

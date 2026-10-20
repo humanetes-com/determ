@@ -194,7 +194,6 @@ from pipeline_core.domain.escalation_lifetime import (
     attributed_cohorts,
     escalate_to_measured_owners,
     escalation_fire_due,
-    measured_owners_owed,
     product_addition_keys,
     red_dead_after_sweep,
     sustain_escalation_products,
@@ -1163,8 +1162,8 @@ def run_phase_c_tdd(
     # it cannot move the test, so it must not hold the fire.
     _red_dead_prev: frozenset[FnLocator] = frozenset()
     # Every unit the owner map admitted or attached a test to, this sweep or
-    # an earlier one. The schedule checks the ones still in `ordered`
-    # (`measured_owners_owed`) for a candidate that writes them.
+    # an earlier one. The schedule check computes the owed subset itself
+    # from these, the ordered admits, the batch and the starved set.
     _owner_map_units: set[FnLocator] = set()
     _measured_owner_keys: frozenset[FnLocator] = frozenset()
     # Escalated test -> (the futile unit-set that EARNED its fire, the
@@ -7624,9 +7623,10 @@ def run_phase_c_tdd(
                     # targets miss crash_blamed, as a flat re-buy.
                     unmeasurable_tests=_unmeasured,
                     attributed=_attributed_locs,
-                    measured_owners=measured_owners_owed(
-                        _owner_map_units, (k for k, _ in ordered),
-                        batch=_batch.keys, starved=_starved),
+                    owner_admitted=frozenset(_owner_map_units),
+                    owner_ordered=tuple(k for k, _ in ordered),
+                    owner_batch=frozenset(_batch.keys),
+                    owner_starved=frozenset(_starved),
                     due=frozenset(_due_fill),
                     due_rungs={u_: _due.rung_of(u_) for u_ in _due_fill},
                     unit_evidence=_unit_evidence,

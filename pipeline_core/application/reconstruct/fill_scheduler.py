@@ -117,13 +117,16 @@ class FillExecutionDeps:
     #: unchanged by this argument. Snapshot before owner-map admission
     #: or the spine locators become "attributed".
     attributed: frozenset[FnLocator] = frozenset()
-    #: Measured coverage owners the driver admitted (or attached a test to),
-    #: on this sweep or an earlier one, that this sweep owes a writer: in
-    #: the dispatch batch, or left out of it at the rank's rotation bound
-    #: (`measured_owners_owed`). Each must be a target of
-    #: some candidate run, opened or deferred with its reason; one that no
-    #: run writes is `owner_unrouted`. Empty (the default) checks nothing.
-    measured_owners: frozenset[FnLocator] = frozenset()
+    #: The four facts the schedule check turns into the owed owners
+    #: (`measured_owners_owed`, inside `violations`). Admitted owners, the
+    #: ordered admits, the dispatch batch, and the owners the rank left out
+    #: at its rotation bound. The check does not take a precomputed set: a
+    #: caller could pass the whole frontier and name an owner the rank left
+    #: inside its bound. Empty (the default) checks nothing.
+    owner_admitted: frozenset[FnLocator] = frozenset()
+    owner_ordered: tuple[FnLocator, ...] = ()
+    owner_batch: frozenset[FnLocator] = frozenset()
+    owner_starved: frozenset[FnLocator] = frozenset()
     #: Defer a non-session run every target of which an earlier run of this
     #: fill already asked under evidence nothing has moved since
     #: (`fill_asks.FillAsks`). False keeps the shadow line only.
@@ -477,7 +480,10 @@ def _check_schedule(sched: FillSchedule,
         decided_from_schedule(sched), hollow=hollow,
         crash_blamed=deps.crash_blamed,
         budget_minutes=sched.budget_minutes,
-        measured_owners=deps.measured_owners,
+        admitted=deps.owner_admitted,
+        ordered=deps.owner_ordered,
+        batch=deps.owner_batch,
+        starved=deps.owner_starved,
         due=deps.due)
     if not found:
         return
@@ -523,9 +529,16 @@ def _schedule_inputs(deps: FillExecutionDeps,
             {k.value: v for k, v in (deps.max_per_kind or {}).items()}
             if scheduled else {}),
     }
-    if scheduled and deps.measured_owners:
-        inputs["measured_owners"] = sorted(
-            f"{u.file}::{u.fn_name}" for u in deps.measured_owners)
+    if scheduled and any((deps.owner_admitted, deps.owner_ordered,
+                          deps.owner_batch, deps.owner_starved)):
+        inputs["owner_admitted"] = [
+            f"{u.file}::{u.fn_name}" for u in deps.owner_admitted]
+        inputs["owner_ordered"] = [
+            f"{u.file}::{u.fn_name}" for u in deps.owner_ordered]
+        inputs["owner_batch"] = [
+            f"{u.file}::{u.fn_name}" for u in deps.owner_batch]
+        inputs["owner_starved"] = [
+            f"{u.file}::{u.fn_name}" for u in deps.owner_starved]
     if scheduled and deps.due:
         inputs["due"] = sorted(f"{u.file}::{u.fn_name}" for u in deps.due)
     if scheduled and deps.unit_evidence is not None:

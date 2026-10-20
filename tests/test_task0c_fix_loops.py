@@ -41,6 +41,15 @@ def _ws(tmp_path: Path) -> Path:
     return ws
 
 
+def _with_gen(ws: Path) -> Path:
+    """A pipeline-generated sibling the harness is allowed to rewrite."""
+    (ws / "src" / "lib.gen_tests_1.rs").write_text("#[test]\nfn t() { broken }\n")
+    return ws
+
+
+_GEN_ERR = "error: x\n --> src/lib.gen_tests_1.rs:1:1"
+
+
 def _deps(**over: Any) -> Task0cDeps:
     stub: dict[str, Any] = {f: (lambda *a, **k: None) for f in Task0cDeps.__dataclass_fields__}
     stub["get_current_cluster"] = lambda: None
@@ -67,7 +76,7 @@ def test_harness_fix_changing_signatures_terminates(tmp_path: Path) -> None:
     """Ever-changing, never-resolving signatures bounded by
     floor-stall instead of looping forever; exhaustion runs the strip ladder
     and returns the blocked verdict."""
-    ws = _ws(tmp_path)
+    ws = _with_gen(_ws(tmp_path))
     calls = {"ask": 0, "sig": 0}
 
     def err_sigs(out: str) -> frozenset[str]:
@@ -80,7 +89,7 @@ def test_harness_fix_changing_signatures_terminates(tmp_path: Path) -> None:
 
     deps = _deps(
         test_augmentor_factory=lambda: _augmentor(
-            lambda p, m: (False, "error: x\n --> src/lib.rs:1:1")),
+            lambda p, m: (False, _GEN_ERR)),
         error_signatures_from_output=err_sigs,
         ask=ask,
     )
@@ -94,7 +103,7 @@ def test_harness_fix_changing_signatures_terminates(tmp_path: Path) -> None:
 def test_harness_fix_identical_signatures_escalates_to_strip(tmp_path: Path) -> None:
     """Identical signatures on consecutive attempts → driver `repeated` exit
     after attempt 2 (the old loop's same-sig escalation), then the ladder."""
-    ws = _ws(tmp_path)
+    ws = _with_gen(_ws(tmp_path))
     calls = {"ask": 0}
 
     def ask(prompt: str, **k: Any) -> str:
@@ -103,7 +112,7 @@ def test_harness_fix_identical_signatures_escalates_to_strip(tmp_path: Path) -> 
 
     deps = _deps(
         test_augmentor_factory=lambda: _augmentor(
-            lambda p, m: (False, "error: x\n --> src/lib.rs:1:1")),
+            lambda p, m: (False, _GEN_ERR)),
         error_signatures_from_output=lambda out: frozenset({"E0308 same"}),
         ask=ask,
     )
@@ -139,14 +148,14 @@ def test_harness_fix_llm_heals_and_augmentation_proceeds(tmp_path: Path) -> None
     """Broken harness healed by the LLM's file fix on attempt 1: the loop
     accepts, the harness gate opens, and execution proceeds into augmentation
     (marked by the read_state sentinel)."""
-    ws = _ws(tmp_path)
+    ws = _with_gen(_ws(tmp_path))
     checks = {"n": 0, "ask": 0}
 
     def harness(p: Path, m: str) -> tuple[bool, str]:
         checks["n"] += 1
         # 1st: broken (enter loop); 2nd: healed (post-LLM recheck);
         # 3rd: precheck before pre-clean.
-        return (checks["n"] >= 2), ("" if checks["n"] >= 2 else "error: z\n --> src/lib.rs:1:1")
+        return (checks["n"] >= 2), ("" if checks["n"] >= 2 else "error: z\n --> src/lib.gen_tests_1.rs:1:1")
 
     def ask(prompt: str, **k: Any) -> str:
         checks["ask"] += 1
@@ -159,7 +168,7 @@ def test_harness_fix_llm_heals_and_augmentation_proceeds(tmp_path: Path) -> None
         test_augmentor_factory=lambda: _augmentor(harness),
         error_signatures_from_output=lambda out: frozenset({"E"}),
         ask=ask,
-        extract_files=lambda r: {"src/lib.rs": "pub fn f() {}\n"},
+        extract_files=lambda r: {"src/lib.gen_tests_1.rs": "#[test]\nfn t() {}\n"},
         write=lambda p, c: Path(p).write_text(c),
         derive_gentest_prelude=lambda p: ("", ""),
         prelude_import_names=lambda b: "",
@@ -169,6 +178,80 @@ def test_harness_fix_llm_heals_and_augmentation_proceeds(tmp_path: Path) -> None
         task0c_augment_module(ws, "m", ws, deps, crate_type="lib")
     assert checks["ask"] == 1          # one LLM fix pass healed it
     assert checks["n"] == 3            # broken → healed → precheck
+    assert (ws / "src" / "lib.gen_tests_1.rs").read_text(encoding="utf-8") == "#[test]\nfn t() {}\n"
+    # The library file the error does not name is not a write.
+    assert (ws / "src" / "lib.rs").read_text(encoding="utf-8") == "mod gen_tests_1;\n"
+
+
+def test_a_library_file_named_in_the_error_is_not_rewritten(tmp_path: Path) -> None:
+    """A harness failure that names a library file used to send that file
+    to the model and write the reply back. The file stays byte-identical
+    and the model is not asked, including when the file contains a
+    generated-module declaration and this process can write it.
+    Negative control: the same reply, aimed at a generated test file the
+    error names, is written (the heal test above)."""
+    ws = _ws(tmp_path)
+    src = ws / "src" / "lib.rs"
+    original = src.read_text(encoding="utf-8")
+    calls = {"ask": 0}
+    written: list[str] = []
+
+    def ask(prompt: str, **k: Any) -> str:
+        calls["ask"] += 1
+        return "<FILE>rewritten</FILE>"
+
+    def write(p: Path, c: str) -> None:
+        written.append(str(p))
+        Path(p).write_text(c, encoding="utf-8")
+
+    deps = _deps(
+        test_augmentor_factory=lambda: _augmentor(
+            lambda p, m: (False, "error: x\n --> src/lib.rs:1:1")),
+        error_signatures_from_output=lambda out: frozenset({"E0308"}),
+        ask=ask,
+        extract_files=lambda r: {"src/lib.rs": "pub fn rewritten() {}\n"},
+        write=write,
+    )
+    res = task0c_augment_module(ws, "m", ws, deps, crate_type="lib")
+    assert res == (0.0, 0, False, "harness_broken_after_strip")
+    assert calls["ask"] == 0 and written == []
+    assert src.read_text(encoding="utf-8") == original
+
+
+def test_a_red_library_is_reported_and_not_rewritten(tmp_path: Path) -> None:
+    """A library that does not compile, in a writable file, used to enter
+    the harness fix loop. It is reported and the file is left as it is.
+    A generated test the library error names is not this return: the
+    repair still runs (covered by the heal test)."""
+    ws = _ws(tmp_path)
+    src = ws / "src" / "lib.rs"
+    original = src.read_text(encoding="utf-8")
+    calls = {"ask": 0}
+    harness_calls = {"n": 0}
+
+    def ask(prompt: str, **k: Any) -> str:
+        calls["ask"] += 1
+        return "<FILE>rewritten</FILE>"
+
+    def harness(p: Path, m: str) -> tuple[bool, str]:
+        harness_calls["n"] += 1
+        return False, "should not be asked"
+
+    deps = _deps(
+        test_augmentor_factory=lambda: SimpleNamespace(
+            is_applicable=lambda ct: True,
+            lib_compiles=lambda p, m: (
+                False, "error[E0425]\n --> src/lib.rs:1:1"),
+            test_harness_compiles=harness,
+        ),
+        ask=ask,
+        extract_files=lambda r: {"src/lib.rs": "pub fn rewritten() {}\n"},
+        write=lambda p, c: Path(p).write_text(c, encoding="utf-8"),
+    )
+    res = task0c_augment_module(ws, "m", ws, deps, crate_type="lib")
+    assert res == (0.0, 0, False, "harness_broken_in_protected_files")
+    assert calls["ask"] == 0 and harness_calls["n"] == 0
+    assert src.read_text(encoding="utf-8") == original
 
 
 def test_engine_get_history_formats_jsonl(tmp_path: Path) -> None:

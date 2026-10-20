@@ -385,10 +385,14 @@ class PhaseCFillEngine:
         # (eligible plus hop-pair members). Empty skips coverage-split
         # marking so a call that does not snapshot keeps today's order.
         attributed: Collection[FnLocator] = (),
-        # Measured coverage owners this sweep admitted or attached that are
-        # in the dispatched batch; the schedule check names any that no
-        # candidate run writes (`schedule_invariants`, `owner_unrouted`).
-        measured_owners: Collection[FnLocator] = (),
+        # The four facts the schedule check turns into owed owners
+        # (`schedule_invariants.violations` calls `measured_owners_owed`).
+        # A precomputed owner set is not an argument: the whole frontier
+        # named owners the rank had left inside its bound.
+        owner_admitted: Collection[FnLocator] = (),
+        owner_ordered: Collection[FnLocator] = (),
+        owner_batch: Collection[FnLocator] = (),
+        owner_starved: Collection[FnLocator] = (),
         # What the red tests owe this fill (`candidate_tiers.due_reading`):
         # each gets an opened writer whatever deferred it.
         due: Collection[FnLocator] = (),
@@ -605,7 +609,10 @@ class PhaseCFillEngine:
                 crash_blamed=(crash_sites or CrashSites()).blame_map(
                     (crash_blamed or frozenset()) | stub_hold_blockers),
                 attributed=frozenset(attributed),
-                measured_owners=frozenset(measured_owners),
+                owner_admitted=frozenset(owner_admitted),
+                owner_ordered=tuple(owner_ordered),
+                owner_batch=frozenset(owner_batch),
+                owner_starved=frozenset(owner_starved),
                 due=frozenset(due),
                 due_rungs=dict(due_rungs or {}),
                 unit_evidence=unit_evidence,

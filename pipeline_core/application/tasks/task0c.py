@@ -993,6 +993,21 @@ class _PreflightCtx:
     check_stop: Callable[[str], None]
 
 
+def _harness_may_rewrite(path: Path) -> bool:
+    """The one predicate a test-phase repair may write through.
+
+    The fact is a compile failure while preparing tests. Every prompt and
+    every write in the harness fix attempt calls this, and a path it
+    refuses is not sent and not written. It accepts only a pipeline-generated
+    test file (`is_claimed_pipeline_gen_test_path`): a `*.gen_tests_N.rs`
+    sibling, or an integration file that carries the writer origin marker.
+    A library file is refused whether or not this process can write it and
+    whether or not the error names it. A new write of a repair cannot skip
+    the predicate: the attempt has one write, and it is guarded by this.
+    """
+    return is_claimed_pipeline_gen_test_path(path)
+
+
 def _run_harness_preflight(
     *,
     project_dir: Path,
@@ -1003,10 +1018,11 @@ def _run_harness_preflight(
 ) -> tuple[float, int, bool, str] | None:
     """Ensure the module's test harness compiles before augmentation.
 
-    Two-stage check (lib, then full harness), an LLM repair fix-loop, and the
-    targeted→full→git-restore strip escalation ladder. Returns an early-exit
-    result tuple when augmentation must be skipped, or ``None`` to proceed.
-    Body moved VERBATIM from ``task0c_augment_module``.
+    Two-stage check (lib, then full harness), an LLM repair of generated
+    test files only, and the targeted→full→git-restore strip escalation
+    ladder. A red library whose error does not name a generated test file
+    is reported and left as it is. Returns an early-exit result tuple when
+    augmentation must be skipped, or ``None`` to proceed.
     """
     _log = ctx.log
     _emit = ctx.emit
@@ -1027,42 +1043,27 @@ def _run_harness_preflight(
     _check_stop = ctx.check_stop
 
     # Pre-flight: two-stage compile check.
-    # Stage 1: library only — if broken, skip (not TASK 0c's job to fix implementation).
-    # Stage 2: full test harness — if broken but stage 1 passes, existing test code is
-    #   broken and the LLM is asked to fix it before augmentation begins.
+    # Stage 1: library only. A red library is not a test writer's job unless
+    # the error names a generated test file (a syntax error in one still
+    # breaks `cargo build --lib`). Anything else is reported and not written.
+    # Stage 2: full test harness. The repair may rewrite a generated test
+    # file and nothing else.
     lib_ok, lib_err = augmentor.lib_compiles(project_dir, module_name)
     if not lib_ok:
-        # Check whether the failure is caused by a gen_* block we wrote
-        # (syntax errors inside #[cfg(test)] blocks still break cargo build --lib).
-        # If so, fall through to the harness fix loop which passes the error to the
-        # LLM and only strips as a last resort — preserving generated test progress.
-        # If the failure is in the real implementation, skip immediately.
         _lib_err_in_gen = any(
-            "mod gen_" in lib_err or
-            ("gen_tests" in lib_err) or
-            (src_file.name in lib_err and
-             "mod gen_" in src_file.read_text(encoding="utf-8", errors="ignore"))
+            _harness_may_rewrite(src_file)
+            and (str(src_file.relative_to(project_dir)) in lib_err
+                 or src_file.name in lib_err)
             for src_file in _iter_module_rs(module_dir)
-            if not is_test_file(src_file, project_dir)
         )
         if not _lib_err_in_gen:
-            # Check whether any of the broken files are writable (i.e. we wrote them).
-            # If the error is only in write-protected originals, we truly cannot fix it.
-            _broken_in_err = [
-                src_file for src_file in _iter_module_rs(module_dir)
-                if (str(src_file.relative_to(project_dir)) in lib_err
-                    or src_file.name in lib_err)
-                and not is_test_file(src_file, project_dir)
-                and os.access(src_file, os.W_OK)
-            ]
-            if not _broken_in_err:
-                err_snippet = lib_err[:400]
-                _log(f"  [{module_name}] Library does not compile in write-protected files — skipping.")
-                _log(f"    Error: {err_snippet}")
-                return 0.0, 0, False, "harness_broken_in_protected_files"
-            _log(f"  [{module_name}] Library compile failure in writable source — routing to harness fix loop.")
-        else:
-            _log(f"  [{module_name}] Library compile failure in gen_* block — routing to harness fix loop.")
+            err_snippet = lib_err[:400]
+            _log(f"  [{module_name}] HEALTH ‼ AUGMENT_TREE_RED library does not "
+                 "compile — a test writer does not rewrite source.")
+            _log(f"    Error: {err_snippet}")
+            return 0.0, 0, False, "harness_broken_in_protected_files"
+        _log(f"  [{module_name}] Library compile failure in a generated test — "
+             "repairing that test file only.")
 
     def _error_signatures(cargo_output: str) -> frozenset[str]:
         """Extract stable error signatures — error code + message, no file/line numbers."""
@@ -1094,7 +1095,6 @@ def _run_harness_preflight(
 
         def _attempt_harness_fix(fix_attempt: int) -> FixOutcome:
             nonlocal compile_err, prev_signatures, broken_files, harness_unidentified
-            _log(f"  [{module_name}] Harness fix attempt {fix_attempt} — sending compile error to LLM.")
 
             # Find source files mentioned in the error that belong to this module.
             broken_files = []
@@ -1115,13 +1115,18 @@ def _run_harness_preflight(
                 harness_unidentified = True
                 return FixOutcome("stop")
 
-            # Pass 1: ask LLM to fix each broken file — preserve as much generated
-            # test code as possible rather than discarding it immediately.
-            # gen_tests siblings are fixable here; only original tests are not.
+            # Ask only about a generated test file. A library file named in
+            # the error is reported, not prompted: the model used to receive
+            # the whole file and the write below kept a compiling rewrite.
+            rewriteable = [p for p in broken_files if _harness_may_rewrite(p)]
+            if not rewriteable:
+                _log(f"  [{module_name}] Harness error names no generated test "
+                     "file — not rewriting source.")
+                return FixOutcome("stop")
+            _log(f"  [{module_name}] Harness fix attempt {fix_attempt} — "
+                 "sending compile error to LLM.")
             _files_prompted = 0
-            for src_file in broken_files:
-                if _is_protected_test_file(src_file):
-                    continue
+            for src_file in rewriteable:
                 try:
                     current_content = src_file.read_text(encoding="utf-8")
                 except Exception:
@@ -1154,11 +1159,19 @@ corrected content here
                 response = ask(prompt, model=_TASK0C_MODEL)
                 _files_prompted += 1
                 files = extract_files(response)
-                if rel in files:
+                # The same predicate as the prompt. `rel` is the file just
+                # read; a path that is not a generated test is not written
+                # even if the reply names it.
+                if rel in files and _harness_may_rewrite(project_dir / rel):
                     write(project_dir / rel, files[rel])
                     _log(f"    LLM fixed test code in {rel}")
                 else:
                     _log(f"    LLM produced no output for {rel}")
+
+            if _files_prompted == 0:
+                # No generated test file to repair. Do not record an attempt:
+                # a claimed attempt that sent no prompt is an audit failure.
+                return FixOutcome("stop")
 
             # Intent-vs-effect record: the attempt was CLAIMED above ("sending
             # compile error to LLM") — record how many prompts actually went

@@ -133,6 +133,8 @@ def _deps(model: _Model, *, lanes: int = 1, logs: list[str] | None = None,
         enumerate_types=lambda _sd: [],
         run_probe=lambda *_a, **_k: None,  # type: ignore[arg-type,return-value]
         exercises_by_coverage=lambda *_a, **_k: {},
+        tests_failing_alone=lambda *_a, **_k: (),
+        settle_test_gate=lambda *_a, **_k: "kept",
         BOOK_BUDGET=BookBudget(examples_per_prompt=2, lanes=lanes),
         write_features=lambda _pd, c, f: features.__setitem__(c, dict(f)),
     )

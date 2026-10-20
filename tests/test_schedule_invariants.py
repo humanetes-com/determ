@@ -616,7 +616,9 @@ def test_the_executor_logs_a_broken_schedule_loudly() -> None:
     events: list[tuple[str, dict[str, Any]]] = []
     deps = SimpleNamespace(
         scheduled=True, crash_blamed=frozenset(inputs["crash_blamed"]),
-        measured_owners=frozenset(), due=frozenset(),
+        owner_admitted=frozenset(), owner_ordered=(),
+        owner_batch=frozenset(), owner_starved=frozenset(),
+        due=frozenset(),
         iteration=5, cluster="stable", log=log.append,
         emit=lambda name, data: events.append((name, data)))
     _check_schedule(recorded, inputs["hollow"], deps)  # type: ignore[arg-type]
@@ -674,20 +676,19 @@ def test_an_admitted_owner_no_candidate_writes_is_named() -> None:
     buf = FnLocator("src/ensure.rs", "new")
     file_run = Decided(key="f", label="file src/ensure.rs",
                        targets=frozenset({buf}), opened=True, share_minutes=5.0)
-    got = violations([file_run], hollow=None, measured_owners={render})
+    owed = {"admitted": {render}, "ordered": (render,), "batch": {render}}
+    got = violations([file_run], hollow=None, **owed)
     assert [v.kind for v in got] == ["owner_unrouted"]
     assert "src/ensure.rs::render" in got[0].detail
 
     parked = Decided(key="s", label="session[1 test(s), 3 unit(s)] #8",
                      targets=frozenset({render}), opened=False,
                      reason="pair_wait")
-    assert violations([file_run, parked], hollow=None,
-                      measured_owners={render}) == ()
+    assert violations([file_run, parked], hollow=None, **owed) == ()
     opened = Decided(key="f2", label="file src/ensure.rs",
                      targets=frozenset({render, buf}), opened=True,
                      share_minutes=5.0)
-    assert violations([opened], hollow=None,
-                      measured_owners={render}) == ()
+    assert violations([opened], hollow=None, **owed) == ()
     assert violations([file_run], hollow=None) == ()
 
 
@@ -699,9 +700,12 @@ def test_an_owner_admitted_on_an_earlier_sweep_is_checked_when_owed() -> None:
     (`dispatch_rank.starved`). Controls: the same owner inside a deferral
     with a reason does not fire; a unit the flat exclusion removed has left
     `ordered`; an owner past the cap inside the bound is not owed, so it does
-    not fire (run `3495074-71c576c7` fill 1 printed it as HEALTH ‼), while the
-    previous whole-frontier input names it."""
-    from pipeline_core.domain.escalation_lifetime import measured_owners_owed
+    not fire (run `3495074-71c576c7` fill 1 printed it as HEALTH ‼).
+    Passing the frontier as the admitted and ordered sets, with an empty
+    batch and an empty starved set, names nobody: there is no raw owner-set
+    argument that could."""
+    import inspect
+
     from pipeline_core.domain.models import FnLocator
     from pipeline_core.domain.schedule_invariants import Decided, violations
 
@@ -713,35 +717,57 @@ def test_an_owner_admitted_on_an_earlier_sweep_is_checked_when_owed() -> None:
     batch = {buf}
     ordered = [buf, render, waiting]     # `flat` left with the flat exclusion
     # `render` has met the rotation bound; `waiting` is inside it.
-    owners = measured_owners_owed(admitted_before, ordered,
-                                  batch=batch, starved={render})
-    assert owners == {render}
     file_run = Decided(key="f", label="file src/ensure.rs",
                        targets=frozenset({buf}), opened=True, share_minutes=5.0)
-    got = violations([file_run], hollow=None, measured_owners=owners)
+    got = violations([file_run], hollow=None, admitted=admitted_before,
+                     ordered=ordered, batch=batch, starved={render})
     assert [v.kind for v in got] == ["owner_unrouted"]
     assert "src/ensure.rs::render" in got[0].detail
     hollow = Decided(key="h", label="pair hollow", targets=frozenset({render}),
                      opened=False, reason="hollow")
     assert violations([file_run, hollow], hollow=None,
-                      measured_owners=owners) == ()
-    # Negative control: the whole-frontier input names the waiting owner.
-    frontier_input = frozenset(k for k in ordered if k in admitted_before)
-    got_old = violations([file_run], hollow=None, measured_owners=frontier_input)
-    assert any("src/chain.rs::new" in v.detail for v in got_old)
+                      admitted=admitted_before, ordered=ordered,
+                      batch=batch, starved={render}) == ()
+    frontier = [k for k in ordered if k in admitted_before]
+    assert violations([file_run], hollow=None, admitted=frontier,
+                      ordered=frontier, batch=(), starved=()) == ()
+    assert waiting in frontier
+    assert "measured_owners" not in inspect.signature(violations).parameters
 
 
-def test_a_recorded_event_carries_its_admitted_owners() -> None:
-    """The census reads `measured_owners` off the schedule event; an event
-    that predates the field (or has no inputs) carries none."""
+def test_a_recorded_event_recomputes_owed_owners_from_the_four_facts() -> None:
+    """The census reads the four facts off the schedule event and the
+    checker computes the owed set. A legacy `measured_owners` list, which
+    recorded the whole frontier, is not an input. An event with no facts
+    checks nothing."""
     from pipeline_core.domain.models import FnLocator
-    from pipeline_core.domain.schedule_invariants import measured_owners_from_event
+    from pipeline_core.domain.schedule_invariants import (
+        Decided,
+        owner_facts_from_event,
+        violations,
+    )
 
-    assert measured_owners_from_event(
-        {"inputs": {"measured_owners": ["src/ensure.rs::render"]}}) == frozenset(
-            {FnLocator("src/ensure.rs", "render")})
-    assert measured_owners_from_event({"inputs": {}}) == frozenset()
-    assert measured_owners_from_event({}) == frozenset()
+    event = {"inputs": {
+        "owner_admitted": ["src/ensure.rs::render", "src/chain.rs::new"],
+        "owner_ordered": ["src/ensure.rs::render", "src/chain.rs::new"],
+        "owner_batch": [],
+        "owner_starved": ["src/ensure.rs::render"],
+    }}
+    facts = owner_facts_from_event(event)
+    file_run = Decided(key="f", label="file src/ensure.rs",
+                       targets=frozenset(), opened=True)
+    got = violations(
+        [file_run], hollow=None,
+        admitted=facts["admitted"], ordered=facts["ordered"],
+        batch=facts["batch"], starved=facts["starved"])
+    assert [v.kind for v in got] == ["owner_unrouted"]
+    assert "src/ensure.rs::render" in got[0].detail
+    assert "src/chain.rs::new" not in got[0].detail
+    assert owner_facts_from_event(
+        {"inputs": {"measured_owners": ["src/ensure.rs::render"]}}) == {}
+    assert owner_facts_from_event({"inputs": {}}) == {}
+    assert owner_facts_from_event({}) == {}
+    assert FnLocator("src/ensure.rs", "render") != FnLocator("src/chain.rs", "new")
 
 
 def _due_of(seed: int, runs: list[Any]) -> frozenset[FnLocator]:

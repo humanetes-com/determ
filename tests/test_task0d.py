@@ -118,6 +118,8 @@ class _World:
             "run_probe": run_probe,
             "exercises_by_coverage": exercises,
             "record_misses": lambda pd, c, m: self.misses.append((c, list(m))),
+            "tests_failing_alone": lambda *_a, **_k: (),
+            "settle_test_gate": lambda *_a, **_k: "kept",
             # The book's rule calls are their own stage with their own knob;
             # these pins are about the probe stage, so the book is built
             # without sentences (no model call) unless a test asks for it.

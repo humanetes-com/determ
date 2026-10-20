@@ -302,12 +302,12 @@ def emit_behaviour_tests(
     *,
     crate: str,
     verify: Verify,
+    failing_alone: FailingAlone,
+    settle: Settle,
     perturb_env: Mapping[str, str] = (),  # type: ignore[assignment]
     cfg_attr: str = "",
     balanced: Callable[[str], bool] = lambda _s: True,
     recapture: Recapture | None = None,
-    failing_alone: FailingAlone | None = None,
-    settle: Settle | None = None,
 ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
     """Write the replayable captures as one `tests/<stem>_gen_1.rs`, verified.
 
@@ -326,7 +326,9 @@ def emit_behaviour_tests(
 
     ``failing_alone(stem, names)`` names the tests of the green file that do
     not pass alone in a process of their own (`adapters.test_worlds`); their
-    captures are withdrawn like a replay disagreement. A test that passes
+    captures are withdrawn like a replay disagreement. Both callables are
+    required: a default that skipped them admitted the file as written. A
+    test that passes
     only beside another test's side effect on process state is not a
     specification of the crate (run `801510-bb22799f`, 2026-10-20: a t0c test
     passed only after a sibling's `set_var`, and task 3 read it red or green
@@ -343,6 +345,9 @@ def emit_behaviour_tests(
     legacy free-form blobs. A delimiter-unbalanced render is refused rather
     than written: a broken file in `tests/` does not fail one test, it stops
     the whole crate compiling and every verdict with it."""
+    if not callable(failing_alone) or not callable(settle):
+        raise TypeError(
+            "emit_behaviour_tests requires the alone check and the world settle")
     stem = behaviour_test_stem(cfg_cluster)
     _clear_previous(project_dir, stem)
     keep = replayable(specs)
@@ -452,24 +457,23 @@ def emit_behaviour_tests(
             if unrun := _unexecuted(keep, executed):
                 _withdraw_unrun(unrun, perturbed=False)
                 return None, tuple(dropped), misses, ()
-            if failing_alone is not None:
-                alone = frozenset(failing_alone(dest.stem, sorted(executed)))
-                if alone:
-                    keep, went = _withdraw(
-                        keep, alone, _drop,
-                        "passes only beside the file's other tests: red "
-                        "when run alone in its own process")
-                    log(
-                        f"  [task0d] cluster {cfg_cluster}: {len(went)} "
-                        "capture(s) pass only beside the file's other tests "
-                        "and were withdrawn.")
-                    if keep and went:
-                        continue
-                    with suppress(OSError):
-                        dest.unlink()
-                    for s in keep:
-                        _drop(s, "replay red alone on a test naming no capture")
-                    return None, tuple(dropped), misses, ()
+            alone = frozenset(failing_alone(dest.stem, sorted(executed)))
+            if alone:
+                keep, went = _withdraw(
+                    keep, alone, _drop,
+                    "passes only beside the file's other tests: red "
+                    "when run alone in its own process")
+                log(
+                    f"  [task0d] cluster {cfg_cluster}: {len(went)} "
+                    "capture(s) pass only beside the file's other tests "
+                    "and were withdrawn.")
+                if keep and went:
+                    continue
+                with suppress(OSError):
+                    dest.unlink()
+                for s in keep:
+                    _drop(s, "replay red alone on a test naming no capture")
+                return None, tuple(dropped), misses, ()
 
             # Green under the capture env. Now the axis run-twice cannot see: the
             # same binary under a different environment. A capture whose value
@@ -570,7 +574,7 @@ def emit_behaviour_tests(
                     _withdraw_unrun(unrun, perturbed=True)
                     return None, tuple(dropped), misses, ()
 
-            if settle is not None and settle(dest, body) is None:
+            if settle(dest, body) is None:
                 with suppress(OSError):
                     dest.unlink()
                 for s in keep:
