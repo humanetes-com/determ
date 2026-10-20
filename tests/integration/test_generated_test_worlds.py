@@ -258,6 +258,68 @@ def test_a_test_that_fails_where_it_was_written_has_no_world(tmp_path: Path) -> 
                                 cluster_env=cluster_cargo_env, timeout=600) is True
 
 
+# One test passes only because the other, which sorts first, set process
+# state. Run `801510-bb22799f` (2026-10-20), `tests/fmt_gen_1.rs`: a test
+# asserting a captured backtrace beside one that sets `RUST_LIB_BACKTRACE`.
+_ORDER_DEPENDENT = """#[test]
+fn a_sets_the_mode() {
+    std::env::set_var("GADGET_MODE", "1");
+    assert_eq!(gadgets::size(), 1);
+}
+
+#[test]
+fn b_reads_the_mode() {
+    assert_eq!(std::env::var("GADGET_MODE").as_deref(), Ok("1"));
+}
+"""
+
+
+def _file_run(root: Path, cluster: BuildCluster, stem: str,
+              *extra: str) -> tuple[int, str]:
+    env = cluster_cargo_env(cluster)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / root.parent.name / cluster.name)
+    args = " ".join(extra)
+    return run_cargo(CargoCli(), f"cargo test --offline --test {stem} -- "
+                     f"--test-threads=1 {args}", root, env, timeout=600)
+
+
+def test_premise_one_thread_runs_a_file_in_name_order_and_shares_its_process(
+        tmp_path: Path) -> None:
+    """The file run settles on (`--test-threads=1`) passes the order-dependent
+    pair; `--exact` on the reader alone fails it. If libtest stops running a
+    one-thread file in name order in one process, the alone check is no
+    longer the only thing that tells the two apart."""
+    root = _crate(tmp_path)
+    base, _alt = _clusters()
+    (root / "tests" / "mode_gen_0.rs").write_text(_ORDER_DEPENDENT)
+    rc, out = _file_run(root, base, "mode_gen_0")
+    assert rc == 0 and parse_test_counts(out)[:2] == (2, 0)
+    rc_alone, out_alone = _file_run(root, base, "mode_gen_0",
+                                    "--exact", "b_reads_the_mode")
+    assert rc_alone != 0 and parse_test_counts(out_alone)[:2] == (0, 1)
+
+
+def test_a_test_that_passes_only_after_another_has_no_world(tmp_path: Path) -> None:
+    """The settle refuses the block and leaves the file as found.
+    NEGATIVE CONTROL: the whole-file reading the settle used to stop at
+    passes it (the premise above)."""
+    root = _crate(tmp_path)
+    base, alt = _clusters()
+    logs: list[str] = []
+    deps = TestWorldsDeps(
+        clusters=lambda: [base, alt],
+        world_gate=lambda c: cluster_cfg_attr(c, [base, alt]),
+        passes_in=functools.partial(test_passes_in_world,
+                                    cluster_env=cluster_cargo_env, timeout=600,
+                                    log=logs.append),
+        log=logs.append, world_key=world_key)
+    f = _write(root, "mode_gen_1", _ORDER_DEPENDENT, base, deps)
+    before = f.read_text()
+    assert settle_test_gate(root, "gadgets", f, _ORDER_DEPENDENT, base, deps) is None
+    assert f.read_text() == before
+    assert any("b_reads_the_mode fail(s) when run alone" in m for m in logs), logs
+
+
 # --- the crate's doc examples, emitted as oracle tests -----------------------
 # Same reader (the per-world runner and the settle), fed by the real extractor's
 # doc records. Run `292191-d60a5308`: the one assertion pinning a lost

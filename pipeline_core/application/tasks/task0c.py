@@ -2219,9 +2219,12 @@ project-specific import paths, type construction patterns, and hard constraints.
                         _why = (
                             "The file compiles and no test failed, but not every #[test] in "
                             "it was reported PASSING when run in the build it was written "
-                            "for. Every test must run and pass: no `#[ignore]`, and no "
+                            "for, or not every test passed when run ALONE in a process of "
+                            "its own. Every test must run and pass: no `#[ignore]`, no "
                             "`#[cfg(...)]` (on a test or at the top of the file) that "
-                            "compiles a test out.")
+                            "compiles a test out, and no test that relies on another test "
+                            "having run first (an environment variable, a global or a file "
+                            "another test sets up).")
                         _log(f"  [{module_name}] gen_tests_{pass_n} in {rel_path} is not "
                              "reported passing in the world that generated it.")
                         _log_task0c_attempt(project_dir, rel_path, attempt + _fix_n - 1,

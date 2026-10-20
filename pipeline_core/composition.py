@@ -1478,7 +1478,7 @@ def build_app(
         world_gate=cluster_cfg_attr,
         passes_in=functools.partial(
             test_passes_in_world, cluster_env=cluster_cargo_env,
-            timeout=cfg.build_timeout),
+            timeout=cfg.build_timeout, log=ports.log),
         log=ports.log, emit=ports.emit,
         world_key=world_key)
 
