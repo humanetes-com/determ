@@ -158,7 +158,9 @@ def qualified_verdicts(
     failed: set[tuple[str, str]] = set()
     incomplete: set[str] = set()
     for b in binaries:
-        label = str(getattr(b, "label", "?"))
+        # The binary's key: its label, world-qualified when the capture
+        # joined worlds — the same binary in two worlds is two verdicts.
+        label = str(getattr(b, "key", None) or getattr(b, "label", "?"))
         for name in getattr(b, "passed", ()):
             passed.add((label, str(name)))
         for name in getattr(b, "failed", ()):

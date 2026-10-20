@@ -3077,8 +3077,8 @@ def run_phase_c_tdd(
                  "passed_pairs": [list(p) for p in sorted(_p_pairs)][:200],
                  "failed_pairs": [list(p) for p in sorted(_f_pairs)][:200],
                  "incomplete": sorted(_incomplete),
-                 "hung": sorted(b.label for b in _hung),
-                 "hung_tests": sorted(f"{b.label}::{b.dangling or '?'}" for b in _hung),
+                 "hung": sorted(b.key for b in _hung),
+                 "hung_tests": sorted(f"{b.key}::{b.dangling or '?'}" for b in _hung),
                  "reconciled": _rec.reconciled,
                  "reconcile_note": _rec.note,
                  # The outer-loop budget travels with every iter event so a
@@ -5591,7 +5591,7 @@ def run_phase_c_tdd(
             # same question reuses the last reading. A bare name that gains
             # or loses a binary does not — the stored map is the first
             # claimant's.
-            _hung_now = {b.label: (b.dangling or "?") for b in _hung}
+            _hung_now = {b.key: (b.dangling or "?") for b in _hung}
             _cov_key = (_tree_sha, frozenset(cur_failed),
                         frozenset(_hung_now.items()),
                         frozenset(_measure.failed_pairs),

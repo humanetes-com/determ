@@ -257,3 +257,41 @@ def test_the_world_header_is_written_only_when_worlds_join() -> None:
     joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
     assert "=== cfg world: base ===" in joined
     assert "=== cfg world:" not in join_world_captures([("base", BASE_RUN)])
+
+
+# --- a verdict is (world, binary, test) --------------------------------------
+
+
+def test_a_joined_capture_reconciles_its_counts_with_its_verdicts() -> None:
+    """Run `989033-faa2ae3e` (2026-10-20), the first one-tree sweep: `VERDICT
+    MISMATCH — UNEXPLAINED: 188 qualified pass(es) vs pass_count=352`. The
+    two worlds run the same binaries under the same labels, so (binary,
+    test) pairs collapsed across worlds while the trailer counts summed."""
+    from pipeline_core.domain.measurement import Measurement, qualified_verdicts
+    joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
+    bins = parse_binary_results(joined)
+    assert [(b.world, b.label) for b in bins] == [
+        ("base", "tests/a.rs"), ("alt", "tests/a.rs"),
+        ("alt", "tests/compiletest.rs")]
+    p_pairs, f_pairs, _inc = qualified_verdicts(bins)
+    passed, failed = parse_test_counts(joined)[:2]
+    m = Measurement(cluster="base", iteration=1, tree_sha="t",
+                    oracle_size=passed + failed, pass_count=passed,
+                    fail_count=failed, passed=frozenset(), failed=frozenset(),
+                    passed_pairs=p_pairs, failed_pairs=f_pairs)
+    assert m.reconcile().reconciled
+    assert ("base/tests/a.rs", "t_shared") in p_pairs
+    assert ("alt/tests/a.rs", "t_shared") in p_pairs
+    # Control: the same binaries keyed by label alone lose a world's copy.
+    bare = {(b.label, n) for b in bins for n in b.passed}
+    assert len(bare) == passed - 1
+
+
+def test_a_reading_keeps_both_worlds_copies_of_a_binary() -> None:
+    from pipeline_core.domain.test_results import TestStateReading
+    joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
+    reading = TestStateReading(binaries=parse_binary_results(joined))
+    assert sorted(reading.by_label()) == [
+        "alt/tests/a.rs", "alt/tests/compiletest.rs", "base/tests/a.rs"]
+    one = TestStateReading(binaries=parse_binary_results(BASE_RUN))
+    assert sorted(one.by_label()) == ["tests/a.rs"]

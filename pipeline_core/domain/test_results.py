@@ -1371,10 +1371,21 @@ class BinaryResult:
     # These are what the crash localizer re-runs under gdb / ASAN; an abort
     # that printed a panic already names its site in the block.
     aborted_silent: frozenset[str] = frozenset()
+    # The build world this binary ran in, when the capture joined several
+    # (`join_world_captures`); "" for a one-world capture. Two worlds run the
+    # same binaries under the same labels, so the label alone is not a
+    # binary of the crate's reading: `key` is.
+    world: str = ""
 
     @property
     def executed(self) -> int:
         return self.pass_count + self.fail_count
+
+    @property
+    def key(self) -> str:
+        """The binary's identity in a reading: its label, qualified by its
+        world when the capture joined worlds."""
+        return f"{self.world}/{self.label}" if self.world else self.label
 
 
 @dataclass(frozen=True)
@@ -1486,7 +1497,9 @@ class TestStateReading:
         return any(b.hung for b in self.binaries)
 
     def by_label(self) -> dict[str, BinaryResult]:
-        return {b.label: b for b in self.binaries}
+        """Per binary of the reading, by :attr:`BinaryResult.key` (the label,
+        world-qualified when the capture joined worlds)."""
+        return {b.key: b for b in self.binaries}
 
     def keyed(self) -> KeyedVerdicts:
         """This reading per (binary, test): what every keep compares
@@ -1508,11 +1521,11 @@ class TestStateReading:
         silent: set[TestKey] = set()
         for b in self.binaries:
             if b.completed:
-                passed |= _k(b.label, b.passed)
-            failed |= _k(b.label, b.failed)
-            ignored |= _k(b.label, b.ignored)
-            aborted |= _k(b.label, b.aborted)
-            silent |= _k(b.label, b.aborted_silent)
+                passed |= _k(b.key, b.passed)
+            failed |= _k(b.key, b.failed)
+            ignored |= _k(b.key, b.ignored)
+            aborted |= _k(b.key, b.aborted)
+            silent |= _k(b.key, b.aborted_silent)
         return KeyedVerdicts(
             passed=frozenset(passed), failed=frozenset(failed),
             ignored=frozenset(ignored), aborted=frozenset(aborted),
@@ -1841,7 +1854,22 @@ def parse_binary_results(
     cut — the last one — and that binary did not die, it HUNG: it is marked
     ``hung`` (its ``dangling`` test is the one that never returned). Earlier
     unclosed sections in the same capture are crashes as before (cargo
-    went on to the next target after them)."""
+    went on to the next target after them).
+
+    A capture that joined several build worlds is read world by world, each
+    binary carrying its ``world``: cargo's pairing of labels to sections
+    holds within one world's run, and the same label in two worlds is two
+    binaries."""
+    _worlds = world_sections(test_output)
+    if "" not in _worlds:
+        # Worlds run one after another, so only the LAST one can have been
+        # cut by the caller's timeout; an earlier world's open section is a
+        # crash of that world's binary, as in one capture.
+        _last = list(_worlds)[-1]
+        return tuple(replace(b, world=w)
+                     for w, text in _worlds.items()
+                     for b in parse_binary_results(
+                         text, timed_out=timed_out and w == _last))
     labels: list[tuple[str, str | None]] = []
     for raw in test_output.splitlines():
         _lab = _target_label(raw.strip())
