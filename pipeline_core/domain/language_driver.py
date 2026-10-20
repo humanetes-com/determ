@@ -69,6 +69,7 @@ class LanguageDriver(Protocol):
         crate_traits: Collection[str] = ()) -> bool: ...
     def origin_licenses_conversion(self, origin: Sequence[Mapping[str, object]]) -> bool: ...
     def unique_called_name(self, source_line: str) -> str | None: ...
+    def called_name_at_column(self, source_line: str, col: int) -> str | None: ...
     def ownership_transfer_must(self, names: Collection[str]) -> str: ...
     def file_fill_tag_examples(self) -> str: ...
     def sig_change_example(self, fn_name: str) -> str: ...
@@ -137,11 +138,34 @@ def _called_idents(line: str) -> list[str]:
     in source order. The conversion on an ASAN test line is the first
     call; trailing adapters (``unwrap``) sit after it.
     """
-    found: list[str] = []
+    return [name for name, _start, _end in _called_spans(line)]
+
+
+def _path_start(line: str, sep: int) -> int:
+    """Where the path ending in the ``::`` at ``sep`` begins: back over
+    ``Ident::`` segments (``Error::msg`` begins at ``E``)."""
+    k = sep
+    while k > 0:
+        if line[k - 1].isalnum() or line[k - 1] == "_":
+            k -= 1
+        elif k > 1 and line[k - 2:k] == "::":
+            k -= 2
+        else:
+            break
+    return k
+
+
+def _called_spans(line: str) -> list[tuple[str, int, int]]:
+    """Every call :func:`_called_idents` finds, as ``(name, start, end)``,
+    0-based and end-exclusive: ``start`` is where the callee is written
+    (the name after ``.``, the path's first segment before ``::``), ``end``
+    is past the name. A debugger's caller column falls in this span."""
+    found: list[tuple[str, int, int]] = []
     i = 0
     n = len(line)
     while i < n:
         if line[i] == "." or (line[i] == ":" and i + 1 < n and line[i + 1] == ":"):
+            start_of = (_path_start(line, i) if line[i] == ":" else None)
             i = i + 2 if line[i] == ":" else i + 1
             while i < n and line[i].isspace():
                 i += 1
@@ -171,7 +195,7 @@ def _called_idents(line: str) -> list[str]:
                         while k < n and line[k].isspace():
                             k += 1
                 if k < n and line[k] == "(":
-                    found.append(name)
+                    found.append((name, i if start_of is None else start_of, j))
                 i = j
             continue
         i += 1
@@ -419,6 +443,12 @@ class GenericLanguageDriver:
     def unique_called_name(self, source_line: str) -> str | None:
         found = _called_idents(source_line)
         return found[0] if found else None
+
+    def called_name_at_column(self, source_line: str, col: int) -> str | None:
+        # `col` is the detector's 1-based column of a caller frame.
+        at = {name for name, start, end in _called_spans(source_line)
+              if start <= col - 1 < end}
+        return next(iter(at)) if len(at) == 1 else None
 
     def ownership_transfer_must(self, names: Collection[str]) -> str:
         # A non-empty crashed set at this slot is already the conversion the

@@ -39,8 +39,10 @@ from pipeline_core.domain.crash_site import (
     CrashFrame,
     CrashSite,
     SourceWindow,
+    access_stack_text,
     authorable_frames,
     blamed_locators,
+    caller_column_after_destructor,
     first_test_file_after_destructor,
     first_test_file_on_access,
     non_destructor_frames,
@@ -50,6 +52,7 @@ from pipeline_core.domain.crash_site import (
     relativize_frame_files,
     site_from_frames,
 )
+from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnLocator
 
 #: The run's own report, first error block, byte-for-byte. Driven through the
@@ -557,3 +560,83 @@ def test_the_arc_double_drop_report_still_recovers_nothing() -> None:
         source_line="    let b = err.into_boxed_dyn_error();",
         source_loc=("tests/test_downcast.rs", 83))
     assert site.blamed_locator is None and site.origin_unattributed
+
+
+#: Run `1804897-1ad432ba` (2026-10-20), `logs/asan/asan-20261020T121045129084.txt`,
+#: the `tests/error_gen_3.rs` block byte-for-byte. The free stack is
+#: `Error::drop src/error.rs:630 → tests/error_gen_3.rs:37:43`; the access
+#: stack is std's drop glue of the `Box<dyn Error>` the conversion returned,
+#: with no `src/` frame at all.
+_TWO_CALLS = (Path(__file__).parent / "fixtures" / "crash"
+              / "uaf_two_declared_calls_one_line_1804897_2026-10-20.txt")
+#: Line 37 of that test, as it stands in the tree: two calls `src/error.rs`
+#: declares, the constructor and the conversion. Column 43 is where the
+#: conversion's name starts.
+_LINE_ERROR_GEN_3_37 = (
+    '    let boxed = Error::msg("boxed debug").into_boxed_dyn_error();')
+
+
+def _two_calls_site(*, drop_column: bool = False) -> CrashSite:
+    rep = _report(_TWO_CALLS, "tests/error_gen_3.rs")
+    origin = ([{k: v for k, v in r.items() if k != "col"} for r in rep.origin]
+              if drop_column else rep.origin)
+    return site_from_frames(
+        rep.label, "test_debug_alternate_exercises_error_impl_debug",
+        rep.kind, rep.access, origin_raw_frames=origin, origin_capable=True,
+        raw_report=rep.text, source_line=_LINE_ERROR_GEN_3_37,
+        source_loc=first_test_file_after_destructor(origin),
+        declared_in=_declared)
+
+
+def test_two_declared_calls_on_the_freeing_line_are_told_apart_by_the_caller_column() -> None:
+    """The line holds two calls the anchor file declares, so the one-call
+    rule named nobody and the destructor kept the blame: the fill prompts of
+    that run said "Fix the pointer/lifetime scheme in `drop`" three times,
+    and crash-settle reverted `drop` each time. The caller frame's column
+    names the conversion."""
+    rep = _report(_TWO_CALLS, "tests/error_gen_3.rs")
+    assert first_test_file_after_destructor(rep.origin) == (
+        "tests/error_gen_3.rs", 37)
+    assert caller_column_after_destructor(rep.origin) == 43
+    site = _two_calls_site()
+    assert site.blamed_locator == FnLocator("src/error.rs", "into_boxed_dyn_error")
+    assert site.blamed is not None
+    assert site.blamed.named_by == ("tests/error_gen_3.rs", 37)
+    without = _two_calls_site(drop_column=True)
+    assert without.blamed_locator == FnLocator("src/error.rs", "drop"), (
+        "negative control: without the column the live blame reproduces")
+
+
+def test_the_column_names_only_the_call_written_there() -> None:
+    drv = language_driver()
+    assert drv.called_name_at_column(_LINE_ERROR_GEN_3_37, 43) == (
+        "into_boxed_dyn_error")
+    # A path call is written from its first segment.
+    assert drv.called_name_at_column(_LINE_ERROR_GEN_3_37, 17) == "msg"
+    # Inside an argument, at the `let`, or with no column: nobody.
+    assert drv.called_name_at_column(_LINE_ERROR_GEN_3_37, 30) is None
+    assert drv.called_name_at_column(_LINE_ERROR_GEN_3_37, 5) is None
+    assert drv.called_name_at_column(_LINE_ERROR_GEN_3_37, 0) is None
+
+
+def test_a_frame_derived_site_says_dropped_twice_and_shows_an_access_stack_with_no_crate_frame() -> None:
+    """The live prompt printed the access header with nothing under it and
+    never the double-drop reading, which only the chain-derived renderer
+    used. Both come from the stacks the frame filter discards."""
+    site = _two_calls_site()
+    assert site.frames == ()
+    text = site.render_evidence()
+    assert "DOUBLE DROP: `anyhow::Error` is dropped twice" in text
+    assert "crate frames only" not in text
+    assert "no crate frame on it" in text
+    assert "drop_glue::<alloc::boxed::Box<dyn core::error::Error" in text
+    assert "tests/error_gen_3.rs:40" in text
+    assert "Fix the pointer/lifetime scheme in `into_boxed_dyn_error`" in text
+    # The access excerpt stops at the line that reached it.
+    access = access_stack_text(site.raw_report)
+    assert access.splitlines()[-1].strip().endswith("tests/error_gen_3.rs:40:1")
+    bare = CrashSite(binary_label="b", test_name=None,
+                     signal="AddressSanitizer: heap-use-after-free",
+                     frames=(), origin_capable=True)
+    assert "DOUBLE DROP" not in bare.render_evidence(), (
+        "negative control: a site without the two stacks claims nothing")

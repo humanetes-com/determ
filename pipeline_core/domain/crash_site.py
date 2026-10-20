@@ -426,6 +426,35 @@ def first_test_file_after_destructor(
     destructor
     frames (`Error::drop` then `object_drop`) are walked past.
     """
+    rec = _caller_after_destructor(origin)
+    if rec is None:
+        return None
+    return (str(rec["file"]), int(str(rec["line"])))
+
+
+def caller_column_after_destructor(
+    origin: Sequence[Mapping[str, object]],
+) -> int:
+    """The column of the caller frame :func:`first_test_file_after_destructor`
+    names, or 0 when the detector printed none.
+
+    The line alone cannot say WHICH call freed: `tests/error_gen_3.rs:37`,
+    run `1804897-1ad432ba` (2026-10-20), is
+    ``let boxed = Error::msg("boxed debug").into_boxed_dyn_error();`` — two
+    calls the anchor file declares — and the free stack's caller frame is
+    `:37:43`, the column where the second call's name starts. Without the
+    column the recovery named nobody and the destructor kept the blame."""
+    rec = _caller_after_destructor(origin)
+    col = rec.get("col") if rec is not None else None
+    return col if isinstance(col, int) and col >= 1 else 0
+
+
+def _caller_after_destructor(
+    origin: Sequence[Mapping[str, object]],
+) -> Mapping[str, object] | None:
+    """The one walk both readers above share: the first non-toolchain,
+    non-destructor frame after an in-crate destructor, with a line, in a
+    test file or in `src/`; None otherwise."""
     seen_destructor = False
     for rec in origin:
         file_ = str(rec.get("file") or "")
@@ -442,10 +471,8 @@ def first_test_file_after_destructor(
         raw_line = rec.get("line")
         if not (isinstance(raw_line, int) and raw_line >= 1):
             return None
-        if file_.startswith("tests/"):
-            return (file_, raw_line)
-        if file_.startswith("src/"):
-            return (file_, raw_line)
+        if file_.startswith(("tests/", "src/")):
+            return rec
         return None
     return None
 
@@ -542,8 +569,10 @@ def recover_owner_from_caller_source(
     ``source_window`` (the access-side window of the enclosing test fn,
     whose own coordinates supply ``named_by`` — the binding line, not the
     faulting access). On a line, with the anchor's declared names in hand,
-    the name is the one call to a declared fn, and two or none is nobody;
-    without them, the line's first call. On a window, the name the faulting
+    the name is the one call to a declared fn; with two or more, the one
+    the caller frame's column falls in (:func:`caller_column_after_destructor`),
+    and none, or no column, is nobody; without the declared names, the
+    line's first call. On a window, the name the faulting
     line reads is resolved
     first (:func:`_name_from_binding`), counting only calls to fns the
     anchor file declares (``declared_in``, the anchor's fn names, or None
@@ -590,6 +619,12 @@ def recover_owner_from_caller_source(
         if declared is not None:
             calls = _declared_calls(source_line, declared)
             name = calls[0] if len(calls) == 1 else None
+            col = caller_column_after_destructor(origin_raw)
+            if len(calls) > 1 and col:
+                # Two declared calls on the line: the caller frame's column
+                # is where the call that ran the destructor is written.
+                at = drv.called_name_at_column(source_line, col)
+                name = at if at in calls else None
         else:
             name = drv.unique_called_name(source_line)
     elif source_window is not None and source_window.lines:
@@ -769,8 +804,8 @@ class DestructionFault:
         return (
             f"DOUBLE DROP: `{self.freed_type}` is dropped twice — freed at "
             f"{self.free_site}, then touched again by drop glue at "
-            f"{self.access_site}. Both drops run in test code, so no crate "
-            "frame appears in either stack: the defect is a value this crate "
+            f"{self.access_site}. A drop that frees what it owns is doing "
+            "its job: the defect is a value this crate "
             "hands to a SECOND owner without giving up the first (a vtable "
             "drop that also drops a payload another path has already read out, "
             "a missing `ManuallyDrop`/`mem::forget` after a `ptr::read`, a "
@@ -1111,10 +1146,30 @@ def _render_invalid_memory(site: CrashSite) -> str:
     lines = [
         f"Test binary `{site.binary_label}` died with {site.signal}"
         f"{where} — it never reported its remaining tests.",
-        "Faulting access (innermost first, crate frames only):",
     ]
-    lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
-              for i, fr in enumerate(site.frames)]
+    if site.destruction is not None:
+        # The double-drop reading is drawn from the stacks the frame filter
+        # discards, and it says which value has two owners. It was rendered
+        # only for chain-derived sites, so a frame-derived site with the same
+        # two stacks (run `1804897-1ad432ba`, 2026-10-20: `Error::drop` freed
+        # at the conversion's call, drop glue of the returned box touched
+        # it) told the model to fix the destructor and never said
+        # "dropped twice".
+        lines.append(site.destruction.render())
+    if site.frames:
+        lines.append("Faulting access (innermost first, crate frames only):")
+        lines += [f"  #{i} {fr.symbol} at {_frame_locus(fr)}"
+                  for i, fr in enumerate(site.frames)]
+    else:
+        # No crate frame on the access stack: the header alone printed
+        # nothing, and the access path the model needed (which drop glue
+        # of which type, reached from which test line) was in the frames
+        # the filter dropped.
+        raw_access = access_stack_text(site.raw_report)
+        if raw_access:
+            lines.append("Faulting access (no crate frame on it — the "
+                         "detector's own stack, std frames included):")
+            lines.append(raw_access)
     if site.origin_frames and site.origin_traced:
         # The debugger's trace (`traced_origin_index`): the faulting frame
         # was handed the address; this frame produced it.
@@ -1631,6 +1686,30 @@ def origin_stack_text(report: str, *, max_frames: int = 8) -> str:
             elif s:
                 break
     return "\n".join(keep) if len(keep) > 1 else ""
+
+
+def access_stack_text(report: str, *, max_frames: int = 8) -> str:
+    """The ACCESS stack of the first error report, verbatim, from its
+    innermost frame through the first frame outside the toolchain (the
+    line that reached it), at most ``max_frames`` frames; "" when the report
+    has no access stack. The access-side sibling of
+    :func:`origin_stack_text`, for a site whose access stack holds no crate
+    frame."""
+    keep: list[str] = []
+    for line in _asan_first_report(report)[1:]:
+        if line.startswith("#"):
+            if len(keep) >= max_frames:
+                keep.append("    … (truncated)")
+                break
+            keep.append("    " + line)
+            rec = _parse_asan_frame_line(line)
+            file_ = str(rec.get("file") or "") if rec is not None else ""
+            if file_ and not _raw_is_toolchain(file_) and not file_.startswith("("):
+                break
+            continue
+        if keep:
+            break
+    return "\n".join(keep)
 
 
 def _asan_first_report(report: str) -> list[str]:
@@ -2413,16 +2492,25 @@ def vanished_subject_fns(
 
 
 def _parse_asan_frame_line(line: str) -> dict[str, object] | None:
-    """``#N 0xADDR in SYMBOL FILE:LINE[:COL]`` → frame record, else None."""
+    """``#N 0xADDR in SYMBOL FILE:LINE[:COL]`` → frame record, else None.
+
+    ``col`` is kept (0 when absent): on a caller frame it is where on the
+    line the call that ran the callee sits, which is the only thing that
+    tells two calls on one line apart (:func:`caller_column_after_destructor`).
+    """
     toks = line.split()
     if len(toks) < 5 or toks[2] != "in":
         return None
     loc = toks[-1]
     symbol = " ".join(toks[3:-1])
     parts = loc.rsplit(":", 2)
+    if len(parts) == 3 and not parts[1].isdigit():
+        # `FILE:LINE` with a colon in FILE; there is no column.
+        parts = [parts[0] + ":" + parts[1], parts[2]]
     file_ = parts[0]
     line_no = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
-    return {"func": symbol, "file": file_, "line": line_no}
+    col = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() else 0
+    return {"func": symbol, "file": file_, "line": line_no, "col": col}
 
 
 @dataclass(frozen=True, slots=True)
