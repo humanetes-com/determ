@@ -95,7 +95,7 @@ def test_a_compiling_turn_that_is_still_the_crash_is_not_kept(tmp_path):
     ])
     logs: list[str] = []
 
-    def measure(raw):
+    def measure(raw, _role=None):
         raw.append(capture)
         lib = (root / "src" / "lib.rs").read_text()
         return baseline if lib == "SESSION_LIB" else after
@@ -132,7 +132,7 @@ def test_a_compiling_turn_that_is_still_the_crash_is_not_kept(tmp_path):
 
     # Negative control: the same turn with no written unit in the sweep's
     # blame is kept.
-    def measure_open(raw):
+    def measure_open(raw, _role=None):
         raw.append(capture)
         return after
 
@@ -165,7 +165,7 @@ def test_an_inconclusive_opening_suite_does_not_run_or_keep(tmp_path):
         return "should not run"
 
     out = run_slice_session(
-        _ports(measure=lambda raw: None, ask=ask),
+        _ports(measure=lambda raw, _role=None: None, ask=ask),
         target_src_dir=root, cluster_name="t",
         slice_=SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         records=_RECS, turn0="turn0")
@@ -190,8 +190,8 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
     from pipeline_core.domain.test_results import compare_readings
     assert not compare_readings(baseline, after).regressed
     assert compare_readings(baseline, after).newly_red == frozenset({"t_keep"})
-    kept, reverted = _peel(
-        _ports(measure=lambda raw: after),
+    kept, reverted, _held = _peel(
+        _ports(measure=lambda raw, _role=None: after),
         root,
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
@@ -208,8 +208,8 @@ def test_peel_holds_a_net_positive_state_that_reddened_a_sibling_and_peels_a_fla
     flat = _reading({"t_pair"}, {"t_keep"})
     assert flat.pass_count == baseline.pass_count
     assert compare_readings(baseline, flat).regressed
-    kept2, _reverted2 = _peel(
-        _ports(measure=lambda raw: flat),
+    kept2, _reverted2, _held2 = _peel(
+        _ports(measure=lambda raw, _role=None: flat),
         root2,
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
@@ -238,8 +238,8 @@ def test_a_peel_refuses_a_silent_abort_even_beside_a_net_gain(tmp_path):
     from pipeline_core.domain.test_results import compare_readings
     assert not compare_readings(baseline, after).regressed
     assert compare_readings(baseline, after).net_pass_delta > 0
-    kept, _reverted = _peel(
-        _ports(measure=lambda raw: after),
+    kept, _reverted, _held = _peel(
+        _ports(measure=lambda raw, _role=None: after),
         root,
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
@@ -278,7 +278,7 @@ def test_a_hung_turn_restores_the_whole_change_set(tmp_path):
     hold = _reading({"t_keep"}, {"t_pair"})
     logs: list[str] = []
 
-    def measure(_raw):
+    def measure(_raw, _role=None):
         lib = (root / "src" / "lib.rs").read_text()
         ren = (root / "src" / "render.rs").read_text()
         if lib == "SESSION_LIB" and ren == "SESSION_REN":
@@ -340,8 +340,8 @@ def test_a_failed_peel_splice_leaves_the_unit_on_the_kept_side(tmp_path):
         path.write_text(body)
         return True, "", 0
 
-    kept, reverted = _peel(
-        _ports(measure=lambda raw: hold, splice=splice),
+    kept, reverted, _held = _peel(
+        _ports(measure=lambda raw, _role=None: hold, splice=splice),
         root,
         SessionSlice(tests=("t_pair",), units=(_FMT, _RENDER)),
         _RECS, baseline,
@@ -412,7 +412,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
     ports = SessionPorts(
         ask_turns=ask, splice=splice, check=lambda: (0, "", []),
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
-        measure_suite=lambda raw: after if (tmp_path / "src" / "i.rs").read_text() != "IMPL"
+        measure_suite=lambda raw, _role=None: after if (tmp_path / "src" / "i.rs").read_text() != "IMPL"
         else baseline,
         read_source=lambda p: None,
         enumerate_bodies=enumerate,
@@ -450,7 +450,7 @@ def test_a_file_request_grows_the_write_set_so_the_next_turn_can_write_the_imple
     ports_ctrl = SessionPorts(
         ask_turns=ask_ctrl, splice=splice, check=lambda: (0, "", []),
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
-        measure_suite=lambda raw: baseline,
+        measure_suite=lambda raw, _role=None: baseline,
         read_source=lambda p: None,
         enumerate_bodies=lambda: {disp_site: disp.body_text},
         answer_pulls=lambda r, conversation="": None,
@@ -484,7 +484,7 @@ def test_a_turn_that_ignores_an_input_is_kept_only_when_a_test_turns_green(tmp_p
     baseline = _reading(set(), {"t_box"})
     still_red = _reading(set(), {"t_box"})
     out = run_slice_session(
-        _ports(measure=lambda raw: baseline
+        _ports(measure=lambda raw, _role=None: baseline
                if (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
                else still_red, ask=ask),
         target_src_dir=root, cluster_name="t",
@@ -499,7 +499,7 @@ def test_a_turn_that_ignores_an_input_is_kept_only_when_a_test_turns_green(tmp_p
     root2 = _tree(tmp_path / "control")
     green = _reading({"t_box"}, set())
     kept = run_slice_session(
-        _ports(measure=lambda raw: baseline
+        _ports(measure=lambda raw, _role=None: baseline
                if (root2 / "src" / "lib.rs").read_text() == "SESSION_LIB"
                else green, ask=ask),
         target_src_dir=root2, cluster_name="t",
@@ -532,7 +532,7 @@ def _sibling_turn(root: Path, *, after: TestStateReading,
 
     baseline = _reading(set(), {"t_fmt", "t_render"})
     logs: list[str] = []
-    ports = _ports(measure=lambda raw: baseline
+    ports = _ports(measure=lambda raw, _role=None: baseline
                    if (root / "src" / "render.rs").read_text() == "SESSION_REN"
                    else after, ask=ask)
     ports = SessionPorts(**{
@@ -581,7 +581,7 @@ def test_a_regressed_turn_that_gained_keeps_only_its_changed_bodies(tmp_path):
     baseline = _reading({"t_sib"}, {"t_target"})
     after = _reading({"t_target"}, {"t_sib"})
 
-    def measure(raw):
+    def measure(raw, _role=None):
         lib = (root / "src" / "lib.rs").read_text()
         return baseline if lib == "SESSION_LIB" else after
 
@@ -633,7 +633,7 @@ def test_a_body_the_crash_settlement_withdraws_is_dropped_and_the_rest_judged(
     asked: list[str] = []
     seen: list[object] = []
 
-    def measure(raw):
+    def measure(raw, _role=None):
         raw.append("capture")
         lib = (root / "src" / "lib.rs").read_text()
         ren = (root / "src" / "render.rs").read_text()

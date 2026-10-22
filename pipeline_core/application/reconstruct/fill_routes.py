@@ -115,6 +115,14 @@ class RouteRunReport:
     #: green (`file::fn` -> body). Empty on every other run. Kept off the
     #: tree so the next fill can start the joint ask from them.
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
+    #: A joint session's verdict over its candidate's own tests, read on the
+    #: state the session ended on (`candidate_tiers.joint_outcome_of`).
+    #: Empty on every other run.
+    joint_outcome: str = ""
+
+    @property
+    def joint_repaired(self) -> bool:
+        return self.joint_outcome == "accepted"
 
     @property
     def opened_units(self) -> frozenset[FnLocator]:

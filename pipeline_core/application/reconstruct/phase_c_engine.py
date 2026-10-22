@@ -91,6 +91,7 @@ from pipeline_core.domain.refill_stamp import (
     stamp_reads_dispatch,
 )
 from pipeline_core.domain.refine import FixProgress, FloorStall
+from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_results import (
     native_crashes,
@@ -419,6 +420,7 @@ class PhaseCFillEngine:
         # Failing test -> the crate fns it executes (the sweep's owner map
         # plus its attributed units): the red-slice session's editable set.
         session_slices: Mapping[str, frozenset[FnSite]] | None = None,
+        joint_slices: Sequence[SessionSlice] | None = None,
         session_owners: Mapping[str, frozenset[FnSite]] | None = None,
         # The sweep's stub hold (`test_outcome.StubHold`), for the SCHEDULE
         # only: the still-stubbed fns failing tests stop in first, and each
@@ -555,6 +557,7 @@ class PhaseCFillEngine:
                 behaviour_specs=behaviour_specs,
                 dispatch_ranks=dispatch_ranks,
                 session_slices=session_slices,
+                joint_slices=joint_slices,
                 session_owners=session_owners,
                 held=stub_hold_hollow,
             )

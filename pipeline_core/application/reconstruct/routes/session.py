@@ -33,7 +33,7 @@ class SessionRoute:
             kind=self.kind, label=sl.label(seq=i),
             targets=frozenset(locator_of(u) for u in sl.units),
             target_tests=frozenset(_bare(t) for t in sl.tests),
-            files=tuple(sl.files), seq=i)
+            files=tuple(sl.files), seq=i, joint=sl.joint)
             for i, sl in enumerate(self._plans)]
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:

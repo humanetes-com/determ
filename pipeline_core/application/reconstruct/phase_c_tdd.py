@@ -31,8 +31,10 @@ from pipeline_core.application.reconstruct.attribution import (
 from pipeline_core.application.reconstruct.body_reseed import (
     ReseedOutcome,
     TreeWriter,
+    definition_checker,
     reseed,
     restore_prior,
+    skeleton_fingerprints,
 )
 from pipeline_core.application.reconstruct.cargo_runner import oracle_test_source
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
@@ -43,6 +45,12 @@ from pipeline_core.application.reconstruct.crash_settler import (
 from pipeline_core.application.reconstruct.crash_settler import (
     bind as bind_crash_settler,
 )
+from pipeline_core.application.reconstruct.fill_ground_lock import (
+    GroundSession,
+    check_measurement,
+    fill_ground,
+    ground_lock_for,
+)
 from pipeline_core.application.reconstruct.impl_fill import followup_think_env_on
 from pipeline_core.application.reconstruct.macro_invariants import defined_macro_names
 from pipeline_core.application.reconstruct.site_revert import (
@@ -51,6 +59,7 @@ from pipeline_core.application.reconstruct.site_revert import (
     revert_site_regressions,
 )
 from pipeline_core.application.reconstruct.tdd_ratchet import (
+    aborted_names,
     breach_withheld,
     closure_stub_sites,
     closure_withheld,
@@ -61,7 +70,6 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.application.reconstruct.tree_txn import (
-    TreeTxn,
     guard_tree_boundary,
 )
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
@@ -84,6 +92,7 @@ from pipeline_core.domain.body_ledger import (
     SweepView,
     authored_layout_fp,
     body_sha,
+    candidate_seed_allowed,
     classify,
     flat_standing_unchanged,
     judgment_attributed,
@@ -94,6 +103,7 @@ from pipeline_core.domain.body_ledger import (
     rebuy_by_grade,
     rebuy_hits,
     rows_for_units,
+    sig_sha_of,
     standing_on_tree,
     tests_creditable_to_locator,
 )
@@ -101,6 +111,7 @@ from pipeline_core.domain.body_standing import bind as bind_body_standing
 from pipeline_core.domain.body_standing import is_proven_text, proven_units
 from pipeline_core.domain.candidate_tiers import (
     DEFAULT_MISSES,
+    JUDGED_JOINT_OUTCOMES,
     LADDER,
     UNREAD,
     AskLedger,
@@ -109,10 +120,9 @@ from pipeline_core.domain.candidate_tiers import (
     due_reading,
     evidence_text,
     feature_reach,
-    joint_accept,
     joint_candidates,
     joint_note,
-    joint_rollback,
+    joint_spent,
     merge_slices,
     miss_reasons,
     render_failed,
@@ -204,6 +214,7 @@ from pipeline_core.domain.evidence_premise import (
     unit_ask_fingerprints,
 )
 from pipeline_core.domain.fill_class import FillClassHistogram
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     RouteKind,
@@ -287,7 +298,6 @@ from pipeline_core.domain.reasoning_cap import (
 from pipeline_core.domain.red_ledger import RunFacts, red_ledger, render_red_ledger
 from pipeline_core.domain.reference_floor import (
     ReferenceMeasurement,
-    pairs_of,
     reference_floor_close_reason,
 )
 from pipeline_core.domain.refill_evidence import (
@@ -303,6 +313,7 @@ from pipeline_core.domain.retro_gate import bind_crate_names
 from pipeline_core.domain.rust_scan import is_hollow_body
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
+    SessionSlice,
     attributed_units_for_session,
     recorded_locator_sites,
     session_slices_for_failing,
@@ -1554,6 +1565,85 @@ def run_phase_c_tdd(
     _lesson_store: Any = None
     _withdrawn_told: set[str] = set()
 
+    def _cluster_rows() -> list[RouteLedgerRow]:
+        """Every route-ledger row of this cluster, whichever process wrote
+        it."""
+        if deps.route_ledger_rows is None:
+            return []
+        try:
+            return list(deps.route_ledger_rows(project_dir.name, cluster.name))
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def _joint_session_slices(
+            cands: Sequence[JointCandidate],
+            frontier_now: Mapping[FnLocator, Collection[str]],
+            iter_no: int) -> list[SessionSlice]:
+        """One joint session slice per owed candidate: its gained and lost
+        tests, its reverted units plus every frontier unit those tests are
+        attributed to, and as seed the stored bodies the tree can take
+        (`body_ledger.candidate_seed_allowed`: the route row's oracle, the
+        signature and the layout — never the body's state, which for a
+        reverted answer is the refusal)."""
+        if not cands:
+            return []
+        oracle_now = _oracle_fp(iter_no)
+        file_fp = skeleton_fingerprints(_skeleton_root())
+        recs = (list(deps.enumerate_fns(target_src_dir) or [])
+                if deps.enumerate_fns is not None else [])
+        declared = {(str(r_.get("file") or ""), str(r_.get("fn_name") or ""))
+                    for r_ in recs if isinstance(r_, Mapping)}
+        # The ledger rows graded under this oracle: a row from another oracle
+        # describes a body against tests this tree is not scored by.
+        entries = [e_ for e_ in _ledger_entries() if e_.oracle_fp == oracle_now]
+        present = definition_checker(_skeleton_root())
+        out: list[SessionSlice] = []
+        for c in cands:
+            want = {bare_test_name(n_) for n_ in c.gained | c.lost}
+            units = {FnLocator(*k_.rsplit("::", 1))
+                     for k_ in c.units if "::" in k_}
+            units |= {loc_ for loc_, ts_ in frontier_now.items()
+                      if any(bare_test_name(t_) in want for t_ in ts_)}
+            seed: list[tuple[str, str]] = []
+            refused: list[str] = []
+            for key_, body_ in sorted(c.bodies.items()):
+                file_, fn_ = key_.rsplit("::", 1)
+                sha_ = body_sha((body_,))
+                entry_ = next(
+                    (e_ for e_ in reversed(entries)
+                     if e_.key.file == file_ and e_.key.fn_name == fn_
+                     and e_.body_sha == sha_), None)
+                sig_ = (sig_sha_of(deps.tree_writer.signatures(
+                    FnLocator(file_, fn_), target_src_dir))
+                        if deps.tree_writer is not None else "")
+                decision = candidate_seed_allowed(
+                    entry_, row_oracle_fp=c.oracle_fp, oracle_fp=oracle_now,
+                    file_fp=file_fp.get(file_, ""), sig_sha=sig_,
+                    located=(file_, fn_) in declared,
+                    definition_present=present)
+                if decision:
+                    seed.append((key_, body_))
+                else:
+                    refused.append(f"{key_} ({decision.reason})")
+            if refused:
+                deps.log(f"  {tag} [phase-c/tdd] iter {iter_no}: joint "
+                         f"{c.label}: not seedable — {'; '.join(refused)}")
+            if not seed:
+                continue
+            out.append(SessionSlice(
+                tests=tuple(sorted(want)),
+                units=tuple(FnSite(u_.file, u_.fn_name, "")
+                            for u_ in sorted(units)),
+                seed=tuple(seed), joint=c.digest, joint_label=c.label,
+                joint_gained=tuple(sorted(bare_test_name(g_) for g_ in c.gained))))
+            deps.emit("phase_c.tdd.joint_owed", data={
+                "cluster": cluster.name, "iter": iter_no,
+                "candidate": c.label, "digest": c.digest,
+                "gained": sorted(c.gained), "lost": sorted(c.lost),
+                "seed": [k_ for k_, _b in seed], "refused": refused,
+                "units": sorted(unit_key(u_) for u_ in units)})
+        return out
+
     def _this_fill_rows(iter_no: int | None = None) -> list[RouteLedgerRow]:
         """This run's route-ledger rows for this cluster (one fill's when
         `iter_no` is given): what each run targeted, kept, reverted, and
@@ -1642,9 +1732,14 @@ def run_phase_c_tdd(
         withdrawn = _withdrawn_now()
         nonlocal _joint_now
         _oracle_now = _oracle_fp(iter_n)
-        _joint_now = joint_candidates(
-            [r_ for r_ in _this_fill_rows()
-             if not _oracle_now or r_.oracle_fp == _oracle_now], red)
+        # Every process's rows under this oracle: a candidate read only off
+        # this process's rows dies with it. A candidate a judged joint row
+        # already answered is spent (`joint_spent`).
+        _rows_or = [r_ for r_ in _cluster_rows()
+                    if _oracle_now and r_.oracle_fp == _oracle_now]
+        _joint_now = tuple(
+            c_ for c_ in joint_candidates(_rows_or, red)
+            if not joint_spent(_rows_or, c_.digest, _oracle_now))
         if _joint_now:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
                      f"{len(_joint_now)} reverted run(s) had turned red "
@@ -2532,7 +2627,8 @@ def run_phase_c_tdd(
             # is last iter's fills, and the charge restores the snapshot.
             _withheld = closure_withheld(
                 _breach, _bratchet_passing - _sweep.passing,
-                TestStateReading(parse_binary_results(output)).judged_names,
+                TestStateReading(parse_binary_results(output)).judged_names
+                - aborted_names(output),
                 closure_stub_sites(_bratchet_reading, output),
                 hollow_now=hollow_count(snapshot_src_tree(target_src_dir)),
                 hollow_at_snapshot=hollow_count(_bratchet_snap),
@@ -2586,6 +2682,16 @@ def run_phase_c_tdd(
                     "cluster": cluster.name, "iter": iter_n,
                     "pass_count": pass_count, "best_pass": _bratchet_best,
                     "breach": _confirm, "files_reverted": _rev,
+                    # What the breach lost and gained against the best tree,
+                    # and the fill's runs, so a revert names its tests and
+                    # the runs it throws away.
+                    "lost": sorted(_bratchet_passing - _sweep.passing),
+                    "gained": sorted(_sweep.passing - _bratchet_passing),
+                    "fill_runs": [
+                        {"label": r_.label, "outcome": r_.outcome.value,
+                         "kept": [f"{a_}::{b_}" for a_, b_ in r_.kept],
+                         "net_pass_delta": r_.net_pass_delta}
+                        for r_ in _this_fill_rows(iter_n - 1)],
                 })
                 # READ PATH: the restore is whole-tree and older by
                 # construction, so it re-stubs units the ledger can vouch for
@@ -6985,37 +7091,18 @@ def run_phase_c_tdd(
         # Served is whatever fill-return has already stamped — not this batch.
         _persist_floor()
         frontier_keys = set(_batch.keys)
-        # A joint ask starts from the reverted bodies, on one transaction
-        # with the functions the newly red tests fail through. The copy is
-        # local: `eligible` stays the sweep's frontier.
-        _joint_live = tuple(
-            c for c in _joint_now
-            if c.bodies and not c.repaired
-            and c.label not in _asks.joint_repaired)
-        _joint_extra: set[FnLocator] = set()
+        # A joint ask is one session run: the reverted answer's bodies are
+        # its seed turn, judged against that session's own opening premise,
+        # with the functions the candidate's tests fail through editable
+        # beside them (`SessionSlice.seed`, `run_slice_session`). Nothing is
+        # written here: the pre-fill splice this replaces held the candidate
+        # on the shared tree for a whole fill with no verdict, and every
+        # baseline of fill 9 of run `4012759-5c5177c6` read 337 against the
+        # sweep's 343.
+        _joint_live = tuple(c for c in _joint_now if c.bodies and not c.repaired)
+        _joint_slices = _joint_session_slices(_joint_live, eligible, iter_n)
         _elig_fill: Frontier = eligible
         _due_fill: frozenset[FnLocator] = _due.units & frozenset(_batch.keys)
-        if _joint_live and deps.tree_writer is not None:
-            _lost_bare = {bare_test_name(n) for c in _joint_live for n in c.lost}
-            _gained_bare = {bare_test_name(n)
-                            for c in _joint_live for n in c.gained}
-            _want_tests = _lost_bare | _gained_bare
-            for _loc_j, _tests_j in eligible.items():
-                if any(bare_test_name(t) in _want_tests for t in _tests_j):
-                    _joint_extra.add(_loc_j)
-            for _c in _joint_live:
-                for _key_b in _c.bodies:
-                    if "::" not in _key_b:
-                        continue
-                    _file_b, _fn_b = _key_b.rsplit("::", 1)
-                    _joint_extra.add(FnLocator(_file_b, _fn_b))
-            frontier_keys |= _joint_extra
-            _due_fill = frozenset(_due_fill | _joint_extra)
-            _elig_fill = dict(eligible)
-            for _loc_j in _joint_extra:
-                _names_j = set(_elig_fill.get(_loc_j, ()))
-                _names_j |= _want_tests
-                _elig_fill[_loc_j] = _names_j
         _cls_bit = (f" {_prev_fill_classes.rendered()}"
                     if _saw_fill else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
@@ -7415,9 +7502,28 @@ def run_phase_c_tdd(
             _plan_premise = _premise_of_capture(output)
 
             def _ground_now() -> dict[str, PremiseEntry] | None:
-                _rc_g, _out_g = deps.run_cargo(
-                    test_cmd, target_src_dir, cluster_env,
-                    timeout=test_timeout)
+                # A premise like every route's baseline: read inside the
+                # tree's splice lock, so a parallel worker's in-flight splice
+                # is not in it and two cargo processes never share the target
+                # dir; taking the lock first restores any write no verdict
+                # left. Read with no lock and no role, a sibling's unjudged
+                # write moved the premise and refused claims (review of the
+                # 2026-10-22 implementation). A caller already inside its own
+                # hold reads on that hold.
+                _lk = ground_lock_for(target_src_dir)
+                _take = not _lk.held_by_me()
+                if _take:
+                    _lk.acquire()
+                try:
+                    check_measurement(
+                        target_src_dir,
+                        MeasureRole.PREMISE if _take else MeasureRole.JUDGMENT)
+                    _rc_g, _out_g = deps.run_cargo(
+                        test_cmd, target_src_dir, cluster_env,
+                        timeout=test_timeout)
+                finally:
+                    if _take:
+                        _lk.release()
                 if _rc_g == -1:
                     return None
                 return _premise_of_capture(_out_g)
@@ -7500,56 +7606,22 @@ def run_phase_c_tdd(
             record_settled=_settle_record, log=deps.log, emit=_settle_emit))
 
         _fill_crash: tuple[BaseException, str] | None = None
-        # The joint ask's candidate bodies go on the tree before the fill,
-        # each function's prior body remembered. A rejected or crashed joint
-        # answer puts back ONLY the functions that still hold the candidate
-        # body: a file-level restore would also erase every other body the
-        # fill landed in those files while the route rows, the body ledger
-        # and the landed set still record them as kept.
-        _joint_cand: dict[FnLocator, tuple[str, ...]] = {}
-        _joint_prior: dict[FnLocator, tuple[str, ...]] = {}
-        if _joint_live and deps.tree_writer is not None:
-            for _c in _joint_live:
-                for _key_b, _body_b in _c.bodies.items():
-                    if _body_b and "::" in _key_b:
-                        _file_b, _fn_b = _key_b.rsplit("::", 1)
-                        _joint_cand[FnLocator(_file_b, _fn_b)] = (str(_body_b),)
-            _txn_j = TreeTxn(target_src_dir)
-            try:
-                _joint_prior = {
-                    _loc_p: deps.tree_writer.bodies(_loc_p, target_src_dir)
-                    for _loc_p in _joint_cand}
-                _spliced_j, _refused_j = (
-                    deps.tree_writer.splice(_joint_cand, _txn_j)
-                    if _joint_cand else ([], []))
-            except (OSError, ValueError, TypeError):
-                _spliced_j, _refused_j = [], [(FnLocator("", ""), "splice failed")]
-            if not _spliced_j or _refused_j:
-                _txn_j.rollback()
-                _joint_live, _joint_cand, _joint_prior = (), {}, {}
-
-        def _unsplice_joint(
-                cand: dict[FnLocator, tuple[str, ...]] = _joint_cand,
-                prior: dict[FnLocator, tuple[str, ...]] = _joint_prior,
-        ) -> list[FnLocator]:
-            """Put back the prior body of every candidate function that still
-            holds the candidate body; one the fill rewrote keeps the fill's
-            body (its own gates judged it)."""
-            if not cand or deps.tree_writer is None:
-                return []
-            _tw = deps.tree_writer
-            back = joint_rollback(
-                cand, prior, lambda loc_: _tw.bodies(loc_, target_src_dir))
-            if back:
-                deps.tree_writer.splice(back, TreeTxn(target_src_dir))
-            return sorted(back, key=lambda loc_: (loc_.file, loc_.fn_name))
-
         _frontier_built: FailureFrontier | None = None
         # Every route's test gate reads the settler bound here
         # (`crash_settler.bound`), so no route can judge a crash without it.
         bind_crash_settler(_crash_settler)
+        _ground: GroundSession | None = None
         try:
-            with collect_stream_meta() as _fill_meta:
+            # The fill's ground (`fill_ground_lock`): opened here, after every
+            # boundary write of this iteration (reseed, ratchet restore,
+            # re-sweep), on the tree the sweep measured. While it is bound,
+            # taking the tree's splice lock restores bytes no verdict left
+            # and releasing it accepts the holder's; on the way out the
+            # fill-return premise restores anything a write after the last
+            # hold left, before the next sweep reads the tree.
+            with collect_stream_meta() as _fill_meta, fill_ground(
+                    target_src_dir, log=deps.log, emit=deps.emit,
+                    cluster=cluster.name, iteration=iter_n) as _ground:
                 sub = deps.task2_fill_fns_one_by_one(
                     project_dir=project_dir,
                     target_src_dir=target_src_dir,
@@ -7637,6 +7709,9 @@ def run_phase_c_tdd(
                         dispatch_ranks_of([k for k, _ in ordered]) or None),
                     session_slices=_session_slices or None,
                     session_owners=_session_owners or None,
+                    # The joint asks of this fill, each one seeded session
+                    # (`_joint_session_slices`).
+                    joint_slices=_joint_slices or None,
                     # The held view (`domain/held_stubs`), for the schedule
                     # and the session planner: its units are the bodies the
                     # held tests need first, and its map is the only hollow
@@ -7650,10 +7725,6 @@ def run_phase_c_tdd(
         except BaseException as _fill_exc:
             # Before the restore: a restored tree no longer holds these
             # bodies, and the ledger is where a body outlives the tree.
-            if _joint_cand:
-                with suppress(OSError, ValueError, TypeError):
-                    _unsplice_joint()
-                _joint_cand = {}
             _record_landed_rows("stopped during the fill pass", frozenset())
             _restore_abandoned_bet("stopped during the fill pass")
             _final_sweep("stopped during the fill pass")
@@ -7669,6 +7740,26 @@ def run_phase_c_tdd(
         finally:
             fill_phase_clock.disarm()
             bind_crash_settler(None)
+            if _ground is not None:
+                deps.log(f"  {tag} [phase-c/ground] fill {iter_n}: "
+                         f"{_ground.premises} premise(s) and "
+                         f"{_ground.judgments} judgment(s) read on the "
+                         f"accepted tree; {_ground.breaks} unjudged write(s)"
+                         + (f" restored in {', '.join(_ground.broken_files)}"
+                            if _ground.breaks else "")
+                         + (f" ({_ground.failed_reverts} from a revert that "
+                            "did not land)" if _ground.failed_reverts else "")
+                         + f"; ground {_ground.opened} -> "
+                         f"{_ground.ground.identity}")
+                deps.emit("phase_c.fill.ground", data={
+                    "cluster": cluster.name, "iter": iter_n,
+                    "premises": _ground.premises,
+                    "judgments": _ground.judgments,
+                    "breaks": _ground.breaks,
+                    "failed_reverts": _ground.failed_reverts,
+                    "broken_files": list(_ground.broken_files),
+                    "opened": _ground.opened,
+                    "closed": _ground.ground.identity})
         if _fill_crash is not None:
             _exc_c, _tb_c = _fill_crash
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cluster_failed "
@@ -7753,46 +7844,26 @@ def run_phase_c_tdd(
             if _new_unit_asks and deps.save_ask_ledger is not None:
                 with suppress(OSError):
                     deps.save_ask_ledger(project_dir, cluster.name, _asks)
-        if _joint_cand and _joint_live:
-            try:
-                _rc_j, _out_j = deps.run_cargo(
-                    test_cmd, target_src_dir, cluster_env, timeout=test_timeout)
-            except Exception as _je:  # noqa: BLE001 — a measurement never keeps a splice
-                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: joint "
-                         f"measurement failed ({type(_je).__name__}: {_je}); "
-                         "the candidate bodies are taken back.")
-                with suppress(OSError, ValueError, TypeError):
-                    _unsplice_joint()
-            else:
-                _pass_a, _, _, _ = pairs_of(parse_binary_results(_out_j))
-                _after_g = {bare_test_name(n) for _l, n in _pass_a}
-                _gained_j = {bare_test_name(n)
-                             for c in _joint_live for n in c.gained}
-                _lost_j = {bare_test_name(n) for c in _joint_live for n in c.lost}
-                _jv = joint_accept(gained=_gained_j, lost=_lost_j,
-                                   after_green=_after_g)
-                _back_j: list[FnLocator] = []
-                if not _jv.accept:
-                    with suppress(OSError, ValueError, TypeError):
-                        _back_j = _unsplice_joint()
-                deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: joint "
-                         f"{'accepted' if _jv.accept else 'not accepted'} — "
-                         f"{_jv.why}"
-                         + ("; candidate body taken back from "
-                            + ", ".join(f"{u.file}::{u.fn_name}" for u in _back_j)
-                            if _back_j else ""))
-                if not _jv.refute:
-                    for _c in _joint_live:
-                        _asks.joint_repaired.add(_c.label)
-                        for _t_j in _c.gained:
-                            _tb = bare_test_name(_t_j)
-                            _fp_j = _due.fingerprints.get(_tb, "")
-                            _folded = (f"{_fp_j}+{_c.digest}" if _fp_j
-                                       else _c.digest)
-                            for _u_j in _c.units:
-                                _asks.record(_u_j, _tb, _folded, rung="unit")
-                                if _words_now.get(_tb, ""):
-                                    _asks.note_words(_u_j, _tb, _folded)
+        if _joint_live:
+            # A joint ask the session judged is asked: its gained tests'
+            # owed rung is recorded under the candidate's digest, so the
+            # owed reading does not offer the same question again. The
+            # session's own row carries the verdict (`joint_outcome`); a row
+            # that never measured the seed records nothing.
+            _judged_j = {r_.joint for r_ in _this_fill_rows(iter_n)
+                         if r_.joint_outcome in JUDGED_JOINT_OUTCOMES}
+            for _c in _joint_live:
+                if _c.digest not in _judged_j:
+                    continue
+                for _t_j in _c.gained:
+                    _tb = bare_test_name(_t_j)
+                    _fp_j = _due.fingerprints.get(_tb, "")
+                    _folded = (f"{_fp_j}+{_c.digest}" if _fp_j
+                               else _c.digest)
+                    for _u_j in _c.units:
+                        _asks.record(_u_j, _tb, _folded, rung="unit")
+                        if _words_now.get(_tb, ""):
+                            _asks.note_words(_u_j, _tb, _folded)
         _landed_after_fill: frozenset[FnLocator] = (
             frozenset(changed_units(
                 _bodies_before, unit_bodies(_recs_after_fill, frontier_keys)))
@@ -8492,11 +8563,7 @@ def run_phase_c_tdd(
         try:
             _runs_led = []
             for _row_led in _this_fill_rows():
-                _facts_led = RunFacts.of_row(_row_led)
-                if (_facts_led.joint_repaired
-                        or _facts_led.label in _asks.joint_repaired):
-                    _facts_led = replace(_facts_led, joint_repaired=True)
-                _runs_led.append(_facts_led)
+                _runs_led.append(RunFacts.of_row(_row_led))
             _red_entries = red_ledger(
                 last_failed, reading=_due, ledger=_asks, runs=_runs_led,
                 words={bare_test_name(t_): e_ for t_, e_ in

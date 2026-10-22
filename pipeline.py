@@ -844,10 +844,10 @@ _HELPERS = _Helpers(
     task2_verbosity_guard=_TASK2_VERBOSITY_GUARD,
     structure_via_app=_LateStructure(),
     # late-bind _run_cargo/_UNIFIED_FILL_LOOP by name: both are patched seams.
-    test_regression_baseline=lambda tc, cwd, env, sink=None: (
+    test_regression_baseline=lambda tc, cwd, env, sink=None, *, role: (
         _regression_guard.baseline(
             _run_cargo, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env,
-            sink)),
+            sink, role=role)),
     test_regression_gate=lambda tc, cwd, env, base, **kw: _regression_guard.gate(
         _run_cargo, _guard, _U2_TEST_TIMEOUT, _UNIFIED_FILL_LOOP, tc, cwd, env, base,
         observe=lambda cmp: _fill_reading.publish_fill_reading(

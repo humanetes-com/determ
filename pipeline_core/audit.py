@@ -717,6 +717,40 @@ def check_fill_yield(run: RunData) -> Verdict:
     return Verdict("C13 fill-yield", PASS, "; ".join(notes))
 
 
+def check_fill_ground(run: RunData) -> Verdict:
+    """C14: every fill's gates judge from the tree the last verdict left.
+
+    Reads `phase_c.fill.ground` (one per fill: the premises and judgments
+    measured on the accepted tree, and the unjudged writes the splice lock
+    restored) and `phase_c.fill.unjudged_stop`. FAIL when a fill met bytes
+    it could not restore; WARN when a fill restored any, a revert that did
+    not land included (the release restores it and counts it as a break);
+    PASS otherwise. Run
+    `4012759-5c5177c6` fill 9 judged every run from a tree six tests below
+    its sweep, because the joint ask spliced its candidate before the fill
+    with no verdict. Reports; changes no decision."""
+    fills = [e.get("data") or {} for e in run.named("phase_c.fill.ground")]
+    stops = [e.get("data") or {} for e in run.named("phase_c.fill.unjudged_stop")]
+    if not fills and not stops:
+        return Verdict("C14 fill-ground", SKIP, "no fill ground in run")
+    notes = [f"{_cluster_of(d)}:fill {d.get('iter')}: "
+             f"{d.get('premises', 0)} premise(s), {d.get('breaks', 0)} break(s)"
+             for d in fills[-3:]]
+    if stops:
+        return Verdict("C14 fill-ground", FAIL, "; ".join(
+            f"{_cluster_of(d)}:fill {d.get('iter')} unrestorable write in "
+            + ", ".join(d.get("files") or ["?"]) for d in stops))
+    broken = [d for d in fills if int(d.get("breaks") or 0)]
+    if broken:
+        return Verdict("C14 fill-ground", WARN, "; ".join(
+            f"{_cluster_of(d)}:fill {d.get('iter')} restored "
+            + ", ".join(d.get("broken_files") or ["?"])
+            + (f" ({d.get('failed_reverts')} revert(s) that did not land)"
+               if int(d.get("failed_reverts") or 0) else "")
+            for d in broken))
+    return Verdict("C14 fill-ground", PASS, "; ".join(notes))
+
+
 def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
           project_dir: Path | None, since: str, plateau_n: int) -> list[Verdict]:
     run = load_run(events_path, prompts_dir, log_path, since)
@@ -734,6 +768,7 @@ def audit(events_path: Path, prompts_dir: Path | None, log_path: Path | None,
         check_dispatched_routed(run),
         check_crash_culprits(run),
         check_fill_yield(run),
+        check_fill_ground(run),
     ]
 
 

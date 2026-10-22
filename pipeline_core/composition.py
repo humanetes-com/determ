@@ -907,7 +907,11 @@ from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
 from pipeline_core.ports.cargo_runner import CargoRunner as CargoRunnerPort
-from pipeline_core.ports.fill_engine import FillPassPort, RegressionGatePort
+from pipeline_core.ports.fill_engine import (
+    FillPassPort,
+    RegressionBaselinePort,
+    RegressionGatePort,
+)
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
@@ -1046,7 +1050,7 @@ class Helpers:
     structure_via_app: Any  # StructureReader reading the LIVE pipeline._APP.structure
     # Task-1 collaborators (Task1Deps construction):
     # Impl-fill collaborators (ImplFillDeps construction):
-    test_regression_baseline: Callable[..., Any]
+    test_regression_baseline: RegressionBaselinePort
     test_regression_gate: RegressionGatePort
     per_impl_max_stubs: int
     converge_in_cluster: Callable[..., Any]

@@ -1731,3 +1731,58 @@ def test_a_passenger_culprit_does_not_exempt_a_session_from_the_unmeasurable_dem
     assert not run_is_unmeasurable(
         session, aimed, {culprit: frozenset({"t1"})}), "an aimed test crashed there"
     assert bool(session.targets & frozenset(blame)), "pre-fix exemption"
+
+
+def _joint(label: str, units: set[FnLocator], tests: set[str]) -> RouteRun:
+    return RouteRun(kind=RouteKind.SESSION, label=f"joint[{label}]",
+                    targets=frozenset(units), target_tests=frozenset(tests),
+                    files=("src/x.rs",), bodies_sha="s", joint="jabc")
+
+
+def test_a_joint_session_holds_the_pair_and_the_file_off_its_targets() -> None:
+    """Fill 9 of run `4012759-5c5177c6` opened the pair on the candidate's
+    body ahead of the joint ask. A joint session holds every run that writes
+    one of its targets or aims at one of its tests, a pair included, while
+    its grace lasts. Negative control: the same session without the joint
+    digest is held BY the pair instead."""
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    assert joint.holds_jointly and pair.holds_jointly
+    assert run_blocks(joint, pair, {}) and not run_blocks(pair, joint, {})
+    sched = schedule([pair, file_run, joint], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [joint.label]
+    assert {(s.run.label, s.reason) for s in sched.deferred} == {
+        (pair.label, "pair_wait"), (file_run.label, "pair_wait")}
+
+    plain = replace(joint, joint="", label="session[1 test(s), 1 unit(s)] #0")
+    control = schedule([pair, file_run, plain], [], oracle_fp="o", hollow={})
+    assert [s.run.label for s in control.ordered] == [pair.label]
+
+
+def test_a_joint_session_past_its_grace_stops_holding() -> None:
+    """The pair's bound, read for the joint run: `unpaid_grace` graded joint
+    rows that paid nothing release the runs it held."""
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    spent = [replace(_row(replace(joint, bodies_sha=f"b{i}"), RunOutcome.REVERTED),
+                     joint=joint.joint)
+             for i in range(DEFAULT_UNPAID_GRACE)]
+    inside = schedule([file_run, joint], spent[1:], oracle_fp="o", hollow={})
+    assert [(s.run.label, s.reason) for s in inside.deferred] == [
+        (file_run.label, "pair_wait")]
+    past = schedule([file_run, joint], spent, oracle_fp="o", hollow={})
+    assert not [s for s in past.deferred if s.reason == "pair_wait"]
+
+
+def test_a_joint_row_round_trips_its_digest_and_verdict() -> None:
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    assert joint.to_dict()["joint"] == "jabc"
+    row = replace(_row(joint, RunOutcome.FLAT), joint="jabc",
+                  joint_outcome="gains_held")
+    back = RouteLedgerRow.from_dict(row.to_dict())
+    assert back is not None and back.joint == "jabc"
+    assert back.joint_outcome == "gains_held" and back.holds_jointly
+    plain = RouteLedgerRow.from_dict(_row(_file("f", {_FMT}, set()),
+                                          RunOutcome.FLAT).to_dict())
+    assert plain is not None and not plain.holds_jointly and not plain.joint

@@ -1799,6 +1799,26 @@ class BinaryOutputSection:
 
 
 def binary_output_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
+    """:func:`_one_world_sections` of each world of ``test_output``, labelled
+    the way :func:`parse_binary_results` keys the same binary
+    (:attr:`BinaryResult.key`): bare on a one-world capture, ``world::label``
+    on a capture that joined worlds (:func:`join_world_captures`).
+
+    One name per binary across the two parsers is what lets a comparison's
+    ``newly_crashed`` key index into these sections. The fill runner joins
+    every world, so ``newly_crashed`` read `base::tests/context.rs` while the
+    slicer labelled the bare `tests/context.rs`: `crash_panics` reported the
+    qualified name missing and the stub-only keep never fired on a joined
+    capture (review of the 2026-10-19 close, 2026-10-22)."""
+    worlds = world_sections(test_output)
+    if "" in worlds:
+        return _one_world_sections(test_output)
+    return tuple(
+        replace(s, label=binary_key(w, s.label))
+        for w, text in worlds.items() for s in _one_world_sections(text))
+
+
+def _one_world_sections(test_output: str) -> tuple[BinaryOutputSection, ...]:
     """Slice a combined capture into one :class:`BinaryOutputSection` per
     ``running N tests`` section, paired index-wise with the ``Running`` /
     ``Doc-tests`` labels exactly as :func:`parse_binary_results` pairs them
@@ -2181,6 +2201,30 @@ class RegressionComparison:
     # in one world may still trade a red test inside that world, but no world
     # pays for another's loss.
     per_world: tuple[tuple[str, RegressionComparison], ...] = ()
+    # The subset of ``newly_red`` whose own process ABORTED (`BinaryResult.
+    # aborted`: the binary was re-run one test per process), and how many
+    # passes at baseline those aborts cost. Under test isolation an abort no
+    # longer takes its binary with it, so it is a red verdict of that test and
+    # never reaches ``newly_crashed``; the crash-only keep and the sweep's
+    # closure exemption asked only ``newly_crashed`` what panicked, so an
+    # isolated abort through a still-stubbed drop path was never exonerated
+    # (review of the 2026-10-19 close, 2026-10-22). This is the same fact as a
+    # crashed binary, one test wide, so both readers ask it the same question.
+    newly_red_aborted: frozenset[str] = frozenset()
+    abort_lost_pass: int = 0
+
+    @property
+    def lost_by_abort(self) -> bool:
+        """Every test the change lost died with its process — a binary that
+        stopped completing, or a test whose own process aborted — and at least
+        one did. The shape the crash-only branch judges by what panicked."""
+        return (bool(self.newly_crashed or self.newly_red_aborted)
+                and self.newly_red <= self.newly_red_aborted)
+
+    @property
+    def abort_cost(self) -> int:
+        """Baseline passes lost to aborts, shared-process and isolated."""
+        return self.crash_lost_pass + self.abort_lost_pass
 
     @property
     def net_pass_delta(self) -> int:
@@ -2318,7 +2362,8 @@ def compare_readings(base: TestStateReading,
     hung_tests: list[str] = []
     newly_red: set[str] = set()
     newly_green: set[str] = set()
-    base_pass = cur_pass = base_exec = cur_exec = crash_lost = 0
+    newly_red_aborted: set[str] = set()
+    base_pass = cur_pass = base_exec = cur_exec = crash_lost = abort_lost = 0
     for label, b in base_by.items():
         c = cur_by.get(label)
         if not b.completed:
@@ -2347,7 +2392,12 @@ def compare_readings(base: TestStateReading,
         measured.append(label)
         b_key, c_key = stable_test_keys(b), stable_test_keys(c)
         b_failed = {b_key[n] for n in b.failed}
-        newly_red |= {n for n in c.failed if c_key[n] not in b_failed}
+        _red = {n for n in c.failed if c_key[n] not in b_failed}
+        newly_red |= _red
+        _ab = {n for n in _red if n in c.aborted}
+        newly_red_aborted |= _ab
+        b_passed = {b_key[n] for n in b.passed}
+        abort_lost += sum(1 for n in _ab if c_key[n] in b_passed)
         newly_green |= {n for n in c.passed if c_key[n] in b_failed}
         base_pass += b.pass_count
         cur_pass += c.pass_count
@@ -2366,7 +2416,9 @@ def compare_readings(base: TestStateReading,
         newly_hung=tuple(sorted(newly_hung)),
         hung_tests=tuple(sorted(hung_tests)),
         newly_green=frozenset(newly_green),
-        per_world=per_world)
+        per_world=per_world,
+        newly_red_aborted=frozenset(newly_red_aborted),
+        abort_lost_pass=abort_lost)
 
 
 def _reading_of_world(reading: TestStateReading, world: str) -> TestStateReading:

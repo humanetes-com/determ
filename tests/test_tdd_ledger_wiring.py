@@ -12,6 +12,8 @@ cluster entry that starts from stubs, and a landing nobody records).
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +21,7 @@ from typing import Any
 import pytest
 
 from pipeline_core.adapters.oracle_fingerprint import cluster_oracle_fp
+from pipeline_core.application.reconstruct.splice import splice_lock_for
 from pipeline_core.domain.body_ledger import (
     COMPARATOR_VERSION,
     BodyState,
@@ -30,6 +33,21 @@ from pipeline_core.domain.body_ledger import (
 )
 from pipeline_core.domain.models import BuildCluster, FnLocator
 from tests.test_tdd_ratchet import _driver_deps
+
+
+@contextmanager
+def as_engine_keep(kw: dict[str, Any]) -> Iterator[None]:
+    """The fake engine's writes are its keeps: every route writes and keeps
+    under the tree's splice lock, and a write outside every hold is an
+    unjudged write the fill's ground restores (`fill_ground_lock`). A stop
+    raised after the keep (`SystemExit` in a hook) still releases with the
+    keep accepted, as a route whose keep was judged before the stop does."""
+    lock = splice_lock_for(Path(kw["target_src_dir"]))
+    lock.acquire()
+    try:
+        yield
+    finally:
+        lock.release()
 
 _LAYOUT = """\
 pub struct Own { pub ptr: usize }
@@ -141,17 +159,19 @@ def _run(monkeypatch, tmp_path: Path, *, ledger: dict | None,
 
     def _fill(**_kw: Any):
         from pipeline_core.domain.models import ClusterFillResult
-        if fills:
-            (src / "a.rs").write_text(
-                layout.replace("\n        unimplemented!()\n    ", _BODY),
-                encoding="utf-8")
-        if fill_write is not None:
-            fill_write(src)
+        with as_engine_keep(_kw):
+            if fills:
+                (src / "a.rs").write_text(
+                    layout.replace("\n        unimplemented!()\n    ", _BODY),
+                    encoding="utf-8")
+            if fill_write is not None:
+                fill_write(src)
         # `fill_hook` plays the engine: it receives the driver's kwargs, so
         # it can keep a body and call the per-wave writer the way the fill
         # executor does — and raise the stop the executor would propagate.
         if fill_hook is not None:
-            fill_hook(_kw)
+            with as_engine_keep(_kw):
+                fill_hook(_kw)
         return ClusterFillResult(
             attempts=1, fns_filled=fills, dispatched_fns=dispatched_fns,
             answer_lost_fns=answer_lost_fns)

@@ -25,6 +25,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
+from pipeline_core.application.reconstruct.fill_ground_lock import current_ground
 from pipeline_core.application.reconstruct.fill_reading import (
     kept_mark,
     kept_since,
@@ -39,6 +40,7 @@ from pipeline_core.domain import unit_clock
 from pipeline_core.domain.body_ledger import ReportKeep, WaveKept
 from pipeline_core.domain.fill_asks import FillAsks
 from pipeline_core.domain.fill_context import route_scope
+from pipeline_core.domain.fill_ground import UnjudgedWrite
 from pipeline_core.domain.fill_schedule import (
     CrashBlame,
     FillBudget,
@@ -409,6 +411,7 @@ def _row_for(
     s: ScheduledRun, report: RouteRunReport | None, kept: _Kept | None,
     *, deps: FillExecutionDeps, started: str, minutes: float,
     share: float | None, outcome: RunOutcome | None = None,
+    unjudged: bool = False,
 ) -> RouteLedgerRow:
     delta = 0
     red: tuple[str, ...] = ()
@@ -443,7 +446,11 @@ def _row_for(
         first_turn_minutes=rep.first_turn_minutes,
         carried_body=rep.carried_body,
         candidate_bodies=dict(rep.candidate_bodies),
-        joint_repaired=bool(getattr(rep, "joint_repaired", False)))
+        joint=s.run.joint,
+        joint_outcome=(rep.joint_outcome
+                       or (UNJUDGED_WRITE_REASON if s.run.joint and unjudged
+                           else "")),
+        joint_repaired=rep.joint_repaired)
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
@@ -458,8 +465,18 @@ def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
         + (f", newly red {len(row.newly_red)}" if row.newly_red else "")
         + (f", crashed {list(row.newly_crashed)}" if row.newly_crashed else "")
         + f"; {row.reason})")
+    # The premise the run opened on, beside its row: the pass count of its
+    # first baseline and the accepted tree's identity when it was written,
+    # so a run judged on a tree other than its sweep's is a lookup.
+    ground = current_ground()
+    extra: dict[str, object] = {}
+    if ground is not None:
+        extra["ground"] = ground.ground.identity
+        if row.label in ground.base_pass:
+            extra["base_pass"] = ground.base_pass[row.label]
     deps.emit("phase_c.route.run",
-              data={**row.to_dict(), **({"unchanged": True} if unchanged else {})})
+              data={**row.to_dict(), **extra,
+                    **({"unchanged": True} if unchanged else {})})
 
 
 def _check_schedule(sched: FillSchedule,
@@ -607,6 +624,11 @@ def _withhold_landed_wave(
             continue
         opened.append(replace(w, run=run_now))
     return opened, deferred, gone
+
+
+#: The reason on a run ended by bytes no verdict left that its premise could
+#: not put back (`fill_ground_lock`), and on every run of the plan after it.
+UNJUDGED_WRITE_REASON = "unjudged_write"
 
 
 def execute_fill(
@@ -846,13 +868,15 @@ def execute_fill(
         starts: dict[str, float] = {}
         ends: dict[str, float] = {}
         before: dict[str, str] = {}
+        unjudged: dict[str, UnjudgedWrite] = {}
 
         def _run_one(w: ScheduledRun, *, _route: FillRoute = route,
                      _starts: dict[str, float] = starts,
                      _ends: dict[str, float] = ends,
                      _reports: dict[str, RouteRunReport] = reports,
                      _clocks: dict[str, RunClock] = clocks,
-                     _before: dict[str, str] = before) -> None:
+                     _before: dict[str, str] = before,
+                     _unjudged: dict[str, UnjudgedWrite] = unjudged) -> None:
             _starts[w.run.key] = deps.now()
             # The targets' bodies as THIS run opens on them — not the plan's
             # sha, which an earlier run of the same fill may have moved.
@@ -868,6 +892,14 @@ def execute_fill(
                 with observe_call() as _rows:
                     try:
                         _rep = _route.run(w.run, _clocks[w.run.key])
+                    except UnjudgedWrite as _uw:
+                        # The tree held bytes no verdict left and the
+                        # premise could not put them back: nothing this run
+                        # would measure is a judgment. The route's own
+                        # exception path rolled its transaction back; the
+                        # run is rowed reverted and the plan stops here.
+                        _unjudged[w.run.key] = _uw
+                        _rep = RouteRunReport(empty=True)
                     finally:
                         # The last claimed unit's bound ends with the run,
                         # so no later loop on this thread (the next run, a
@@ -912,8 +944,15 @@ def execute_fill(
             # with the run that made them (a single run also collects the
             # unlabelled keeps of a route that could not bind its label).
             kept = kept_since(mark, w.run.label if len(wave) > 1 else None)
-            row = _row_for(w, rep, kept, deps=deps, started=started,
-                           minutes=minutes, share=shares[w.run.key])
+            if w.run.key in unjudged:
+                row = replace(
+                    _row_for(w, rep, kept, deps=deps, started=started,
+                             minutes=minutes, share=shares[w.run.key],
+                             outcome=RunOutcome.REVERTED, unjudged=True),
+                    reason=UNJUDGED_WRITE_REASON)
+            else:
+                row = _row_for(w, rep, kept, deps=deps, started=started,
+                               minutes=minutes, share=shares[w.run.key])
             rows.append(row)
             _log_row(deps, row, unchanged=rep.unchanged)
             if w.run.label in reasked:
@@ -926,6 +965,34 @@ def execute_fill(
             rep_w = reports.get(w.run.key)
             if rep_w is not None:
                 landed_fill |= rep_w.kept
+        if unjudged and i < len(ordered):
+            # The same exit as a moved premise: the rest of the plan was
+            # planned on a tree no verdict describes. The fill returns and
+            # its return premise restores what it can before the sweep.
+            _files = sorted({f for e in unjudged.values() for f in e.files})
+            deps.log(
+                f"  [phase-c/schedule] fill {deps.iteration}: UNJUDGED_WRITE "
+                f"in {', '.join(_files) or '?'} could not be restored — "
+                f"{len(ordered) - i} run(s) still planned deferred for the "
+                "sweep to re-plan")
+            deps.emit("phase_c.fill.unjudged_stop", data={
+                "cluster": deps.cluster, "iter": deps.iteration,
+                "files": _files,
+                "runs": [w.run.label for w in wave if w.run.key in unjudged],
+                "deferred": [w.run.label for w in ordered[i:]]})
+            started = datetime.now(UTC).isoformat(timespec="seconds")
+            rest = ordered[i:]
+            for w in rest:
+                row = replace(
+                    _row_for(w, None, None, deps=deps, started=started,
+                             minutes=0.0, share=0.0,
+                             outcome=RunOutcome.DEFERRED),
+                    reason=UNJUDGED_WRITE_REASON)
+                rows.append(row)
+                _log_row(deps, row)
+            _flush(rows[-len(rest):])
+            ordered = ordered[:i]
+            break
         # A wave can end without its routes asking the clock again after
         # their last keep; ask here, per run still ahead, so no run is opened
         # on a plan whose ground moved under it. Runs planned on tests that

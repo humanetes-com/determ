@@ -454,7 +454,7 @@ def test_the_session_records_its_first_turn_from_its_opening(tmp_path: Path) -> 
         label="unit", completed=True, passed=frozenset(), failed=frozenset({"t"}),
         pass_count=0, fail_count=1),))
 
-    def measure(_raw: list[str]) -> TestStateReading:
+    def measure(_raw: list[str], _role: object = None) -> TestStateReading:
         clock[0] += 60.0  # every suite reading costs a minute
         return red
 

@@ -123,8 +123,9 @@ def closure_stub_sites(
     """The stub-panic sites :func:`closure_withheld` may forgive a breach on:
     `stub_only_crash` over exactly the binaries that were COMPLETE WITH A
     PASS at the ratchet's snapshot and CRASHED in this sweep
-    (`compare_readings(...).newly_crashed`) — the binaries whose vanished
-    tests are the breach. The fill gates judge their crash-only keep over
+    (`compare_readings(...).newly_crashed`), plus the newly red tests whose
+    own isolated process aborted (`newly_red_aborted`) — the processes whose
+    lost tests are the breach. The fill gates judge their crash-only keep over
     the same set, so a keep is never a charge one iteration later.
 
     Not the whole capture: a `crashed_all_red` binary (no pass at the
@@ -136,8 +137,20 @@ def closure_stub_sites(
     if snapshot_reading is None:
         return frozenset()
     now = TestStateReading(parse_binary_results(output))
-    crashed = compare_readings(snapshot_reading, now).newly_crashed
-    return stub_only_crash(output, crashed=crashed)
+    cmp = compare_readings(snapshot_reading, now)
+    return stub_only_crash(output, crashed=cmp.newly_crashed,
+                           aborted_tests=cmp.newly_red_aborted)
+
+
+def aborted_names(output: str) -> frozenset[str]:
+    """The tests of ``output`` whose own process aborted (isolated re-run).
+    They carry a red verdict, and for the closure exemption they vanished
+    with their process exactly as a crashed binary's tests do: the caller
+    removes them from the judged set it hands :func:`closure_withheld`."""
+    out: set[str] = set()
+    for b in parse_binary_results(output):
+        out |= b.aborted
+    return frozenset(out)
 
 
 def closure_withheld(

@@ -33,6 +33,7 @@ from pipeline_core.application.reconstruct.context import (
     crash_block_stands,
     fill_skip,
 )
+from pipeline_core.application.reconstruct.fill_ground_lock import AttemptHold
 from pipeline_core.application.reconstruct.fill_reading import (
     last_comparison,
     note_kept_comparison,
@@ -76,6 +77,7 @@ from pipeline_core.domain.fill_class import (
     keep_reading,
     tests_could_not_run,
 )
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
     ignored_inputs_feedback,
@@ -250,7 +252,8 @@ class FillOneFn:
         if best is None:
             return False
         _base = self.cargo.test_regression_baseline(
-            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
+            ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
+            role=MeasureRole.PREMISE)
         _hollow_before = hollow_count(snapshot_src_tree(ctx.target_src_dir))
         _sp = self.mut.splice_body_scoped(
             file_path, fn_name, container, sig_text, best.body,
@@ -823,7 +826,9 @@ class FillOneFn:
         # search space it has already explored.
         per_fn_history: list[dict[str, Any]] = []
 
-        def _attempt_fn_fill(fix_attempt: int) -> FixOutcome:
+        _hold = AttemptHold(ctx.splice_check_lock)
+
+        def _attempt_fn_fill_held(fix_attempt: int) -> FixOutcome:
             nonlocal attempts, sig_text, last_response, \
                 last_body, error_excerpt, first_failed_body, \
                 first_error_excerpt, retro_bound_methods, last_metric
@@ -1019,9 +1024,28 @@ class FillOneFn:
                 })
                 return FixOutcome("stop")
 
+            # Hold splice_check_lock from the premise through every write of
+            # this attempt (the signature swap included), cargo check, the
+            # gates and the revert (if applicable). Other workers wait so we
+            # don't corrupt target/ with concurrent cargo invocations, and a
+            # write made before the hold would be restored by the take (the
+            # ground's premise) or stored by another holder's release.
+            _hold.take()
+            _lock_released = False
+            # Fresh regression baseline, captured NOW (inside the lock, right
+            # before this attempt's own writes) rather than once at fn-dispatch
+            # time — see the comment on the old dispatch-time capture this
+            # replaced, above `_attempt_fn_fill`'s definition, for why a stale
+            # baseline under parallelism misattributes other workers' queued-
+            # ahead regressions to this fn.
+            _attempt_baseline_test = self.cargo.test_regression_baseline(
+                ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
+                role=MeasureRole.PREMISE)
+            _attempt_hollow_before = hollow_count(
+                snapshot_src_tree(ctx.target_src_dir))
             # If the model proposed a sig change, try it FIRST so
-            # the body splice operates on the updated sig. Rolls back if
-            # the resulting cargo check still fails (revert via snapshot).
+            # the body splice operates on the updated sig. Inside the hold:
+            # it is this attempt's write and is judged with the body.
             if fix_attempt >= 5:
                 proposed_sig = self.mut.extract_signature_block(last_response)
                 if proposed_sig and self.mut.replace_fn_signature(
@@ -1066,21 +1090,6 @@ class FillOneFn:
             # have shifted offsets. When a fn's name is duplicated in a
             # file (Display::fmt vs Debug::fmt), we disambiguate by
             # container + sig_text in locate_fn_by_record.
-            # Hold splice_check_lock from splice through cargo check through
-            # the revert (if applicable). Other workers wait so we don't
-            # corrupt target/ with concurrent cargo invocations.
-            ctx.splice_check_lock.acquire()
-            _lock_released = False
-            # Fresh regression baseline, captured NOW (inside the lock, right
-            # before this attempt's own splice) rather than once at fn-dispatch
-            # time — see the comment on the old dispatch-time capture this
-            # replaced, above `_attempt_fn_fill`'s definition, for why a stale
-            # baseline under parallelism misattributes other workers' queued-
-            # ahead regressions to this fn.
-            _attempt_baseline_test = self.cargo.test_regression_baseline(
-                ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env)
-            _attempt_hollow_before = hollow_count(
-                snapshot_src_tree(ctx.target_src_dir))
             def _locate_and_splice() -> SpliceOutcome:
                 _loc = self.mut.locate_fn_by_record(
                     file_path, fn_name, container, sig_text, rec.cfg_predicates)
@@ -1173,7 +1182,7 @@ class FillOneFn:
             if not ok:
                 # The target did not land: its extras must not stay alone.
                 self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
-                ctx.splice_check_lock.release()
+                _hold.drop()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""
                 _refused_feedback = None if _race_detected else reply_refusal_feedback(
@@ -1499,7 +1508,7 @@ class FillOneFn:
             if rc == 0 and _u2_fail_sig is None:
                 _joint_labels = [u.label for u, _pre in joint.live]
                 joint.settle()
-                ctx.splice_check_lock.release()
+                _hold.drop()
                 _lock_released = True
                 _ctx = f" [{container}]" if container else ""
                 self.tel.log(f"  [phase-c/per-fn] {idx}/{ctx.total} filled "
@@ -1682,7 +1691,7 @@ class FillOneFn:
             if _refused_feedback is None:
                 _revert_own_body()
             if not _lock_released:
-                ctx.splice_check_lock.release()
+                _hold.drop()
                 _lock_released = True
             if _crash_blocked_mark:
                 self.tel.log(
@@ -1722,6 +1731,23 @@ class FillOneFn:
                          f"codes={_codes or '—'}; re-prompting with errors.")
             return FixOutcome("failed", err_sig=cur_err_sig,
                               metric=cur_metric)
+
+        def _attempt_fn_fill(fix_attempt: int) -> FixOutcome:
+            # Every exit of an attempt releases its hold with a verdict; an
+            # exception or a stop that escapes between the take and the
+            # release used to leave the non-reentrant lock held, and the next
+            # unit — and, with a fill's ground bound, the fill's exit premise
+            # — waited on it forever. Abandoned, nothing the attempt left is
+            # accepted and the next taker restores the accepted bytes.
+            try:
+                return _attempt_fn_fill_held(fix_attempt)
+            finally:
+                if _hold.held:
+                    self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: "
+                                 "attempt ended holding the splice lock — "
+                                 "released with no verdict; the next premise "
+                                 "restores what it left.")
+                    _hold.abandon()
 
         def _on_fn_failure(attempt_n: int, outcome: FixOutcome,
                            gauge: FloorStall) -> None:

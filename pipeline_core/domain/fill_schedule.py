@@ -196,6 +196,17 @@ class RouteRun:
     #: The ``key`` of the planned run this one was carved from; the route
     #: that planned that run executes this one. Empty for a planned run.
     parent: str = ""
+    #: The digest of the joint candidate a joint session answers
+    #: (`candidate_tiers.JointCandidate.digest`); empty for every other run.
+    joint: str = ""
+
+    @property
+    def holds_jointly(self) -> bool:
+        """The run is one transaction over its targets that other runs must
+        not split: a hop pair, or a joint session re-asking a reverted
+        answer from its own bodies. Derived, so a pair cannot be planned
+        without it and a joint session cannot drop it."""
+        return self.kind is RouteKind.PAIR or bool(self.joint)
 
     @property
     def plan_key(self) -> str:
@@ -219,6 +230,7 @@ class RouteRun:
             "files": list(self.files), "seq": self.seq,
             "bodies_sha": self.bodies_sha,
             **({"parent": self.parent} if self.parent else {}),
+            **({"joint": self.joint} if self.joint else {}),
         }
 
 
@@ -289,6 +301,15 @@ def _blocking_stubs(run: RouteRun,
     return run.stubs_in_targets & frozenset(all_blocking)
 
 
+def _hold_rank(run: RouteRun) -> int:
+    """2 for a joint session, 1 for a hop pair, 0 for every other run: a run
+    holds the runs of a lower rank that write its targets or aim at its
+    tests (`run_blocks`)."""
+    if run.joint:
+        return 2
+    return 1 if run.kind is RouteKind.PAIR else 0
+
+
 def run_blocks(a: RouteRun, b: RouteRun,
                hollow: Mapping[str, frozenset[FnLocator]],
                crash_blamed: Collection[FnLocator] = ()) -> bool:
@@ -321,12 +342,19 @@ def run_blocks(a: RouteRun, b: RouteRun,
     left file / impl / per-fn free to spend the fill on units the hop
     already said cannot pay.
 
+    A joint session (`RouteRun.joint`) holds the same way, and holds a pair
+    too: it re-asks the one recorded answer that turned the shared tests
+    green, from its own bodies, so it is the first try at them. Fill 9 of
+    run `4012759-5c5177c6` opened the pair on `src/fmt.rs::debug` ahead of
+    the joint ask on the same body. Two runs of one rank do not hold each
+    other (`_hold_rank`).
+
     Otherwise: `b`'s own tests are hollow because of a stub `a` holds and
     `b` does not."""
     if a is b:
         return False
     blamed = frozenset(crash_blamed)
-    if (a.kind is RouteKind.PAIR and b.kind is not RouteKind.PAIR
+    if (_hold_rank(a) > _hold_rank(b)
             and (a.targets & b.targets or a.target_tests & b.target_tests)
             and not _blocking_stubs(b, hollow)
             and not ((b.targets & blamed) - a.targets)):
@@ -407,14 +435,30 @@ class RouteLedgerRow:
     #: the tree. Empty on rows that reverted nothing worth replaying, and
     #: on every row written before the joint ask kept bodies.
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
-    #: The union gate repaired this run's gained revert. Absent on older rows.
+    #: The joint ask this run answered judged its candidate's lost tests
+    #: green again with the gains held (`joint_outcome == "accepted"`).
+    #: Absent on older rows.
     joint_repaired: bool = False
+    #: The digest of the joint candidate this run answered; empty on every
+    #: other row. With `joint_outcome` it is what makes a candidate spent.
+    joint: str = ""
+    #: The joint verdict of that run's end reading (`candidate_tiers.
+    #: JOINT_OUTCOMES`): ``accepted``, ``gains_held``, ``refuted`` once the
+    #: seed was judged; ``unmeasured`` when it never was, ``unjudged_write``
+    #: when the run ended on a premise it could not restore. Only a judged
+    #: outcome spends the candidate.
+    joint_outcome: str = ""
     #: Whether a reply of this session carried a function body. None on
     #: every non-session row and on every session row written before the
     #: bit. False is a session whose replies were requests, notes or empty.
     #: True is a session that routed, refused, compiled or judged a body,
     #: including one whose bodies did not compile.
     carried_body: bool | None = None
+
+    @property
+    def holds_jointly(self) -> bool:
+        """The row is a pair's or a joint session's (`RouteRun.holds_jointly`)."""
+        return self.kind is RouteKind.PAIR or bool(self.joint)
 
     @property
     def identity(self) -> str:
@@ -454,6 +498,9 @@ class RouteLedgerRow:
             **({"candidate_bodies": dict(sorted(self.candidate_bodies.items()))}
                if self.candidate_bodies else {}),
             **({"joint_repaired": True} if self.joint_repaired else {}),
+            **({"joint": self.joint} if self.joint else {}),
+            **({"joint_outcome": self.joint_outcome}
+               if self.joint_outcome else {}),
             **({"carried_body": self.carried_body}
                if self.carried_body is not None else {}),
         }
@@ -507,6 +554,8 @@ class RouteLedgerRow:
                 str(k): str(v) for k, v in dict(
                     raw.get("candidate_bodies") or {}).items() if v},
             joint_repaired=bool(raw.get("joint_repaired", False)),
+            joint=str(raw.get("joint", "") or ""),
+            joint_outcome=str(raw.get("joint_outcome", "") or ""),
             carried_body=(bool(raw["carried_body"])
                           if isinstance(raw.get("carried_body"), bool) else None),
         )
@@ -2452,7 +2501,7 @@ def admit_ranked(
     # ranked pair are the same run.
     spent = frozenset(
         _served_key(run) for run, *_ in ranked
-        if run.kind is RouteKind.PAIR and unpaid_grace > 0
+        if run.holds_jointly and unpaid_grace > 0
         and consecutive_unpaid(rows_list, run, oracle_fp) >= unpaid_grace)
 
     order_blockers = Blockers.of(hollow, crash_blamed)
@@ -2478,7 +2527,7 @@ def admit_ranked(
             _per_test[key] = (
                 unpaid_tries_for_test(
                     rows_list, test, oracle_fp,
-                    match=lambda r: r.kind is RouteKind.PAIR)
+                    match=lambda r: r.holds_jointly)
                 if kind == "pair" else
                 unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
         return _per_test[key] >= unpaid_grace
@@ -2501,7 +2550,7 @@ def admit_ranked(
         minutes, and the fill after re-planned into the same order."""
         if not run_blocks(a, b, hollow, blamed):
             return False
-        return a.kind is not RouteKind.PAIR or _grace_left(a, b)
+        return not a.holds_jointly or _grace_left(a, b)
 
     # Topological order over the blocks relation, condensed to its strongly
     # connected components (:func:`condensed_order`): runs that block each
@@ -2577,7 +2626,7 @@ def admit_ranked(
             waiting.append(replace(s, deferred=True, share_minutes=0.0))
             continue
         blocking_pairs = [p for p in opened_runs
-                          if p.kind is RouteKind.PAIR
+                          if p.holds_jointly
                           and run_blocks(p, run, hollow, blamed)]
         mutual = [p for p in blocking_pairs
                   if run_blocks(run, p, hollow, blamed)]

@@ -15,15 +15,16 @@ import directly. Only I/O, the LLM call, the extractor, the retro store, and
 """
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.crash_site import CrashSites
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.fill_schedule import UnitEvidence
 from pipeline_core.domain.models import (
     BuildCluster,
@@ -35,10 +36,25 @@ from pipeline_core.domain.models import (
     TypeRecord,
 )
 from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
+from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
+
+
+class TreeLock(Protocol):
+    """A tree's splice+cargo lock. While a fill's ground is bound, taking it
+    restores bytes no verdict left and releasing it accepts the holder's
+    (`application.reconstruct.fill_ground_lock`)."""
+
+    def acquire(self, blocking: bool = ..., timeout: float = ...) -> bool: ...
+    def release(self) -> None: ...
+    def locked(self) -> bool: ...
+    def __enter__(self) -> Any: ...
+    def __exit__(self, exc_type: type[BaseException] | None,
+                 exc: BaseException | None,
+                 tb: TracebackType | None) -> None: ...
 
 
 @runtime_checkable
@@ -86,7 +102,7 @@ class Mutator(Protocol):
         self, file_path: Path, name: str, new_sig: str,
     ) -> bool: ...
     def extract_signature_block(self, response: str) -> str | None: ...
-    def lock_for(self, tree: Path) -> threading.Lock: ...
+    def lock_for(self, tree: Path) -> TreeLock: ...
     def parse_validator(self) -> Callable[[Path], bool] | None:
         """The splice gate's parse check (the structure reader's `parse_ok`,
         `(path) -> parses?`), or None when no reader is wired (the fixture
@@ -119,7 +135,7 @@ class Cargo(Protocol):
     ) -> U2Verdict: ...
     def test_regression_baseline(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
-        raw_sink: list[str] | None = ...,
+        raw_sink: list[str] | None = ..., *, role: MeasureRole,
     ) -> TestStateReading | None: ...
     def test_regression_gate(
         self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
@@ -302,11 +318,24 @@ class ImplFillPath(Protocol):
         behaviour_specs: Sequence[BehaviourSpec] = ...,
         dispatch_ranks: dict[FnLocator, int] | None = ...,
         session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
+        joint_slices: Sequence[SessionSlice] | None = ...,
         session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
         on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = ...,
         fill_premise: Mapping[str, Any] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
     ) -> ClusterFillResult: ...
+
+
+class RegressionBaselinePort(Protocol):
+    """The suite measurement every fill route reads a baseline with
+    (`regression_guard.baseline` bound by the composition root). `role` is
+    required: the same measurement is the premise a run is judged against
+    and the judgment of a write it made (`domain/fill_ground.MeasureRole`)."""
+
+    def __call__(
+        self, test_cmd: str | None, cwd: Path, env: dict[str, str] | None,
+        raw_sink: list[str] | None = ..., /, *, role: MeasureRole,
+    ) -> TestStateReading | None: ...
 
 
 class RegressionGatePort(Protocol):
@@ -393,6 +422,7 @@ class FillPassPort(Protocol):
         body_rows: int | None = ...,
         dispatch_ranks: dict[FnLocator, int] | None = ...,
         session_slices: Mapping[str, frozenset[FnSite]] | None = ...,
+        joint_slices: Sequence[SessionSlice] | None = ...,
         session_owners: Mapping[str, frozenset[FnSite]] | None = ...,
         stub_hold_blockers: frozenset[FnLocator] = ...,
         stub_hold_hollow: Mapping[str, frozenset[FnLocator]] | None = ...,

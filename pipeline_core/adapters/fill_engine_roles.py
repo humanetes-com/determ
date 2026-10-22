@@ -23,10 +23,13 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
 from typing import Any
 
+from pipeline_core.application.reconstruct.fill_ground_lock import (
+    note_failed_revert,
+)
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.models import (
     ClusterFillResult,
     FnFixContext,
@@ -37,7 +40,11 @@ from pipeline_core.domain.reconstruction import FnLocation, SpliceOutcome
 from pipeline_core.domain.stub_inventory import StubInventory
 from pipeline_core.domain.test_report import U2Verdict
 from pipeline_core.domain.test_results import RegressionComparison, TestStateReading
-from pipeline_core.ports.fill_engine import RegressionGatePort
+from pipeline_core.ports.fill_engine import (
+    RegressionBaselinePort,
+    RegressionGatePort,
+    TreeLock,
+)
 from pipeline_core.ports.structure import StructureReader
 
 
@@ -75,7 +82,7 @@ class MutatorAdapter:
     splice_fn_body_fn: Callable[..., SpliceOutcome]
     replace_fn_signature_fn: Callable[[Path, str, str], bool]
     extract_signature_block_fn: Callable[[str], str | None]
-    lock_for_fn: Callable[[Path], Lock]
+    lock_for_fn: Callable[[Path], TreeLock]
     # The structure reader's parse check the splice functions above are
     # bound to; None when composed without a reader.
     parse_validator_fn: Callable[[Path], bool] | None = None
@@ -129,6 +136,17 @@ class MutatorAdapter:
         Gated on having a disambiguator (container or sig): with neither, the
         record locator guesses among same-name candidates instead of refusing,
         and a revert must never guess."""
+        out = self._revert(file_path, name, container, sig_text, pre_image,
+                           cfg_predicates)
+        if not out.ok:
+            # The bytes this revert was meant to remove are still on the tree:
+            # the hold that wrote them must not accept them as ground.
+            note_failed_revert(file_path)
+        return out
+
+    def _revert(self, file_path: Path, name: str, container: str,
+                sig_text: str, pre_image: str,
+                cfg_predicates: tuple[str, ...] | None) -> SpliceOutcome:
         loc = (self.locate_fn_by_record(file_path, name, container, sig_text,
                                         cfg_predicates)
                if (container or sig_text) else None)
@@ -186,7 +204,7 @@ class MutatorAdapter:
     def extract_signature_block(self, response: str) -> str | None:
         return self.extract_signature_block_fn(response)
 
-    def lock_for(self, tree: Path) -> Lock:
+    def lock_for(self, tree: Path) -> TreeLock:
         return self.lock_for_fn(tree)
 
 
@@ -200,7 +218,7 @@ class CargoFillAdapter:
     u2_test_gate_fn: Callable[..., U2Verdict]
     focus_errors_fn: Callable[..., str]
     env_fn: Callable[[], dict[str, str]]
-    test_regression_baseline_fn: Callable[..., TestStateReading | None] | None = None
+    test_regression_baseline_fn: RegressionBaselinePort | None = None
     test_regression_gate_fn: RegressionGatePort | None = None
     check_diag_fn: Callable[..., tuple[int, str, list[Any]]] | None = None
 
@@ -232,10 +250,12 @@ class CargoFillAdapter:
     def test_regression_baseline(self, test_cmd: str | None, cwd: Path,
                                  env: dict[str, str] | None,
                                  raw_sink: list[str] | None = None,
+                                 *, role: MeasureRole,
                                  ) -> TestStateReading | None:
         if self.test_regression_baseline_fn is None:
             return None
-        return self.test_regression_baseline_fn(test_cmd, cwd, env, raw_sink)
+        return self.test_regression_baseline_fn(test_cmd, cwd, env, raw_sink,
+                                                role=role)
 
     def test_regression_gate(self, test_cmd: str | None, cwd: Path,
                              env: dict[str, str] | None,

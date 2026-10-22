@@ -248,7 +248,7 @@ def replay(session: Mapping[str, Any], root: Path, *,
             return 1, "error[E0308]: mismatched types", []
         return 0, "", []
 
-    def measure(raw: list[str]) -> TestStateReading | None:
+    def measure(raw: list[str], _role: object = None) -> TestStateReading | None:
         raw.append("")
         if not state["baseline_taken"]:
             state["baseline_taken"] = True

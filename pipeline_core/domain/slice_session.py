@@ -61,6 +61,23 @@ class SessionSlice:
     tests: tuple[str, ...]
     units: tuple[FnSite, ...]
     file_chars: int = 0
+    #: Bodies the session puts on the tree before turn 0 and judges as one
+    #: turn of its own (`file::fn`, body text). Empty for every slice but a
+    #: joint ask's: a reverted run that turned red tests green and a sibling
+    #: red is re-asked from its own bodies, judged against the session's
+    #: opening premise like any turn, instead of sitting on the shared tree
+    #: for a whole fill with no verdict (run `4012759-5c5177c6`, fill 9).
+    seed: tuple[tuple[str, str], ...] = ()
+    #: The digest of the joint candidate this slice answers
+    #: (`candidate_tiers.JointCandidate.digest`), "" for a packed slice. A
+    #: joint slice is planned apart from packing and its run holds the other
+    #: runs off its targets the way a pair does.
+    joint: str = ""
+    #: That candidate's display label, for the schedule line.
+    joint_label: str = ""
+    #: The tests the candidate turned green (the rest of `tests` are the
+    #: ones it turned red), for the joint verdict the session's row records.
+    joint_gained: tuple[str, ...] = ()
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -70,7 +87,9 @@ class SessionSlice:
         """Display string of the slice's counts. Optional ``seq`` is the plan
         index, so two slices that share counts still print apart on the
         schedule line. Not an identity: :func:`slice_for_run` binds on the
-        aimed tests."""
+        aimed tests. A joint slice prints the candidate it answers."""
+        if self.joint:
+            return f"joint[{self.joint_label or self.joint}]"
         base = f"session[{len(self.tests)} test(s), {len(self.units)} unit(s)]"
         if seq is None:
             return base
@@ -89,10 +108,14 @@ def slice_for_run(
     share a count-only label while aiming at disjoint tests (run
     ``1092886-60870fdd``, 2026-09-06: two 3-test / 23-unit slices, the
     second opened twice and the first never). Returns the first match;
-    packing does not emit duplicate test sets.
+    packing does not emit duplicate test sets. A joint slice binds only the
+    joint run of its own candidate (two candidates can aim at one test
+    set), and a packed slice only a packed run.
     """
     want = frozenset(_bare_test(t) for t in run.target_tests)
     for sl in plans:
+        if sl.joint != run.joint:
+            continue
         have = frozenset(_bare_test(t) for t in sl.tests)
         if have == want:
             return sl

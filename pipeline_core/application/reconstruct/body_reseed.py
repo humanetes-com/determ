@@ -174,7 +174,7 @@ def skeleton_fingerprints(skeleton_root: Path) -> dict[str, str]:
     return out
 
 
-def _definition_checker(skeleton_root: Path) -> Callable[[LayoutDep], bool]:
+def definition_checker(skeleton_root: Path) -> Callable[[LayoutDep], bool]:
     """Is this dependency's definition still in the tree, verbatim?
 
     `find_definition_span` matches on the non-space projection, so indentation
@@ -257,7 +257,7 @@ def reseed(
         for key in wanted_keys}
     plan = plan_reseed(entries, wanted=wanted_keys, file_fp=file_fp,
                        sig_sha=sig_sha, oracle_fp=oracle_fp,
-                       definition_present=_definition_checker(skeleton_root))
+                       definition_present=definition_checker(skeleton_root))
     outcome.skipped = list(plan.skipped)
     if not plan.take:
         return outcome

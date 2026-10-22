@@ -86,7 +86,7 @@ def _run(root: Path, replies: list[str], *, allowance: int, max_turns: int = 8,
         ask_turns=ask, splice=splice,
         check=lambda: (0, "", []) if compiles else (1, "error[E0308]", ["E0308"]),
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
-        measure_suite=lambda raw: (green if (root / "src" / "lib.rs").read_text() != "BASE"
+        measure_suite=lambda raw, _role=None: (green if (root / "src" / "lib.rs").read_text() != "BASE"
                                    else base),
         read_source=lambda p: None,
         enumerate_bodies=lambda: {_FMT: (root / "src" / "lib.rs").read_text()},

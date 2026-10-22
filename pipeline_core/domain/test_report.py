@@ -34,8 +34,10 @@ from pipeline_core.domain.assertion_position import (
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
+    WORLD_KEY_SEP,
     TestStateReading,
     binary_output_sections,
+    failure_bodies_for,
     parse_binary_results,
     parse_failed_tests,
     split_test_stdout_sections,
@@ -562,6 +564,7 @@ class CrashPanics:
 
 def crash_panics(
     raw_output: str, crashed: Iterable[str] | None = None,
+    aborted_tests: Iterable[str] = (),
 ) -> CrashPanics:
     """Read the panics of the binaries named by ``crashed`` — labels as
     :func:`test_results.parse_binary_results` gives them — out of their own
@@ -581,7 +584,14 @@ def crash_panics(
     (`newly_red=[]`, three to eight `newly_crashed`, every one paired with
     a `crash_all_red` guard on `error_gen_3` and friends), the whole-text
     read was `frozenset()` on every fill, and each of the seven `ptr.rs`
-    route-runs reverted the textbook `Own::new`."""
+    route-runs reverted the textbook `Own::new`.
+
+    ``aborted_tests`` — tests whose OWN process aborted (the binary was
+    re-run one test per process, `BinaryResult.aborted`). Each one's failure
+    block is that process's whole evidence and is read by the same rule as a
+    crashed section; a name with no block is ``missing``. An isolated abort
+    through a still-stubbed drop path is the crashed-binary case one test
+    wide, and reading only sections left it with no reader at all."""
     sections = binary_output_sections(raw_output)
     by_label: dict[str, list[str]] = {}
     for s in sections:
@@ -593,13 +603,18 @@ def crash_panics(
     runtime = unparseable = 0
     judged: list[str] = []
     missing: list[str] = []
-    for label in wanted:
-        texts = by_label.get(label)
-        if not texts:
+    _tests = tuple(dict.fromkeys(aborted_tests))
+    blocks = failure_bodies_for(raw_output, set(_tests)) if _tests else {}
+    evidence: list[tuple[str, str | None]] = [
+        (label, "\n".join(by_label[label]) if by_label.get(label) else None)
+        for label in wanted]
+    evidence += [(t, blocks.get(t)) for t in _tests]
+    for label, text in evidence:
+        if not text:
             missing.append(label)
             continue
         judged.append(label)
-        for p in _iter_located_panics("\n".join(texts)):
+        for p in _iter_located_panics(text):
             if p is None:
                 unparseable += 1
             elif p.is_runtime_abort:
@@ -616,6 +631,7 @@ def crash_panics(
 
 def stub_only_crash(
     raw_output: str, crashed: Iterable[str] | None = None,
+    aborted_tests: Iterable[str] = (),
 ) -> frozenset[tuple[str, int]]:
     """The (file, line) stub-panic sites of the ``crashed`` binaries, iff
     EVERY crate panic those binaries printed is a stub panic
@@ -633,7 +649,7 @@ def stub_only_crash(
     runtime's own double-panic announcement is neither: it is the
     announcement OF the stub panic in `Drop`, and it is ignored here (never
     a veto, never a site)."""
-    panics = crash_panics(raw_output, crashed)
+    panics = crash_panics(raw_output, crashed, aborted_tests)
     return panics.stub_sites if panics.stub_only else frozenset()
 
 
@@ -734,18 +750,24 @@ class StubAbortReading:
         declaring file compiles into the library's unit-test binary, labelled
         ``unittests <lib path>``. A test the index does not place, or a binary
         this reading does not hold, contributes nothing."""
-        lib_labels = [lab for lab in self.by_binary if lab.startswith("unittests ")]
+        # A joined capture keys each binary by its world (`binary_key`); a test
+        # file names the binary in every world, so a test is held by the union
+        # of its binary's sites over the worlds that aborted it.
+        by_bare: dict[str, set[FnSite]] = {}
+        for key, sites in self.by_binary.items():
+            by_bare.setdefault(key.rsplit(WORLD_KEY_SEP, 1)[-1], set()).update(sites)
+        lib_labels = [lab for lab in by_bare if lab.startswith("unittests ")]
         out: dict[str, frozenset[FnSite]] = {}
         for t in tests:
             rel = test_files.get(t)
             if rel is None:
                 continue
             if rel.startswith("tests/"):
-                sites = self.by_binary.get(rel)
+                got = by_bare.get(rel)
             else:
-                sites = self.by_binary[lib_labels[0]] if len(lib_labels) == 1 else None
-            if sites:
-                out[t] = sites
+                got = by_bare[lib_labels[0]] if len(lib_labels) == 1 else None
+            if got:
+                out[t] = frozenset(got)
         return out
 
 

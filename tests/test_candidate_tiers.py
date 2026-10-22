@@ -317,10 +317,12 @@ def test_the_ledger_round_trips_misses_and_tree_readings() -> None:
     led = AskLedger(oracle_fp="o")
     led.miss("u", "t", "f")
     led.settle("t", "T", "f")
-    led.joint_repaired.add("pair a")
     back = AskLedger.from_dict(led.to_dict())
     assert back.missed("u", "t", "f") == 1 and back.last == {"t": ("T", "f")}
-    assert back.joint_repaired == {"pair a"}
+    # The label-keyed joint set is gone: an old file's key is ignored and a
+    # new file never writes it (a candidate is spent by its route row).
+    old = AskLedger.from_dict({**led.to_dict(), "joint_repaired": ["pair a"]})
+    assert "joint_repaired" not in old.to_dict()
 
 
 def _row(label: str, reverted, newly_red, newly_green):  # type: ignore[no-untyped-def]
@@ -394,6 +396,9 @@ def test_the_union_gate_accepts_only_when_gains_and_losses_are_green() -> None:
     with_body = JointCandidate("pair", frozenset({"a"}), frozenset({"g"}),
                                frozenset({"l"}), bodies={"a": "fn a() {}"})
     assert bare.digest == same.digest and with_body.digest != bare.digest
+    relabelled = JointCandidate("session #4", frozenset({"a"}), frozenset({"g"}),
+                                frozenset({"l"}))
+    assert relabelled.digest == bare.digest, "a label is not an identity"
 
 
 def test_the_ladder_asks_the_session_after_the_unit_route() -> None:
@@ -524,7 +529,8 @@ def test_a_candidate_keeps_bodies_from_a_mapping_or_from_tuples() -> None:
         "src/a.rs::f": "fn f() {}", "src/a.rs::empty": ""}})
     (c,) = joint_candidates([mapped], ["t"])
     assert c.bodies == {"src/a.rs::f": "fn f() {}"}
-    tuples = _row("pair", (("src/a.rs", "f"),), ("sib",), ("t",))
+    tuples = _row("pair", (("src/a.rs", "g"), ("src/a.rs", "h"),
+                           ("src/a.rs", "skip")), ("sib",), ("t",))
     tuples.candidate_bodies = [
         ("src/a.rs", "g", "fn g() {}"),
         ("src/a.rs::h", "fn h() {}"),
@@ -535,17 +541,61 @@ def test_a_candidate_keeps_bodies_from_a_mapping_or_from_tuples() -> None:
     assert c2.bodies == {"src/a.rs::g": "fn g() {}", "src/a.rs::h": "fn h() {}"}
 
 
-def test_a_rejected_joint_answer_takes_back_only_the_candidate_functions() -> None:
-    """A function still holding the candidate body gets its prior body; one
-    the fill rewrote keeps the fill's body; nothing outside the candidate is
-    in the map. The previous rollback restored whole files and erased every
-    other body the fill landed in them."""
-    from pipeline_core.domain.candidate_tiers import joint_rollback
-    cand = {"f": ("CAND_F",), "g": ("CAND_G",)}
-    prior = {"f": ("OLD_F",), "g": ("OLD_G",)}
-    tree = {"f": ("CAND_F",), "g": ("FILL_G",), "h": ("FILL_H",)}
-    back = joint_rollback(cand, prior, lambda u: tree[u])
-    assert back == {"f": ("OLD_F",)}
+def _iteration_8_row(run_id: str = "4012759-5c5177c6"):  # type: ignore[no-untyped-def]
+    """The route row of run `4012759-5c5177c6`, iteration 8, as recorded in
+    `logs/route_ledger/anyhow/index.jsonl`: the session kept `from_boxed`,
+    reverted `debug`, turned `test_debug` green and three display/debug
+    tests red, and stored both bodies."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        label="session[4 test(s), 6 unit(s)] #0", run_id=run_id,
+        oracle_fp="o", kept=(("src/error.rs", "from_boxed"),),
+        reverted=(("src/fmt.rs", "debug"),),
+        newly_green=("test_debug",),
+        newly_red=("test_display_error_from_option_context_debug",
+                   "test_display_error_from_with_context_display_only",
+                   "wrapper_message_error_debug_alternate"),
+        candidate_bodies={"src/error.rs::from_boxed": "FROM_BOXED",
+                          "src/fmt.rs::debug": "DEBUG"},
+        joint="", joint_outcome="", joint_repaired=False)
+
+
+def test_the_seed_holds_only_the_bodies_the_run_reverted() -> None:
+    """Fill 9 of run `4012759-5c5177c6` re-spliced the kept `from_boxed` over
+    itself and printed "taken back" for a write that changed nothing. The
+    candidate's seed is the reverted body alone."""
+    from pipeline_core.domain.candidate_tiers import joint_candidates
+    (c,) = joint_candidates([_iteration_8_row()], ["test_debug"])
+    assert c.bodies == {"src/fmt.rs::debug": "DEBUG"}
+    assert c.units == frozenset({"src/fmt.rs::debug"})
+
+
+def test_a_candidate_outlives_its_process_and_is_spent_by_its_digest() -> None:
+    """Rows of an earlier run under the same oracle still owe the candidate;
+    the same answer recorded by two runs is one candidate; a judged joint
+    row with its digest spends it, and an unmeasured one does not."""
+    from types import SimpleNamespace
+
+    from pipeline_core.domain.candidate_tiers import joint_candidates, joint_spent
+    rows = [_iteration_8_row("old-run"), _iteration_8_row("older-run")]
+    (c,) = joint_candidates(rows, ["test_debug"])
+    assert not joint_spent(rows, c.digest, "o")
+    unmeasured = SimpleNamespace(joint=c.digest, oracle_fp="o",
+                                 joint_outcome="unmeasured", reverted=(),
+                                 newly_red=(), newly_green=())
+    assert not joint_spent([*rows, unmeasured], c.digest, "o")
+    judged = SimpleNamespace(joint=c.digest, oracle_fp="o",
+                             joint_outcome="gains_held", reverted=(),
+                             newly_red=(), newly_green=())
+    assert joint_spent([*rows, judged], c.digest, "o")
+    assert not joint_spent([*rows, judged], c.digest, "other oracle")
+
+
+def test_a_joint_row_is_not_itself_a_candidate() -> None:
+    from pipeline_core.domain.candidate_tiers import joint_candidates
+    row = _iteration_8_row()
+    row.joint = "jdeadbeef"
+    assert joint_candidates([row], ["test_debug"]) == ()
 
 
 def test_a_compile_reason_from_an_earlier_evidence_state_does_not_count_now() -> None:
@@ -568,3 +618,11 @@ def test_the_latest_reverted_body_is_the_one_kept() -> None:
     assert att.remembered_bodies([FnLocator("src/a.rs", "f"),
                                   FnLocator("src/a.rs", "g")]) == {
         "src/a.rs::f": "SECOND"}
+
+
+def test_the_joint_verdict_word_classifies_the_end_reading() -> None:
+    from pipeline_core.domain.candidate_tiers import joint_outcome_of
+    kw = {"gained": {"t_gain"}, "lost": {"t_lost"}}
+    assert joint_outcome_of(after_green={"t_gain", "t_lost"}, **kw) == "accepted"
+    assert joint_outcome_of(after_green={"t_gain"}, **kw) == "gains_held"
+    assert joint_outcome_of(after_green={"t_lost"}, **kw) == "refuted"

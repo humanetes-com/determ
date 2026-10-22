@@ -123,6 +123,7 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustInput, IdentityMustUnit
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.blueprint import Blueprint, blueprint_path, parse_blueprint
+from pipeline_core.domain.candidate_tiers import joint_outcome_of
 from pipeline_core.domain.cfg import cluster_cfg_set, filter_cfg_inactive_branches
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
@@ -159,6 +160,7 @@ from pipeline_core.domain.fill_class import (
     note_fill_class,
     tests_could_not_run,
 )
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.fill_groups import BlockGroupInput, coupled_fill_groups
 from pipeline_core.domain.fill_schedule import (
     RunClock,
@@ -336,7 +338,6 @@ from pipeline_core.domain.test_results import (
     REGRESSED_OUTPUT,
     RegressedAttempt,
     RegressionComparison,
-    TestStateReading,
     regressed_attempt_of,
     regression_detail_kind,
     strip_ansi,
@@ -348,7 +349,11 @@ from pipeline_core.domain.verdict import (
     ValidityVector,
     VerdictRecord,
 )
-from pipeline_core.ports.fill_engine import RegressionGatePort
+from pipeline_core.ports.fill_engine import (
+    RegressionBaselinePort,
+    RegressionGatePort,
+    TreeLock,
+)
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -523,11 +528,11 @@ class ImplFillDeps:
     scan_unimplemented_for_cluster: Callable[..., StubInventory]
     scan_unimplemented_records_for_cluster: Callable[..., list[dict[str, Any]] | None]
     splice_fn_with_where: Callable[..., SpliceOutcome]
-    splice_lock_for: Callable[..., threading.Lock]
+    splice_lock_for: Callable[..., TreeLock]
     types_section_for_fix: Callable[..., str]
     bound_methods_section_for: Callable[..., str]
     u2_test_gate: U2TestGate
-    test_regression_baseline: Callable[..., TestStateReading | None]
+    test_regression_baseline: RegressionBaselinePort
     test_regression_gate: RegressionGatePort
     # The transcript model call (`AskClient.ask_turns`): every fill route
     # talks to the model through a `UnitConversation` on it, and so does the
@@ -743,6 +748,10 @@ def prepare_impl_fill(
     # map plus the attributed units). The red-slice session's editable set;
     # None or empty runs no session.
     session_slices: Mapping[str, frozenset[FnSite]] | None = None,
+    # The joint asks of this fill: one seeded slice per reverted answer the
+    # driver still owes (`SessionSlice.seed`, `SessionSlice.joint`). Planned
+    # ahead of the packed sessions, never packed with them.
+    joint_slices: Sequence[SessionSlice] | None = None,
     # Failing test -> the units the sweep's coverage MEASURED it executes
     # (the owner map alone, without attributed additions): the session's
     # per-unit executed marks. None leaves the marks off.
@@ -2176,7 +2185,7 @@ def prepare_impl_fill(
                 # test-runnable now → gate self-disables, verbatim revert
                 # unchanged.
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env)
+                    tdd_test_cmd, target_src_dir, cluster_env, role=MeasureRole.PREMISE)
                 _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 containers = [b.container for b in fblocks]
                 # Route-only widening: `fblocks` is only this file's
@@ -2592,7 +2601,8 @@ def prepare_impl_fill(
                     withdraw_crashing_bodies(
                         _jw,
                         lambda sink: _test_regression_baseline(
-                            tdd_test_cmd, target_src_dir, cluster_env, sink),
+                            tdd_test_cmd, target_src_dir, cluster_env, sink,
+                            role=MeasureRole.JUDGMENT),
                         _baseline_test, tag=f"{glabel} ")
                     if _jw.withdrawn:
                         _kept_c, _gone_c = split_withdrawn(
@@ -3863,7 +3873,7 @@ def prepare_impl_fill(
                 # in the baseline, so filling them green is never mistaken
                 # for a regression.
                 _baseline_test = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env)
+                    tdd_test_cmd, target_src_dir, cluster_env, role=MeasureRole.PREMISE)
                 _hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 # Splice each parsed body into the impl indicated by its
                 # `block` attribute. Match against TARGET container OR any
@@ -4052,7 +4062,8 @@ def prepare_impl_fill(
                     withdraw_crashing_bodies(
                         _jw_i,
                         lambda sink: _test_regression_baseline(
-                            tdd_test_cmd, target_src_dir, cluster_env, sink),
+                            tdd_test_cmd, target_src_dir, cluster_env, sink,
+                            role=MeasureRole.JUDGMENT),
                         _baseline_test, tag=f"{block_id} ")
                     _gone_i = sorted({f.fn_name for f in _jw_i.withdrawn
                                       if f.file_rel == block.file})
@@ -5110,7 +5121,7 @@ def prepare_impl_fill(
             if _salvaged is not None:
                 with _splice_check_lock:
                     _sv_base = _test_regression_baseline(
-                        tdd_test_cmd, target_src_dir, cluster_env)
+                        tdd_test_cmd, target_src_dir, cluster_env, role=MeasureRole.PREMISE)
                     # The salvage is a transaction: the compiling image
                     # goes in, is checked, and is rolled back to the
                     # stubbed pre-image byte for byte when it does not hold.
@@ -5594,7 +5605,7 @@ def prepare_impl_fill(
                 _snaps = {b.file: capture(target_src_dir / b.file, None)
                           for b in (*halves, *_pair_extra)}
                 _pair_baseline = _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env)
+                    tdd_test_cmd, target_src_dir, cluster_env, role=MeasureRole.PREMISE)
                 _pair_hollow_before = hollow_count(snapshot_src_tree(target_src_dir))
                 _spliced_by_file: dict[str, list[str]] = {}
                 # Bodies refused for their own TEXT (`reply_refusal_feedback`):
@@ -6036,7 +6047,8 @@ def prepare_impl_fill(
         """Plan the packed sessions and return the route that runs them one
         at a time under the fill schedule; None when nothing is planned."""
         served: set[FnLocator] = set()
-        if not session_slices or os.getenv("SLICE_SESSION", "1") == "0":
+        if ((not session_slices and not joint_slices)
+                or os.getenv("SLICE_SESSION", "1") == "0"):
             return None
         _ask_turns = deps.ask_turns
         _max_turns = int(os.getenv("SLICE_SESSION_MAX_TURNS", "8"))
@@ -6210,8 +6222,8 @@ def prepare_impl_fill(
                               evidence_chars=evidence_chars)
 
         _all_recs = _tree_sites()
-        _slices = expand_locator_sites(session_slices, _all_recs)
-        for _file, _fn, _n in locator_only_expansions(session_slices, _all_recs):
+        _slices = expand_locator_sites(session_slices or {}, _all_recs)
+        for _file, _fn, _n in locator_only_expansions(session_slices or {}, _all_recs):
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
         _costs = _session_costs(_slices)
@@ -6249,6 +6261,19 @@ def prepare_impl_fill(
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
         if _gaps.condensed_clause():
             _log(f"  [phase-c/session] {_gaps.condensed_clause()}")
+        # The joint asks go first and are never packed: each is its own
+        # transaction over the reverted answer (`RouteRun.holds_jointly`).
+        _joint_plans: list[SessionSlice] = []
+        for _js in joint_slices or ():
+            _exp = expand_locator_sites({"joint": frozenset(_js.units)}, _all_recs)
+            _units_j = tuple(sorted(_exp.get("joint", frozenset()),
+                                    key=lambda u: (u.file, u.fn_name, u.container)))
+            if not _units_j:
+                _log(f"  [phase-c/session] {_js.label()}: no unit of the joint "
+                     "ask has a record on the tree — not planned")
+                continue
+            _joint_plans.append(replace(_js, units=_units_j))
+        _plans = _joint_plans + _plans
         if not _plans:
             if session_slices:
                 _log(f"  [phase-c/session] no slice planned "
@@ -6462,8 +6487,8 @@ def prepare_impl_fill(
                     text, _crate_type_records),
                 same_crash=SameCrashJudge(
                     frozenset(crash_blamed or ()), culprits_of),
-                measure_suite=lambda raw: _test_regression_baseline(
-                    tdd_test_cmd, target_src_dir, cluster_env, raw),
+                measure_suite=lambda raw, role: _test_regression_baseline(
+                    tdd_test_cmd, target_src_dir, cluster_env, raw, role=role),
                 read_source=_read_source,
                 enumerate_bodies=_bodies_now,
                 extend_body_watch=_extend_watch,
@@ -6647,7 +6672,26 @@ def prepare_impl_fill(
                           newly_red=tuple(sorted(_out.newly_red)),
                           newly_crashed=tuple(_out.final.crashed),
                           newly_green=_out.final.newly_green)
+            # A joint ask's verdict over its candidate's own tests, read on
+            # the tree the session LEFT (`held_green`: after any peel), not
+            # on its best reading before the peel — a net-negative seed the
+            # peel took back would otherwise be stored as `gains_held` while
+            # the tree holds none of its gains. It classifies; the session's
+            # keep rule already decided the tree.
+            _joint_outcome = ""
+            if _sl.joint:
+                _joint_outcome = (
+                    joint_outcome_of(
+                        gained=_sl.joint_gained,
+                        lost=frozenset(_sl.tests) - frozenset(_sl.joint_gained),
+                        after_green=_out.held_green)
+                    if _out.seed_judged and _out.held_green is not None
+                    else "unmeasured")
+                _log(f"  [phase-c/session] {_sl.label()}: joint verdict "
+                     f"{_joint_outcome} — outcome {_out.outcome}, kept "
+                     f"{len(_out.kept)} unit(s)")
             return RouteRunReport(
+                joint_outcome=_joint_outcome,
                 model_calls=_out.model_calls,
                 kept=frozenset(locator_of(u) for u in _out.kept),
                 reverted=frozenset(locator_of(u) for u in _out.reverted),

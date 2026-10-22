@@ -736,6 +736,58 @@ def reseed_allowed(
     return GateDecision(True)
 
 
+def candidate_seed_allowed(
+    entry: LedgerEntry | None, *, row_oracle_fp: str, oracle_fp: str,
+    file_fp: str, sig_sha: str, located: bool,
+    definition_present: Any = None,
+) -> GateDecision:
+    """May a joint candidate's stored body be put on this tree as the seed
+    of a joint session?
+
+    The comparisons of :func:`reseed_allowed` that are about the TREE — the
+    oracle the body was graded under, its signature, the layout — and not
+    the one about the BODY's state. A joint candidate is by definition a
+    body a gate reverted, so its ledger entry, when it has one, is REFUTED
+    or FLAT, and the reseed gate refuses exactly every such body: on run
+    `4012759-5c5177c6` that refused the only recorded answer that turned
+    `test_debug` green. The seed is judged by the session that splices it,
+    so the state is not a premise here.
+
+    `entry` is the ledger row whose `body_sha` is the candidate's body, graded
+    under the current oracle, when one exists: its `sig_sha` and `layout_fp`
+    supply the comparisons, and a moved fingerprint falls back to
+    `definition_present` over the entry's dependencies as the reseed gate's
+    does. `row_oracle_fp` is the oracle the candidate's route row was
+    measured under, never the caller's current one passed twice. With
+    none, the body is seedable while its declaration still locates a body
+    span on this tree (`located`) and the route row's oracle matches; a
+    splice refusal at seed time is then the layout failure, logged by the
+    session with the splice reason."""
+    if not row_oracle_fp or row_oracle_fp != oracle_fp:
+        return GateDecision(False, "oracle moved")
+    if not located:
+        return GateDecision(False, "no body span on this tree")
+    if entry is None or not entry.layout_fp:
+        # No layout evidence for this body: the located declaration is the
+        # whole check, as for a body with no ledger row.
+        if entry is not None and entry.sig_sha and sig_sha and entry.sig_sha != sig_sha:
+            return GateDecision(False, "signature moved")
+        return GateDecision(True)
+    if entry.sig_sha and sig_sha and entry.sig_sha != sig_sha:
+        return GateDecision(False, "signature moved")
+    # The layout comparison is the reseed gate's: the fast path needs both
+    # fingerprints and equality; a fingerprint the caller could not compute
+    # (a key miss) is not a match, it falls to the dependency check.
+    if file_fp and entry.layout_fp == file_fp:
+        return GateDecision(True)
+    if definition_present is None or not entry.layout_deps:
+        return GateDecision(False, "layout moved")
+    moved = tuple(d.name for d in entry.layout_deps if not definition_present(d))
+    if moved:
+        return GateDecision(False, "layout moved", moved)
+    return GateDecision(True)
+
+
 # --- promotion ---------------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)

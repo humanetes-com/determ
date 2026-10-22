@@ -78,9 +78,11 @@ __all__ = [
     "LADDER",
     "JointCandidate",
     "JointVerdict",
-    "joint_rollback",
+    "JUDGED_JOINT_OUTCOMES",
     "joint_accept",
     "joint_candidates",
+    "joint_outcome_of",
+    "joint_spent",
     "joint_note",
     "miss_reasons",
     "UNREAD",
@@ -236,8 +238,6 @@ class AskLedger:
     repairs: dict[str, dict[str, str]] = field(default_factory=dict)
     #: (unit, test) -> fingerprints whose rung cannot be built (no slice).
     absent: dict[str, set[str]] = field(default_factory=dict)
-    #: Route-run labels a joint answer repaired (accept, or not a refutation).
-    joint_repaired: set[str] = field(default_factory=set)
     #: (unit, test) -> fingerprints a compile miss was left pending on once.
     pending: dict[str, set[str]] = field(default_factory=dict)
     #: unit -> its own ask fingerprints (`evidence_premise.unit_ask_fingerprint`:
@@ -454,7 +454,6 @@ class AskLedger:
                 "repairs": {k: dict(sorted(v.items()))
                             for k, v in sorted(self.repairs.items())},
                 "absent": {k: sorted(v) for k, v in sorted(self.absent.items())},
-                "joint_repaired": sorted(self.joint_repaired),
                 "pending": {k: sorted(v) for k, v in sorted(self.pending.items())},
                 "unit_asks": {k: sorted(v)
                               for k, v in sorted(self.unit_asks.items())}}
@@ -469,7 +468,6 @@ class AskLedger:
         words = raw.get("words") or {}
         repairs = raw.get("repairs") or {}
         absent = raw.get("absent") or {}
-        repaired = raw.get("joint_repaired") or ()
         pending = raw.get("pending") or {}
         unit_asks = raw.get("unit_asks") or {}
         return cls(oracle_fp=str(raw.get("oracle_fp", "")),
@@ -487,7 +485,6 @@ class AskLedger:
                    repairs={str(k): {str(f): str(d) for f, d in v.items()}
                             for k, v in repairs.items()},
                    absent={str(k): {str(x) for x in v} for k, v in absent.items()},
-                   joint_repaired={str(x) for x in repaired},
                    pending={str(k): {str(x) for x in v} for k, v in pending.items()},
                    unit_asks={str(k): {str(x) for x in v}
                               for k, v in unit_asks.items()})
@@ -803,8 +800,12 @@ def _fold(fp: str, extra: str) -> str:
 class JointCandidate:
     """A reverted route run that turned red tests green and a sibling red:
     a right-or-better answer a gate refused. Its units are owed again,
-    together, to the tests it turned green. `bodies` is the text of those
-    units as it stood before the revert, kept off the tree."""
+    together, to the tests it turned green. `bodies` is the text of the
+    REVERTED units as it stood before the revert, kept off the tree: a body
+    the same run kept is already on the tree, and re-splicing it over
+    itself is a write that changes nothing and prints as a repair (run
+    `4012759-5c5177c6`, fill 9: `from_boxed` "taken back" to its own
+    text)."""
 
     label: str
     units: frozenset[str]
@@ -812,14 +813,27 @@ class JointCandidate:
     lost: frozenset[str]
     bodies: Mapping[str, str] = field(default_factory=dict)
     repaired: bool = False
+    #: The oracle the recording row was measured under (`RouteLedgerRow.
+    #: oracle_fp`). Not part of the identity: the seed gate compares it with
+    #: the tree's oracle, and the same answer under one oracle is one
+    #: candidate.
+    oracle_fp: str = ""
 
     @property
     def digest(self) -> str:
-        parts = [self.label, *sorted(self.units), *sorted(self.gained),
+        """What the candidate IS: its units, its gained and lost tests and
+        its bodies. The label is a display string that repeats across runs
+        (`session[4 test(s), 6 unit(s)] #0`), so it is not part of it, and
+        the same answer recorded by two processes is one candidate."""
+        parts = [*sorted(self.units), "|", *sorted(self.gained), "|",
                  *sorted(self.lost)]
         parts.extend(f"{k}={self.bodies[k]}" for k in sorted(self.bodies))
         h = hashlib.sha256("\0".join(parts).encode("utf-8"))
         return "j" + h.hexdigest()[:_WIDTH]
+
+
+#: The joint outcomes of a seed that was judged: each spends the candidate.
+JUDGED_JOINT_OUTCOMES = frozenset({"accepted", "gains_held", "refuted"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -862,17 +876,26 @@ def joint_accept(*, gained: Collection[str], lost: Collection[str],
         False, False, "gains held, still red: " + ", ".join(sorted(still_red)))
 
 
-def joint_rollback(cand: Mapping[Any, Sequence[str]],
-                   prior: Mapping[Any, Sequence[str]],
-                   now: Callable[[Any], Sequence[str]]) -> dict[Any, Sequence[str]]:
-    """The functions a rejected joint answer puts back, and to what: each
-    candidate function still holding the candidate body gets its prior
-    body. One the fill rewrote keeps the fill's body, and nothing outside
-    the candidate is touched: a file-level restore erased every other body
-    the fill landed in those files while the route rows still recorded
-    them kept."""
-    return {loc: prior[loc] for loc, body in cand.items()
-            if prior.get(loc) and tuple(now(loc)) == tuple(body)}
+def joint_outcome_of(*, gained: Collection[str], lost: Collection[str],
+                     after_green: Collection[str]) -> str:
+    """The joint verdict as the word a route row stores: ``accepted``,
+    ``refuted`` or ``gains_held`` (`joint_accept`). It classifies the
+    session's end reading; it decides nothing about the tree."""
+    v = joint_accept(gained=gained, lost=lost, after_green=after_green)
+    if v.accept:
+        return "accepted"
+    return "refuted" if v.refute else "gains_held"
+
+
+def joint_spent(rows: Iterable[Any], digest: str, oracle_fp: str) -> bool:
+    """A judged joint row for `digest` under this oracle exists. A row whose
+    seed was never measured, or that ended on a premise it could not
+    restore, does not spend the candidate."""
+    return any(
+        str(getattr(r, "joint", "") or "") == digest
+        and str(getattr(r, "oracle_fp", "") or "") == oracle_fp
+        and str(getattr(r, "joint_outcome", "") or "") in JUDGED_JOINT_OUTCOMES
+        for r in rows)
 
 
 def _bodies_of(row: Any) -> dict[str, str]:
@@ -895,14 +918,24 @@ def _bodies_of(row: Any) -> dict[str, str]:
 
 def joint_candidates(rows: Iterable[Any], red_tests: Collection[str],
                      ) -> tuple[JointCandidate, ...]:
-    """The route-ledger rows (this run, this oracle) whose run reverted
-    units, turned at least one still-red test green, and reddened another
-    test. Run `450922-661c5e9f` reverted the `src/ensure.rs` file run and the
-    Debug/Display pair this way; the bodies they had written are kept on
-    the row (`candidate_bodies`) so the next ask can start from them."""
+    """The route-ledger rows whose run reverted units, turned at least one
+    still-red test green, and reddened another test. Run `450922-661c5e9f`
+    reverted the `src/ensure.rs` file run and the Debug/Display pair this
+    way; the bodies they had written are kept on the row
+    (`candidate_bodies`) so the next ask can start from them.
+
+    The caller passes every row of the cluster under the current oracle,
+    whichever process wrote it: a candidate read only from this process's
+    rows dies with the process (run `4012759-5c5177c6`'s iteration-8 row, the
+    only answer that ever turned `test_debug` green, was invisible to any
+    restart). One candidate per digest; a row of a run that answered a
+    joint ask is not itself a candidate."""
     red = {t.rsplit("::", 1)[-1] for t in red_tests}
     out: list[JointCandidate] = []
+    seen: set[str] = set()
     for r in rows:
+        if getattr(r, "joint", ""):
+            continue
         reverted = frozenset(f"{p[0]}::{p[1]}"
                              for p in getattr(r, "reverted", ()) or ())
         lost = frozenset(getattr(r, "newly_red", ()) or ())
@@ -910,10 +943,15 @@ def joint_candidates(rows: Iterable[Any], red_tests: Collection[str],
             g.rsplit("::", 1)[-1]
             for g in (getattr(r, "newly_green", ()) or ())) & red
         if reverted and lost and gained:
-            out.append(JointCandidate(
-                str(getattr(r, "label", "")), reverted, gained, lost,
-                _bodies_of(r),
-                bool(getattr(r, "joint_repaired", False))))
+            bodies = {k: v for k, v in _bodies_of(r).items() if k in reverted}
+            cand = JointCandidate(
+                str(getattr(r, "label", "")), reverted, gained, lost, bodies,
+                bool(getattr(r, "joint_repaired", False)),
+                str(getattr(r, "oracle_fp", "") or ""))
+            if cand.digest in seen:
+                continue
+            seen.add(cand.digest)
+            out.append(cand)
     return tuple(out)
 
 

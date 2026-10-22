@@ -1287,3 +1287,63 @@ def test_the_stub_is_told_the_last_crash_refutation_under_its_oracle() -> None:
     # A refutation with no crash recorded (any other refuting grade) is not one.
     assert latest_crash_refutation(
         [regressed], "src/error.rs", "new", oracle_fp=_ORACLE) is None
+
+
+def test_a_joint_seed_is_gated_on_the_tree_and_never_on_the_bodys_state() -> None:
+    """The reseed gate refuses every reverted body by its state; the joint
+    seed gate keeps only the tree comparisons. Run `4012759-5c5177c6`: the
+    one answer that turned `test_debug` green was a reverted, refuted body.
+    Negative control: the reseed gate on the same entry refuses it."""
+    from pipeline_core.domain.body_ledger import candidate_seed_allowed
+    refuted = _entry(state=BodyState.REFUTED)
+    assert not _allowed(refuted, file_fp="fp-original",
+                        sig_sha=refuted.sig_sha)
+    ok = candidate_seed_allowed(
+        refuted, row_oracle_fp=_ORACLE, oracle_fp=_ORACLE,
+        file_fp="fp-original", sig_sha=refuted.sig_sha, located=True)
+    assert ok, ok.reason
+    kw = {"row_oracle_fp": _ORACLE, "oracle_fp": _ORACLE, "located": True}
+    assert candidate_seed_allowed(None, file_fp="", sig_sha="", **kw)
+    assert candidate_seed_allowed(
+        None, row_oracle_fp="old", oracle_fp=_ORACLE, file_fp="", sig_sha="",
+        located=True).reason == "oracle moved"
+    assert candidate_seed_allowed(
+        None, row_oracle_fp=_ORACLE, oracle_fp=_ORACLE, file_fp="",
+        sig_sha="", located=False).reason == "no body span on this tree"
+    assert candidate_seed_allowed(
+        refuted, file_fp="fp-original", sig_sha="other",
+        **kw).reason == "signature moved"
+    assert candidate_seed_allowed(
+        refuted, file_fp="fp-moved", sig_sha=refuted.sig_sha,
+        **kw).reason == "layout moved"
+    dep = LayoutDep("ErrorImpl", "struct", "struct ErrorImpl { x: u8 }")
+    with_deps = _entry(state=BodyState.REFUTED, layout_deps=(dep,))
+    assert candidate_seed_allowed(
+        with_deps, file_fp="fp-moved", sig_sha=with_deps.sig_sha,
+        definition_present=lambda d: True, **kw)
+    moved = candidate_seed_allowed(
+        with_deps, file_fp="fp-moved", sig_sha=with_deps.sig_sha,
+        definition_present=lambda d: False, **kw)
+    assert not moved and moved.moved == ("ErrorImpl",)
+
+
+def test_a_joint_seed_with_no_file_fingerprint_is_not_a_layout_match() -> None:
+    """A key miss in `skeleton_fingerprints` gives an empty `file_fp`. The
+    seed gate passed it as a match while the reseed gate needs both
+    fingerprints and equality (review of the 2026-10-22 implementation). It
+    now falls to the dependency check like a moved fingerprint, and an entry
+    with no layout evidence at all is gated by the located declaration."""
+    from pipeline_core.domain.body_ledger import candidate_seed_allowed
+    kw = {"row_oracle_fp": _ORACLE, "oracle_fp": _ORACLE, "located": True}
+    refuted = _entry(state=BodyState.REFUTED)
+    assert refuted.layout_fp
+    miss = candidate_seed_allowed(refuted, file_fp="", sig_sha=refuted.sig_sha, **kw)
+    assert not miss and miss.reason == "layout moved"
+    dep = LayoutDep("ErrorImpl", "struct", "struct ErrorImpl { x: u8 }")
+    with_deps = _entry(state=BodyState.REFUTED, layout_deps=(dep,))
+    assert candidate_seed_allowed(
+        with_deps, file_fp="", sig_sha=with_deps.sig_sha,
+        definition_present=lambda _d: True, **kw)
+    no_layout = _entry(state=BodyState.REFUTED, layout_fp="")
+    assert candidate_seed_allowed(no_layout, file_fp="", sig_sha=no_layout.sig_sha,
+                                  **kw)

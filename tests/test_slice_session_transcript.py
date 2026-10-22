@@ -64,7 +64,7 @@ def _run(root: Path, *, bound: int, max_turns: int = 8):
         splice=lambda *a, **k: (True, "", 0),
         check=lambda: (0, "", []),
         focus_errors=lambda out, f: out, blamed_type_api=lambda t: t,
-        measure_suite=lambda raw: _reading(),
+        measure_suite=lambda raw, _role=None: _reading(),
         read_source=lambda p: None,
         enumerate_bodies=lambda: {_FMT: "BASE"},
         answer_pulls=lambda r, conversation="": "here is the error",

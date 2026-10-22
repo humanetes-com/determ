@@ -503,12 +503,12 @@ def test_regression_gate(
                   "The oracle score is the objective; a strict net gain is "
                   "not refused over an individual loss")
         return None
-    # Reached only for a binary the capture could NOT rebuild one test per
-    # process (`isolate_aborted_binaries`: no executable path, the deadline,
-    # an ambiguous splice, or `PHASE_C_TEST_ISOLATION=0`). An isolated binary
-    # always completes, its aborted tests are per-test failures, and the
-    # per-test comparison above already judged them; the branches below are
-    # the fallback reading of a shared-process abort, not a second rule.
+    # Two shapes reach the branch below: a binary the capture could NOT
+    # rebuild one test per process (`isolate_aborted_binaries`: no executable
+    # path, the deadline, an ambiguous splice, or `PHASE_C_TEST_ISOLATION=0`),
+    # and an isolated binary whose lost tests each aborted in their own
+    # process. Both are one fact — the lost tests died with their process —
+    # and get one rule.
     # A crash-only verdict is asked one more question before it may revert:
     # WHAT panicked, in the binaries that COST something. When every
     # completed binary held (no newly-red, no measured-scope count drop) and
@@ -534,8 +534,14 @@ def test_regression_gate(
     # INTRODUCING a stub — must pass ``introduced_stubs=True``, because a
     # stub restore's own panic would otherwise exonerate itself. File-first
     # peel is that caller.
-    if (cmp.newly_crashed and not cmp.newly_red
-            and cmp.cur_pass >= cmp.base_pass
+    # Under test isolation the same abort arrives one test wide: the binary
+    # completes, the dead test is a red verdict (`newly_red_aborted`), and its
+    # pass counts against `cur_pass`. It is the same shape and is judged by
+    # the same question, over that test's own block, with the passes the
+    # aborts cost added back to the count check exactly as a crashed binary's
+    # are left out of it (`RegressionComparison.lost_by_abort`).
+    if (cmp.lost_by_abort
+            and cmp.cur_pass + cmp.abort_lost_pass >= cmp.base_pass
             and cmp.cur_executed >= cmp.base_executed):
         # A crash-only reading: every COMPLETED binary held and the only
         # loss is a binary that produced no verdicts. The sweep judges this
@@ -549,58 +555,60 @@ def test_regression_gate(
         # claw the keep back: a full iteration per cycle, and every later
         # unit of the batch judged with the crashed binaries excluded.
         _stub_sites = stub_only_crash(_raw[-1] if _raw else "",
-                                      crashed=cmp.newly_crashed)
+                                      crashed=cmp.newly_crashed,
+                                      aborted_tests=cmp.newly_red_aborted)
         # Carried out on every exit of this branch: the retro writer stamps
         # the record it earns from a stub-caused crash as the tree's, not
         # the body's (`crash_stub_sites`), and the failed-attempt comment
         # names the stubs instead of "did not compile".
         cmp = replace(cmp, crash_stub_sites=_stub_sites)
-        _plural = 'ies' if len(cmp.newly_crashed) > 1 else 'y'
+        _died = [*cmp.newly_crashed, *sorted(cmp.newly_red_aborted)]
+        _plural = 'ies' if len(_died) > 1 else 'y'
         if _stub_sites:
             _locs = sorted(f"{f}:{ln}" for f, ln in _stub_sites)
             if introduced_stubs:
                 guard("phase-c/crash_introduced_stub_reverted",
-                      f"binar{_plural} {list(cmp.newly_crashed)} crashed, and "
+                      f"binar{_plural} {_died} crashed, and "
                       f"the capture's only panic(s) are stub panics at {_locs} "
                       "— this fill put those stub(s) back, so the panic is "
                       "its own; REVERTED rather than kept (cost: "
-                      f"{cmp.crash_lost_pass} baseline pass(es))")
+                      f"{cmp.abort_cost} baseline pass(es))")
                 return cmp, render_regression_detail(cmp)
             hollow_now = hollow_count(snapshot_src_tree(cwd))
             if hollow_before is not None and hollow_now < hollow_before:
                 guard("phase-c/crash_closure_kept",
-                      f"binar{_plural} {list(cmp.newly_crashed)} crashed, the "
+                      f"binar{_plural} {_died} crashed, the "
                       f"capture's only panic(s) are stub panics at {_locs}, "
                       f"and the hollow set shrank {hollow_before} → "
                       f"{hollow_now} — a coupled component closing (the "
                       "sweep's own closure exemption); fill KEPT (cost: "
-                      f"{cmp.crash_lost_pass} baseline pass(es) until the "
+                      f"{cmp.abort_cost} baseline pass(es) until the "
                       "stub(s) fill)")
                 return None
             guard("phase-c/crash_stub_panic_reverted",
-                  f"binar{_plural} {list(cmp.newly_crashed)} crashed on stub "
+                  f"binar{_plural} {_died} crashed on stub "
                   f"panic(s) at {_locs} with the hollow set not shrinking "
                   f"({hollow_before} → {hollow_now}) — not a closure; "
                   "REVERTED, as the sweep would charge it (cost: "
-                  f"{cmp.crash_lost_pass} baseline pass(es))")
+                  f"{cmp.abort_cost} baseline pass(es))")
             return cmp, render_regression_detail(cmp)
         if stub_free:
             guard("phase-c/crash_stub_free_reverted",
-                  f"binar{_plural} {list(cmp.newly_crashed)} crashed after the "
+                  f"binar{_plural} {_died} crashed after the "
                   "fill and the tree holds no stub — no hollow sibling can be "
                   "the one speaking, so the crash is this fill's; REVERTED "
                   "now rather than kept for the next sweep's ratchet, so the "
                   "rest of the batch is judged against a live baseline "
-                  f"(cost: {cmp.crash_lost_pass} baseline pass(es))")
+                  f"(cost: {cmp.abort_cost} baseline pass(es))")
             return cmp, render_regression_detail(cmp)
         guard("phase-c/crash_only_reverted",
-              f"binar{_plural} {list(cmp.newly_crashed)} crashed with no "
+              f"binar{_plural} {_died} crashed with no "
               "newly-red verdict in any completed binary and no stub-only "
               "panic evidence in the crashed binar" + _plural + "'s own "
               "output — the sweep would count the vanished tests as failing "
               "and the ratchet would restore the snapshot; REVERTED here "
               "instead, so the rest of the fill is judged against a live "
-              f"baseline (cost: {cmp.crash_lost_pass} baseline pass(es))")
+              f"baseline (cost: {cmp.abort_cost} baseline pass(es))")
         return cmp, render_regression_detail(cmp)
     return cmp, render_regression_detail(cmp)
 

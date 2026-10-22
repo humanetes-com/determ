@@ -71,6 +71,7 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
 from pipeline_core.domain.crash_keep import SameCrashJudge
+from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
     identity_name,
@@ -85,6 +86,7 @@ from pipeline_core.domain.refill_evidence import quote_panic_site
 from pipeline_core.domain.rust_idents import signature_fixed_by_trait
 from pipeline_core.domain.slice_session import (
     ChangeSet,
+    RoutedBody,
     SessionSlice,
     TargetStatus,
     TurnReading,
@@ -124,8 +126,11 @@ class SessionPorts:
     focus_errors: Callable[[str, str], str]
     # (excerpt) -> excerpt with the blamed types' declared fns appended.
     blamed_type_api: Callable[[str], str]
-    # (raw_sink) -> the whole suite's reading, None when inconclusive.
-    measure_suite: Callable[[list[str]], TestStateReading | None]
+    # (raw_sink, role) -> the whole suite's reading, None when inconclusive.
+    # The opening baseline is the session's PREMISE; every reading after a
+    # splice (a turn, a settle re-read, a peel step, the seed) is a JUDGMENT
+    # (`domain/fill_ground.MeasureRole`).
+    measure_suite: Callable[[list[str], MeasureRole], TestStateReading | None]
     # crate-relative path -> text, for quoting a panic's source line.
     read_source: Callable[[str], str | None]
     # () -> current body text per slice unit.
@@ -219,6 +224,18 @@ class SessionOutcome:
     #: tests green is still on the tree. Empty when the session did not
     #: revert a gain.
     candidate_bodies: Mapping[str, str] = field(default_factory=dict)
+    #: The slice carried a seed and the seed's write was measured (its own
+    #: judged turn, kind `seed`). False on every unseeded session and on a
+    #: seed that did not compile, could not be routed, or read inconclusive.
+    seed_judged: bool = False
+    #: The session's targets passing on the tree the session LEFT: the end
+    #: state when it was kept whole, the peel's held subset when peeled, the
+    #: opening suite when everything was put back. None when that tree was
+    #: not measured. `final` is the best judged reading, taken before any
+    #: peel, and describes a tree the session may have taken back; a joint
+    #: ask classified on it stored `gains_held` for a seed the peel had
+    #: already removed (review of the 2026-10-22 implementation).
+    held_green: frozenset[str] | None = None
 
     @property
     def carried_body(self) -> bool:
@@ -350,6 +367,34 @@ def render_admitted_units(recs: Sequence[FnRecord]) -> str:
             f"return <FN> bodies for them: {named}.")
 
 
+def seed_change_set(
+    seed: Sequence[tuple[str, str]],
+    records: Mapping[FnSite, FnRecord],
+) -> tuple[ChangeSet, tuple[str, ...]]:
+    """The seed's bodies routed to the slice's records: each `file::fn` to the
+    one record of that file and name (either rooting of the file). A key
+    with no record, or with several, is not routed and is named."""
+    def _norm(f: str) -> str:
+        return f.removeprefix("src/")
+    routed: list[RoutedBody] = []
+    missing: list[str] = []
+    for key, body in seed:
+        if "::" not in key or not body:
+            missing.append(key)
+            continue
+        file_, fn_ = key.rsplit("::", 1)
+        hits = [site for site in records
+                if site.fn_name == fn_ and _norm(site.file) == _norm(file_)]
+        if len(hits) != 1:
+            missing.append(key)
+            continue
+        rec = records[hits[0]]
+        routed.append(RoutedBody(unit=hits[0], container=rec.container,
+                                 sig_text=rec.sig_text, body=body,
+                                 where_clause=None))
+    return ChangeSet(tuple(routed), ()), tuple(missing)
+
+
 def run_slice_session(
     ports: SessionPorts,
     *,
@@ -420,7 +465,15 @@ def run_slice_session(
     returns None); the allowance is the caller's statement of that bound,
     and a request past it is charged as a turn so the loop terminates
     whatever the answerer does. 0 charges every request, the behaviour
-    before, and is the negative control."""
+    before, and is the negative control.
+
+    A slice with a `seed` (a joint ask) writes the seed after the opening
+    baseline and judges it as a turn of its own, kind `seed`: no model call,
+    no turn charged, measured as a JUDGMENT against the opening PREMISE and
+    kept, peeled or restored by the same rule as every turn. Turn 0 then
+    carries the seed's result (what each newly red test printed), and the
+    model's turns start from the seeded tree, or from the baseline when the
+    seed did not compile."""
     label = slice_.label()
     files = list(slice_.files)
     # The write set starts as the planned slice and may grow when a FILE
@@ -435,7 +488,7 @@ def run_slice_session(
     baseline_texts = {f: capture(target_src_dir / f, None) for f in files}
     baseline_bodies = dict(ports.enumerate_bodies())
     base_raw: list[str] = []
-    baseline = ports.measure_suite(base_raw)
+    baseline = ports.measure_suite(base_raw, MeasureRole.PREMISE)
     ports.emit("phase_c.session.start", data={
         "cluster": cluster_name, "tests": list(slice_.tests),
         "units": [site_payload(u) for u in slice_.units],
@@ -467,6 +520,7 @@ def run_slice_session(
         label=label, route="session")
     pending = turn0
     started = ports.now()
+    seed_judged = False
     turns = 0
     model_calls = 0
     first_turn_minutes: float | None = None
@@ -512,6 +566,72 @@ def run_slice_session(
     def _images() -> dict[str, PreImage]:
         return {f: capture(target_src_dir / f, None) for f in files}
 
+    def _seed_turn() -> str:
+        """Write and judge the slice's seed; return the text turn 0 carries
+        about it ("" without a seed)."""
+        nonlocal best, keepable, accepted, seed_judged
+        cs, missing = seed_change_set(slice_.seed, records)
+        if missing:
+            ports.log(f"  [phase-c/session] {label}: seed — {len(missing)} "
+                      "body(ies) have no single record in the slice and are "
+                      "not written: " + ", ".join(missing[:6]))
+        if not cs.routed:
+            return ""
+        rejected, pre = _apply(cs)
+        names = ", ".join(f"{r.unit.file}::{r.unit.fn_name}" for r in cs.routed)
+        preface = ("SEED: before your first turn, the bodies an earlier "
+                   f"answer wrote for {names} were put on the tree. That "
+                   "answer turned target tests green and was reverted "
+                   "because it broke others.\n")
+        rc, out, _diags = ports.check()
+        if rc != 0:
+            _restore(pre)
+            ports.emit("phase_c.session.turn", data={
+                "cluster": cluster_name, "turn": 0, "kind": "seed",
+                "compiled": False,
+                "units": [site_payload(u) for u in sorted(cs.units)]})
+            ports.log(f"  [phase-c/session] {label}: seed of {len(cs.routed)} "
+                      "body(ies) does not compile on this tree; restored, the "
+                      "turns start from the opening state.")
+            focused = "\n".join(
+                x for x in (ports.focus_errors(out, f) for f in sorted(pre)) if x)
+            return (preface + "They do not compile on this tree and were taken "
+                    "back:\n" + (focused or out[-2000:]))
+        raw: list[str] = []
+        jw = JudgedWrite(
+            frozenset(FnLocator(r.unit.file, r.unit.fn_name) for r in cs.routed),
+            {f: img.text("replace") for f, img in pre.items()},
+            size=len(cs.routed))
+        reading, after = _read(raw, jw)
+        if after is None or baseline is None:
+            _restore(pre)
+            ports.log(f"  [phase-c/session] {label}: seed read inconclusive; "
+                      "restored.")
+            return ""
+        seed_judged = True
+        images = _images()
+        best = _JudgedState(0, reading, images)
+        if not reading.regressed:
+            keepable = best
+        failing = [t.test for t in reading.targets if not t.passing]
+        ports.emit("phase_c.session.turn", data={
+            "cluster": cluster_name, "turn": 0, "kind": "seed",
+            "compiled": True,
+            "units": [site_payload(u) for u in sorted(cs.units)],
+            "targets_failing": failing, "newly_red": list(reading.newly_red),
+            "crashed": list(reading.crashed), "pass_delta": reading.pass_delta,
+            "regressed": reading.regressed})
+        ports.log(f"  [phase-c/session] {label}: seed turn — {len(cs.routed)} "
+                  f"body(ies) judged; targets failing {len(failing)}/"
+                  f"{len(slice_.tests)}, newly red {len(reading.newly_red)}, "
+                  f"net {reading.pass_delta:+d}.")
+        if reading.clean:
+            accepted = True
+            ports.log(f"  [phase-c/session] {label}: ACCEPTED on the seed — "
+                      "every target passes, no regression.")
+        return preface + "The result of that write:\n" + render_test_turn(
+            reading, rejected)
+
     def _reply_capped() -> CallCapReading | None:
         if ports.call_reading is None:
             return None
@@ -541,7 +661,7 @@ def run_slice_session(
 
     def _read(raw: list[str], written: Collection[FnLocator],
               ) -> tuple[TurnReading, TestStateReading | None]:
-        after = ports.measure_suite(raw)
+        after = ports.measure_suite(raw, MeasureRole.JUDGMENT)
         # A test process that died under this change set is settled by the
         # fill's bound settler (`crash_settler`) before the turn is read, the
         # same rule the per-fn and joint gates apply: a culprit outside the
@@ -555,7 +675,7 @@ def run_slice_session(
             if _settler.settle(raw[-1] if raw else "", written, baseline,
                                tag=f"{label} ").changed_tree:
                 raw.clear()
-                after = ports.measure_suite(raw)
+                after = ports.measure_suite(raw, MeasureRole.JUDGMENT)
         if after is None or baseline is None:
             return TurnReading(targets=tuple(
                 TargetStatus(t, False, "(suite inconclusive)") for t in slice_.tests)), after
@@ -616,7 +736,11 @@ def run_slice_session(
         return reading, after
 
     try:
-        while turns < max_turns:
+        if slice_.seed:
+            _said = _seed_turn()
+            if _said:
+                pending = turn0 + "\n\n" + _said
+        while turns < max_turns and not accepted:
             if model_calls and first_turn_minutes is None:
                 first_turn_minutes = (ports.now() - opened_at) / 60.0
             ports.check_graceful_stop(f"slice session turn {turns + 1}")
@@ -985,6 +1109,10 @@ def run_slice_session(
     # so the decision reads that state's reading, and the peel — needed only
     # when the best state itself regresses the opening suite — walks from it.
     final = ended.reading if ended is not None else None
+    # Unless a branch below takes the end state back, the tree holds it.
+    held_green: frozenset[str] | None = (
+        final.green_targets if final is not None
+        else _green_targets_in(baseline, slice_.tests))
     if accepted:
         outcome, kept = "accepted", changed
     elif changed:
@@ -1006,12 +1134,15 @@ def run_slice_session(
                           "peelable subset; later binaries never ran).")
                 kept, reverted = frozenset(), changed
                 outcome = "reverted"
+                held_green = _green_targets_in(baseline, slice_.tests)
             else:
-                kept, reverted = _peel(
+                kept, reverted, _peel_held = _peel(
                     ports, target_src_dir, slice_, records, baseline,
                     baseline_bodies, baseline_texts, changed,
                     peel_max=peel_max, label=label)
                 outcome = "kept" if kept else "reverted"
+                held_green = (_green_targets_in(_peel_held, slice_.tests) if kept
+                              else _green_targets_in(baseline, slice_.tests))
         else:
             outcome, kept = "kept", changed
     result = SessionOutcome(
@@ -1026,7 +1157,8 @@ def run_slice_session(
         judged_turns=judged_turns, judged_capped_turns=judged_capped,
         answered_turns=answered_turns, requests=requests,
         first_turn_minutes=first_turn_minutes,
-        candidate_bodies=_candidate_bodies)
+        candidate_bodies=_candidate_bodies, seed_judged=seed_judged,
+        held_green=held_green)
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,
@@ -1117,9 +1249,10 @@ def _peel(
     *,
     peel_max: int,
     label: str,
-) -> tuple[frozenset[FnSite], frozenset[FnSite]]:
+) -> tuple[frozenset[FnSite], frozenset[FnSite], TestStateReading | None]:
     """Restore changed units one at a time until the suite holds; the rest
-    are kept. Restores the whole baseline when the budget runs out or
+    are kept, and the reading that held is returned with them (None when
+    the baseline was restored). Restores the whole baseline when the budget runs out or
     nothing holds. The bar is the sweep's (`RegressionComparison.regressed`):
     a strict net gain holds even with a newly-red test, at or below zero any
     loss fails. It used to be "no previously-passing test red, whatever the
@@ -1148,7 +1281,7 @@ def _peel(
         if rc != 0:
             continue
         raw: list[str] = []
-        after = ports.measure_suite(raw)
+        after = ports.measure_suite(raw, MeasureRole.JUDGMENT)
         if after is None or baseline is None:
             continue
         cmp = compare_readings(baseline, after)
@@ -1163,9 +1296,21 @@ def _peel(
             ports.log(f"  [phase-c/session] {label}: peeled {len(reverted)} unit(s) — "
                       f"the remaining {len(remaining) + len(unrestored)} hold "
                       "with no previously-passing test red.")
-            return frozenset(remaining) | frozenset(unrestored), frozenset(reverted)
+            return (frozenset(remaining) | frozenset(unrestored),
+                    frozenset(reverted), after)
     for pre_image in baseline_texts.values():
         restore(pre_image)
     ports.log(f"  [phase-c/session] {label}: no subset of the change set holds "
               "within the peel budget — baseline restored.")
-    return frozenset(), changed
+    return frozenset(), changed, None
+
+
+def _green_targets_in(reading: TestStateReading | None,
+                      tests: Sequence[str]) -> frozenset[str] | None:
+    """The targets `reading` saw passing and nowhere failing (bare names)."""
+    if reading is None:
+        return None
+    passed = {n.rsplit("::", 1)[-1] for n in reading.passed_names}
+    failed = {n.rsplit("::", 1)[-1] for b in reading.binaries for n in b.failed}
+    return frozenset(t for t in tests if t.rsplit("::", 1)[-1] in passed
+                     and t.rsplit("::", 1)[-1] not in failed)

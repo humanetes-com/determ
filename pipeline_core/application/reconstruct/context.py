@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import threading
 from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -16,6 +15,7 @@ from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.models import FillResult, FnLocator, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
+from pipeline_core.ports.fill_engine import TreeLock
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +39,7 @@ class PerFnPassCtx:
     failures_dir: Path
     tdd_frontier_tests: FailureFrontier | None
     tdd_test_cmd: str | None
-    splice_check_lock: threading.Lock
+    splice_check_lock: TreeLock
     retros_cache: dict[str, Any]
     idiom_blocks: list[ImplBlock]
     pass_n: int

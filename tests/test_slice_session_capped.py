@@ -111,7 +111,7 @@ def test_an_empty_capped_reply_is_reasked_and_the_session_goes_on(tmp_path: Path
     base = _reading({"t_keep"}, {"t_fmt"})
     green = _reading({"t_keep", "t_fmt"}, set())
     out, calls = _run(root, ["", _BODY], [_CAPPED_EMPTY, _CLEAN],
-                      measure=lambda raw: green if (root / "src" / "lib.rs").read_text() != "BASE" else base)
+                      measure=lambda raw, _role=None: green if (root / "src" / "lib.rs").read_text() != "BASE" else base)
     assert out.outcome == "accepted"
     assert out.turns == 2 and out.model_calls == 2
     assert out.capped_turns == 1 and out.judged_turns == 1
@@ -127,7 +127,7 @@ def test_without_a_cap_reading_an_empty_reply_still_ends_the_session(tmp_path: P
     cannot tell a capped reply from a decline and ends as before."""
     root = _tree(tmp_path)
     base = _reading({"t_keep"}, {"t_fmt"})
-    out, calls = _run(root, ["", _BODY], None, measure=lambda raw: base)
+    out, calls = _run(root, ["", _BODY], None, measure=lambda raw, _role=None: base)
     assert out.outcome == "no_change" and out.turns == 1 and len(calls) == 1
     # The session still ends, but it wrote nothing, so it is no verdict on
     # the slice (`SessionOutcome.unanswered`; run `1430425-193a8f28`
@@ -139,7 +139,7 @@ def test_every_reply_capped_and_empty_ends_unmeasured_after_the_budget(tmp_path:
     root = _tree(tmp_path)
     base = _reading({"t_keep"}, {"t_fmt"})
     out, calls = _run(root, ["", "", ""], [_CAPPED_EMPTY] * 3,
-                      measure=lambda raw: base, max_turns=3)
+                      measure=lambda raw, _role=None: base, max_turns=3)
     assert out.outcome == "no_change" and out.turns == 3 and len(calls) == 3
     assert out.capped_turns == 3 and out.judged_turns == 0
     assert out.unmeasured
@@ -156,7 +156,7 @@ def test_a_session_whose_only_landing_is_a_capped_guess_is_unmeasured_unless_it_
     base = _reading({"t_keep"}, {"t_fmt"})
     worse = _reading(set(), {"t_fmt", "t_keep"})
     out, _calls = _run(root, [_BODY, ""], [_CAPPED_BODY, _CLEAN],
-                       measure=lambda raw: worse if (root / "src" / "lib.rs").read_text() != "BASE" else base)
+                       measure=lambda raw, _role=None: worse if (root / "src" / "lib.rs").read_text() != "BASE" else base)
     assert out.judged_turns == 1 and out.judged_capped_turns == 1
     assert out.unmeasured
     assert _outcome(RouteRunReport(model_calls=2, reverted=frozenset({FnLocator("src/lib.rs", "fmt")}),
@@ -166,7 +166,7 @@ def test_a_session_whose_only_landing_is_a_capped_guess_is_unmeasured_unless_it_
     # Control: the same landing from an uncapped reply is a measured refusal.
     (root / "src" / "lib.rs").write_text("BASE")
     out2, _c = _run(root, [_BODY, ""], [_CLEAN, _CLEAN],
-                    measure=lambda raw: worse if (root / "src" / "lib.rs").read_text() != "BASE" else base)
+                    measure=lambda raw, _role=None: worse if (root / "src" / "lib.rs").read_text() != "BASE" else base)
     assert out2.judged_turns == 1 and out2.judged_capped_turns == 0
     assert not out2.unmeasured
     assert _outcome(RouteRunReport(model_calls=2, reverted=frozenset({FnLocator("src/lib.rs", "fmt")})),
