@@ -248,16 +248,31 @@ class CrashSettler:
                 fresh = [f for f in step.culprits
                          if (f.file_rel, f.fn_name, f.line) not in {
                              (s.file_rel, s.fn_name, s.line) for s in stubbed}]
+                # A culprit whose body cannot be located (a shared name the
+                # stack gave no line for) is carried like a site that names
+                # nobody: the others go back, and if its crash is still in
+                # the next reading the settlement ends there. One such frame
+                # used to sink every other culprit of the step with it.
+                lost = [f for f in fresh if not self._locatable(txn, f)]
+                fresh = [f for f in fresh if f not in lost]
                 if not fresh or not self._stub(txn, fresh):
                     outcome = SettlementOutcome.UNSETTLED
                     reason = reason or "the culprit's body could not be put back"
                     break
                 stubbed.extend(fresh)
+                _carried = [c.reason for c in step.carried] + [
+                    f"{f.file_rel}::{f.fn_name}: its body could not be located"
+                    for f in lost]
                 d.log(f"  {tag}[phase-c/crash-settle] round {rounds}: the "
                       "crash under the write was produced by unproven "
                       + ", ".join(f"{f.file_rel}::{f.fn_name} (line {f.line})"
                                   for f in fresh)
-                      + " — put back to a stub, re-running the suite.")
+                      + " — put back to a stub, re-running the suite"
+                      + (f"; {len(_carried)} crash(es) with no body to put "
+                         "back are carried to that reading ("
+                         + "; ".join(_carried)[:400] + ")"
+                         if _carried else "")
+                      + ".")
                 got = d.run_suite()
                 if got is None:
                     outcome = SettlementOutcome.UNSETTLED
@@ -437,6 +452,16 @@ class CrashSettler:
         for rel, text in out.items():
             txn.write(rel, text)
         return True
+
+    @staticmethod
+    def _locatable(txn: TreeTxn, f: CrashFrame) -> bool:
+        """Whether `_stub` can find the one occurrence the frame ran."""
+        try:
+            text = txn.read(f.file_rel)
+        except OSError:
+            return False
+        spans = [(s, e) for _sig, s, _b, e in locate_all_fns(text, f.fn_name)]
+        return occurrence_of_frame(spans, text, f.line) is not None
 
     def _stub(self, txn: TreeTxn, frames: Sequence[CrashFrame]) -> bool:
         """Put back the one occurrence of each frame's function the stack

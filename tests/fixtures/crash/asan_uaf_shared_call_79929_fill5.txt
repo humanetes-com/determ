@@ -1,0 +1,218 @@
+     Running tests/test_convert.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_convert-3a70465ea1f7fa1a)
+==1660766==ERROR: AddressSanitizer: heap-use-after-free on address 0x7bee675e18d0 at pc 0x561eefaad24a bp 0x7bbe64ffe240 sp 0x7bbe64ffe238
+WRITE of size 8 at 0x7bee675e18d0 thread T1
+    #0 0x561eefaad249 in core::sync::atomic::atomic_sub::<usize, usize> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/sync/atomic.rs:3956:24
+    #1 0x561eefaad249 in <core::sync::atomic::Atomic<usize>>::fetch_sub /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/sync/atomic.rs:3193:26
+    #2 0x561eefaad249 in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/sync.rs:2831:32
+    #3 0x561eefaac959 in core::ptr::drop_glue::<alloc::sync::Arc<core::sync::atomic::Atomic<bool>>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ptr/mod.rs:825:1
+    #4 0x561eefaacc89 in core::ptr::drop_glue::<test_convert::drop::Flag> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ptr/mod.rs:825:1
+    #5 0x561eefaa7d6c in test_convert::test_convert /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:17:1
+    #6 0x561eefaaa9c6 in test_convert::test_convert::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:10:18
+    #7 0x561eefaad615 in <test_convert::test_convert::{closure#0} as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #8 0x561eefaae99a in <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #9 0x561eefaae99a in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:724:18
+    #10 0x561eefabc214 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #11 0x561eefabc214 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #12 0x561eefabc214 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #13 0x561eefabc214 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #14 0x561eefabc214 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #15 0x561eefabc214 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #16 0x561eefabc214 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #17 0x561eefab5b23 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #18 0x561eefab5b23 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #19 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #20 0x561eefabf291 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #21 0x561eefabf291 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #22 0x561eefabf291 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #23 0x561eefabf291 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #24 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #25 0x561eefabf291 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #26 0x561eefb294ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #27 0x561eefb294ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #28 0x561eefa76cc6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+    #29 0x7fbe684aca9e  (/usr/lib/libc.so.6+0xaca9e) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+    #30 0x7fbe6854f3db  (/usr/lib/libc.so.6+0x14f3db) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+0x7bee675e18d0 is located 0 bytes inside of 24-byte region [0x7bee675e18d0,0x7bee675e18e8)
+freed by thread T1 here:
+    #0 0x561eefa78b96 in free /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #1 0x561eefaa8fa4 in alloc::alloc::dealloc_nonnull /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:128:14
+    #2 0x561eefaa8fa4 in <alloc::alloc::Global>::deallocate_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:229:22
+    #3 0x561eefaa8fa4 in <alloc::alloc::Global>::deallocate_impl /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:344:9
+    #4 0x561eefaa8fa4 in <alloc::alloc::Global as core::alloc::Allocator>::deallocate /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:462:23
+    #5 0x561eefaad27f in <alloc::sync::Arc<core::sync::atomic::Atomic<bool>> as core::ops::drop::Drop>::drop /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/sync.rs:2874:18
+    #6 0x561eefaa7ec3 in test_convert::test_convert /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:15:5
+    #7 0x561eefaaa9c6 in test_convert::test_convert::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:10:18
+    #8 0x561eefabc214 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #9 0x561eefabc214 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #10 0x561eefabc214 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #11 0x561eefabc214 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #12 0x561eefabc214 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #13 0x561eefabc214 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #14 0x561eefabc214 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #15 0x561eefab5b23 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #16 0x561eefab5b23 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #17 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #18 0x561eefabf291 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #19 0x561eefabf291 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #20 0x561eefabf291 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #21 0x561eefabf291 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #22 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #23 0x561eefabf291 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #24 0x561eefb294ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #25 0x561eefb294ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #26 0x561eefa76cc6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+
+previously allocated by thread T1 here:
+    #0 0x561eefa78e34 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x561eefaa8e47 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x561eefaa8e47 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x561eefaaa9c6 in test_convert::test_convert::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:10:18
+    #4 0x561eefabc214 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #5 0x561eefabc214 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #6 0x561eefabc214 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #7 0x561eefabc214 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #8 0x561eefabc214 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #9 0x561eefabc214 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #10 0x561eefabc214 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #11 0x561eefab5b23 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #12 0x561eefab5b23 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #13 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #14 0x561eefabf291 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #15 0x561eefabf291 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #16 0x561eefabf291 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #17 0x561eefabf291 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #18 0x561eefabf291 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #19 0x561eefabf291 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #20 0x561eefb294ae in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #21 0x561eefb294ae in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #22 0x561eefa76cc6 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+
+Thread T1 created by T0 here:
+    #0 0x561eefa5cbc1 in pthread_create /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:257:3
+    #1 0x561eefb0d8e0 in <std::sys::thread::unix::Thread>::new /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:98:19
+    #2 0x561eefac1dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:116:26
+    #3 0x561eefac1dc1 in <std::thread::builder::Builder>::spawn_unchecked::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/builder.rs:261:32
+    #4 0x561eefac1dc1 in <std::thread::builder::Builder>::spawn::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/builder.rs:191:23
+    #5 0x561eefac1dc1 in test::run_test /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:27
+    #6 0x561eefad4c3a in test::run_tests::<test::console::run_tests_console::{closure#2}> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:434:31
+    #7 0x561eefad4c3a in test::console::run_tests_console /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/console.rs:328:5
+    #8 0x561eefac0a97 in test::test_main_inner::<test::test_main_static::{closure#0}> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:170:19
+    #9 0x561eefac0a97 in test::test_main_static /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:195:5
+    #10 0x561eefaa7c42 in test_convert::main /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_convert.rs:1
+    #11 0x561eefaa7b5f in std::rt::lang_start::<()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/rt.rs:205:5
+    #12 0x561eefaa88ed in main (/home/user/determ/tmp/anyhow/.skeleton-filled/stable/target-asan/x86_64-unknown-linux-gnu/debug/deps/test_convert-3a70465ea1f7fa1a+0x1268ed) (BuildId: 1e71f2ceab743eb350f176d95e53d9d97a2972c3)
+    #13 0x7ffd7dc96e89  (<unknown module>)
+
+SUMMARY: AddressSanitizer: heap-use-after-free /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/sync/atomic.rs:3956:24 in core::sync::atomic::atomic_sub::<usize, usize>
+
+     Running tests/test_downcast.rs (target-asan/x86_64-unknown-linux-gnu/debug/deps/test_downcast-f6f43bff8bced278)
+==1660769==ERROR: AddressSanitizer: heap-use-after-free on address 0x7c1800be3820 at pc 0x55a96cdd608d bp 0x7ba7fe5fe060 sp 0x7ba7fe5fe058
+READ of size 8 at 0x7c1800be3820 thread T2
+    #0 0x55a96cdd608c in <anyhow::Error as core::ops::drop::Drop>::drop /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:598:26
+    #1 0x55a96cdd59ba in core::ptr::drop_glue::<anyhow::Error> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ptr/mod.rs:825:1
+    #2 0x55a96cd8e130 in <anyhow::Error>::downcast::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:375:5
+    #3 0x55a96cd84328 in test_downcast::test_downcast /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:17:37
+    #4 0x55a96cd888d6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #5 0x55a96cd89ba5 in <test_downcast::test_downcast::{closure#0} as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #6 0x55a96cd904ca in <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #7 0x55a96cd904ca in test::__rust_begin_short_backtrace::<core::result::Result<(), alloc::string::String>, fn() -> core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:724:18
+    #8 0x55a96cd9dd44 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #9 0x55a96cd9dd44 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #10 0x55a96cd9dd44 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #11 0x55a96cd9dd44 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #12 0x55a96cd9dd44 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #13 0x55a96cd9dd44 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #14 0x55a96cd9dd44 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #15 0x55a96cd97653 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #16 0x55a96cd97653 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #17 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #18 0x55a96cda0dc1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #19 0x55a96cda0dc1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #20 0x55a96cda0dc1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #21 0x55a96cda0dc1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #22 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #23 0x55a96cda0dc1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #24 0x55a96ce1501e in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #25 0x55a96ce1501e in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #26 0x55a96cd4e226 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+    #27 0x7fa801aaca9e  (/usr/lib/libc.so.6+0xaca9e) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+    #28 0x7fa801b4f3db  (/usr/lib/libc.so.6+0x14f3db) (BuildId: 5e3b85a3eaa72d02eaae3882b22410ebda6b5555)
+
+0x7c1800be3820 is located 0 bytes inside of 72-byte region [0x7c1800be3820,0x7c1800be3868)
+freed by thread T2 here:
+    #0 0x55a96cd500f6 in free /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:51:3
+    #1 0x55a96cd87044 in alloc::alloc::dealloc_nonnull /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:128:14
+    #2 0x55a96cd87044 in <alloc::alloc::Global>::deallocate_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:229:22
+    #3 0x55a96cd87044 in <alloc::alloc::Global>::deallocate_impl /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:344:9
+    #4 0x55a96cd87044 in <alloc::alloc::Global as core::alloc::Allocator>::deallocate /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:462:23
+    #5 0x55a96cd84328 in test_downcast::test_downcast /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:17:37
+    #6 0x55a96cd888d6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #7 0x55a96cd9dd44 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #8 0x55a96cd9dd44 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #9 0x55a96cd9dd44 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #10 0x55a96cd9dd44 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #11 0x55a96cd9dd44 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #12 0x55a96cd9dd44 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #13 0x55a96cd9dd44 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #14 0x55a96cd97653 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #15 0x55a96cd97653 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #16 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #17 0x55a96cda0dc1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #18 0x55a96cda0dc1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #19 0x55a96cda0dc1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #20 0x55a96cda0dc1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #21 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #22 0x55a96cda0dc1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #23 0x55a96ce1501e in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #24 0x55a96ce1501e in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #25 0x55a96cd4e226 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+
+previously allocated by thread T2 here:
+    #0 0x55a96cd50394 in malloc /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_malloc_linux.cpp:67:3
+    #1 0x55a96cdd6e77 in alloc::alloc::alloc /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:101:9
+    #2 0x55a96cdd6e77 in <alloc::alloc::Global>::alloc_impl_runtime /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/alloc.rs:210:73
+    #3 0x55a96cdd1bb6 in <anyhow::Error>::construct_from_std::<anyhow::wrapper::MessageError<&str>> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:162:18
+    #4 0x55a96cdd1fd0 in <anyhow::Error>::construct_from_adhoc::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:172:9
+    #5 0x55a96cdd250e in <anyhow::Error>::msg::<&str> /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:80:9
+    #6 0x55a96cd86adb in anyhow::__private::format_err /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/lib.rs:659:24
+    #7 0x55a96cd9026c in test_downcast::common::bail_literal /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/common/mod.rs:5:5
+    #8 0x55a96cd888d6 in test_downcast::test_downcast::{closure#0} /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:14:19
+    #9 0x55a96cd9dd44 in test::run_test_in_process::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:74
+    #10 0x55a96cd9dd44 in <core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #11 0x55a96cd9dd44 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #12 0x55a96cd9dd44 in std::panicking::catch_unwind::<core::result::Result<(), alloc::string::String>, core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #13 0x55a96cd9dd44 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<test::run_test_in_process::{closure#0}>, core::result::Result<(), alloc::string::String>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #14 0x55a96cd9dd44 in test::run_test_in_process /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:747:27
+    #15 0x55a96cd9dd44 in test::run_test::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:668:43
+    #16 0x55a96cd97653 in test::run_test::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:41
+    #17 0x55a96cd97653 in std::sys::backtrace::__rust_begin_short_backtrace::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/backtrace.rs:166:18
+    #18 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:70:13
+    #19 0x55a96cda0dc1 in <core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/panic/unwind_safe.rs:275:9
+    #20 0x55a96cda0dc1 in std::panicking::catch_unwind::do_call::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:581:40
+    #21 0x55a96cda0dc1 in std::panicking::catch_unwind::<(), core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panicking.rs:544:19
+    #22 0x55a96cda0dc1 in std::panic::catch_unwind::<core::panic::unwind_safe::AssertUnwindSafe<std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1}::{closure#0}>, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/panic.rs:359:14
+    #23 0x55a96cda0dc1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()>::{closure#1} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:68:26
+    #24 0x55a96cda0dc1 in <std::thread::lifecycle::spawn_unchecked<test::run_test::{closure#1}, ()>::{closure#1} as core::ops::function::FnOnce<()>>::call_once::{shim:vtable#0} /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/core/src/ops/function.rs:250:5
+    #25 0x55a96ce1501e in <alloc::boxed::Box<dyn core::ops::function::FnOnce<(), Output = ()> + core::marker::Send> as core::ops::function::FnOnce<()>>::call_once /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/alloc/src/boxed.rs:2275:9
+    #26 0x55a96ce1501e in <std::sys::thread::unix::Thread>::new::thread_start /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:118:17
+    #27 0x55a96cd4e226 in asan_thread_start(void*) /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:246:28
+
+Thread T2 created by T0 here:
+    #0 0x55a96cd34121 in pthread_create /rustc/llvm/src/llvm-project/compiler-rt/lib/asan/asan_interceptors.cpp:257:3
+    #1 0x55a96cdf9490 in <std::sys::thread::unix::Thread>::new /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/sys/thread/unix.rs:98:19
+    #2 0x55a96cda38f1 in std::thread::lifecycle::spawn_unchecked::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/lifecycle.rs:116:26
+    #3 0x55a96cda38f1 in <std::thread::builder::Builder>::spawn_unchecked::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/builder.rs:261:32
+    #4 0x55a96cda38f1 in <std::thread::builder::Builder>::spawn::<test::run_test::{closure#1}, ()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/thread/builder.rs:191:23
+    #5 0x55a96cda38f1 in test::run_test /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:698:27
+    #6 0x55a96cdb676a in test::run_tests::<test::console::run_tests_console::{closure#2}> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:434:31
+    #7 0x55a96cdb676a in test::console::run_tests_console /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/console.rs:328:5
+    #8 0x55a96cda25c7 in test::test_main_inner::<test::test_main_static::{closure#0}> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:170:19
+    #9 0x55a96cda25c7 in test::test_main_static /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/test/src/lib.rs:195:5
+    #10 0x55a96cd83d12 in test_downcast::main /home/user/determ/tmp/anyhow/.skeleton-filled/stable/tests/test_downcast.rs:1
+    #11 0x55a96cd8ec7f in std::rt::lang_start::<()> /rustc/9eb3be26b46eccea1de7448ea9cc3c1d20bb1a35/library/std/src/rt.rs:205:5
+    #12 0x55a96cd8694d in main (/home/user/determ/tmp/anyhow/.skeleton-filled/stable/target-asan/x86_64-unknown-linux-gnu/debug/deps/test_downcast-f6f43bff8bced278+0x13894d) (BuildId: b9a3f9484be5396d3cf81876093f43eb4aaa1939)
+    #13 0x7ffc4051fe88  (<unknown module>)
+
+SUMMARY: AddressSanitizer: heap-use-after-free /home/user/determ/tmp/anyhow/.skeleton-filled/stable/src/error.rs:598:26 in <anyhow::Error as core::ops::drop::Drop>::drop
+

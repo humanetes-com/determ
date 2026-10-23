@@ -426,3 +426,100 @@ def test_a_trace_that_stops_at_the_reader_outside_the_write_is_not_stubbed(
     step2 = settle_step([fabricated], {FnLocator("src/lib.rs", "other")}, _never)
     assert step2.outcome is SettlementOutcome.STUB
     assert [f.fn_name for f in step2.culprits] == ["make_a"]
+
+
+# ---- a crash that names nobody beside crashes that name a body ----
+#
+# Run `79929-5a16b1d7` (2026-10-23): every settlement of the destructor write
+# ended `unsettled — tests/test_convert.rs: NOBODY` at the first such site,
+# while five sites of the same reading named the two Box conversions the
+# destructor had made reachable; the write was reverted on `pass 100 -> 132`.
+# The shapes below are the invented `read` / `make_a` / `make_b` crate.
+
+def _nobody(test: str = "t9") -> CrashSite:
+    """An origin-capable use-after-free whose stacks hold no crate body."""
+    return site_from_frames(
+        "tests/u.rs", test, "AddressSanitizer: heap-use-after-free",
+        [{"func": f"u::{test}", "file": "tests/u.rs", "line": 17}],
+        origin_raw_frames=[{"func": f"u::{test}", "file": "tests/u.rs",
+                            "line": 15}],
+        origin_capable=True)
+
+
+def test_a_site_that_names_nobody_does_not_veto_the_culprit_another_names(
+) -> None:
+    nobody = _nobody()
+    assert nobody.origin_unattributed and not nobody.culprit_frames
+    step = settle_step([nobody, _site("t1", "make_a", 7)], {READ}, _never)
+    assert step.outcome is SettlementOutcome.STUB
+    assert [f.fn_name for f in step.culprits] == ["make_a"]
+    assert [c.site.test_name for c in step.carried] == ["t9"]
+    assert "NOBODY" in step.carried[0].reason
+
+
+def test_control_a_reading_of_nobody_alone_is_not_settled() -> None:
+    """What the rule this replaced protected, kept: a crash nothing explains
+    is never settled on its own, and a proven culprit is never put back."""
+    step = settle_step([_nobody()], {READ}, _never)
+    assert step.outcome is SettlementOutcome.UNSETTLED
+    assert "NOBODY" in step.reason
+    step = settle_step([_site("t1", "make_a", 7)], {READ},
+                       lambda u: u == MAKE_A)
+    assert step.outcome is SettlementOutcome.UNSETTLED
+    assert [f.fn_name for f in step.culprits] == ["make_a"]
+
+
+def test_a_culprit_in_the_write_after_a_site_that_names_nobody_convicts_it(
+) -> None:
+    """The first-site return also hid a later OWN."""
+    step = settle_step([_nobody(), _site("t1", "make_a", 7)], {MAKE_A},
+                       _never)
+    assert step.outcome is SettlementOutcome.OWN
+    assert [f.fn_name for f in step.culprits] == ["make_a"]
+
+
+def test_a_proven_culprit_rides_along_and_the_others_go_back() -> None:
+    step = settle_step([_site("t1", "make_a", 7), _site("t2", "make_b", 11)],
+                       {READ}, lambda u: u == MAKE_A)
+    assert step.outcome is SettlementOutcome.STUB
+    assert [f.fn_name for f in step.culprits] == ["make_b"]
+    assert "proven" in step.carried[0].reason
+
+
+def test_a_carried_crash_that_goes_with_the_stubs_settles(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _settler(root, [_PASS], [[_nobody(), _site("t1", "make_a", 6)], []])
+    got = s.settle("capture", {READ}, _baseline())
+    assert got.outcome is SettlementOutcome.SETTLED, got.reason
+    assert got.stubbed_locators == (MAKE_A,)
+    text = (root / "src" / "lib.rs").read_text()
+    assert "bad_a" not in text and "bad_b" in text and "real" in text
+
+
+def test_a_carried_crash_still_there_after_the_stubs_gives_them_back(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _settler(root, [_PASS],
+                 [[_nobody(), _site("t1", "make_a", 6)], [_nobody()]])
+    got = s.settle("capture", {READ}, _baseline())
+    assert got.outcome is SettlementOutcome.UNSETTLED
+    assert "NOBODY" in got.reason
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+def test_an_unlocatable_culprit_is_carried_and_the_others_go_back(
+        tmp_path: Path) -> None:
+    """A recovered frame of a shared name has no occurrence to put back; the
+    other culprit of the same step still goes back, and the settlement holds
+    only because the next reading has no crash left."""
+    root = _tree(tmp_path)
+    path = root / "src" / "lib.rs"
+    path.write_text(path.read_text() + "\nfn make_a() {\n    other\n}\n")
+    s = _settler(root, [_PASS],
+                 [[_line0("make_a"), _site("t2", "make_b", 10)], []])
+    got = s.settle("capture", {READ}, _baseline())
+    assert got.outcome is SettlementOutcome.SETTLED, got.reason
+    assert got.stubbed_locators == (MAKE_B,)
+    text = path.read_text()
+    assert "bad_b" not in text and "bad_a" in text and "other" in text

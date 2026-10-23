@@ -2547,39 +2547,86 @@ class AsanReport:
     alloc: tuple[dict[str, object], ...] = ()
 
 
-def origin_or_allocation(
+class OriginSource(Enum):
+    """Which stack a use-after-free's origin was read from
+    (:func:`release_origin`), strongest evidence first."""
+
+    #: The free stack itself: it ran a crate body, or it named nothing the
+    #: other two stacks can improve on.
+    FREE_STACK = "free_stack"
+    #: The free stack's innermost workspace frame is a call the access stack
+    #: also shows: the memory was released under that call, and the crate
+    #: body it entered is the origin.
+    SHARED_CALL = "shared_call"
+    #: The allocation stack's crate frames: the body that built the memory.
+    ALLOCATION = "allocation"
+
+
+def _frame_key(f: Mapping[str, object]) -> tuple[object, object, object, object]:
+    return (f.get("func"), f.get("file"), f.get("line"), f.get("col"))
+
+
+def _workspace_file(f: Mapping[str, object]) -> str:
+    fl = str(f.get("file") or "")
+    return "" if fl.startswith("/") else fl
+
+
+def release_origin(
     origin: list[dict[str, object]],
     alloc: Sequence[dict[str, object]],
+    access: Sequence[dict[str, object]],
     is_test_path: Callable[[str], bool],
-) -> tuple[list[dict[str, object]], bool]:
-    """The stack a use-after-free is blamed on: the free stack, unless its
-    only workspace frames are the test's own, in which case the allocation
-    stack's crate frames name the body that built the memory. Frames are
-    workspace-relative (`relativize_frame_files`); an absolute path is
-    outside the workspace. Returns ``(frames, from_allocation)``.
+) -> tuple[list[dict[str, object]], OriginSource]:
+    """The stack a use-after-free is blamed on. Frames are workspace-relative
+    (`relativize_frame_files`); an absolute path is outside the workspace.
 
-    A test's own free is usually the legitimate one (it dropped its value),
-    so the free stack says nothing about the crate; the constructor on the
-    allocation stack is the crate's last word on that memory. Run
-    `486447-5207101c` (2026-10-07): `tests/test_context.rs::test_downcast_high`
-    freed in the test at `:124`, allocated through
-    `Error::construct_from_context` → `Error::context` → `ext_context`;
-    `tests/test_downcast.rs::test_drop` freed at `:83`, allocated through
-    `Error::construct_from_std` → `Error::new`. Both were blamed on nobody."""
-    def _ws(frames: Sequence[dict[str, object]]) -> list[str]:
-        return [str(f.get("file") or "") for f in frames
-                if str(f.get("file") or "")
-                and not str(f.get("file") or "").startswith("/")]
+    The free stack, unless its only workspace frames are the test's own. A
+    test's own free is usually the legitimate one, so such a stack says
+    nothing about the crate, and two stacks can say more, in this order:
 
-    free_ws = _ws(origin)
+    1. The access stack, when it holds the free stack's innermost workspace
+       frame (same function, file, line and column: the same call in
+       progress). The access happened inside that call, so the free did too:
+       the sanitizer's unwinder lost the crate frames between the call and
+       the deallocation. The crate body that call entered — the outermost
+       crate frame inside it on the access stack — is the one body both the
+       release and the later use ran under. Every archived instance from
+       2026-10-07 to 2026-10-23 has this shape: run `79929-5a16b1d7`'s
+       `test_downcast.rs:17:37` is the free stack's only test frame and the
+       access stack's caller of `Error::downcast`, whose own `Drop` of the
+       released value is the access. The allocation stack named
+       `construct_from_std`, a constructor no settlement could stub without
+       losing every passing `msg` test.
+    2. The allocation stack's crate frames: the body that built the memory.
+       Run `486447-5207101c` (2026-10-07) blamed nobody on two reports whose
+       free stacks held only the test; the allocation stacks named
+       `Error::construct_from_context` and `Error::construct_from_std`. Both
+       reports also satisfy rule 1 (free at `test_context.rs:124:19` and
+       `test_downcast.rs:83:16`, the access stacks' callers of
+       `Error::downcast`), so the constructor is now the reading only for a
+       report whose free call is not on the access stack.
+
+    A free in a different call than the access (run `79929-5a16b1d7`'s
+    `test_convert.rs`: freed by `drop(box_dyn)` at `:15`, written at `:17`)
+    names no crate body under rule 1, and with no crate frame on the
+    allocation stack either, the free stack stands and the site blames
+    nobody, which is the honest reading."""
+    free_ws = [fl for f in origin if (fl := _workspace_file(f))]
     if not free_ws or not all(is_test_path(f) for f in free_ws):
-        return origin, False
+        return origin, OriginSource.FREE_STACK
+    anchor = next(f for f in origin if _workspace_file(f))
+    at = next((i for i, f in enumerate(access)
+               if _frame_key(f) == _frame_key(anchor)), None)
+    if at is not None:
+        inside = [f for f in access[:at]
+                  if (fl := _workspace_file(f)) and not is_test_path(fl)]
+        if inside:
+            return [dict(inside[-1])], OriginSource.SHARED_CALL
     crate = [f for f in alloc
-             if (fl := str(f.get("file") or ""))
-             and not fl.startswith("/") and not is_test_path(fl)]
+             if (fl := _workspace_file(f)) and not is_test_path(fl)]
     if not crate:
-        return origin, False
-    return [dict(f) for f in alloc], True
+        return origin, OriginSource.FREE_STACK
+    return [dict(f) for f in alloc], OriginSource.ALLOCATION
 
 
 def parse_asan_reports(output: str) -> list[AsanReport]:

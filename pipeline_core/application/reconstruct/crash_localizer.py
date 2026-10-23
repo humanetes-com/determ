@@ -32,14 +32,15 @@ from pipeline_core.domain.crash_site import (
     AsanReport,
     CrashSite,
     FaultClass,
+    OriginSource,
     SourceWindow,
     asan_stack_excerpt,
     enclosing_fn_window,
     first_test_file_after_destructor,
     first_test_file_on_access,
-    origin_or_allocation,
     parse_asan_reports,
     relativize_frame_files,
+    release_origin,
     site_from_frames,
 )
 from pipeline_core.domain.language_driver import language_driver
@@ -149,14 +150,18 @@ def _site_for_report(
     access = relativize_frame_files(report.access, str(workspace_root))
     origin = relativize_frame_files(report.origin, str(workspace_root))
     label = report.label
-    origin, _from_alloc = origin_or_allocation(
+    origin, _source = release_origin(
         origin, relativize_frame_files(list(report.alloc), str(workspace_root)),
-        is_oracle_path)
-    if _from_alloc:
+        access, is_oracle_path)
+    if _source is not OriginSource.FREE_STACK:
+        _read_from = (
+            "the access stack's call it was freed under"
+            if _source is OriginSource.SHARED_CALL
+            else "the allocation stack's crate frames")
         deps.log("  [phase-c/crash-localizer] "
                  f"{report.kind} in {label}: the free stack's only workspace "
-                 "frames are the test's own — the origin is read from the "
-                 "allocation stack's crate frames: " + ", ".join(
+                 f"frames are the test's own — the origin is read from "
+                 f"{_read_from}: " + ", ".join(
                      str(f.get("func") or "?") for f in origin
                      if str(f.get("file") or "")
                      and not str(f.get("file") or "").startswith("/")

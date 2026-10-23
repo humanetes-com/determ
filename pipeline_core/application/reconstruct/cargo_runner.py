@@ -37,8 +37,10 @@ from pipeline_core.domain.assertion_position import (
 )
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.cluster_env import judges_every_world, world_of_env
+from pipeline_core.domain.crash_settlement import frame_locator
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite
+from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.test_command import derive_scoped_test_cmd
 from pipeline_core.domain.test_isolation import (
     IsolatedTest,
@@ -928,13 +930,28 @@ def u2_test_gate(
         # tree. Otherwise the reject carries the crash as the localizer read
         # it.
         _settled_text = ""
+        _unit_locs = {FnLocator(s.file, s.fn_name) for s in unit_sites}
+        # The abort is about this unit when a panic it printed is the
+        # unit's own — an assertion of its test (the renderer's "the first
+        # panic is yours"), a panic inside one of its bodies, a stub of its
+        # own it still reaches — or the settlement below names one of its
+        # bodies. A panic inside another crate body, or a death with nothing
+        # printed and nothing settled, says nothing about this one.
+        def _in_unit(file: str, line: int) -> bool:
+            at = _locate(file, line)
+            return (at is not None
+                    and FnLocator(at.file, at.fn_name) in _unit_locs)
+        _attributed = (
+            any(is_oracle_path(p.file) or _in_unit(p.file, p.line)
+                for p in _panics.crate_panics)
+            or any(_in_unit(f, ln) for f, ln in _panics.stub_sites))
         _settler = bound_crash_settler()
         if (_settler is not None and settle and baseline is not None
                 and not (_panics.crate_panics or _panics.stub_sites)):
             _settlement = _settler.settle(
-                out or "",
-                {FnLocator(s.file, s.fn_name) for s in unit_sites},
-                baseline)
+                out or "", _unit_locs, baseline)
+            _attributed = _attributed or any(
+                frame_locator(f) in _unit_locs for f in _settlement.own)
             if _settlement.changed_tree:
                 guard("phase-c/u2_crash_settled",
                       f"{sorted(_aborted)} died on a culprit outside this "
@@ -957,7 +974,8 @@ def u2_test_gate(
                 _panics.stub_sites, frozenset(unit_sites), _locate),
             capture=out or "",
             positions=assertion_positions(
-                out or "", oracle_test_source(target_src_dir)))
+                out or "", oracle_test_source(target_src_dir)),
+            abort_attributed=_attributed)
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —

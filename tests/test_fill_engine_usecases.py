@@ -1724,3 +1724,57 @@ def _baseline_passing(*names: str):  # type: ignore[no-untyped-def]
     return TestStateReading((BinaryResult(
         label="tests/t.rs", completed=True, passed=frozenset(names),
         failed=frozenset(), pass_count=len(names)),))
+
+
+# ---- no exhausted lesson from an abort nothing attributed to the unit ----
+# Run `79929-5a16b1d7` (2026-10-23): the destructor's per-fn loop ended on two
+# aborts the settlement could not attribute (`tests/test_convert.rs: NOBODY`)
+# and stored the exhausted note "I tried reading self.inner with
+# core::ptr::read and calling the vtable object_drop…", a body the file route
+# then scored `pass 100 -> 132`. Notes retire only on compile evidence, so the
+# wrong lesson would have stood.
+
+class _NoteFill(RecordingFill):
+    def __init__(self, **scripted: Any) -> None:
+        super().__init__(**scripted)
+        self.notes: list[str] = []
+
+    def extract_self_note(self, *a: Any, **k: Any) -> str | None:
+        return "what the attempt tried did not work"
+
+    def append_note(self, fr_path: Any, note: str, **k: Any) -> bool:
+        self.notes.append(note)
+        return True
+
+
+def _abort_reject(attributed: bool):  # type: ignore[no-untyped-def]
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    return U2Verdict(U2Decision.REJECT, self_failures=frozenset({"t_x"}),
+                     detail="Your body ABORTED the test process",
+                     aborted=frozenset({"t_x"}),
+                     abort_attributed=attributed)
+
+
+def _exhaust_on(tmp_path: Path, attributed: bool) -> _NoteFill:
+    from dataclasses import replace
+    ws = _mk_ws(tmp_path)
+    fake = _NoteFill(run=(0, ""), u2=_abort_reject(attributed), regr=None,
+                     regr_base=_baseline_passing("t_pass"),
+                     body=("Ok(())", "R"))
+    ctx = replace(_ctx(ws), fr_path=ws / "fr.md")
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert not res.filled
+    return fake
+
+
+def test_an_unattributed_abort_leaves_no_exhausted_note(tmp_path: Path) -> None:
+    fake = _exhaust_on(tmp_path, attributed=False)
+    assert fake.notes == []
+    assert any("no exhausted note" in m for m in fake.logs)
+
+
+def test_control_an_abort_attributed_to_the_unit_still_leaves_its_note(
+        tmp_path: Path) -> None:
+    fake = _exhaust_on(tmp_path, attributed=True)
+    assert fake.notes == ["what the attempt tried did not work"]

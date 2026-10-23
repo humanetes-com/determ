@@ -841,6 +841,16 @@ class U2Verdict:
     aborted: frozenset[str] = frozenset()
     crash: CrashPanics | None = None
     external_stub_sites: frozenset[tuple[str, int]] = frozenset()
+    # Whether the abort is evidence about THIS unit: a crate panic the
+    # aborted sections printed resolves into one of its bodies, or the crash
+    # settlement named one of them as the culprit. False for an abort no
+    # reading attributed — the process died and nothing says the body under
+    # test made it die. A lesson written from such a reject ("what this
+    # attempt tried did not work") records an outcome another body decided:
+    # run `79929-5a16b1d7` stored "I tried reading self.inner with
+    # core::ptr::read and calling the vtable object_drop…" as exhausted for
+    # the destructor whose file-route body then read `pass 100 -> 132`.
+    abort_attributed: bool = False
     # The scoped `cargo test` capture this verdict was read from. Empty on
     # verdicts built without a run (tests, the accepts that never asked).
     # The same-crash keep reads native crashes from it; a summary string
@@ -887,13 +897,21 @@ class U2Verdict:
                external_stub_sites: frozenset[tuple[str, int]] = frozenset(),
                capture: str = "",
                positions: Mapping[TestKey, int] | None = None,
+               abort_attributed: bool = False,
                ) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
                    detail=detail, no_verdict=no_verdict,
                    self_passed=self_passed, self_failure_sites=sites,
                    aborted=aborted, crash=crash,
                    external_stub_sites=external_stub_sites,
-                   capture=capture, positions=dict(positions or {}))
+                   capture=capture, positions=dict(positions or {}),
+                   abort_attributed=abort_attributed)
+
+    @property
+    def abort_unattributed(self) -> bool:
+        """The reject lost verdicts to an abort that no reading put on this
+        unit (`abort_attributed`)."""
+        return bool(self.aborted) and not self.abort_attributed
 
     @property
     def blocking_fns(self) -> frozenset[FnSite]:

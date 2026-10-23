@@ -405,6 +405,10 @@ class FillOneFn:
         # without `nonlocal`, like the holders above.
         _last_failure: list[AttemptFailure] = [AttemptFailure.COMPILE]
         _last_crash_sites: list[frozenset[tuple[str, int]] | None] = [None]
+        # Whether the last recorded abort is evidence about this unit
+        # (`U2Verdict.abort_attributed`). An abort the regression gate saw in
+        # another binary, or a U2 abort no reading put on this unit, is not.
+        _last_abort_owned: list[bool] = [False]
         # The inputs the last attempt's body ignored with no attributed test
         # observed passing (`domain/ignored_inputs`); empty when it did not.
         _last_declined: list[tuple[str, ...]] = [()]
@@ -840,6 +844,7 @@ class FillOneFn:
             # report a judgeable fill as unjudgeable.
             _blocked_by.clear()
             _last_crash_sites[0] = None
+            _last_abort_owned[0] = False
             _last_own_panics[0] = ()
             cur_text = file_path.read_text(encoding="utf-8")
             # Strip inactive #[cfg] branches so the model sees only the
@@ -1278,6 +1283,7 @@ class FillOneFn:
                     _u2_fail_sig, cargo_out = _v.self_failures, _v.detail
                     if _v.aborted:
                         _last_crash_sites[0] = _v.external_stub_sites
+                        _last_abort_owned[0] = _v.abort_attributed
                         _last_own_panics[0] = tuple(
                             f"{p.file}:{p.line}: {p.message}"
                             for p in (_v.crash.crate_panics
@@ -2272,7 +2278,19 @@ class FillOneFn:
             })
             # Exhausted fix-loop — extract a "what didn't work" note so the
             # model doesn't repeat the same dead-end approach on the next pass.
-            if ctx.fr_path is not None and (first_failed_body or last_body):
+            # Not when the loop ended on an abort no reading put on this
+            # unit: the body never got a verdict of its own, so "what it
+            # tried did not work" is a claim about whatever killed the
+            # process. Notes carry no crash outcome and retire only on
+            # compile evidence (`disproved_lessons`), so a wrong one stays.
+            _unowned_abort = (_last_failure[0] is AttemptFailure.ABORT
+                              and not _last_abort_owned[0])
+            if _unowned_abort and (first_failed_body or last_body):
+                self.tel.log(f"  [model-notes] no exhausted note for "
+                             f"{rel_file}::{fn_name}: the last attempt ended "
+                             "on an abort no reading attributed to this unit.")
+            if (ctx.fr_path is not None and (first_failed_body or last_body)
+                    and not _unowned_abort):
                 note = self.retros.extract_self_note(
                     failed_body=last_body or first_failed_body,
                     error_excerpt=error_excerpt or first_error_excerpt,

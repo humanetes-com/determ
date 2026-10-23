@@ -514,6 +514,8 @@ def test_u2_gate_abort_with_own_panic_still_charges(tmp_path) -> None:
               unit_fns=frozenset({FnSite("src/lib.rs", "mine", "")}),
               structure=_FakeStructure(recs), src_dir=tmp_path)
     assert v.decision is U2Decision.REJECT
+    # Its own stub is evidence about it: a lesson from this reject stands.
+    assert v.abort_attributed and not v.abort_unattributed
 
 
 def test_u2_gate_abort_without_stub_evidence_still_charges() -> None:
@@ -523,6 +525,45 @@ def test_u2_gate_abort_without_stub_evidence_still_charges() -> None:
               {"a", "b"}, baseline=_judged(["a", "b"]))
     assert v.decision is U2Decision.REJECT
     assert "ABORTED the test process" in v.detail
+    # Nothing printed, nothing settled: the reject stands, but it is no
+    # evidence about the body (no exhausted lesson may be written from it).
+    assert v.abort_unattributed
+
+
+class _OwnSettler:
+    """A bound settler whose reading names `own` as the write's culprit."""
+
+    def __init__(self, own):
+        self.own = own
+
+    def settle(self, capture, written, baseline, *, tag=""):
+        from pipeline_core.application.reconstruct.crash_settler import (
+            Settlement,
+        )
+        from pipeline_core.domain.crash_settlement import SettlementOutcome
+        return Settlement(
+            SettlementOutcome.OWN if self.own else SettlementOutcome.UNSETTLED,
+            own=self.own)
+
+
+def test_u2_gate_an_abort_the_settlement_puts_on_the_unit_is_attributed() -> None:
+    from pipeline_core.application.reconstruct.crash_settler import bind
+    from pipeline_core.domain.crash_site import CrashFrame
+    unit = frozenset({FnSite("src/lib.rs", "mine", "")})
+    try:
+        bind(_OwnSettler((CrashFrame("src/lib.rs", 2, "mine", "c::mine"),)))
+        v = _gate(_const_run_cargo(101, "error: process didn't exit "
+                                        "successfully"),
+                  {"a", "b"}, unit_fns=unit, baseline=_judged(["a", "b"]))
+        assert v.decision is U2Decision.REJECT and v.abort_attributed
+        # Control: the settlement names nobody in the unit.
+        bind(_OwnSettler(()))
+        v = _gate(_const_run_cargo(101, "error: process didn't exit "
+                                        "successfully"),
+                  {"a", "b"}, unit_fns=unit, baseline=_judged(["a", "b"]))
+        assert v.decision is U2Decision.REJECT and v.abort_unattributed
+    finally:
+        bind(None)
 
 
 def _crashed_after(panic_lines: str) -> str:
@@ -855,6 +896,7 @@ def test_u2_gate_names_the_units_own_first_panic_when_drop_then_aborts(tmp_path:
     assert "ABORTED the test process" in v.detail
     assert "tests/t.rs:9: assertion failed: boom" in v.detail
     assert "The abort is the tree's; the first panic is yours" in v.detail
+    assert v.abort_attributed
     assert "src/error.rs:2" in v.detail
     assert "undefined behaviour" not in v.detail
     assert v.crash is not None and v.crash.runtime_aborts == 1

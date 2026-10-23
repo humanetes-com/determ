@@ -20,9 +20,10 @@ recursion's cycle). Standing decides only what may be put back to a stub:
 - a culprit inside the written set convicts the write (OWN);
 - culprits all outside it, none of them PROVEN, are the bodies to put back to
   stubs, and the write stands while the suite is re-run without them (STUB);
-- anything else — a site that blames nobody, or blames a body the ledger has
-  proven — cannot be settled here, and the write is judged as before
-  (UNSETTLED).
+- a site that blames nobody, or blames a body the ledger has proven, names
+  nothing to put back; it is carried to the reading taken without the stubs
+  the other sites justify, and when it is still there (or there were no
+  such stubs) the write is judged as before (UNSETTLED).
 
 A PROVEN body is never put back: its tests ran and passed with it on the
 tree, and a stub would lose them. A body whose standing is anything else has
@@ -76,10 +77,56 @@ def frame_locator(frame: CrashFrame) -> FnLocator:
 
 
 @dataclass(frozen=True, slots=True)
+class CarriedSite:
+    """A crash of the reading that names no body this step may act on, and
+    why: the settlement re-reads without the stubs it does make, and this
+    crash has to be gone from that reading for anything to be committed."""
+
+    site: CrashSite
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementStep:
     outcome: SettlementOutcome
     culprits: tuple[CrashFrame, ...] = ()
     reason: str = ""
+    #: STUB only: the reading's crashes this step could not act on.
+    carried: tuple[CarriedSite, ...] = ()
+
+
+def _unactionable(
+    site: CrashSite, is_proven: Callable[[FnLocator], bool],
+) -> tuple[str, tuple[CrashFrame, ...]] | None:
+    """Why a site outside the write names no body a stub may replace, with
+    the proven culprits when that is the reason; None when it does."""
+    if site.fault not in _SETTLEABLE:
+        # A runtime abort (a panic while unwinding) is sited where it
+        # happened and is the double-panic renderer's question; only a
+        # fault whose culprit is a body that made bad memory or a cycle
+        # can be settled against that body.
+        return f"{site.binary_label}: {site.fault} is not settled", ()
+    culprits = site.culprit_frames
+    if not culprits:
+        return f"{site.binary_label}: {site.blame_label}", ()
+    if (site.origin_traced and site.origin_traced_at_reader
+            and not site.origin_stack_lines):
+        # Outside the write only: a written reader is judged as written, as
+        # an untraced fault is. Run `14235-bf24f931` iter 3: the trace named
+        # the accessor that dereferenced a stale pointer it had loaded from a
+        # freed object (`src/error.rs::error`, line 818), and the settlement
+        # stubbed and refuted a correct body. Only an origin the sanitizer
+        # printed, or a trace that runs past a crate frame handed the
+        # address, names a producer.
+        return (f"{site.binary_label}: the debugger's trace stops at the "
+                f"frame that read the bad address ({culprits[0].fn_name}); a "
+                "pointer it loaded from memory has a producer the trace "
+                "cannot see"), ()
+    proven = tuple(f for f in culprits if is_proven(frame_locator(f)))
+    if proven:
+        return (f"{site.binary_label}: the culprit {proven[0].file_rel}::"
+                f"{proven[0].fn_name} is proven on this tree"), proven
+    return None
 
 
 def settle_step(
@@ -88,57 +135,61 @@ def settle_step(
     is_proven: Callable[[FnLocator], bool],
 ) -> SettlementStep:
     """One reading's verdict. ``sites`` are the localized crashes of binaries
-    that did not crash before the write (the caller filters the rest)."""
+    that did not crash before the write (the caller filters the rest).
+
+    Every site is read before the step decides:
+
+    - a culprit inside the write, on any site, convicts it (OWN);
+    - otherwise the unproven culprits outside the write that any site names
+      are put back (STUB), and the sites that name no such body ride along
+      as ``carried``: blames nobody, a fault that is not settled, a trace
+      that stops at the reader, a proven culprit;
+    - a reading of carried sites alone is UNSETTLED.
+
+    A carried crash does not stop the stubs the other sites justify: the
+    caller re-reads the suite without them, and a carried crash still there
+    is a site of that reading, so a reading of nothing else ends UNSETTLED
+    and every stub is given back. Nothing is committed while a crash of the
+    write remains unexplained, which is what the rule this replaced
+    protected, but a crash that goes away with the attributable culprits is
+    no longer a veto on them. Until 2026-10-23 this returned at the first
+    such site: run `79929-5a16b1d7`'s destructor write read `pass 100 ->
+    132`, `100 -> 117` and was reverted seven times across three routes
+    because `tests/test_convert.rs` blamed nobody, while five sites of the
+    same readings named the two Box conversions the destructor had made
+    reachable. That return also hid an OWN on any later site."""
     if not sites:
         return SettlementStep(SettlementOutcome.NO_CRASH)
     written_set = frozenset(written)
+    own: list[tuple[CrashSite, CrashFrame]] = []
     outside: list[CrashFrame] = []
+    carried: list[CarriedSite] = []
+    proven: list[CrashFrame] = []
     for site in sites:
-        if site.fault not in _SETTLEABLE:
-            # A runtime abort (a panic while unwinding) is sited where it
-            # happened and is the double-panic renderer's question; only a
-            # fault whose culprit is a body that made bad memory or a cycle
-            # can be settled against that body.
-            return SettlementStep(
-                SettlementOutcome.UNSETTLED,
-                reason=f"{site.binary_label}: {site.fault} is not settled")
-        culprits = site.culprit_frames
-        if not culprits:
-            return SettlementStep(
-                SettlementOutcome.UNSETTLED,
-                reason=f"{site.binary_label}: {site.blame_label}")
-        own = [f for f in culprits if frame_locator(f) in written_set]
-        if own:
-            return SettlementStep(
-                SettlementOutcome.OWN, tuple(own),
-                reason=(f"{site.binary_label}: the culprit is the written "
-                        f"body {own[0].fn_name} ({own[0].file_rel}:"
-                        f"{own[0].line})"))
-        if (site.origin_traced and site.origin_traced_at_reader
-                and not site.origin_stack_lines):
-            # Outside the write only: a written reader is judged as
-            # written, as an untraced fault is. Run `14235-bf24f931`
-            # iter 3: the trace named the accessor that dereferenced a stale pointer it had loaded from a freed
-            # object (`src/error.rs::error`, line 818), and the settlement
-            # stubbed and refuted a correct body. Only an origin the
-            # sanitizer printed, or a trace that runs past a crate frame
-            # handed the address, names a producer.
-            return SettlementStep(
-                SettlementOutcome.UNSETTLED,
-                reason=(f"{site.binary_label}: the debugger's trace stops at "
-                        f"the frame that read the bad address "
-                        f"({culprits[0].fn_name}); a pointer it loaded from "
-                        "memory has a producer the trace cannot see"))
-        proven = [f for f in culprits if is_proven(frame_locator(f))]
-        if proven:
-            return SettlementStep(
-                SettlementOutcome.UNSETTLED, tuple(proven),
-                reason=(f"{site.binary_label}: the culprit "
-                        f"{proven[0].file_rel}::{proven[0].fn_name} is proven "
-                        "on this tree"))
-        outside.extend(culprits)
-    return SettlementStep(SettlementOutcome.STUB,
-                          tuple(_distinct(outside)))
+        mine = [f for f in site.culprit_frames
+                if frame_locator(f) in written_set]
+        if mine and site.fault in _SETTLEABLE:
+            own.extend((site, f) for f in mine)
+            continue
+        why = _unactionable(site, is_proven)
+        if why is not None:
+            carried.append(CarriedSite(site, why[0]))
+            proven.extend(why[1])
+            continue
+        outside.extend(site.culprit_frames)
+    if own:
+        site0, f0 = own[0]
+        return SettlementStep(
+            SettlementOutcome.OWN, tuple(_distinct(f for _s, f in own)),
+            reason=(f"{site0.binary_label}: the culprit is the written body "
+                    f"{f0.fn_name} ({f0.file_rel}:{f0.line})"))
+    if outside:
+        return SettlementStep(SettlementOutcome.STUB,
+                              tuple(_distinct(outside)),
+                              carried=tuple(carried))
+    return SettlementStep(SettlementOutcome.UNSETTLED,
+                          tuple(_distinct(proven)),
+                          reason=carried[0].reason)
 
 
 def _distinct(frames: Iterable[CrashFrame]) -> list[CrashFrame]:
