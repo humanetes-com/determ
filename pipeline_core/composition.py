@@ -433,6 +433,7 @@ from pipeline_core.application.doc_example_tests import (
 )
 from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
 from pipeline_core.application.extract_behaviours import harvest_behaviour_suite
+from pipeline_core.application.failure_reading import read_alone
 from pipeline_core.application.fix_loop import GenerateFixLoopDeps
 from pipeline_core.application.gen_tests_reattach import ReattachDeps
 from pipeline_core.application.generators.task1_synthesizer import (
@@ -687,6 +688,12 @@ from pipeline_core.application.tasks.task3 import (
     Task3Deps,
 )
 from pipeline_core.application.tasks.task3 import (
+    alone_reader as task3_alone_reader,
+)
+from pipeline_core.application.tasks.task3 import (
+    cluster_outputs as task3_cluster_outputs,
+)
+from pipeline_core.application.tasks.task3 import (
     task3 as _task3_impl,
 )
 from pipeline_core.application.tasks.task4 import Task4Deps
@@ -860,6 +867,11 @@ from pipeline_core.domain.rust_scan import (
 from pipeline_core.domain.rust_scan import (
     rust_delimiters_balanced as _rust_delimiters_balanced,
 )
+from pipeline_core.domain.same_failure import (
+    FailureSignature,
+    FailureToRead,
+    SignatureReader,
+)
 from pipeline_core.domain.test_cmd import build_test_cmd as _build_test_cmd
 from pipeline_core.domain.test_cmd import parse_cmd as _parse_cmd
 from pipeline_core.domain.test_command import (
@@ -903,6 +915,7 @@ from pipeline_core.domain.workspace_layout import (
 )
 from pipeline_core.domain.workspace_layout import SKELETON_DIR, SKELETON_FILLED_DIR
 from pipeline_core.domain.workspace_layout import WORKSPACE_DIR as _WORKSPACE_DIR
+from pipeline_core.domain.world_floor import excused_everywhere, judge_cluster_capture
 from pipeline_core.io import read, write
 from pipeline_core.io import read as _io_read
 from pipeline_core.io import write as _io_write
@@ -2161,13 +2174,26 @@ def build_app(
     def _dead_stub_sites(project_dir: Path, clusters: Any) -> frozenset[FnSite]:
         return read_dead_stub_sites(project_dir, clusters, _dead_stub_deps)
 
-    def _reference_excused(project_dir: Path) -> frozenset[str]:
-        """Bare names of tests the pristine tree fails or skips in ANY cluster."""
+    def _reference_excused(project_dir: Path, test_output: str) -> frozenset[str]:
+        """Bare names of the failures in task 3's aggregated output that the
+        reference floor excuses in EVERY cluster they failed in: the same
+        failure as the original's under that cluster's cfg, or a test the
+        original skipped there. It used to be every name the original failed
+        or skipped in ANY cluster, so a test the original fails only in
+        `nightly` was out of reach in `stable` too, and any failure of that
+        name, whatever it said, ended the repair loop."""
         measured = _reference(project_dir)
         if measured is None:
             return frozenset()
-        return frozenset(
-            name for c in measured.clusters.values() for _label, name in c.neutral)
+        by_name = {str(c.name): c for c in (_load_baked_clusters(project_dir) or [])}
+        judged = {
+            name: (text, judge_cluster_capture(
+                measured, name, text,
+                task3_alone_reader(project_dir, cluster_cargo_env(by_name[name]),
+                                   cfg.test_timeout))
+                if name in by_name else None)
+            for name, text in task3_cluster_outputs(test_output).items()}
+        return excused_everywhere(judged)
 
     def _out_of_reach(ctx: Any, test_output: str) -> str:
         """Why no remaining failure can be repaired by rewriting a body, or "".
@@ -2186,7 +2212,7 @@ def build_app(
         unrepairable = (not_body_repairable_tests(list(tests_dir.rglob("*.rs")))
                         if tests_dir.is_dir() else frozenset())
         reachable, blocked = _split_reachable_failures(
-            failed, unrepairable, _reference_excused(ctx.project_dir))
+            failed, unrepairable, _reference_excused(ctx.project_dir, test_output))
         if reachable or not blocked:
             return ""
         return (f"the {len(blocked)} remaining failure(s) "
@@ -2975,6 +3001,28 @@ def build_app(
             _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env,
             exclude=exclude)
 
+    # Every compile check of a cluster tree also builds the other worlds
+    # (`cargo_runner.WorldChecks`). `PHASE_C_ALL_WORLDS_CHECK=0` checks the
+    # home world only — the pre-2026-10-02 gate, kept as the negative control
+    # of a reading.
+    _worlds = (WorldChecks(
+        clusters=lambda: list(scope.all),
+        cluster_env=cluster_cargo_env,
+        world_key=world_key, log=ports.log)
+        if _os.getenv("PHASE_C_ALL_WORLDS_CHECK", "1") != "0" else None)
+
+    def _failure_reader(world: str, tree: Path,
+                        home_env: dict[str, str]) -> SignatureReader:
+        """The TDD sweep's reader of how a failing test fails: run alone in
+        `tree` under the env of the world it failed in (the same env the
+        sweep ran that world under)."""
+        env = (_worlds.env_of(world, tree, home_env) if _worlds is not None
+               else None) or dict(home_env)
+
+        def read(todo: Sequence[FailureToRead]) -> dict[tuple[str, str], FailureSignature | None]:
+            return read_alone(todo, cwd=tree, env=env, timeout=cfg.test_timeout)
+        return read
+
     _run_id = (run_context or {}).get("run_id") or ""
     return App(
         adapters=adapters,
@@ -2986,15 +3034,7 @@ def build_app(
         structure=structure,
         cargo_runner=PortBoundCargoRunner(
             adapters.cargo,
-            # Every compile check of a cluster tree also builds the other
-            # worlds (`cargo_runner.WorldChecks`). `PHASE_C_ALL_WORLDS_CHECK=0`
-            # checks the home world only — the pre-2026-10-02 gate, kept as
-            # the negative control of a reading.
-            worlds=(WorldChecks(
-                clusters=lambda: list(scope.all),
-                cluster_env=cluster_cargo_env,
-                world_key=world_key, log=ports.log)
-                if _os.getenv("PHASE_C_ALL_WORLDS_CHECK", "1") != "0" else None)),
+            worlds=_worlds),
         ask_client=ask_client,
         scan_stub_records_for_cluster=structure_cache.scan_unimplemented_records_for_cluster,
         collect_impl_blocks_for_cluster=structure_cache.collect_impl_blocks_for_cluster,
@@ -3103,6 +3143,7 @@ def build_app(
             # measured-owners withholding a pair earns never lapses.
             route_ledger_rows=fill_roles.route_ledger.load,
             reference_measurement=_reference,
+            failure_reader=_failure_reader,
             augmentation_fn_record=augment_store.cluster_fn_record,
             # The baked suite, for the tiers a red test owes; and the ask
             # ledger, so a resumed process does not re-owe what the last one

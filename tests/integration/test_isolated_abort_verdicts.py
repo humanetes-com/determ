@@ -843,3 +843,95 @@ def test_a_gdb_site_skips_the_destructor_by_its_symbol(
         out, _CMD, root, env)
     assert control and control[0].blamed_locator == FnLocator(
         "src/lib.rs", "drop"), "negative control: the printed name alone blames drop"
+
+
+# --- the same failure, read from the test run alone ---------------------------
+#
+# The reference floor excuses a red test the original also fails only when the
+# failure is the same (`domain.same_failure`, run `391506-3403a6a7`,
+# 2026-10-22). It rests on two behaviours of cargo and libtest that only a
+# real run shows: a harness that writes its report straight to the process's
+# stderr (as trybuild does) is not in libtest's `---- NAME stdout ----` block,
+# and the executable the capture's `Running` line names runs exactly that test
+# when given `--exact NAME --test-threads=1`, with the report on its stderr.
+# The crate is invented: `case()` decides which case of a two-case report
+# mismatches.
+
+_REPORT_LIB = """pub fn case() -> &'static str {
+    CASE
+}
+"""
+
+_REPORT_TEST = """use std::io::Write;
+
+#[test]
+fn report() {
+    let mut err = std::io::stderr();
+    writeln!(err, "case {} ... mismatch", reporter::case()).unwrap();
+    panic!("1 of 2 cases failed");
+}
+
+#[test]
+fn quiet() {}
+"""
+
+
+def _report_crate(root: Path, case: str) -> Path:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "reporter"))
+    (root / "src" / "lib.rs").write_text(_REPORT_LIB.replace("CASE", f'"{case}"'))
+    (root / "tests" / "report.rs").write_text(_REPORT_TEST)
+    return root
+
+
+def _report_run(root: Path, tag: str) -> tuple[str, dict[str, str]]:
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / tag)
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), "cargo test --offline --no-fail-fast", root,
+                         env, timeout=600)
+    return out, env
+
+
+def _signature(root: Path, tag: str):  # type: ignore[no-untyped-def]
+    from pipeline_core.application.failure_reading import read_one
+    from pipeline_core.domain.world_floor import failures_to_read
+    out, env = _report_run(root, tag)
+    todo = failures_to_read(None, out)
+    assert [f.name for f in todo] == ["report"], out[-2000:]
+    return out, read_one(todo[0], cwd=root, env=env, timeout=600, cached=False)
+
+
+def test_premise_a_harness_report_on_stderr_is_not_in_the_libtest_block(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.test_results import split_test_stdout_sections
+    out, sig = _signature(_report_crate(tmp_path / "a", "b"), "report-a")
+    block = dict(split_test_stdout_sections(out))["report"]
+    assert "1 of 2 cases failed" in block
+    assert "case b ... mismatch" not in block
+    assert sig is not None and "case b ... mismatch" in sig.text
+    assert "test quiet" not in sig.text  # the alone run ran exactly one test
+
+
+def test_the_same_failure_matches_and_a_moved_case_does_not(tmp_path: Path) -> None:
+    from pipeline_core.domain.reference_floor import (
+        ClusterReference,
+        judge_against_reference,
+    )
+    from pipeline_core.domain.same_failure import FailedReading, ReferenceFailure
+    _o, original = _signature(_report_crate(tmp_path / "orig", "b"), "report-orig")
+    _s, same = _signature(_report_crate(tmp_path / "same", "b"), "report-same")
+    _m, moved = _signature(_report_crate(tmp_path / "moved", "c"), "report-moved")
+    pair = ("tests/report.rs", "report")
+    ref = ClusterReference(cluster="c",
+                           failures={pair: ReferenceFailure(original, original)})
+
+    def judge(sig):  # type: ignore[no-untyped-def]
+        return judge_against_reference(
+            ref, frozenset(), FailedReading(pairs=frozenset({pair}),
+                                            signatures={pair: sig}))
+    assert same == original and judge(same).met
+    assert moved != original and not judge(moved).met
+    # Negative control: the name-only rule excused the moved case too.
+    assert not (frozenset({pair}) - (ref.failed | ref.ignored))

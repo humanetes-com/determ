@@ -32,8 +32,8 @@ from pipeline_core.domain.models import BuildCluster
 from pipeline_core.domain.reference_floor import (
     ClusterReference,
     ReferenceMeasurement,
-    judge_cluster_binaries,
 )
+from pipeline_core.domain.same_failure import ReferenceFailure, SignatureReader
 from pipeline_core.domain.test_results import (
     join_capture,
     join_world_captures,
@@ -42,7 +42,18 @@ from pipeline_core.domain.test_results import (
     parse_test_counts,
     world_sections,
 )
-from pipeline_core.domain.world_floor import failed_pairs, judge_every_world
+from pipeline_core.domain.world_floor import (
+    failed_pairs,
+    judge_cluster_capture,
+    judge_every_world,
+)
+
+
+def _nothing_read(_world: str) -> SignatureReader:
+    """No failure is read: every reference here has no recorded failure, so
+    a shared failure is excused by name (`tests/test_same_failure.py` pins
+    the signature rule)."""
+    return lambda _todo: {}
 
 
 def _world(name: str, *, default: bool, active: list[str], excluded: list[str],
@@ -147,19 +158,19 @@ def _reference() -> ReferenceMeasurement:
             announced=2, reported=2),
         "alt": ClusterReference(
             cluster="alt", passed=frozenset({("tests/a.rs", "t_shared")}),
-            failed=frozenset({("tests/compiletest.rs", "ui")}),
+            failures=dict.fromkeys(frozenset({("tests/compiletest.rs", "ui")}), ReferenceFailure()),
             announced=2, reported=2, rc=101),
     })
 
 
 def test_a_failure_the_original_shares_in_one_world_is_excused_there_only() -> None:
     joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
-    v = judge_every_world(_reference(), joined, "base")
+    v = judge_every_world(_reference(), joined, "base", _nothing_read)
     assert v is not None and v.met
     # Control: the joined capture judged as the home world's alone reads the
     # other world's `ui` against a reference that never had it.
-    control = judge_cluster_binaries(_reference(), "base",
-                                     parse_binary_results(joined))
+    control = judge_cluster_capture(_reference(), "base", joined,
+                                    _nothing_read(""))
     assert control is not None and not control.met
 
 
@@ -167,7 +178,7 @@ def test_a_red_test_in_the_other_world_is_not_excused() -> None:
     alt_red = _capture({"tests/a.rs": {"t_shared": False},
                         "tests/compiletest.rs": {"ui": False}})
     joined = join_world_captures([("base", BASE_RUN), ("alt", alt_red)])
-    v = judge_every_world(_reference(), joined, "base")
+    v = judge_every_world(_reference(), joined, "base", _nothing_read)
     assert v is not None and not v.met
     assert ("tests/a.rs", "t_shared") in v.unexcused_failures
     assert failed_pairs(joined) == {("tests/a.rs", "t_shared"),
@@ -175,16 +186,16 @@ def test_a_red_test_in_the_other_world_is_not_excused() -> None:
 
 
 def test_one_world_judges_as_before() -> None:
-    v = judge_every_world(_reference(), BASE_RUN, "base")
-    assert v == judge_cluster_binaries(_reference(), "base",
-                                       parse_binary_results(BASE_RUN))
+    v = judge_every_world(_reference(), BASE_RUN, "base", _nothing_read)
+    assert v == judge_cluster_capture(_reference(), "base", BASE_RUN,
+                                      _nothing_read(""))
     assert failed_pairs(BASE_RUN) == frozenset()
 
 
 def test_a_world_with_no_reference_gives_no_verdict() -> None:
     ref = replace(_reference(), clusters={"base": _reference().clusters["base"]})
     joined = join_world_captures([("base", BASE_RUN), ("alt", ALT_RUN)])
-    assert judge_every_world(ref, joined, "base") is None
+    assert judge_every_world(ref, joined, "base", _nothing_read) is None
 
 
 # --- the runner -------------------------------------------------------------

@@ -310,10 +310,11 @@ def test_a_first_sweep_floor_names_the_originals_failure_withdrawn(
         ReferenceMeasurement,
         pairs_of,
     )
+    from pipeline_core.domain.same_failure import ReferenceFailure
     from pipeline_core.domain.test_results import parse_binary_results
     passed, failed, _, _ = pairs_of(parse_binary_results(_FLOOR))
     ref = ReferenceMeasurement(key="k", clusters={"stable": ClusterReference(
-        cluster="stable", passed=passed, failed=failed,
+        cluster="stable", passed=passed, failures=dict.fromkeys(failed, ReferenceFailure()),
         announced=len(passed) + len(failed),
         reported=len(passed) + len(failed), rc=101)})
     events: list[tuple[str, dict]] = []

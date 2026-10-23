@@ -57,12 +57,21 @@ from pipeline_core.domain.reference_floor import (  # noqa: E402
     pairs_of,
     reference_floor_close_reason,
 )
+from pipeline_core.domain.same_failure import FailedReading, ReferenceFailure  # noqa: E402
 
 _UI = ("tests/compiletest.rs", "ui")
 _A = ("tests/test_a.rs", "alpha")
 _B = ("tests/test_a.rs", "beta")
 # A generated test: the pipeline's own oracle, absent from upstream entirely.
 _GEN = ("anyhow", "error::gen_tests_1::roundtrip")
+
+
+def _unread(pairs: frozenset[tuple[str, str]]) -> FailedReading:
+    """Failing pairs with no failure read: what a caller that only has names
+    can pass. Against a reference failure with no stable reading (every
+    reference built here) such a failure is excused by name; the
+    signature rule itself is pinned in `tests/test_same_failure.py`."""
+    return FailedReading(pairs=frozenset(pairs))
 
 
 # --- normalize_pair: doc-test names carry a line number -------------------
@@ -142,7 +151,7 @@ def test_a_tree_holding_one_of_three_examples_reports_two_missing() -> None:
     verdict = judge_against_reference(
         ClusterReference(cluster="stable", passed=pairs_of([ref])[0],
                          announced=3, reported=3),
-        pairs_of([ours])[0], frozenset())
+        pairs_of([ours])[0], _unread(frozenset()))
     assert len(verdict.advisory_unmet) == 2
 
 
@@ -161,8 +170,8 @@ def test_a_name_that_merely_ends_in_a_paren_is_untouched() -> None:
 def test_a_failure_the_original_also_fails_is_neutral() -> None:
     """The `ui` case, with the measured shape of both runs."""
     ref = ClusterReference(cluster="nightly", passed=frozenset({_A, _B}),
-                           failed=frozenset({_UI}), announced=3, reported=3)
-    verdict = judge_against_reference(ref, frozenset({_A, _B}), frozenset({_UI}))
+                           failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()), announced=3, reported=3)
+    verdict = judge_against_reference(ref, frozenset({_A, _B}), _unread(frozenset({_UI})))
     assert verdict.met is True
     assert verdict.unmet == frozenset()
     assert verdict.unexcused_failures == frozenset()
@@ -176,9 +185,9 @@ def test_a_failing_test_absent_from_the_reference_is_still_required() -> None:
     in the reference", and a two-state rule that neutralised everything the
     reference lacks would drop the whole augmentation out of the criterion."""
     ref = ClusterReference(cluster="nightly", passed=frozenset({_A, _B}),
-                           failed=frozenset({_UI}), announced=3, reported=3)
+                           failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()), announced=3, reported=3)
     verdict = judge_against_reference(
-        ref, frozenset({_A, _B}), frozenset({_UI, _GEN}))
+        ref, frozenset({_A, _B}), _unread(frozenset({_UI, _GEN})))
     assert verdict.met is False
     assert verdict.unexcused_failures == frozenset({_GEN})
     assert _UI not in verdict.unexcused_failures
@@ -207,28 +216,28 @@ def test_tdd_closes_when_failures_are_the_recorded_nightly_neutral() -> None:
     ref = ClusterReference(
         cluster="nightly",
         passed=frozenset(tuple(p) for p in nightly["passed"]),
-        failed=failed,
+        failures=dict.fromkeys(failed, ReferenceFailure()),
         ignored=frozenset(tuple(p) for p in nightly.get("ignored") or []),
         announced=int(nightly["announced"]),
         reported=int(nightly["reported"]),
     )
     ours_pass = ref.passed
     ours_fail = failed
-    verdict = judge_against_reference(ref, ours_pass, ours_fail)
+    verdict = judge_against_reference(ref, ours_pass, _unread(ours_fail))
     assert verdict.met is True
     reachable, _out = split_reachable_failures(
         [n for _, n in ours_fail],
-        excused=[n for _, n in ref.neutral])
+        excused=[n for _, n in ref.failed | ref.ignored])
     assert reachable == frozenset()
     assert reference_floor_close_reason(
         rc=101, fail_count=1, compile_broke=False, oracle_intact=True,
         verdict=verdict) == verdict.reason
-    extra = judge_against_reference(ref, ours_pass, ours_fail | {_GEN})
+    extra = judge_against_reference(ref, ours_pass, _unread(ours_fail | {_GEN}))
     assert extra.met is False
     assert extra.unexcused_failures == frozenset({_GEN})
     reachable_extra, _out = split_reachable_failures(
         [n for _, n in (ours_fail | {_GEN})],
-        excused=[n for _, n in ref.neutral])
+        excused=[n for _, n in ref.failed | ref.ignored])
     assert reachable_extra
     assert reference_floor_close_reason(
         rc=101, fail_count=2, compile_broke=False, oracle_intact=True,
@@ -247,8 +256,8 @@ def test_tdd_closes_when_failures_are_the_recorded_nightly_neutral() -> None:
 
 def test_losing_a_test_the_original_passes_fails_the_floor() -> None:
     ref = ClusterReference(cluster="nightly", passed=frozenset({_A, _B}),
-                           failed=frozenset({_UI}), announced=3, reported=3)
-    verdict = judge_against_reference(ref, frozenset({_A}), frozenset({_UI, _B}))
+                           failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()), announced=3, reported=3)
+    verdict = judge_against_reference(ref, frozenset({_A}), _unread(frozenset({_UI, _B})))
     assert verdict.met is False
     assert _B in verdict.unmet
 
@@ -258,7 +267,7 @@ def test_exceeding_the_reference_is_never_a_failure() -> None:
     are the normal state, not drift to be reported as a mismatch."""
     ref = ClusterReference(cluster="stable", passed=frozenset({_A}),
                            announced=1, reported=1)
-    verdict = judge_against_reference(ref, frozenset({_A, _B, _GEN}), frozenset())
+    verdict = judge_against_reference(ref, frozenset({_A, _B, _GEN}), _unread(frozenset()))
     assert verdict.met is True
     assert verdict.exceeded == 2
 
@@ -268,7 +277,7 @@ def test_a_test_the_reference_skips_is_neutral() -> None:
     reference IGNORES it. An ignored test bounds nothing either way."""
     ref = ClusterReference(cluster="stable", passed=frozenset({_A}),
                            ignored=frozenset({_UI}), announced=2, reported=2)
-    assert judge_against_reference(ref, frozenset({_A}), frozenset({_UI})).met is True
+    assert judge_against_reference(ref, frozenset({_A}), _unread(frozenset({_UI}))).met is True
 
 
 # --- doc tests are compared and reported, never gated ---------------------
@@ -287,7 +296,7 @@ def test_a_missing_doc_test_is_advisory_not_gating() -> None:
     iteration can address. It is reported instead."""
     ref = ClusterReference(cluster="stable", passed=frozenset({_A, _DOC}),
                            announced=2, reported=2)
-    verdict = judge_against_reference(ref, frozenset({_A}), frozenset())
+    verdict = judge_against_reference(ref, frozenset({_A}), _unread(frozenset()))
     assert verdict.met is True
     assert verdict.advisory_unmet == frozenset({_DOC})
     assert "src/lib.rs - Error" in verdict.reason
@@ -307,7 +316,7 @@ def test_a_doc_test_that_runs_here_and_fails_gates() -> None:
                            passed=frozenset({_A, _DOC, _DOC_RAN}),
                            announced=3, reported=3)
     verdict = judge_against_reference(
-        ref, frozenset({_A}), frozenset({_DOC_RAN}))
+        ref, frozenset({_A}), _unread(frozenset({_DOC_RAN})))
     assert verdict.met is False
     assert verdict.unmet == frozenset({_DOC_RAN})
     assert verdict.unexcused_failures == frozenset({_DOC_RAN})
@@ -316,7 +325,7 @@ def test_a_doc_test_that_runs_here_and_fails_gates() -> None:
     # NEGATIVE CONTROL: the filter this replaced dropped every doc pair from
     # both conditions; on the same input it reads the floor as met.
     unmet = ref.passed - frozenset({_A})
-    unexcused = frozenset({_DOC_RAN}) - ref.neutral
+    unexcused = frozenset({_DOC_RAN}) - (ref.failed | ref.ignored)
     old_unmet = frozenset(p for p in unmet if not is_doc_pair(p))
     old_unexcused = frozenset(p for p in unexcused if not is_doc_pair(p))
     assert not old_unmet and not old_unexcused
@@ -324,10 +333,10 @@ def test_a_doc_test_that_runs_here_and_fails_gates() -> None:
 
 def test_a_failing_doc_test_the_reference_fails_too_is_excused() -> None:
     ref = ClusterReference(cluster="nightly", passed=frozenset({_A}),
-                           failed=frozenset({_DOC_RAN}),
+                           failures=dict.fromkeys(frozenset({_DOC_RAN}), ReferenceFailure()),
                            announced=2, reported=2)
     assert judge_against_reference(
-        ref, frozenset({_A}), frozenset({_DOC_RAN})).met is True
+        ref, frozenset({_A}), _unread(frozenset({_DOC_RAN}))).met is True
 
 
 # --- an unhealthy reference is refused, never quietly trusted -------------
@@ -353,7 +362,7 @@ def test_announced_not_equal_reported_makes_it_unusable() -> None:
 
 def test_a_healthy_reference_is_usable() -> None:
     ref = ClusterReference(cluster="nightly", passed=frozenset({_A, _B}),
-                           failed=frozenset({_UI}), announced=3, reported=3)
+                           failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()), announced=3, reported=3)
     assert ref.healthy is True
     assert ReferenceMeasurement(key="k", clusters={"nightly": ref}).usable is True
 
@@ -669,7 +678,7 @@ def test_the_floor_passes_a_cluster_whose_only_failure_the_original_shares(
         tmp_path: Path) -> None:
     from pipeline_core.application.tasks.task3 import run_clusters_strict
     ref = ReferenceMeasurement(key="k", clusters={"nightly": ClusterReference(
-        cluster="nightly", passed=frozenset({_A, _B}), failed=frozenset({_UI}),
+        cluster="nightly", passed=frozenset({_A, _B}), failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()),
         announced=3, reported=3)})
     all_pass, _out, results = run_clusters_strict(
         tmp_path, [_cluster()], _deps(reference=ref))
@@ -704,7 +713,7 @@ def test_the_floor_never_upgrades_an_incomplete_cluster(tmp_path: Path) -> None:
         "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; "
         "0 filtered out\n", "")
     ref = ReferenceMeasurement(key="k", clusters={"nightly": ClusterReference(
-        cluster="nightly", passed=frozenset({_A, _B}), failed=frozenset({_UI}),
+        cluster="nightly", passed=frozenset({_A, _B}), failures=dict.fromkeys(frozenset({_UI}), ReferenceFailure()),
         announced=3, reported=3)})
     all_pass, _out, results = run_clusters_strict(
         tmp_path, [_cluster()], _deps(reference=ref, out=silent))

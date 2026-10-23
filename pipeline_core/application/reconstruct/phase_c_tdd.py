@@ -311,6 +311,7 @@ from pipeline_core.domain.refine import (
 )
 from pipeline_core.domain.retro_gate import bind_crate_names
 from pipeline_core.domain.rust_scan import is_hollow_body
+from pipeline_core.domain.same_failure import SignatureReader
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
     SessionSlice,
@@ -628,6 +629,13 @@ class PhaseCTddDeps:
     # PhaseCTddDeps and a REFERENCE_FLOOR=0 launch keep the absolute
     # criterion.
     reference_measurement: Callable[..., Any] | None = None
+    # `(world, tree, home_env) -> SignatureReader`: reads how a failing test
+    # of the sweep fails, run alone in `tree` under that world's env
+    # (`application.failure_reading`). The floor excuses a failure the
+    # original shares only when it is the same failure; with None nothing is
+    # read, and a failure the original's measurement read stably is not
+    # excused (the judge fails closed on an unread failure).
+    failure_reader: Callable[[str, Path, dict[str, str]], SignatureReader] | None = None
     # `(project_dir, cluster, module) -> FnCoverageRecord | None`: the
     # function-execution record test augmentation persisted for this cluster.
     # Read once, when the cluster closes green or on the floor, to classify the
@@ -1677,23 +1685,28 @@ def run_phase_c_tdd(
         return unit_ask_fingerprints(list(units), recs, words=words,
                                      retro=retro, crash=crash_texts)
 
+    def _read_for_world(world: str) -> SignatureReader:
+        if deps.failure_reader is None:
+            return lambda _todo: {}
+        return deps.failure_reader(world, target_src_dir, cluster_env)
+
     def _withdrawn_now() -> frozenset[str]:
         """Red tests (bare names) every failing copy of which the original
-        crate also fails or skips under this cluster's cfg
+        crate also fails the same way, or skips, under this cluster's cfg
         (`reference_floor`). They cannot be made green: withdrawn from the
-        owed reading and named once."""
+        owed reading and named once. A test that fails differently from the
+        original is not withdrawn: it is a red test of this tree."""
         if deps.reference_measurement is None:
             return frozenset()
         _refm_w = deps.reference_measurement(project_dir)
         _v_w = judge_every_world(
             _refm_w if isinstance(_refm_w, ReferenceMeasurement) else None,
-            output, cluster.name)
+            output, cluster.name, _read_for_world)
         if _v_w is None:
             return frozenset()
         _failed_w = failed_pairs(output)
-        _excused = {bare_test_name(n_) for _l, n_ in
-                    _failed_w - _v_w.unexcused_failures}
-        _kept = {bare_test_name(n_) for _l, n_ in _v_w.unexcused_failures}
+        _excused = {bare_test_name(n_) for _l, n_ in _v_w.excused}
+        _kept = {bare_test_name(n_) for _l, n_ in _failed_w - _v_w.excused}
         return frozenset(_excused - _kept)
 
     def _owed_now(hold: StubHold,
@@ -3476,7 +3489,11 @@ def run_phase_c_tdd(
             _refm = deps.reference_measurement(project_dir)
             _floor_verdict = judge_every_world(
                 _refm if isinstance(_refm, ReferenceMeasurement) else None,
-                output, cluster.name)
+                output, cluster.name, _read_for_world)
+            if _floor_verdict is not None and _floor_verdict.diverged:
+                deps.log(
+                    f"  {tag} [phase-c/tdd] iter {iter_n}: not the reference "
+                    f"floor — {_floor_verdict.reason}")
             _floor_why = reference_floor_close_reason(
                 rc=rc, fail_count=fail_count,
                 compile_broke=_sweep_compile_broke,

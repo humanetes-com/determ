@@ -1070,6 +1070,16 @@ class WorldChecks:
         return [c for n, c in sorted(by_name.items())
                 if n != home and self.world_key(c) != own]
 
+    def env_of(self, world: str, cwd: Path, home_env: Mapping[str, str]) -> dict[str, str] | None:
+        """The env a test run of `world` ran under: the home env for the home
+        world (or a capture that names none), the other world's own env
+        (:meth:`env_for`) otherwise, None for a world this run has no cluster
+        for. A test that failed in that world is re-run in that env."""
+        if not world or world == world_of_env(home_env):
+            return dict(home_env)
+        cluster = {str(c.name): c for c in self.clusters()}.get(world)
+        return self.env_for(cluster, cwd, home_env) if cluster is not None else None
+
     def env_for(self, cluster: Any, cwd: Path, home_env: Mapping[str, str]) -> dict[str, str]:
         """The other world's env. Its own target directory: another world's
         flags and toolchain in the home target would invalidate every

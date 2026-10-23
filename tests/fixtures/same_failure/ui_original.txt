@@ -1,0 +1,123 @@
+
+running 1 test
+test ui ... FAILED
+
+failures:
+
+---- ui stdout ----
+
+thread 'ui' (2168716) panicked at /home/someone/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trybuild-1.0.122/src/run.rs:103:13:
+1 of 7 tests failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.60s
+
+
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+    Checking futures-core v0.3.34
+    Checking futures-sink v0.3.34
+   Compiling anyhow v1.0.104 (/work/original)
+    Checking pin-project-lite v0.2.17
+    Checking futures-task v0.3.34
+   Compiling thiserror v2.0.21
+   Compiling rustversion v1.0.23
+    Checking futures-io v0.3.34
+    Checking futures-channel v0.3.34
+    Checking futures-util v0.3.34
+    Checking syn v3.0.9
+    Checking futures v0.3.34
+   Compiling thiserror-impl v2.0.21
+    Checking anyhow-tests v0.0.0 (/work/original/target/tests/trybuild/anyhow)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.66s
+
+
+test [0m[1mtests/ui/chained-comparison.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/empty-ensure.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/ensure-nonbool.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/must-use.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/no-impl.rs[0m ... [0m[1m[31mmismatch
+[0m
+[0m[1m[34mEXPECTED:
+[0m[34m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m[34merror[E0599]: the method `anyhow_kind` exists for reference `&Error`, but its trait bounds were not satisfied
+[0m[34m --> tests/ui/no-impl.rs:7:13
+[0m[34m  |
+[0m[34m4 | struct Error;
+[0m[34m  | ------------ doesn't satisfy `Error: Into<anyhow::Error>`, `Error: anyhow::__private::kind::TraitKind` or `Error: std::fmt::Display`
+[0m[34m...
+[0m[34m7 |     let _ = anyhow!(Error);
+[0m[34m  |             ^^^^^^^^^^^^^^ method cannot be called on `&Error` due to unsatisfied trait bounds
+[0m[34m  |
+[0m[34m  = note: the following trait bounds were not satisfied:
+[0m[34m          `Error: Into<anyhow::Error>`
+[0m[34m          which is required by `Error: anyhow::__private::kind::TraitKind`
+[0m[34m          `Error: std::fmt::Display`
+[0m[34m          which is required by `&Error: anyhow::__private::kind::AdhocKind`
+[0m[34m          `&Error: Into<anyhow::Error>`
+[0m[34m          which is required by `&Error: anyhow::__private::kind::TraitKind`
+[0m[34mnote: the traits `Into` and `std::fmt::Display` must be implemented
+[0m[34m --> $RUST/core/src/fmt/mod.rs
+[0m[34m  |
+[0m[34m  | pub trait Display: PointeeSized {
+[0m[34m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[34m  |
+[0m[34m ::: $RUST/core/src/convert/mod.rs
+[0m[34m  |
+[0m[34m  | pub const trait Into<T>: Sized {
+[0m[34m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[34m  = help: items from traits can only be used if the trait is implemented and in scope
+[0m[34m  = note: the following traits define an item `anyhow_kind`, perhaps you need to implement one of them:
+[0m[34m          candidate #1: `anyhow::__private::kind::AdhocKind`
+[0m[34m          candidate #2: `anyhow::__private::kind::BoxedKind`
+[0m[34m          candidate #3: `anyhow::__private::kind::TraitKind`
+[0m[34m  = note: this error originates in the macro `anyhow` (in Nightly builds, run with -Z macro-backtrace for more info)
+[0m[34m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m
+[0m[1m[31mACTUAL OUTPUT:
+[0m[31m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m[31merror[E0599]: the method `anyhow_kind` exists for reference `&Error`, but its trait bounds were not satisfied
+[0m[31m --> tests/ui/no-impl.rs:7:13
+[0m[31m  |
+[0m[31m4 | struct Error;
+[0m[31m  | ------------ doesn't satisfy `Error: Into<anyhow::Error>`, `Error: anyhow::kind::TraitKind` or `Error: std::fmt::Display`
+[0m[31m...
+[0m[31m7 |     let _ = anyhow!(Error);
+[0m[31m  |             ^^^^^^^^^^^^^^ method cannot be called on `&Error` due to unsatisfied trait bounds
+[0m[31m  |
+[0m[31m  = note: the following trait bounds were not satisfied:
+[0m[31m          `Error: Into<anyhow::Error>`
+[0m[31m          which is required by `Error: anyhow::kind::TraitKind`
+[0m[31m          `Error: std::fmt::Display`
+[0m[31m          which is required by `&Error: anyhow::kind::AdhocKind`
+[0m[31m          `&Error: Into<anyhow::Error>`
+[0m[31m          which is required by `&Error: anyhow::kind::TraitKind`
+[0m[31mnote: the traits `Into` and `std::fmt::Display` must be implemented
+[0m[31m --> $RUST/core/src/fmt/mod.rs
+[0m[31m  |
+[0m[31m  | pub trait Display: PointeeSized {
+[0m[31m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[31m  |
+[0m[31m ::: $RUST/core/src/convert/mod.rs
+[0m[31m  |
+[0m[31m  | pub const trait Into<T>: Sized {
+[0m[31m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[31m  = help: items from traits can only be used if the trait is implemented and in scope
+[0m[31m  = note: the following traits define an item `anyhow_kind`, perhaps you need to implement one of them:
+[0m[31m          candidate #1: `anyhow::kind::AdhocKind`
+[0m[31m          candidate #2: `anyhow::kind::BoxedKind`
+[0m[31m          candidate #3: `anyhow::kind::TraitKind`
+[0m[31m  = note: this error originates in the macro `anyhow` (in Nightly builds, run with -Z macro-backtrace for more info)
+[0m[31m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0mnote: If the [0m[31mactual output[0m is the correct output you can bless it by rerunning
+      your test with the environment variable TRYBUILD=overwrite
+
+test [0m[1mtests/ui/temporary-value.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/wrong-interpolation.rs[0m ... [0m[32mok
+[0m
+

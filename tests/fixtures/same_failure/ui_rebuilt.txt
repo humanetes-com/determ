@@ -1,0 +1,1341 @@
+
+running 1 test
+test ui ... FAILED
+
+failures:
+
+---- ui stdout ----
+
+thread 'ui' (2155582) panicked at /home/someone/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/trybuild-1.0.120/src/run.rs:103:13:
+1 of 7 tests failed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    ui
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.32s
+
+
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+    Checking futures-core v0.3.33
+    Checking futures-sink v0.3.33
+   Compiling thiserror v2.0.20
+    Checking futures-task v0.3.33
+   Compiling rustversion v1.0.23
+    Checking pin-project-lite v0.2.17
+    Checking futures-io v0.3.33
+    Checking anyhow v1.0.104 (/work/rebuilt)
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/lib.rs:210:13
+    |
+210 | #![cfg_attr(error_generic_member_access, feature(error_generic_member_access))]
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: expected names are: `docsrs`, `feature`, and `test` and 31 more
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `anyhow_nightly_testing`
+   --> /work/rebuilt/src/lib.rs:237:11
+    |
+237 | #[cfg(all(anyhow_nightly_testing, feature = "std", not(error_generic_member_access)))]
+    |           ^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_nightly_testing)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_nightly_testing)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/lib.rs:237:56
+    |
+237 | #[cfg(all(anyhow_nightly_testing, feature = "std", not(error_generic_member_access)))]
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:528:20
+    |
+528 |     #[cfg_attr(not(error_generic_member_access), doc = "# _ = stringify! {")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:546:20
+    |
+546 |     #[cfg_attr(not(error_generic_member_access), doc = "# };")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:570:20
+    |
+570 |     #[cfg_attr(not(error_generic_member_access), doc = "# _ = stringify!{")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:589:20
+    |
+589 |     #[cfg_attr(not(error_generic_member_access), doc = "# };")]
+    |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+  --> /work/rebuilt/src/macros.rs:58:16
+   |
+58 | #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+   |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+   --> /work/rebuilt/src/macros.rs:148:16
+    |
+148 | #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+    |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/lib.rs:251:7
+    |
+251 | #[cfg(error_generic_member_access)]
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/lib.rs:258:33
+    |
+258 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+    |                                 ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/lib.rs:262:32
+    |
+262 | #[cfg(not(any(feature = "std", anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/lib.rs:264:33
+    |
+264 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+    |                                 ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/lib.rs:396:32
+    |
+396 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_clippy_format_args`
+   --> /work/rebuilt/src/macros.rs:113:36
+    |
+113 |     #[macro_export] #[cfg_attr(not(anyhow_no_clippy_format_args), clippy::format_args)]
+    |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_clippy_format_args)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_clippy_format_args)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/rebuilt/src/backtrace.rs:18:7
+   |
+18 | #[cfg(error_generic_member_access)]
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/rebuilt/src/backtrace.rs:25:15
+   |
+25 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/backtrace.rs:31:15
+   |
+31 | #[cfg(all(not(anyhow_no_core_error), not(feature = "std")))]
+   |               ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/chain.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/chain.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/chain.rs:8:33
+  |
+8 | #[cfg(all(not(feature = "std"), anyhow_no_core_error))]
+  |                                 ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:68:32
+   |
+68 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:95:32
+   |
+95 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:18:36
+   |
+18 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:26:40
+   |
+26 |         #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                        ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:48:44
+   |
+48 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:63:44
+   |
+63 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:73:44
+   |
+73 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/chain.rs:90:44
+   |
+90 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                            ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/rebuilt/src/context.rs:6:7
+  |
+6 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/context.rs:14:36
+   |
+14 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/context.rs:128:11
+    |
+128 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/context.rs:140:11
+    |
+140 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/rebuilt/src/error.rs:4:7
+  |
+4 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/error.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/error.rs:14:32
+   |
+14 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:615:32
+    |
+615 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:633:32
+    |
+633 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:641:32
+    |
+641 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:721:32
+    |
+721 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:730:32
+    |
+730 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:755:15
+    |
+755 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:760:32
+    |
+760 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:785:32
+    |
+785 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:849:15
+    |
+849 | #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:957:32
+    |
+957 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:964:32
+    |
+964 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:971:32
+    |
+971 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:978:32
+    |
+978 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:984:32
+    |
+984 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/error.rs:27:36
+   |
+27 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                    ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:134:36
+    |
+134 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:140:36
+    |
+140 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:185:36
+    |
+185 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:211:36
+    |
+211 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:364:36
+    |
+364 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:374:36
+    |
+374 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:550:36
+    |
+550 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:591:36
+    |
+591 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:604:11
+    |
+604 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:609:11
+    |
+609 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:149:44
+    |
+149 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:151:44
+    |
+151 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:155:27
+    |
+155 |             #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:199:44
+    |
+199 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:201:44
+    |
+201 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:205:27
+    |
+205 |             #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:297:44
+    |
+297 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:299:44
+    |
+299 |             #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                            ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:303:27
+    |
+303 |             #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:690:36
+    |
+690 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:692:36
+    |
+692 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:698:19
+    |
+698 |     #[cfg(all(not(error_generic_member_access), feature = "std"))]
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/error.rs:887:36
+    |
+887 |     #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                    ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:905:11
+    |
+905 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+   --> /work/rebuilt/src/error.rs:931:11
+    |
+931 |     #[cfg(error_generic_member_access)]
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/kind.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/kind.rs:6:32
+  |
+6 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/kind.rs:67:32
+   |
+67 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/kind.rs:69:32
+   |
+69 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+ --> /work/rebuilt/src/wrapper.rs:4:32
+  |
+4 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+  |                                ^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+ --> /work/rebuilt/src/wrapper.rs:6:7
+  |
+6 | #[cfg(error_generic_member_access)]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/wrapper.rs:57:32
+   |
+57 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/wrapper.rs:60:32
+   |
+60 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/wrapper.rs:66:32
+   |
+66 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+  --> /work/rebuilt/src/wrapper.rs:72:32
+   |
+72 | #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+   |                                ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `error_generic_member_access`
+  --> /work/rebuilt/src/wrapper.rs:77:11
+   |
+77 |     #[cfg(error_generic_member_access)]
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: consider using a Cargo feature instead
+   = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+            [lints.rust]
+            unexpected_cfgs = { level = "warn", check-cfg = ['cfg(error_generic_member_access)'] }
+   = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(error_generic_member_access)");` to the top of the `build.rs`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition name: `anyhow_no_core_error`
+   --> /work/rebuilt/src/lib.rs:650:40
+    |
+650 |         #[cfg(any(feature = "std", not(anyhow_no_core_error)))]
+    |                                        ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using a Cargo feature instead
+    = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+             [lints.rust]
+             unexpected_cfgs = { level = "warn", check-cfg = ['cfg(anyhow_no_core_error)'] }
+    = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(anyhow_no_core_error)");` to the top of the `build.rs`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+    Checking futures-util v0.3.33
+    Checking futures-channel v0.3.33
+warning: calls to `std::mem::forget` with a value that implements `Copy` does nothing
+   --> /work/rebuilt/src/error.rs:711:5
+    |
+711 |     core::mem::forget(e);
+    |     ^^^^^^^^^^^^^^^^^^-^
+    |                       |
+    |                       argument has type `Own<ErrorImpl>`
+    |
+    = note: `#[warn(forgetting_copy_types)]` on by default
+help: use `let _ = ...` to ignore the expression or result
+    |
+711 -     core::mem::forget(e);
+711 +     let _ = e;
+    |
+
+warning: calls to `std::mem::forget` with a value that implements `Copy` does nothing
+   --> /work/rebuilt/src/error.rs:797:9
+    |
+797 |         core::mem::forget(e);
+    |         ^^^^^^^^^^^^^^^^^^-^
+    |                           |
+    |                           argument has type `Own<ErrorImpl>`
+    |
+help: use `let _ = ...` to ignore the expression or result
+    |
+797 -         core::mem::forget(e);
+797 +         let _ = e;
+    |
+
+warning: calls to `std::mem::forget` with a value that implements `Copy` does nothing
+   --> /work/rebuilt/src/error.rs:804:9
+    |
+804 |         core::mem::forget(e);
+    |         ^^^^^^^^^^^^^^^^^^-^
+    |                           |
+    |                           argument has type `Own<ErrorImpl>`
+    |
+help: use `let _ = ...` to ignore the expression or result
+    |
+804 -         core::mem::forget(e);
+804 +         let _ = e;
+    |
+
+warning: calls to `std::mem::forget` with a value that implements `Copy` does nothing
+   --> /work/rebuilt/src/error.rs:837:9
+    |
+837 |         core::mem::forget(e);
+    |         ^^^^^^^^^^^^^^^^^^-^
+    |                           |
+    |                           argument has type `Own<ErrorImpl>`
+    |
+help: use `let _ = ...` to ignore the expression or result
+    |
+837 -         core::mem::forget(e);
+837 +         let _ = e;
+    |
+
+warning: calls to `std::mem::forget` with a value that implements `Copy` does nothing
+   --> /work/rebuilt/src/error.rs:843:5
+    |
+843 |     core::mem::forget(e);
+    |     ^^^^^^^^^^^^^^^^^^-^
+    |                       |
+    |                       argument has type `Own<ErrorImpl>`
+    |
+help: use `let _ = ...` to ignore the expression or result
+    |
+843 -     core::mem::forget(e);
+843 +     let _ = e;
+    |
+
+warning: `anyhow` (lib) generated 93 warnings
+    Checking syn v3.0.3
+    Checking futures v0.3.33
+   Compiling thiserror-impl v2.0.20
+    Checking anyhow-tests v0.0.0 (/work/rebuilt/target/tests/trybuild/anyhow)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.45s
+
+
+test [0m[1mtests/ui/chained-comparison.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/empty-ensure.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/ensure-nonbool.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/must-use.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/no-impl.rs[0m ... [0m[1m[31mmismatch
+[0m
+[0m[1m[34mEXPECTED:
+[0m[34m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m[34merror[E0599]: the method `anyhow_kind` exists for reference `&Error`, but its trait bounds were not satisfied
+[0m[34m --> tests/ui/no-impl.rs:7:13
+[0m[34m  |
+[0m[34m4 | struct Error;
+[0m[34m  | ------------ doesn't satisfy `Error: Into<anyhow::Error>`, `Error: anyhow::__private::kind::TraitKind` or `Error: std::fmt::Display`
+[0m[34m...
+[0m[34m7 |     let _ = anyhow!(Error);
+[0m[34m  |             ^^^^^^^^^^^^^^ method cannot be called on `&Error` due to unsatisfied trait bounds
+[0m[34m  |
+[0m[34m  = note: the following trait bounds were not satisfied:
+[0m[34m          `Error: Into<anyhow::Error>`
+[0m[34m          which is required by `Error: anyhow::__private::kind::TraitKind`
+[0m[34m          `Error: std::fmt::Display`
+[0m[34m          which is required by `&Error: anyhow::__private::kind::AdhocKind`
+[0m[34m          `&Error: Into<anyhow::Error>`
+[0m[34m          which is required by `&Error: anyhow::__private::kind::TraitKind`
+[0m[34mnote: the traits `Into` and `std::fmt::Display` must be implemented
+[0m[34m --> $RUST/core/src/fmt/mod.rs
+[0m[34m  |
+[0m[34m  | pub trait Display: PointeeSized {
+[0m[34m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[34m  |
+[0m[34m ::: $RUST/core/src/convert/mod.rs
+[0m[34m  |
+[0m[34m  | pub const trait Into<T>: Sized {
+[0m[34m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[34m  = help: items from traits can only be used if the trait is implemented and in scope
+[0m[34m  = note: the following traits define an item `anyhow_kind`, perhaps you need to implement one of them:
+[0m[34m          candidate #1: `anyhow::__private::kind::AdhocKind`
+[0m[34m          candidate #2: `anyhow::__private::kind::BoxedKind`
+[0m[34m          candidate #3: `anyhow::__private::kind::TraitKind`
+[0m[34m  = note: this error originates in the macro `anyhow` (in Nightly builds, run with -Z macro-backtrace for more info)
+[0m[34m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m
+[0m[1m[31mACTUAL OUTPUT:
+[0m[31m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0m[31merror[E0599]: the method `anyhow_kind` exists for reference `&Error`, but its trait bounds were not satisfied
+[0m[31m --> tests/ui/no-impl.rs:7:13
+[0m[31m  |
+[0m[31m4 | struct Error;
+[0m[31m  | ------------ doesn't satisfy `Error: Into<anyhow::Error>`, `Error: anyhow::kind::TraitKind` or `Error: std::fmt::Display`
+[0m[31m...
+[0m[31m7 |     let _ = anyhow!(Error);
+[0m[31m  |             ^^^^^^^^^^^^^^ method cannot be called on `&Error` due to unsatisfied trait bounds
+[0m[31m  |
+[0m[31m  = note: the following trait bounds were not satisfied:
+[0m[31m          `Error: Into<anyhow::Error>`
+[0m[31m          which is required by `Error: anyhow::kind::TraitKind`
+[0m[31m          `Error: std::fmt::Display`
+[0m[31m          which is required by `&Error: anyhow::kind::AdhocKind`
+[0m[31m          `&Error: Into<anyhow::Error>`
+[0m[31m          which is required by `&Error: anyhow::kind::TraitKind`
+[0m[31mnote: the traits `Into` and `std::fmt::Display` must be implemented
+[0m[31m --> $RUST/core/src/fmt/mod.rs
+[0m[31m  |
+[0m[31m  | pub trait Display: PointeeSized {
+[0m[31m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[31m  |
+[0m[31m ::: $RUST/core/src/convert/mod.rs
+[0m[31m  |
+[0m[31m  | pub const trait Into<T>: Sized {
+[0m[31m  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[0m[31m  = help: items from traits can only be used if the trait is implemented and in scope
+[0m[31m  = note: the following traits define an item `anyhow_kind`, perhaps you need to implement one of them:
+[0m[31m          candidate #1: `anyhow::kind::AdhocKind`
+[0m[31m          candidate #2: `anyhow::kind::BoxedKind`
+[0m[31m          candidate #3: `anyhow::kind::TraitKind`
+[0m[31m  = note: this error originates in the macro `anyhow` (in Nightly builds, run with -Z macro-backtrace for more info)
+[0m[31m┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈┈
+[0mnote: If the [0m[31mactual output[0m is the correct output you can bless it by rerunning
+      your test with the environment variable TRYBUILD=overwrite
+
+test [0m[1mtests/ui/temporary-value.rs[0m ... [0m[32mok
+[0mtest [0m[1mtests/ui/wrong-interpolation.rs[0m ... [0m[32mok
+[0m
+

@@ -41,13 +41,19 @@ from ..domain.reference_floor import (
     ReferenceMeasurement,
     pairs_of,
 )
+from ..domain.same_failure import FailureSignature, ReferenceFailure
 from ..domain.test_results import find_unreported_tests, parse_binary_results
+from ..domain.world_floor import failures_to_read
 from ..log import emit, log
+from .failure_reading import read_one
 
 # Schema version of `reference.json`. Bumping it invalidates every stored
 # measurement — do that when the MEANING of a field changes, not when a field is
 # added, so an older file that is still correct is not thrown away for free.
-_SCHEMA = 2
+# 3 (2026-10-22): a failed test is excused only by the same failure, so the
+# store carries how each failed (`failures`); a schema-2 file has none and
+# would excuse every failure by name.
+_SCHEMA = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,12 +229,38 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
         return ClusterReference(cluster=str(cluster.name), rc=-1)
     gap = find_unreported_tests(output)
     passed, failed, ignored, incomplete = pairs_of(parse_binary_results(output))
+    failures = _read_failures(tree, output, env, deps.test_timeout,
+                              str(cluster.name))
+    # Every failed test gets an entry: one the alone read did not reach is
+    # recorded as not read, never left out (an absent entry would be a
+    # failure with no reading, the name-only excuse).
+    for pair in failed - failures.keys():
+        failures[pair] = ReferenceFailure()
     ref = ClusterReference(
-        cluster=str(cluster.name), passed=passed, failed=failed, ignored=ignored,
-        incomplete=incomplete, announced=gap.announced, reported=gap.reported, rc=rc)
+        cluster=str(cluster.name), passed=passed, ignored=ignored,
+        incomplete=incomplete, announced=gap.announced, reported=gap.reported, rc=rc,
+        failures=failures)
     log(f"  [reference/{cluster.name}] {len(passed)} passing, {len(failed)} failing, "
         f"{len(ignored)} ignored (rc={rc}, {time.monotonic() - t0:.1f}s)")
     return ref
+
+
+def _read_failures(tree: Path, output: str, env: dict[str, str], timeout: int,
+                   cluster: str) -> dict[tuple[str, str], ReferenceFailure]:
+    """How the original fails each failing test, read twice, each time alone
+    in its own process (`failure_reading.read_one`, uncached). Two readings
+    that differ are kept as they are: the judge then excuses that test by
+    name only and says so, because there is no stable failure to compare."""
+    out: dict[tuple[str, str], ReferenceFailure] = {}
+    for f in failures_to_read(None, output, cluster):
+        first = read_one(f, cwd=tree, env=env, timeout=timeout, cached=False)
+        second = read_one(f, cwd=tree, env=env, timeout=timeout, cached=False)
+        out[f.pair] = ReferenceFailure(first, second)
+        state = ("stable" if out[f.pair].stable
+                 else "not reproducible" if first is not None else "not read")
+        log(f"  [reference/{cluster}] failure of {f.label}::{f.name} read "
+            f"twice alone: {state}")
+    return out
 
 
 def _hollow_fns(tree: Path, deps: ReferenceDeps) -> frozenset[tuple[str, str]]:
@@ -264,6 +296,11 @@ def _to_json(m: ReferenceMeasurement) -> dict[str, Any]:
                 "ignored": sorted([a, b] for a, b in c.ignored),
                 "incomplete": sorted(c.incomplete),
                 "announced": c.announced, "reported": c.reported, "rc": c.rc,
+                "failures": [
+                    [a, b,
+                     f.first.text if f.first is not None else None,
+                     f.second.text if f.second is not None else None]
+                    for (a, b), f in sorted(c.failures.items())],
             } for name, c in sorted(m.clusters.items())
         },
     }
@@ -274,18 +311,28 @@ def _from_json(raw: dict[str, Any]) -> ReferenceMeasurement | None:
         return None
     clusters: dict[str, ClusterReference] = {}
     for name, c in (raw.get("clusters") or {}).items():
+        failures = {(str(a), str(b)): ReferenceFailure(_sig(s1), _sig(s2))
+                    for a, b, s1, s2 in c.get("failures", [])}
+        if frozenset((str(a), str(b)) for a, b in c.get("failed", [])) != frozenset(failures):
+            # A failed test with no reading entry (or the reverse) is a store
+            # this code did not write: re-measure rather than excuse by name.
+            return None
         clusters[str(name)] = ClusterReference(
             cluster=str(name),
             passed=frozenset((str(a), str(b)) for a, b in c.get("passed", [])),
-            failed=frozenset((str(a), str(b)) for a, b in c.get("failed", [])),
             ignored=frozenset((str(a), str(b)) for a, b in c.get("ignored", [])),
             incomplete=frozenset(str(x) for x in c.get("incomplete", [])),
             announced=int(c.get("announced", 0)),
-            reported=int(c.get("reported", 0)), rc=int(c.get("rc", 0)))
+            reported=int(c.get("reported", 0)), rc=int(c.get("rc", 0)),
+            failures=failures)
     return ReferenceMeasurement(
         key=str(raw.get("key", "")), clusters=clusters,
         hollow=frozenset((str(f), str(n)) for f, n in raw.get("hollow", [])),
         source_ref=str(raw.get("source_ref", "")))
+
+
+def _sig(text: object) -> FailureSignature | None:
+    return FailureSignature(str(text)) if text is not None else None
 
 
 def load_reference(project_dir: Path) -> ReferenceMeasurement | None:
@@ -353,8 +400,9 @@ def measure_reference(project_dir: Path, clusters: Sequence[Any],
     path.write_text(json.dumps(_to_json(measured), indent=2), encoding="utf-8")
     for name, c in sorted(measured.clusters.items()):
         log(f"  [reference/{name}] floor: {len(c.passed)} test(s) must pass; "
-            f"{len(c.neutral)} neutral (the original fails or skips them)"
-            + (f"; neutral: {_names(c.failed)}" if c.failed else ""))
+            f"{len(c.ignored)} skipped by the original; {len(c.failed)} failed "
+            "by it, each excused here only by the same failure"
+            + (f": {_names(c.failed)}" if c.failed else ""))
     if measured.hollow:
         log(f"  [reference] the original leaves {len(measured.hollow)} fn(s) "
             f"hollow: {', '.join(f'{f}::{n}' for f, n in sorted(measured.hollow))}")

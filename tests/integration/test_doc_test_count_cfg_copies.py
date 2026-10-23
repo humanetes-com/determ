@@ -58,6 +58,7 @@ from pipeline_core.domain.reference_floor import (
     judge_against_reference,
     pairs_of,
 )
+from pipeline_core.domain.same_failure import FailedReading, ReferenceFailure
 from pipeline_core.domain.test_results import (
     parse_binary_results,
     parse_test_counts,
@@ -262,9 +263,9 @@ def _floor(tmp_path: Path, reporter: Any) -> Any:
     r_pass, r_fail, r_ign, r_inc = pairs_of(parse_binary_results(ref_out))
     o_pass, o_fail, _i, _c = pairs_of(parse_binary_results(our_out))
     assert r_pass and not r_fail, ref_out[-2000:]
-    ref = ClusterReference(cluster="alt", passed=r_pass, failed=r_fail,
+    ref = ClusterReference(cluster="alt", passed=r_pass, failures=dict.fromkeys(r_fail, ReferenceFailure()),
                            ignored=r_ign, incomplete=r_inc)
-    return judge_against_reference(ref, o_pass, o_fail), our_out
+    return judge_against_reference(ref, o_pass, FailedReading(pairs=o_fail)), our_out
 
 
 def test_a_wrong_body_fails_the_floor_through_its_cfg_gated_doc_example(

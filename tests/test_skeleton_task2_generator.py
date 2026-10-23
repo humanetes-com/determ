@@ -544,10 +544,11 @@ def _reference_failing(cluster: str, output: str) -> Any:
         ReferenceMeasurement,
         pairs_of,
     )
+    from pipeline_core.domain.same_failure import ReferenceFailure
     from pipeline_core.domain.test_results import parse_binary_results
     passed, failed, _, _ = pairs_of(parse_binary_results(output))
     return ReferenceMeasurement(key="k", clusters={cluster: ClusterReference(
-        cluster=cluster, passed=passed, failed=failed,
+        cluster=cluster, passed=passed, failures=dict.fromkeys(failed, ReferenceFailure()),
         announced=len(passed) + len(failed), reported=len(passed) + len(failed),
         rc=101)})
 

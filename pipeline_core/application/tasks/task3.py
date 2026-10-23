@@ -21,7 +21,7 @@ from __future__ import annotations
 import shlex
 import subprocess
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,20 +30,19 @@ from typing import Any
 from pipeline_core.domain.test_results import join_capture
 
 from ...domain.cluster_env import overlay_cluster_env
-from ...domain.reference_floor import (
-    ReferenceMeasurement,
-    judge_cluster_binaries,
-)
+from ...domain.reference_floor import ReferenceMeasurement
+from ...domain.same_failure import FailureSignature, FailureToRead, SignatureReader
 from ...domain.test_results import (
     OUTPUT_SEPARATOR,
     ClusterStatus,
     cluster_failure_is_actionable,
     compile_gate_reason,
-    parse_binary_results,
     parse_test_counts,
     validate_task3_output_strict,
 )
+from ...domain.world_floor import judge_cluster_capture
 from ...log import emit, log
+from ..failure_reading import read_alone
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +113,33 @@ def red_ledger_lines(stored: Mapping[str, Any], *, limit: int = 40) -> list[str]
     lines.extend(f"  {e.get('class')}: {e.get('test')} — {e.get('why')}"
                  for e in entries[:limit])
     return lines
+
+
+_CLUSTER_HEAD = "=== cluster: "
+
+
+def cluster_outputs(aggregated: str) -> dict[str, str]:
+    """Each cluster's own capture out of `run_clusters_strict`'s aggregated
+    output (the reader of the `=== cluster: <name> (…) ===` heads that
+    function writes)."""
+    out: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in aggregated.splitlines():
+        if line.startswith(_CLUSTER_HEAD) and line.rstrip().endswith("==="):
+            current = line[len(_CLUSTER_HEAD):].split(" (", 1)[0].strip()
+            out[current] = []
+            continue
+        if current is not None:
+            out[current].append(line)
+    return {k: "\n".join(v) for k, v in out.items()}
+
+
+def alone_reader(cwd: Path, env: dict[str, str], timeout: int) -> SignatureReader:
+    """Reads a failing test of this cluster's run alone, in the published
+    tree and the cluster's env (`failure_reading`)."""
+    def read(todo: Sequence[FailureToRead]) -> dict[tuple[str, str], FailureSignature | None]:
+        return read_alone(todo, cwd=cwd, env=env, timeout=timeout)
+    return read
 
 
 def run_clusters_strict(project_dir: Path, clusters: list[Any],
@@ -188,9 +214,12 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             # log blames the harness for a plain compile error.
             reason = compile_gate_reason(cluster.name, output) or reason
         floor_met = False
-        verdict = (judge_cluster_binaries(
-            reference, cluster.name, parse_binary_results(output))
+        verdict = (judge_cluster_capture(
+            reference, cluster.name, output,
+            alone_reader(project_dir, cluster_env, deps.test_timeout))
             if status == ClusterStatus.FAIL else None)
+        if verdict is not None and verdict.diverged:
+            log(f"  [task3/{cluster.name}] not the reference floor: {verdict.reason}")
         if verdict is not None and reference is not None:
             if verdict.met:
                 floor_met = True
@@ -204,6 +233,8 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
                 emit("task3.floor_met", data={
                     "cluster": cluster.name, "reference_key": reference.key,
                     "exceeded": verdict.exceeded,
+                    "excused_by_name": sorted(f"{a}::{b}" for a, b
+                                              in verdict.excused_by_name),
                     "advisory_unmet": sorted(f"{a}::{b}" for a, b
                                              in verdict.advisory_unmet)})
             elif verdict.advisory_unmet:
@@ -228,7 +259,7 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
             "output": output,
         })
         aggregated_output_chunks.append(
-            f"=== cluster: {cluster.name} (rc={rc}, "
+            f"{_CLUSTER_HEAD}{cluster.name} (rc={rc}, "
             f"{status}, {pass_n}/{expected_n} passed, {fail_n} failed, "
             f"{ign_n} ignored) ===\n{output}\n"
         )
