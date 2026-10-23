@@ -96,6 +96,7 @@ from pipeline_core.monitor import iteration_steps as _steps  # noqa: E402
 from pipeline_core.monitor import phase_panel as _pp  # noqa: E402
 from pipeline_core.monitor import phase_view as _pv  # noqa: E402
 from pipeline_core.monitor import run_data as _rd  # noqa: E402
+from pipeline_core.monitor import run_overview as _ro  # noqa: E402
 from pipeline_core.monitor.engine_metrics import (  # noqa: E402
     engine_rows as _engine_rows,
 )
@@ -708,6 +709,7 @@ def _detach(cmd):
         stderr=subprocess.DEVNULL,
         start_new_session=True,   # setsid() — detach from controlling terminal
     )
+_overview = _ro.OverviewFeed(PIPELINE_LOG, EVENTS_LOG, _find_project_dir, _pipeline_running)
 _view        = "monitor"      # monitor|pipeline|stream|events|legend|health|fields|phases
 _phases = _pp.PhasePanel()    # the [e] view's scroll and expand state
 # Scrolled this far up, a view's window clamps to its first row: the health
@@ -899,8 +901,9 @@ def _detail_box(view, width, inner, pipeline_rows, gen_rows) -> list[str]:
     _page = inner
     cw = content_width(width)
     if view == "health":
-        _lines = _health_lines(PIPELINE_LOG, os.path.join(SCRIPT_DIR, "tmp", "anyhow"),
-                               EVENTS_LOG, running=_pipeline_running())
+        _lines = _overview.read()[1] + _health_lines(
+            PIPELINE_LOG, os.path.join(SCRIPT_DIR, "tmp", "anyhow"),
+            EVENTS_LOG, running=_pipeline_running())
         # Clamp so the first scroll key moves the view from where it is drawn.
         _scroll["health"] = min(_scroll["health"], max(0, len(_lines) - inner))
         title, rows = ("Run health + phase cost (60s cache) — tools/run_health.py, "
@@ -1200,6 +1203,9 @@ def main():
                 _demo_next = time.monotonic() + DEMO_INTERVAL
             elif not _DEMO:
                 _demo_next = time.monotonic() + DEMO_INTERVAL   # re-armed by [d]
+            with contextlib.suppress(Exception):
+                if _overview.status_changed():   # started / finished / stopped: show it
+                    _view, _scroll["health"] = "health", HEALTH_TOP
             try:
                 _render_all()
                 _flush_frame()
