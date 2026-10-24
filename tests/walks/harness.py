@@ -192,7 +192,7 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
            no_verdict: str = "0", flat_window: str = "5",
            flat_require_traversal: str = "0", no_frontier_stop: str = "2",
            reset_cap: str = "2", backstop: str = "10000",
-           fill_phase_minutes: str = "0",
+           fill_phase_minutes: str = "0", unseen_stop: str = "0",
            dispatch_cap: str = "0", floor: dict | None = None,
            frontier: dict | None = None, enumerate_fns=None,
            coverage=None, attribute=None, recorded=None,
@@ -262,6 +262,10 @@ def replay(walk: dict[str, Any], monkeypatch, tmp_path: Path, *,
     monkeypatch.setenv("RETRO_RESET_MAX_ATTEMPTS", reset_cap)
     monkeypatch.setenv("PHASE_C_TDD_BACKSTOP", backstop)
     monkeypatch.setenv("TDD_FILL_PHASE_MAX_MINUTES", fill_phase_minutes)
+    # The unseen stop is pinned off for the same reason: a walk with a
+    # coverage stub whose owner map leaves a red test unanswered would stop
+    # at that sweep. A walk ABOUT the stop passes it.
+    monkeypatch.setenv("TDD_UNSEEN_STOP", unseen_stop)
     # The dispatch cap is OFF here for the identical reason, and leaving it at
     # its production default was an asymmetry rather than a decision: a walk is
     # a fixed observation sequence recorded from runs whose iterations spent the

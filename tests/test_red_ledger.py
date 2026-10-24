@@ -18,7 +18,9 @@ from pipeline_core.domain.red_ledger import (
     RunFacts,
     red_ledger,
 )
+from pipeline_core.domain.test_sight import Sight, SightReading, UnseenReason
 
+_NOT_TAKEN = SightReading(taken=False)
 _SLICES = {"t": frozenset({"src/a.rs::f", "src/a.rs::g"})}
 _REACH = {"src/a.rs::f": frozenset({"F"}), "src/a.rs::g": frozenset({"F", "G"})}
 
@@ -32,7 +34,7 @@ def _reading(ledger: AskLedger, **kw):  # type: ignore[no-untyped-def]
 def _klass(ledger: AskLedger, runs=(), words=None, **kw) -> RedClass:  # type: ignore[no-untyped-def]
     reading = _reading(ledger, **kw)
     (entry,) = red_ledger(["t"], reading=reading, ledger=ledger, runs=runs,
-                          words=words)
+                          words=words, sight=_NOT_TAKEN)
     return entry.klass
 
 
@@ -107,8 +109,27 @@ def test_withdrawn_wins_and_open_is_what_is_still_owed() -> None:
 
 def test_the_pipeline_classes_are_named() -> None:
     assert {RedClass.REFUSED_GAIN, RedClass.COMPILE_LOSS,
-            RedClass.NEVER_OFFERED,
+            RedClass.UNSEEN, RedClass.NEVER_OFFERED,
             RedClass.EVIDENCE_MISSING} == PIPELINE_CLASSES
+
+
+def test_an_unseen_test_is_a_measurement_gap_ahead_of_never_offered() -> None:
+    """A red test the exit sweep never observed executing closes UNSEEN with
+    the reason, not NEVER_OFFERED: the gap is the measurement's, and the
+    entry says which. Negative control: the same reading with sight not
+    taken closes as before."""
+    led = AskLedger()
+    reading = due_reading(["orphan"], slices={}, reach={}, evidence={},
+                          held={}, ledger=led)
+    sight = SightReading({"orphan": Sight(
+        "orphan", reason=UnseenReason.NOT_BUILT_IN_PROBED_WORLD,
+        detail="failed in nightly; probed stable")})
+    (e,) = red_ledger(["orphan"], reading=reading, ledger=led, sight=sight)
+    assert e.klass is RedClass.UNSEEN and e.klass in PIPELINE_CLASSES
+    assert "not_built_in_probed_world" in e.why and "nightly" in e.why
+    (old,) = red_ledger(["orphan"], reading=reading, ledger=led,
+                        sight=SightReading(sight.by_test, taken=False))
+    assert old.klass is RedClass.NEVER_OFFERED
 
 
 def test_a_repaired_compile_miss_is_the_models_when_nothing_is_left() -> None:
@@ -192,10 +213,12 @@ def test_an_unread_test_and_a_test_outside_the_reading_are_never_offered() -> No
     led = AskLedger()
     reading = due_reading(["orphan"], slices={}, reach={}, evidence={},
                           held={}, ledger=led)
-    (unread,) = red_ledger(["orphan"], reading=reading, ledger=led)
+    (unread,) = red_ledger(["orphan"], reading=reading, ledger=led,
+                           sight=_NOT_TAKEN)
     assert unread.klass is RedClass.NEVER_OFFERED
     assert unread.why == "no function could be attributed to it"
-    (missing,) = red_ledger(["not-in-reading"], reading=reading, ledger=led)
+    (missing,) = red_ledger(["not-in-reading"], reading=reading, ledger=led,
+                            sight=_NOT_TAKEN)
     assert missing.klass is RedClass.NEVER_OFFERED
     assert missing.why == "no owed reading was taken for it"
 
@@ -210,7 +233,8 @@ def test_a_route_row_reads_as_run_facts() -> None:
 def test_task3_prints_the_stored_ledger(tmp_path: Path) -> None:
     led = AskLedger()
     _spend(led, land=True)
-    entries = red_ledger(["t"], reading=_reading(led), ledger=led)
+    entries = red_ledger(["t"], reading=_reading(led), ledger=led,
+                         sight=_NOT_TAKEN)
     save_red_ledger(tmp_path, "stable", [e.to_dict() for e in entries],
                     run_id="r", close_kind="cluster_failed")
     lines = red_ledger_lines(load_red_ledger(tmp_path, "stable"))
@@ -230,6 +254,6 @@ def test_a_test_still_held_in_a_stub_is_not_evidence_missing() -> None:
     r = due_reading(["t"], slices=sl, reach={}, evidence={}, held=held, ledger=led)
     led.record("a::stub", "t", r.fingerprints["t"], rung="unit")
     r = due_reading(["t"], slices=sl, reach={}, evidence={}, held=held, ledger=led)
-    (e,) = red_ledger(["t"], reading=r, ledger=led,
+    (e,) = red_ledger(["t"], reading=r, ledger=led, sight=_NOT_TAKEN,
                       words={"t": "thread 't' panicked at src/a.rs:3:5: not implemented"})
     assert e.klass is not RedClass.EVIDENCE_MISSING

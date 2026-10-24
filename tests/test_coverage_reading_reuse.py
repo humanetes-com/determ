@@ -21,6 +21,7 @@ from pipeline_core.application.reconstruct.phase_c_tdd import (
 )
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.coverage_slice import CoverageSlice
+from pipeline_core.domain.measurement import failing_binaries_by_name
 from pipeline_core.domain.models import BuildCluster, ClusterFillResult, FnLocator, FnSite
 from pipeline_core.domain.stub_inventory import StubInventory
 
@@ -76,9 +77,9 @@ def _drive(tmp_path: Path, monkeypatch: Any, outputs: list[str]) -> list[dict[st
     def _fill(**_kw: Any) -> ClusterFillResult:
         return ClusterFillResult(attempts=1, dispatched_fns=(("src/a.rs", "a"),))
 
-    def _coverage(*_a: Any, failing_binaries: dict[str, frozenset[str]] | None = None,
-                  **_k: Any) -> CoverageSlice:
-        asked.append({n: frozenset(v) for n, v in (failing_binaries or {}).items()})
+    def _coverage(*_a: Any, failed_pairs: Any = (), **_k: Any) -> CoverageSlice:
+        # The question is the pairs; the binaries per name are its reading.
+        asked.append(failing_binaries_by_name(failed_pairs))
         return CoverageSlice(owners={"t": frozenset({FnSite(_A.file, _A.fn_name, "")})})
 
     def _cargo(*_a: Any, **_k: Any) -> tuple[int, str]:

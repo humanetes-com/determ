@@ -976,6 +976,26 @@ dispatch cap)`; 43/12 → 4) and the reading at iter `B+1`:
   the cluster is NOT marked done). Nothing dispatchable means no verdict
   can move, so it prevents no reading; `0` disables it and restores the
   spin to the backstop.
+- `TDD_UNSEEN_STOP` (default 1) — the unseen stop, not a flat-score stop.
+  It fires at the `N`-th CONSECUTIVE green-build sweep on which EVERY owed
+  red test (failing, less the withdrawn) is unseen: no measured owner set,
+  no recorded set of a run that started, no crate frame on any crash site,
+  no first failure inside a crate body (`domain/test_sight.py`). It fires
+  before that iteration's dispatch, logs `HEALTH ‼ UNSEEN_STOP` with each
+  test, its measurement gap and the guess it would have dispatched, emits
+  `phase_c.tdd.unseen_stop`, writes the red ledger (`unseen`) and stops the
+  RUN at the iteration boundary; the cluster is not marked done. It can
+  prevent only a guessed fill: over every recorded run, the 17 iterations
+  whose frontier came only from the guessing tiers bought one pass
+  increase. On run `1947461-b4eb65c3` (2026-10-24) it would have fired at
+  iter 13, before the 88-minute fill 13. Not taken on a red build or
+  without a coverage port. Some unseen, some seen: no stop, `HEALTH ‼
+  UNSEEN` names the unseen ones each sweep and no guess is dispatched at
+  them. A seen test is dispatched on a frontier edge only when this sweep
+  observed that unit run it, or the edge is a crash of a vanished test, a
+  held stub, or an escalation product; a guessing attribution that lost
+  such edges is labelled `observed`. `0` disables. Read once at cluster
+  entry, confirmed on the cluster-entry line (`unseen-stop=N`).
 - `TDD_FILL_PHASE_MAX_MINUTES` (default 0) — wall-clock bound on one TDD
   fill phase (file-first + impl + per-fn). Fires mid-fill, at the next
   `check_graceful_stop`, logs `FILL_PHASE_STOP`, emits

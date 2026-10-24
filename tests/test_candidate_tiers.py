@@ -22,7 +22,13 @@ from pipeline_core.domain.candidate_tiers import (
     render_failed,
     tiers_of,
 )
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.test_sight import (
+    Sight,
+    SightReading,
+    SightSource,
+    UnseenReason,
+)
 
 _FIX = json.loads((Path(__file__).parent / "fixtures" / "owed"
                    / "14141-9a904822_fill8.json").read_text())
@@ -183,10 +189,32 @@ def test_a_red_test_with_no_slice_holds_the_cluster_open_for_its_misses_then_is_
 
 
 def test_the_crate_function_a_failure_is_inside_is_the_last_slice_fallback() -> None:
-    sl = merge_slices({}, {}, ["t"], {"t": ["src/a.rs::f"]})
+    seen = SightReading({"t": Sight(
+        "t", frozenset({SightSource.FAILURE_SITE}),
+        frozenset({FnSite("src/a.rs", "f", "")}))})
+    sl = merge_slices({}, {}, ["t"], sight=seen)
     assert sl == {"t": frozenset({"src/a.rs::f"})}
     assert merge_slices({}, {"t": ["src/b.rs::g"]}, ["t"],
-                        {"t": ["src/a.rs::f"]}) == {"t": frozenset({"src/b.rs::g"})}
+                        sight=seen) == {"t": frozenset({"src/b.rs::g"})}
+
+
+def test_an_unseen_test_owes_no_guess() -> None:
+    """Run `1947461-b4eb65c3` (2026-10-24): the frontier was the
+    recently-filled ring attributed to every failing test, and the fallback
+    made it the 35-unit slice of a test nothing observed. An unseen test
+    gets no slice and lands on UNREAD. Negative control: sight not taken
+    keeps the attributed slice, which is the pre-change reading."""
+    unseen = SightReading({"t": Sight(
+        "t", reason=UnseenReason.NOT_BUILT_IN_PROBED_WORLD)})
+    ring = {"t": ["src/ensure.rs::render", "src/fmt.rs::write_str"]}
+    assert merge_slices({}, ring, ["t"], sight=unseen) == {}
+    reading = due_reading(["t"], slices=merge_slices({}, ring, ["t"], sight=unseen),
+                          reach={}, evidence={"t": "x"}, held={},
+                          ledger=AskLedger())
+    assert reading.unread == {"t"} and not reading.by_test
+    old = SightReading(unseen.by_test, taken=False)
+    assert merge_slices({}, ring, ["t"], sight=old) == {
+        "t": frozenset(ring["t"])}
 
 
 def test_asks_are_recorded_only_for_owed_functions_a_route_opened() -> None:

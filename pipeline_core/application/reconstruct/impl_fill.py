@@ -127,7 +127,8 @@ from pipeline_core.domain.candidate_tiers import joint_outcome_of
 from pipeline_core.domain.cfg import cluster_cfg_set, filter_cfg_inactive_branches
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
-from pipeline_core.domain.coverage_slice import entered_by_test
+from pipeline_core.domain.coverage_slice import current as current_coverage_slice
+from pipeline_core.domain.coverage_slice import entered_by_test, matching_test_key
 from pipeline_core.domain.coverage_slice import instructions_for as coverage_must_for
 from pipeline_core.domain.coverage_slice import unreached_by as coverage_unreached_by
 from pipeline_core.domain.crash_keep import SameCrashJudge
@@ -354,6 +355,7 @@ from pipeline_core.ports.fill_engine import (
     RegressionGatePort,
     TreeLock,
 )
+from pipeline_core.ports.measurement import MeasureCoveragePort
 from pipeline_core.prompts.context import PerImplSections
 from pipeline_core.prompts.fix_prompts import (
     BlockFillPlan,
@@ -558,7 +560,7 @@ class ImplFillDeps:
     # (project_dir, cluster_name, failing_tests=) -> CoverageSlice | None:
     # the owner-map probe, so a session can tell the model which of its
     # changed units the still-failing targets execute; None disables it.
-    measure_coverage_slice: Callable[..., Any] | None = None
+    measure_coverage_slice: MeasureCoveragePort | None = None
     # The structure reader's parse check, `(path) -> parses?` — the splice
     # gate's validator. Handed to the deterministic import repair so a
     # rustc-suggested `use` that would leave the file unparseable is
@@ -6070,8 +6072,21 @@ def prepare_impl_fill(
                 if "::" in item:
                     lab, test = item.split("::", 1)
                     hung_map[lab] = test
+            # Each name in the world the sweep saw fail it, owners only: the
+            # sweep's reading carries those pairs, and a turn re-probes only
+            # the worlds its names failed in (pass A of every world on every
+            # turn would multiply the turn's cost for a dead set the session
+            # never reads).
+            _bound_cov = current_coverage_slice()
+            _names = frozenset(names)
+            _pairs = frozenset(
+                p for p in (_bound_cov.failed_pairs if _bound_cov else ())
+                if matching_test_key(p[1], _names) is not None
+                or p[1].rsplit("::", 1)[-1] in {
+                    n.rsplit("::", 1)[-1] for n in _names})
             cov = _coverage_fn(project_dir, cluster_name,
-                               failing_tests=frozenset(names),
+                               failing_tests=_names, failed_pairs=_pairs,
+                               whole_suite=False,
                                cluster_env=cluster_env, hung=hung_map)
             hung_found = getattr(cov, "hung_tests", None) or ()
             if hung_found:

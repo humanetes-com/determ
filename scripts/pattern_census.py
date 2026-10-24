@@ -372,6 +372,26 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      passed while another binary's copy of the same name stayed red.
      Reaction: every keep compares per (binary, test).
 
+  P52 unseen red test — an owed red test the sweep held no observation of
+     executing on its tree (no measured owner set, no recorded set of a run
+     that started, no crate frame on any crash site, no first failure inside
+     a crate body), so any fill aimed at it was a guess. Read from
+     `phase_c.tdd.sight` / `phase_c.tdd.unseen_stop` (each unseen test with
+     the measurement gap: not built in a probed world, unclaimed, probe
+     unavailable, entered no body, crash with no crate frame, died with
+     nothing recorded). Before that event existed: a
+     `phase_c.coverage.owner_map` whose `failing` names a test in none of
+     `measured`, `unmeasured`, `recorded_owners`, or an iteration whose
+     frontier kind is a guessing tier (`recently_filled`, `classifier`,
+     `reverse_map`). Run `1947461-b4eb65c3` (2026-10-24): from iter 13 the
+     last owed red test was built only under a cfg the probe's world did not
+     set; the iteration line printed `unowned=0` off a recently-filled guess
+     and fills 13 and 14 aimed every run off the failing path. Over every
+     recorded run, 17 guess-only iterations bought one pass increase.
+     Reaction: `HEALTH ‼ UNSEEN` names the unseen tests and dispatches no
+     guess; `HEALTH ‼ UNSEEN_STOP` stops the run when every owed red test is
+     unseen.
+
   P51 unjudged write — a fill's gates judged from a tree no verdict left.
      Two readings. After the fill ground shipped (2026-10-22): any
      `phase_c.fill.unjudged_write` event (the lock restored bytes written
@@ -739,6 +759,12 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P38": [],
     "P39": [],
     "P51": [],
+    "P52": [
+        # The unseen tests were named and no guess was dispatched at them.
+        ("HEALTH ‼ UNSEEN iter", "unseen-named"),
+        # Every owed red test was unseen: the run stopped before dispatch.
+        ("HEALTH ‼ UNSEEN_STOP", "unseen-stop"),
+    ],
     "P40": [
         # A whole-file request for a file the conversation held whole was
         # answered by pointer instead of re-sending it.
@@ -3034,6 +3060,86 @@ def detect_p51(run: Run, iters: list[dict]) -> list[dict]:
     return [{"evidence": "; ".join(parts), "refs": [run.start_ref]}]
 
 
+_P52_EVENTS: dict[str, dict[str, list[dict]]] | None = None
+_P52_KINDS = {
+    '"phase_c.tdd.sight"': "sight",
+    '"phase_c.tdd.unseen_stop"': "stop",
+    '"phase_c.coverage.owner_map"': "owner_map",
+    '"phase_c.tdd.iter"': "iter",
+}
+_P52_GUESS_KINDS = frozenset({"recently_filled", "classifier", "reverse_map"})
+
+
+def _p52_events_by_run() -> dict[str, dict[str, list[dict]]]:
+    """The sight, unseen-stop, owner-map and sweep payloads by run."""
+    global _P52_EVENTS
+    if _P52_EVENTS is not None:
+        return _P52_EVENTS
+    out: dict[str, dict[str, list[dict]]] = defaultdict(
+        lambda: {k: [] for k in _P52_KINDS.values()})
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                kind = next((k for tag, k in _P52_KINDS.items() if tag in line), None)
+                if kind is None:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                out[str(ev.get("run_id", ""))][kind].append(dict(ev.get("data") or {}))
+    except OSError:
+        pass
+    _P52_EVENTS = dict(out)
+    return _P52_EVENTS
+
+
+def p52_unseen(ev: dict[str, list[dict]]) -> dict[str, str]:
+    """Unseen test -> its reason, from the sight events, else the silent
+    owner-map reading (reason `silent_owner_map`) for runs before them."""
+    out: dict[str, str] = {}
+    for d in ev.get("sight", ()) + ev.get("stop", ()):
+        for t, v in (d.get("tests") or {}).items():
+            if isinstance(v, dict) and v.get("reason"):
+                out[t] = str(v["reason"])
+    if out or ev.get("sight"):
+        return out
+    for d in ev.get("owner_map", ()):
+        answered = (set(d.get("measured") or ()) | set(d.get("unmeasured") or ())
+                    | set((d.get("recorded_owners") or {})))
+        for t in set(d.get("failing") or ()) - answered:
+            out.setdefault(str(t), "silent_owner_map")
+    return out
+
+
+def detect_p52(run: Run, iters: list[dict]) -> list[dict]:
+    """Owed red tests no observation saw execute, and sweeps whose frontier
+    came only from a guessing tier. One hit per run."""
+    ev = _p52_events_by_run().get(run.run_id)
+    if not ev:
+        return []
+    unseen = p52_unseen(ev)
+    guesses = sorted({int(d.get("iter", 0) or 0) for d in ev.get("iter", ())
+                      if str(d.get("kind", "")) in _P52_GUESS_KINDS})
+    parts: list[str] = []
+    if unseen:
+        by_reason: dict[str, list[str]] = {}
+        for t, r in sorted(unseen.items()):
+            by_reason.setdefault(r, []).append(t)
+        parts.append("unseen: " + "; ".join(
+            f"{r} ({len(ts)}: {', '.join(ts[:3])})"
+            for r, ts in sorted(by_reason.items())))
+    if guesses:
+        parts.append(f"{len(guesses)} sweep(s) with a guess-only frontier "
+                     f"(iter {', '.join(str(i) for i in guesses[:6])})")
+    if ev.get("stop"):
+        parts.append("UNSEEN_STOP fired")
+    if not parts:
+        return []
+    return [{"evidence": "; ".join(parts), "key": sorted(unseen)[:3],
+             "refs": [run.start_ref]}]
+
+
 def detect_p40(run: Run, iters: list[dict]) -> list[dict]:
     """Whole-file requests answered with the file: the conversation did not
     hold it whole. One hit per run, keyed by the paths asked for most."""
@@ -3434,7 +3540,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P40": detect_p40, "P41": detect_p41, "P42": detect_p42,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
-             "P49": detect_p49, "P50": detect_p50, "P51": detect_p51}
+             "P49": detect_p49, "P50": detect_p50, "P51": detect_p51,
+             "P52": detect_p52}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3480,6 +3587,7 @@ CLASS_NAMES = {
     "P48": "dropped on a reserved share (a per-fn run refused units as share-spent and ended under half its share; pre-fix a sibling's in-flight reservation refused every queued unit, run 2157238-210637e6 fill 1: 18 dropped, 1 call in 2.2 of 13 min)",
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
     "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
+    "P52": "unseen red test (an owed red test with no observation of it executing on the tree: no measured owner set, no recorded set of a run that started, no crate frame on any crash site, no first failure inside a crate body; pre-fix the loop guessed from the recently-filled ring, run 1947461-b4eb65c3 iters 13-14)",
     "P51": "unjudged write (a fill's gates judged from a tree no verdict left: its first baseline was not the sweep's reading with no keep before it, or the fill ground restored bytes written outside every hold; pre-fix the joint ask spliced its candidate before the fill, run 4012759-5c5177c6 fill 9)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 

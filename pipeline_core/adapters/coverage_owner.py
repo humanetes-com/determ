@@ -41,7 +41,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -50,9 +50,11 @@ from pipeline_core.domain.coverage_slice import (
     CountedBody,
     CoverageSlice,
     matching_test_key,
+    merge_world_bodies,
     slice_from_counts,
 )
 from pipeline_core.domain.fn_execution import SiteIndex as SiteIndex
+from pipeline_core.domain.measurement import failing_binaries_by_world
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.test_results import parse_binary_results
 from pipeline_core.threads import ContextPool
@@ -248,24 +250,22 @@ def _cov_env(
     return env
 
 
-def _test_binaries(tree: Path, cluster: str = "") -> list[Path]:
-    """Executables in the scratch deps dir, scoped to this cluster's oracle.
+def _test_binaries(tree: Path) -> list[Path]:
+    """Executables in the scratch deps dir: exactly the binaries this world's
+    cfg compiled.
 
-    A body executed only by a nightly test would otherwise count as live when
-    ranking the stable cluster. Skipping nightly-named binaries on a
-    non-nightly cluster is the cluster's own oracle; the other direction
-    (counting a nightly-only body as dead on stable) would demote a unit
-    the nightly cluster still needs. When `cluster` names nightly, keep them.
-    """
+    There was a file-name filter here (skip binaries named `nightly` unless
+    the cluster was), a world guessed from a name while the probe ran in one
+    world. Each world is now built under its own env, so a binary is in the
+    world's reading exactly when that world compiles it, and a file the home
+    world compiles is measured whatever it is called (the stable world runs
+    7 tests of `behaviour_nightly_gen_1.rs`, run `1947461-b4eb65c3`)."""
     deps = tree / "target-cov" / "debug" / "deps"
     out: list[Path] = []
     if not deps.is_dir():
         return out
-    skip_nightly = "nightly" not in cluster.lower()
     for p in sorted(deps.iterdir()):
         if p.suffix in (".d", ".rlib", ".rmeta", ".so") or not p.is_file():
-            continue
-        if skip_nightly and "nightly" in p.name.lower():
             continue
         if os.access(p, os.X_OK):
             out.append(p)
@@ -874,21 +874,169 @@ def _owner_map(
                         cut_before_death=frozenset(cut_before_death))
 
 
+@dataclass(frozen=True, slots=True)
+class ProbeWorld:
+    """One build world the owner probe runs in: its name and the cargo env
+    the sweep runs that world under (cfg flags, toolchain). None is the
+    pre-inheritance instrumentation-only env."""
+
+    name: str
+    env: Mapping[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _WorldReading:
+    """One world's raw reading, before the worlds are merged."""
+
+    world: str
+    bodies: list[CountedBody]
+    owners: dict[str, frozenset[FnSite]]
+    rendered: dict[str, frozenset[FnSite]]
+    unmeasured_tests: frozenset[str]
+    unmeasured_binaries: tuple[str, ...]
+    hung_tests: frozenset[str]
+
+
+def _world_tag(world: str, home: str) -> str:
+    return "" if not world or world == home else f"{world}::"
+
+
 def measure_coverage_slice(
     project_dir: Path,
     cluster: str,
     *,
+    worlds: Sequence[ProbeWorld],
+    failing_tests: Iterable[str] = (),
+    failed_pairs: Iterable[tuple[str, str]] = (),
+    whole_suite: bool = True,
+    log: Callable[[str], None] | None = None,
+    enumerate_fns: Callable[[Path], Sequence[Any] | None],
+    timeout: int | None = None,
+    hung: Mapping[str, str] | None = None,
+    workers: int | None = None,
+    exact_timeout: float | None = None,
+) -> CoverageSlice | None:
+    """The owner probe in every build world the sweep judges, merged.
+
+    `worlds` is required and its first entry is the home world: a caller
+    cannot take a one-world reading of a tree judged in several by
+    forgetting an argument. Run `1947461-b4eb65c3` (2026-10-24) judged the
+    tree in `stable` and `nightly` and probed `stable` only; its last owed
+    red test, `doc_error_example_6`, is gated on a cfg only `nightly` sets,
+    so it had no owner for 14 iterations and every fill of fills 13 and 14
+    aimed at the recently-filled ring. The same adapter run under the
+    nightly env named 17 owners for it, `into_boxed_dyn_error` and
+    `object_boxed` among them.
+
+    `failed_pairs` are the sweep's (binary key, name) failures, the key
+    qualified by world when the capture joined worlds. Each world is asked
+    the names it failed; a name with no pair is asked in the home world (a
+    capture of one world, or a vanished test). A name failed only in a
+    world not listed is asked nowhere and reads `unclaimed`.
+
+    `whole_suite` False is the session turn's question (owners of the named
+    tests only): only the worlds those names failed in are probed, and the
+    dead set and region sentences are withheld, since a body only an
+    unprobed world runs would read dead. True probes every world, so `dead`
+    is "no compiling world executed it" (`merge_world_bodies`).
+
+    Each world runs in its own staged copy and scratch target dir; the
+    loop's per-world target dir is never written (`_cov_env`). A world whose
+    instrumented build fails is left out of `CoverageSlice.worlds` and, on a
+    whole-suite reading, withholds the dead set."""
+    if not worlds:
+        raise ValueError("measure_coverage_slice needs at least the home world")
+    home = worlds[0].name
+    failed_pairs = tuple(failed_pairs)
+    asked = tuple(dict.fromkeys(str(t) for t in failing_tests))
+    by_world = failing_binaries_by_world(failed_pairs, home)
+    known = {w.name for w in worlds}
+    ask: dict[str, list[str]] = {w.name: [] for w in worlds}
+    fb: dict[str, dict[str, frozenset[str]]] = {w.name: {} for w in worlds}
+    for name in asked:
+        hits = [(wn, names[k]) for wn, names in by_world.items()
+                for k in [matching_test_key(name, list(names))] if k is not None]
+        if not hits:
+            ask[home].append(name)
+            continue
+        for wn, targets in hits:
+            if wn not in known:
+                continue
+            ask[wn].append(name)
+            if targets:
+                fb[wn][name] = targets
+    probe = [w for w in worlds
+             if whole_suite or ask[w.name] or (not asked and w.name == home)]
+    hung_by: dict[str, dict[str, str]] = {}
+    for key, test in (hung or {}).items():
+        hw, sep, label = str(key).partition("::")
+        hung_by.setdefault(hw if sep and hw in known else home,
+                           {})[label if sep and hw in known else str(key)] = test
+    readings: list[_WorldReading] = []
+    failed_worlds: list[str] = []
+    for w in probe:
+        r = _measure_world(
+            project_dir, cluster, w, home=home,
+            failing_tests=ask[w.name], log=log, enumerate_fns=enumerate_fns,
+            timeout=timeout, hung=hung_by.get(w.name), workers=workers,
+            exact_timeout=exact_timeout,
+            failing_binaries=fb[w.name] or None)
+        if r is None:
+            failed_worlds.append(w.name)
+        else:
+            readings.append(r)
+    if not readings:
+        return None
+    owners: dict[str, frozenset[FnSite]] = {}
+    rendered: dict[str, frozenset[FnSite]] = {}
+    for r in readings:
+        for t, ks in r.owners.items():
+            owners[t] = owners.get(t, frozenset()) | ks
+        for t, ks in r.rendered.items():
+            rendered[t] = rendered.get(t, frozenset()) | ks
+    slice_ = slice_from_counts(
+        merge_world_bodies(r.bodies for r in readings),
+        owners=owners, rendered=rendered, failing=asked,
+        unmeasured_binaries=[b for r in readings for b in r.unmeasured_binaries],
+        unmeasured_tests=frozenset().union(
+            *(r.unmeasured_tests for r in readings)),
+        hung_tests=frozenset().union(*(r.hung_tests for r in readings)),
+        worlds=[r.world for r in readings])
+    slice_ = replace(slice_, failed_pairs=frozenset(
+        (str(lab), str(n)) for lab, n in failed_pairs
+        if matching_test_key(str(n), asked) is not None))
+    if not whole_suite or failed_worlds:
+        slice_ = replace(slice_, dead=frozenset(), dead_regions={})
+    if log and (len(worlds) > 1 or slice_.unclaimed):
+        log("  [coverage] worlds probed: "
+            + ", ".join(f"{r.world or 'home'} ({len(ask[r.world])} asked)"
+                        for r in readings)
+            + (f"; instrumented build failed in {', '.join(failed_worlds)} — "
+               "dead set withheld" if failed_worlds else "")
+            + ("" if whole_suite else "; owners only (dead set withheld)")
+            + (f"; UNCLAIMED (no probed binary claims the name): "
+               f"{', '.join(sorted(slice_.unclaimed)[:8])}"
+               if slice_.unclaimed else ""))
+    return slice_
+
+
+def _measure_world(
+    project_dir: Path,
+    cluster: str,
+    world: ProbeWorld,
+    *,
+    home: str,
     failing_tests: Iterable[str] = (),
     log: Callable[[str], None] | None = None,
-    cluster_env: Mapping[str, str] | None = None,
     enumerate_fns: Callable[[Path], Sequence[Any] | None],
     timeout: int | None = None,
     hung: Mapping[str, str] | None = None,
     workers: int | None = None,
     exact_timeout: float | None = None,
     failing_binaries: Mapping[str, Collection[str]] | None = None,
-) -> CoverageSlice | None:
-    """Pass A of the owner probe, plus pass C over `failing_tests`.
+) -> _WorldReading | None:
+    """Pass A of the owner probe, plus pass C over `failing_tests`, in one
+    world (`world.env`).
 
     `enumerate_fns` is the loop's own fn enumerator (the extractor port the
     composition root binds); it runs on the staged copy, so its records
@@ -908,8 +1056,8 @@ def measure_coverage_slice(
     empty, and every consumer of it then declines to refuse anything —
     the reading degrades to what it was before the owner map existed.
 
-    `cluster_env` is the same mapping the sweep's cargo uses. None keeps
-    the pre-inheritance replace of RUSTFLAGS (instrumentation only).
+    `world.env` is the mapping the sweep's cargo uses for that world. None
+    keeps the pre-inheritance replace of RUSTFLAGS (instrumentation only).
 
     `timeout` bounds every reconstructed-binary invocation (pass A,
     `--list`, `--exact`). None reads `PHASE_C_TEST_TIMEOUT` (default 120).
@@ -958,7 +1106,7 @@ def measure_coverage_slice(
         prof = work / "prof"
         prof.mkdir()
         env = _cov_env(tree, str(prof / "build-%p.profraw"),
-                       cluster_env=cluster_env)
+                       cluster_env=world.env)
         built = _run(["cargo", "test", "--no-run", "--offline"], cwd=tree,
                      env=env)
         if built.returncode != 0:
@@ -966,7 +1114,7 @@ def measure_coverage_slice(
                 log("  [coverage] staged tree does not build under "
                     "instrumentation — dead-body demotion skipped")
             return None
-        bins = _test_binaries(tree, cluster)
+        bins = _test_binaries(tree)
         if not bins:
             return None
         run_a = prof / "a"
@@ -1094,14 +1242,17 @@ def measure_coverage_slice(
             if not run.completed and matching_test_key(
                     name, unmeasured_asked) is None:
                 unmeasured_tests.add(name)
+        counted = _counted_bodies(index, bodies, lines)
+        tag = _world_tag(world.name, home)
         slice_ = slice_from_counts(
-            _counted_bodies(index, bodies, lines),
+            counted,
             owners=owners, rendered=reading.rendered, failing=asked,
             unmeasured_binaries=[_binary_label(b) for b, _ in unmeasured_bins],
             unmeasured_tests=unmeasured_tests,
             hung_tests=hung_tests)
         if log:
-            log(f"  [coverage] {len(slice_.dead)} dead body(ies), "
+            log(f"  [coverage] {('world ' + world.name + ': ') if tag else ''}"
+                f"{len(slice_.dead)} dead body(ies), "
                 f"{len(slice_.dead_regions)} body(ies) with unreachable lines, "
                 f"owner set for {len(owners)}/{len(asked)} failing test(s), "
                 f"{len(unmeasured_asked)} unmeasured (binary did not complete"
@@ -1125,7 +1276,13 @@ def measure_coverage_slice(
                 f"(staged, own target dir; {pool} worker(s), single-test "
                 f"bound {int(exact_bound)}s, longest completing run "
                 f"{longest.render()})")
-        return slice_
+        return _WorldReading(
+            world=world.name, bodies=counted, owners=dict(owners),
+            rendered=dict(reading.rendered),
+            unmeasured_tests=frozenset(unmeasured_tests),
+            unmeasured_binaries=tuple(
+                f"{tag}{_binary_label(b)}" for b, _ in unmeasured_bins),
+            hung_tests=frozenset(f"{tag}{h}" for h in hung_tests))
     except (OSError, subprocess.SubprocessError) as exc:
         if log:
             log(f"  [coverage] probe failed ({type(exc).__name__}) — "

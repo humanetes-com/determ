@@ -207,6 +207,34 @@ def failing_binaries_by_name(
     return {k: frozenset(v) for k, v in out.items()}
 
 
+def failing_binaries_by_world(
+    failed_pairs: Iterable[tuple[str, str]],
+    home: str,
+) -> dict[str, dict[str, frozenset[str]]]:
+    """World -> failing test name -> the cargo targets of the binaries that
+    failed it in that world. A label with no world prefix is the home
+    world's: a capture of one world carries none.
+
+    `failing_binaries_by_name` drops the world on purpose, for readers that
+    run in one env. A reader that runs each world under its own env needs
+    it kept: run `1947461-b4eb65c3` (2026-10-24) failed
+    `doc_error_example_6` only in `nightly::tests/doc_error_gen_6.rs`, a
+    file the home world (`stable`) does not build, and the owner probe asked
+    the home world for it and got no owner for 14 iterations."""
+    out: dict[str, dict[str, set[str]]] = {}
+    for label, name in failed_pairs:
+        world, sep, rest = str(label).partition("::")
+        world = world if sep else home
+        target = cargo_target_of(rest if sep else str(label))
+        names = out.setdefault(world, {})
+        if target is not None:
+            names.setdefault(str(name), set()).add(target)
+        else:
+            names.setdefault(str(name), set())
+    return {w: {n: frozenset(ts) for n, ts in names.items()}
+            for w, names in out.items()}
+
+
 @dataclass(frozen=True, slots=True)
 class PassDelta:
     """Whether two measurements' pass counts may be compared at all, and why."""

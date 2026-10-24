@@ -163,6 +163,32 @@ class CoverageSlice:
     # or that the caller's own reading already named as hung. Distinct from
     # ``unmeasured_tests`` (a SIGSEGV is unmeasured and not a hang).
     hung_tests: frozenset[str] = frozenset()
+    # The build worlds this reading ran in (each under its own env). Empty
+    # for a reading that does not say, which no consumer may read as "every
+    # world": `test_sight` names a test failed only in a world outside this
+    # set as not built where the probe looked.
+    worlds: frozenset[str] = frozenset()
+    # The sweep's (binary key, name) failures the reading was asked with,
+    # world-qualified where the capture joined worlds: which world failed
+    # each asked name. A later probe of a subset (the session turn) asks
+    # each name in the world that failed it from this.
+    failed_pairs: frozenset[tuple[str, str]] = frozenset()
+
+    @property
+    def unclaimed(self) -> frozenset[str]:
+        """Asked red tests the reading neither measured nor reported as
+        unmeasured: no binary in any probed world claimed the name.
+
+        Computed, never stored, so no constructor can drop it. Before this
+        the asked-minus-answered difference was silent: on run
+        `1947461-b4eb65c3` (2026-10-24) `doc_error_example_6` sat in
+        `failing` and in neither `owners` nor `unmeasured_tests` for 14
+        iterations, so neither the recorded stand-in nor any log line
+        reached it, and attribution fell through to the recently-filled
+        ring."""
+        answered = list(self.owners) + list(self.unmeasured_tests)
+        return frozenset(t for t in self.failing
+                         if matching_test_key(t, answered) is None)
 
 
 def contiguous_runs(lines: Iterable[int]) -> tuple[tuple[int, int], ...]:
@@ -215,6 +241,7 @@ def slice_from_counts(
     unmeasured_binaries: Iterable[str] = (),
     unmeasured_tests: Iterable[str] = (),
     hung_tests: Iterable[str] = (),
+    worlds: Iterable[str] = (),
 ) -> CoverageSlice:
     """The contract that writes the dead set the ranking and prompts consume.
 
@@ -263,7 +290,41 @@ def slice_from_counts(
                          failing=frozenset(failing),
                          unmeasured_binaries=frozenset(unmeasured_binaries),
                          unmeasured_tests=frozenset(unmeasured_tests),
-                         hung_tests=frozenset(hung_tests))
+                         hung_tests=frozenset(hung_tests),
+                         worlds=frozenset(worlds))
+
+
+def merge_world_bodies(
+    per_world: Iterable[Iterable[CountedBody]],
+) -> list[CountedBody]:
+    """One body list from the counted bodies of several build worlds of the
+    SAME staged source, for `slice_from_counts`.
+
+    A body is one (site, first region line). Its count is the sum over the
+    worlds that compiled it; its unreached lines are the lines no compiling
+    world reached (the intersection), because the source text and so the
+    line numbers are the same in every world. A world that did not compile
+    a body has no entry for it and does not vote: a body only one world
+    compiles is judged by that world alone, and a body every compiling
+    world counted 0 is dead. Before this the reading ran in the home world
+    only, so a body only another world's tests executed read as dead there
+    and a test only another world builds had no owner (run
+    `1947461-b4eb65c3`, 2026-10-24)."""
+    merged: dict[tuple[FnSite, int], CountedBody] = {}
+    for bodies in per_world:
+        for b in bodies:
+            key = (b.locator, b.start)
+            prev = merged.get(key)
+            if prev is None:
+                merged[key] = b
+                continue
+            merged[key] = CountedBody(
+                locator=b.locator, start=b.start,
+                count=prev.count + b.count,
+                zero_lines=tuple(sorted(set(prev.zero_lines)
+                                        & set(b.zero_lines))),
+                span_lines=max(prev.span_lines, b.span_lines))
+    return list(merged.values())
 
 
 def matching_test_key(name: str, keys: Iterable[str]) -> str | None:
@@ -312,7 +373,15 @@ def withhold_unmeasured(
     only withholds what the reading cannot know."""
     unmeasured = frozenset(reading.unmeasured_tests) | frozenset(truncated)
     if not unmeasured:
-        return reading, frozenset()
+        if not reading.unclaimed:
+            return reading, frozenset()
+        # A red test no probed binary claimed ran somewhere the reading did
+        # not look; what it executes is as unknown as a crashed run's. Its
+        # absence from `owners` already declines every refusal; the dead
+        # claims go too. It is not added to `unmeasured_tests`: it is not a
+        # run that started, so no recorded set may stand in for it.
+        removed = frozenset(reading.dead) | frozenset(reading.dead_regions)
+        return replace(reading, dead=frozenset(), dead_regions={}), removed
     leaves = {t.rsplit("::", 1)[-1] for t in unmeasured}
     owners = {t: sites for t, sites in reading.owners.items()
               if t not in unmeasured and t.rsplit("::", 1)[-1] not in leaves}

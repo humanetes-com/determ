@@ -34,6 +34,7 @@ from pathlib import Path
 
 import pytest
 
+from pipeline_core.adapters.coverage_owner import ProbeWorld
 from pipeline_core.adapters.extractor import CliExtractor
 from pipeline_core.adapters.structure import CliStructureReader
 
@@ -120,7 +121,7 @@ def _reading(project: Path, monkeypatch: pytest.MonkeyPatch, premise: str):
     monkeypatch.setenv("PHASE_C_COVERAGE_PREMISE", premise)
     logs: list[str] = []
     reading = measure_coverage_slice(
-        project, _CLUSTER, failing_tests=_FAILING, cluster_env=_env(),
+        project, _CLUSTER, failing_tests=_FAILING, worlds=(ProbeWorld("", _env()),),
         enumerate_fns=CliStructureReader(CliExtractor(_EXTRACTOR)).enumerate_fns,
         timeout=300, workers=1, log=logs.append)
     assert reading is not None, f"the coverage reading could not be taken: {logs}"

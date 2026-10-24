@@ -14,6 +14,7 @@ import pytest
 
 from pipeline_core.adapters import coverage_owner as cov
 from pipeline_core.adapters.coverage_owner import (
+    ProbeWorld,
     _body_counts,
     _cov_env,
     _merge_export,
@@ -42,6 +43,8 @@ def _enumerate(tree: Path) -> list:
 def _measure(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
     """`measure_coverage_slice` with the enumerator the composition root
     injects — every call site takes the reading the loop would."""
+    env = kwargs.pop("cluster_env", None)
+    kwargs.setdefault("worlds", (ProbeWorld("", env),))
     return measure_coverage_slice(*args, enumerate_fns=_enumerate, **kwargs)
 
 
@@ -112,8 +115,13 @@ def test_test_binaries_skips_metadata_and_keeps_executables(tmp_path: Path) -> N
     assert _test_binaries(tmp_path / "missing") == []
 
 
-def test_test_binaries_skips_nightly_on_a_stable_cluster(
+def test_test_binaries_keeps_every_binary_the_world_compiled(
         tmp_path: Path) -> None:
+    """Each world is built under its own env, so the binaries in its deps
+    dir are exactly what its cfg compiles. The file-name filter that skipped
+    `nightly`-named binaries outside a nightly cluster is gone: the stable
+    world runs 7 tests of `behaviour_nightly_gen_1.rs` (run
+    `1947461-b4eb65c3`), and a name is not a world."""
     deps = tmp_path / "target-cov" / "debug" / "deps"
     deps.mkdir(parents=True)
     nightly = deps / "behaviour_nightly_gen_1-abc"
@@ -122,9 +130,7 @@ def test_test_binaries_skips_nightly_on_a_stable_cluster(
     stable = deps / "test_fmt-def"
     stable.write_text("x", encoding="utf-8")
     stable.chmod(0o755)
-    assert _test_binaries(tmp_path, "stable") == [stable]
-    got = _test_binaries(tmp_path, "nightly")
-    assert nightly in got and stable in got
+    assert _test_binaries(tmp_path) == [nightly, stable]
 
 
 def _export(tree: Path, count: int, regions: list) -> dict:
@@ -549,16 +555,18 @@ def test_a_generator_of_failing_tests_is_not_counted_as_zero(
 def test_the_composition_binding_accepts_failing_tests(
         monkeypatch, tmp_path: Path) -> None:
     """Run 2629191-02835a4c aborted both clusters: composition bound
-    `lambda pd, cl` and the driver now passes `failing_tests=`."""
+    `lambda pd, cl` and the driver now passes `failing_tests=`. The binding
+    also resolves the worlds: with no world checks it is the home world
+    under the caller's env."""
     from pipeline_core.composition import _tdd_measure_coverage
 
     seen: dict[str, object] = {}
 
-    def _fake(pd, cl, *, failing_tests=(), log=None, cluster_env=None,
+    def _fake(pd, cl, *, worlds, failing_tests=(), log=None,
               enumerate_fns=None):
         seen["failing"] = failing_tests
         seen["log"] = log
-        seen["cluster_env"] = cluster_env
+        seen["worlds"] = worlds
         seen["enumerate_fns"] = enumerate_fns
         return None
 
@@ -566,7 +574,7 @@ def test_the_composition_binding_accepts_failing_tests(
         "pipeline_core.composition._measure_coverage_slice", _fake)
     notes: list[str] = []
     logger = notes.append
-    bound = _tdd_measure_coverage(logger, _enumerate)
+    bound = _tdd_measure_coverage(logger, _enumerate, None)
     cluster = {"RUSTUP_TOOLCHAIN": "nightly",
                "RUSTFLAGS": "-A warnings --cfg X"}
     assert bound(tmp_path, "stable", failing_tests=frozenset({"t"}),
@@ -576,8 +584,47 @@ def test_the_composition_binding_accepts_failing_tests(
     assert seen["enumerate_fns"] is _enumerate
     assert seen["failing"] == frozenset({"t"})
     assert seen["log"] is logger
-    assert seen["cluster_env"] == cluster
+    assert seen["worlds"] == [ProbeWorld("", cluster)]
     # Negative control: the two-argument lambda that shipped is the crash.
     old = lambda pd, cl: None  # noqa: E731
     with pytest.raises(TypeError, match="failing_tests"):
         old(tmp_path, "stable", failing_tests=frozenset({"t"}))
+
+
+def test_the_composition_binding_probes_every_world_the_checks_name(
+        monkeypatch, tmp_path: Path) -> None:
+    """With world checks bound, the home world comes first and every other
+    world follows under `env_for`, whatever the caller passed: the sweep and
+    the session turn cannot take a one-world reading of a tree judged in
+    several. Negative control: the pre-change binding (no worlds) asked the
+    home world only, which is how run `1947461-b4eb65c3`'s last owed red
+    test, built only under the other world's cfg, had no owner."""
+    from types import SimpleNamespace
+
+    from pipeline_core.application.reconstruct.cargo_runner import WorldChecks
+    from pipeline_core.composition import _tdd_measure_coverage
+
+    seen: dict[str, object] = {}
+
+    def _fake(pd, cl, *, worlds, **_k):
+        seen["worlds"] = worlds
+        return None
+
+    monkeypatch.setattr(
+        "pipeline_core.composition._measure_coverage_slice", _fake)
+    a, b = SimpleNamespace(name="alpha"), SimpleNamespace(name="beta")
+    checks = WorldChecks(
+        clusters=lambda: [a, b],
+        cluster_env=lambda c: {"DETERM_CLUSTER_WORLD": c.name,
+                               "RUSTFLAGS": f"--cfg {c.name}"},
+        world_key=lambda c: c.name, log=lambda _m: None)
+    home = {"DETERM_CLUSTER_WORLD": "alpha", "RUSTFLAGS": "--cfg alpha"}
+    _tdd_measure_coverage(lambda _m: None, _enumerate, checks)(
+        tmp_path, "alpha", failing_tests=frozenset({"t"}), cluster_env=home)
+    worlds = seen["worlds"]
+    assert [w.name for w in worlds] == ["alpha", "beta"]
+    assert worlds[0].env == home
+    assert worlds[1].env["RUSTFLAGS"] == "--cfg beta"
+    _tdd_measure_coverage(lambda _m: None, _enumerate, None)(
+        tmp_path, "alpha", failing_tests=frozenset({"t"}), cluster_env=home)
+    assert [w.name for w in seen["worlds"]] == ["alpha"]

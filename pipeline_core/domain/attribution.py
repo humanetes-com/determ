@@ -81,6 +81,10 @@ class FailureKind(StrEnum):
     # is "who might be responsible", never grounds to revert a fill.
     CRASHED_BINARY = "crashed_binary"
     NO_FRONTIER = "no_frontier"
+    # Not an attribution path. The dispatch label after a guessing
+    # attribution's edges were removed because this sweep's sight did not
+    # name them. attribute_failures never returns it, and it does not convict.
+    OBSERVED = "observed"
 
     @property
     def convicts(self) -> bool:
@@ -98,6 +102,30 @@ class FailureKind(StrEnum):
 
 _CONVICTING_KINDS = frozenset({
     FailureKind.RUNTIME, FailureKind.COMPILE, FailureKind.BEHAVIOR})
+
+# A frontier these paths produced is a guess: nothing this sweep observed
+# running the test. After the sight filter removes such an edge, the
+# dispatch label is OBSERVED rather than the guess that no longer describes
+# the frontier. The convicting paths, a merged frontier, and an injected
+# empty frontier stay what they were — the filter may still have removed a
+# non-sight edge, and relabelling those would hide an observation or break
+# a replay that injects NO_FRONTIER.
+_GUESSING_KINDS = frozenset({
+    FailureKind.CLASSIFIER,
+    FailureKind.RECENTLY_FILLED,
+    FailureKind.REVERSE_MAP,
+})
+
+
+def kind_after_sight_filter(kind: FailureKind, *, dropped: bool) -> FailureKind:
+    """The dispatch label after the sight filter removed frontier edges.
+
+    ``dropped`` is whether at least one edge left. A guessing kind then
+    becomes :attr:`FailureKind.OBSERVED`. Every other kind is returned
+    unchanged, including when edges were removed."""
+    if dropped and kind in _GUESSING_KINDS:
+        return FailureKind.OBSERVED
+    return kind
 
 
 @dataclass(frozen=True, slots=True)

@@ -72,6 +72,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.test_sight import SightReading
 
 __all__ = [
     "DEFAULT_MISSES",
@@ -749,18 +750,31 @@ def slices_by_key(slices: Mapping[str, Iterable[Any]]) -> dict[str, frozenset[st
 
 
 def merge_slices(primary: Mapping[str, frozenset[str]],
-                 fallback: Mapping[str, Iterable[str]],
+                 attributed: Mapping[str, Iterable[str]],
                  tests: Sequence[str],
-                 site: Mapping[str, Iterable[str]] | None = None,
+                 *,
+                 sight: SightReading,
                  ) -> dict[str, frozenset[str]]:
-    """`primary` per test, else `fallback` (the frontier's attribution),
-    else `site` (the crate function its first failure is inside) — so a red
-    test the session slicer skipped and attribution left out still names the
-    function it fails through."""
+    """Each owed test's executed slice: `primary` (the session slicer's map),
+    else what the frontier attributes to it, else the bodies the sweep's
+    observations saw it run (`SightReading.units_of`: measured owners, the
+    recorded set, its crash stack, the crate function its first failure is
+    inside).
+
+    An UNSEEN test has no slice. Whatever the frontier attributes to it is a
+    guess (no observation names a unit for it), so it goes to the `UNREAD`
+    path, is counted there and is named by the red ledger, instead of
+    owing the guess. On run `1947461-b4eb65c3` (2026-10-24) the frontier
+    was the recently-filled ring attributed to every failing test, and this
+    fallback turned it into both red tests' 35-unit slice, with four dead
+    bodies at tier 0."""
     out: dict[str, frozenset[str]] = {}
     for t in tests:
-        sl = (primary.get(t) or frozenset(fallback.get(t, ()))
-              or frozenset((site or {}).get(t, ())))
+        if sight.is_unseen(t):
+            continue
+        sl = (primary.get(t) or frozenset(attributed.get(t, ()))
+              or frozenset(unit_key((u.file, u.fn_name))
+                           for u in sight.units_of(t)))
         if sl:
             out[t] = sl
     return out

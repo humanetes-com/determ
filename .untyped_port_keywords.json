@@ -31,10 +31,6 @@
     "followup_think",
     "model"
   ],
-  "attribute_failures": [
-    "extra_failed",
-    "test_texts"
-  ],
   "attribute_failures_fn": [
     "test_texts",
     "unrepairable_tests"
@@ -237,13 +233,6 @@
   ],
   "mark_phase_fn": [
     "detail"
-  ],
-  "measure_coverage_slice": [
-    "cluster_env",
-    "failing_binaries",
-    "failing_tests",
-    "hung",
-    "timeout"
   ],
   "open_conversation_fn": [
     "max_pulls",

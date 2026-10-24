@@ -75,8 +75,8 @@ from pipeline_core.application.reconstruct.tree_txn import (
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
 from pipeline_core.domain.assertion_position import assertion_positions
 from pipeline_core.domain.attribution import (
-    AttributionResult,
     FailureFrontier,
+    kind_after_sight_filter,
     locator_of,
     site_label,
     site_payload,
@@ -132,6 +132,7 @@ from pipeline_core.domain.candidate_tiers import (
     unit_key,
 )
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites, FrontierAdmission
+from pipeline_core.domain.cluster_env import world_of_env
 from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
@@ -259,7 +260,6 @@ from pipeline_core.domain.measurement import (
     Measurement,
     VerdictReconciliation,
     code_identity,
-    failing_binaries_by_name,
     qualified_verdicts,
     tree_content_sha,
 )
@@ -358,6 +358,11 @@ from pipeline_core.domain.test_results import (
     uncoded_src_diagnostics,
     unmeasured_failures,
 )
+from pipeline_core.domain.test_sight import (
+    Observations,
+    SightReading,
+    sight_reading,
+)
 from pipeline_core.domain.unit_exit import exit_line, exits_payload, unit_exits
 from pipeline_core.domain.workspace_layout import SKELETON_DIR
 from pipeline_core.domain.world_floor import failed_pairs, judge_every_world
@@ -370,6 +375,7 @@ from pipeline_core.domain.zero_payoff import (
     zero_payoff_streak,
 )
 from pipeline_core.ports.fill_engine import FillPassPort, LocalizeCrashesPort
+from pipeline_core.ports.measurement import AttributeFailuresPort, MeasureCoveragePort
 
 
 class FilterTestTargets(Protocol):
@@ -404,7 +410,7 @@ class FilterTestTargets(Protocol):
 class PhaseCTddDeps:
     """Collaborators the TDD fill driver needs, injected by the composition root."""
 
-    attribute_failures: Callable[..., AttributionResult]
+    attribute_failures: AttributeFailuresPort
     build_test_reverse_map: Callable[..., dict[str, set[FnLocator]]]
     filter_test_targets: FilterTestTargets
     check_graceful_stop: Callable[[str], None]
@@ -590,7 +596,7 @@ class PhaseCTddDeps:
     # demotion, the coverage instruction AND both reachability refusals
     # (the pre-loop gate in `fill_one_fn`, `screen_guidance`'s
     # `convictors_never_execute`); ranking then uses service/flat only.
-    measure_coverage_slice: Callable[..., Any] | None = None
+    measure_coverage_slice: MeasureCoveragePort | None = None
     # (project_dir, test names) -> the recorded executed set per test, from
     # the retrospectives store's conviction-time entry stamps. Read for the
     # red tests the coverage probe could NOT measure this sweep (their
@@ -979,6 +985,15 @@ def run_phase_c_tdd(
     # and fires after this many CONSECUTIVE undispatchable iterations once
     # that budget is spent. `0` disables it and restores the spin.
     _no_frontier_stop_after = int(os.getenv("TDD_NO_FRONTIER_STOP", "2"))
+    # The unseen stop (`domain/test_sight.py`): the N-th consecutive
+    # green-build sweep on which EVERY owed red test is unseen (no
+    # observation of it executing on this tree) stops the run before that
+    # iteration's dispatch, naming each test and the measurement gap. Such a
+    # sweep can aim a fill only by a guess: over every recorded run, the 17
+    # iterations whose frontier came only from the guessing tiers bought one
+    # pass increase. On run `1947461-b4eb65c3` (2026-10-24) it would have
+    # fired at iter 13, before the 88-minute fill 13. 0 disables.
+    _unseen_stop_after = int(os.getenv("TDD_UNSEEN_STOP", "1"))
     _reset_cap = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
     # Wall-clock bound on one TDD fill phase (file-first + impl + per-fn).
     # `stall` is written only when cargo test finishes an iteration, so a
@@ -1112,6 +1127,8 @@ def run_phase_c_tdd(
          + (f", no-frontier-stop after {_no_frontier_stop_after} "
             "undispatchable iteration(s)" if _no_frontier_stop_after > 0
             else ", no-frontier-stop=off")
+         + (f", unseen-stop={_unseen_stop_after}" if _unseen_stop_after > 0
+            else ", unseen-stop=off")
          + (f", fill-phase-stop={_fill_phase_max} min"
             if _fill_phase_max > 0 else ", fill-phase-stop=off")
          + (f", sessions-per-fill={_max_sessions}"
@@ -1149,6 +1166,10 @@ def run_phase_c_tdd(
     # own per-record budget).
     _no_frontier_streak = 0
     _no_move_readmissions = 0
+    # The sight of the last sweep that took it, and how many consecutive
+    # green-build sweeps found every owed red test unseen.
+    _sight = SightReading(taken=False)
+    _unseen_streak = 0
     # Futility escalation state: per failing test, the frontier
     # unit-set of the previous iteration; a test whose set is UNCHANGED while
     # it kept failing has exhausted its attributed fns — escalate.
@@ -1675,7 +1696,7 @@ def run_phase_c_tdd(
         (`evidence_premise.unit_ask_fingerprints`)."""
         red_words = {bare_test_name(t_): w_ for t_, w_ in
                      failure_evidence_by_test(output).items()}
-        red = {bare_test_name(t_) for t_ in cur_failed}
+        red = {bare_test_name(t_) for t_ in _owed_red}
         words = {k: tuple(red_words[b_] for b_ in sorted(
                      {bare_test_name(t_) for t_ in aimed.get(k, ())} & red)
                      if b_ in red_words)
@@ -1690,12 +1711,25 @@ def run_phase_c_tdd(
             return lambda _todo: {}
         return deps.failure_reader(world, target_src_dir, cluster_env)
 
+    _withdrawn_memo: list[tuple[str, frozenset[str]]] = []
+
     def _withdrawn_now() -> frozenset[str]:
         """Red tests (bare names) every failing copy of which the original
         crate also fails the same way, or skips, under this cluster's cfg
         (`reference_floor`). They cannot be made green: withdrawn from the
         owed reading and named once. A test that fails differently from the
-        original is not withdrawn: it is a red test of this tree."""
+        original is not withdrawn: it is a red test of this tree.
+
+        One reading per sweep capture: the judge re-runs each red test
+        alone, and the owed red set (`_owed_red`) and the owed tiers read
+        the same answer."""
+        if _withdrawn_memo and _withdrawn_memo[0][0] is output:
+            return _withdrawn_memo[0][1]
+        _w = _withdrawn_uncached()
+        _withdrawn_memo[:] = [(output, _w)]
+        return _w
+
+    def _withdrawn_uncached() -> frozenset[str]:
         if deps.reference_measurement is None:
             return frozenset()
         _refm_w = deps.reference_measurement(project_dir)
@@ -1722,21 +1756,10 @@ def run_phase_c_tdd(
         red = sorted({bare_test_name(t_) for t_ in cur_failed})
         primary = {bare_test_name(t_): v_
                    for t_, v_ in slices_by_key(slices).items()}
-        fallback: dict[str, set[str]] = {}
+        attributed: dict[str, set[str]] = {}
         for u_, ts_ in frontier_now.items():
             for t_ in ts_:
-                fallback.setdefault(bare_test_name(t_), set()).add(unit_key(u_))
-        site: dict[str, frozenset[str]] = {}
-        if deps.enumerate_fns is not None:
-            _first = stub_hold_of(
-                output,
-                make_fn_site_locator(
-                    SimpleNamespace(enumerate_fns=deps.enumerate_fns),
-                    target_src_dir),
-                is_stub=lambda _s: True)
-            site = {bare_test_name(t_): frozenset(unit_key(locator_of(x_))
-                                                  for x_ in ss_)
-                    for t_, ss_ in _first.by_test.items()}
+                attributed.setdefault(bare_test_name(t_), set()).add(unit_key(u_))
         evidence = {bare_test_name(t_): e_
                     for t_, e_ in failure_evidence_by_test(output).items()}
         held = {bare_test_name(t_): frozenset(unit_key(locator_of(x_))
@@ -1776,7 +1799,7 @@ def run_phase_c_tdd(
         # candidate for it (positive evidence only; a slice the screen would
         # empty is kept whole).
         _slices, _unentered = screen_unentered(
-            merge_slices(primary, fallback, red, site),
+            merge_slices(primary, attributed, red, sight=_sight),
             lambda u_, t_: unreached_by_test(
                 FnLocator(*u_.rsplit("::", 1)), t_))
         if _unentered:
@@ -1955,6 +1978,7 @@ def run_phase_c_tdd(
     # them and cannot recompute them — a checkpointed cluster is skipped, so by
     # then only its tree survives, not the evidence for it.
     last_failed: frozenset[str] = frozenset()
+    _owed_red: frozenset[str] = frozenset()
     last_ran: frozenset[str] = frozenset()
     last_newly_filled: list[FnLocator] = []
     _regression_notes = os.getenv("TDD_REGRESSION_NOTES", "1") == "1"
@@ -3191,6 +3215,19 @@ def run_phase_c_tdd(
             oracle_static=_expected_count)
         last_failed = frozenset(_measure.failed)
         last_ran = frozenset(_measure.passed) | last_failed
+        # THE OWED RED SET: this sweep's failures less the tests the original
+        # crate fails the same way. Every reader that asks whether a body can
+        # move a test reads this one value (attribution, the coverage ask,
+        # sessions, the red-dead demotion, convictions, crash scope, the
+        # probes, the sight); the score, the floor, the ratchet and the red
+        # ledger keep the raw set. Run `1947461-b4eb65c3` (2026-10-24)
+        # withdrew `ui` from the owed tiers alone: it stayed in the coverage
+        # ask, where it read unmeasured and withheld every dead claim, on the
+        # recently-filled frontier and on every route's target tests.
+        _withdrawn_sweep = (_withdrawn_now() if cur_failed and not score_only
+                            else frozenset())
+        _owed_red = frozenset(
+            t for t in cur_failed if bare_test_name(t) not in _withdrawn_sweep)
         if not _rec.reconciled:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: VERDICT MISMATCH — "
                      f"{_rec.note}. Score claims from this sweep are unsafe.")
@@ -3911,13 +3948,13 @@ def run_phase_c_tdd(
         # to that fill; write the concrete WRONG-body note for the model.
         _regr_note = ""
         if _regression_notes and fr_path and last_newly_filled:
-            _newly_failed = cur_failed - prev_failed
+            _newly_failed = set(_owed_red) - prev_failed
             if _newly_failed:
                 _regr_note = deps.record_tdd_regression(
                     fr_path, src_dir, last_newly_filled, _newly_failed,
                     best_pass, pass_count,
                 )
-        prev_failed = cur_failed
+        prev_failed = set(_owed_red)
         # Record this iter's measurement on the shared LoopState (metric is
         # pass_count — "higher is better" here, so NO negation). record()
         # updates the floor + stall streak; mirror them into the scalars the
@@ -4287,6 +4324,7 @@ def run_phase_c_tdd(
             test_reverse_map, cluster.name,
             test_texts=dict(cluster_tests),
             extra_failed=frozenset(_oracle.vanished),
+            unrepairable_tests=_withdrawn_sweep,
         )
         # A unit whose own keep moved a still-red test's failure to a later
         # assertion is not that test's owner at the new failure
@@ -4310,7 +4348,7 @@ def run_phase_c_tdd(
                         target_src_dir))
         _advanced = advanced_past(
             _ledger_entries(), oracle_fp=_oracle_fp(iter_n),
-            failing={bare_test_name(t) for t in cur_failed},
+            failing={bare_test_name(t) for t in _owed_red},
             body_now=_adv_body_now)
         if _advanced:
             _attr = without_advanced(_attr, _advanced)
@@ -4919,15 +4957,6 @@ def run_phase_c_tdd(
         # "producers"), so the filter is re-applied over everything that landed.
         frontier = _admit_map(frontier)
 
-        # Tests this sweep failed that no frontier unit owns — after
-        # attribution, format-only fallback, and escalation. Always on the
-        # cargo-test line; the event is the foldable form.
-        _owned = {bare_test_name(t) for ts in frontier.values() for t in ts}
-        _unowned = tuple(sorted(
-            {bare_test_name(t) for t in last_failed} - _owned))
-        deps.emit("phase_c.attribution.unattributed", data={
-            "cluster": cluster.name, "iter": iter_n,
-            "tests": list(_unowned), "count": len(_unowned)})
 
         # The exhaustion re-entry filter — for fns that already exhausted the
         # per-fn fix loop in a prior iter (avoid burning compute on the same fn
@@ -5666,7 +5695,7 @@ def run_phase_c_tdd(
         # question (`flat_standing_unchanged`). Keyed on the grade alone the
         # exclusion is a permanent lock, because dispatch is the only
         # producer of the new body that could ever clear it.
-        _bare_failed_now = frozenset(bare_test_name(t) for t in cur_failed)
+        _bare_failed_now = frozenset(bare_test_name(t) for t in _owed_red)
         _convict_now = {
             LedgerKey(_proj, _cl, _u.file, _u.fn_name): frozenset(
                 bare_test_name(t) for t in _ts) & _bare_failed_now
@@ -5737,6 +5766,10 @@ def run_phase_c_tdd(
              for _k in _flat_standing},
             oracle_fp=_oracle_fp(iter_n))
         _cov = None
+        _owed_bare = {bare_test_name(t) for t in _owed_red}
+        _owed_pairs = frozenset(
+            p for p in _measure.failed_pairs
+            if bare_test_name(p[1]) in _owed_bare)
         if deps.measure_coverage_slice is not None:
             # The failing set is what pass C profiles: the owner map exists
             # to answer "can a rewrite of this unit move THIS red test",
@@ -5750,10 +5783,15 @@ def run_phase_c_tdd(
             # same question reuses the last reading. A bare name that gains
             # or loses a binary does not — the stored map is the first
             # claimant's.
+            # The owed red names only, each with the world-qualified pairs
+            # that failed it: the port resolves every world the sweep judges
+            # and asks each world the names it failed (`ProbeWorld`). A
+            # withdrawn test is not asked, so its unmeasured run cannot
+            # withhold the dead set.
             _hung_now = {b.key: (b.dangling or "?") for b in _hung}
-            _cov_key = (_tree_sha, frozenset(cur_failed),
+            _cov_key = (_tree_sha, frozenset(_owed_red),
                         frozenset(_hung_now.items()),
-                        frozenset(_measure.failed_pairs),
+                        _owed_pairs,
                         frozenset(_measure.incomplete))
             if _cov_memo is not None and _cov_memo[0] == _cov_key:
                 _cov = _cov_memo[1]
@@ -5763,12 +5801,11 @@ def run_phase_c_tdd(
             else:
                 _cov = deps.measure_coverage_slice(
                     project_dir, cluster.name,
-                    failing_tests=frozenset(cur_failed),
+                    failing_tests=frozenset(_owed_red),
+                    failed_pairs=_owed_pairs,
                     cluster_env=cluster_env,
                     timeout=test_timeout,
-                    hung=_hung_now,
-                    failing_binaries=failing_binaries_by_name(
-                        _measure.failed_pairs))
+                    hung=_hung_now)
                 _cov_memo = (_cov_key, _cov)
             if _cov is not None and _cov.hung_tests:
                 deps.emit("phase_c.coverage.hung", data={
@@ -5784,6 +5821,7 @@ def run_phase_c_tdd(
         # `_owners_positive` is taken before the withholding, and the record
         # of what a crashed test entered when it last ran stands in for it.
         _recorded: dict[str, frozenset[FnLocator]] = {}
+        _recorded_store: dict[str, frozenset[FnLocator]] = {}
         _stack_sites: dict[str, frozenset[FnSite]] = {}
         _owners_positive: dict[str, frozenset[FnSite]] = (
             dict(_cov.owners) if _cov is not None else {})
@@ -5795,6 +5833,7 @@ def run_phase_c_tdd(
             if _no_owner and deps.recorded_entry_sets is not None:
                 _recorded = dict(deps.recorded_entry_sets(
                     project_dir, _no_owner))
+            _recorded_store = dict(_recorded)
             # The fns an aborted test's own faulting stack passed through were
             # executed by it: positive evidence the stand-in record is the
             # typed slot for (only for a test with no measured owner set).
@@ -5850,7 +5889,7 @@ def run_phase_c_tdd(
         # here is a (file, fn) stamp and does not fan out. Sessions do
         # not read this map: they take unique-container sites below.
         _recorded_failing = records_standing_in(
-            _recorded, _owners_positive, cur_failed)
+            _recorded, _owners_positive, _owed_red)
         _recorded_rank = {
             t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
             for t, us in _recorded_failing.items()}
@@ -5869,6 +5908,142 @@ def run_phase_c_tdd(
         for _t, _ks in _stack_sites.items():
             if _t in _recorded_failing:
                 _recorded_sites[_t] = _recorded_sites.get(_t, frozenset()) | _ks
+        # THE SIGHT (`domain/test_sight.py`): per owed red test, whether this
+        # sweep observed it executing, through what, or why not. Read off the
+        # measurements only (coverage owners, the recorded set of a run that
+        # did not complete, the crash sites, the first failure inside a crate
+        # body). Not taken on a red build or without a coverage port.
+        _first_sites: dict[str, frozenset[FnSite]] = {}
+        if deps.enumerate_fns is not None:
+            _first_sites = dict(stub_hold_of(
+                output,
+                make_fn_site_locator(
+                    SimpleNamespace(enumerate_fns=deps.enumerate_fns),
+                    target_src_dir),
+                is_stub=lambda _s: True).by_test)
+        _sight = sight_reading(
+            _owed_red,
+            Observations.of(
+                coverage=_cov, positive_owners=_owners_positive,
+                recorded=_recorded_store, crash_sites=_sites,
+                failure_sites=_first_sites, failed_pairs=_owed_pairs,
+                home=world_of_env(cluster_env)),
+            taken=(not _sweep_compile_broke
+                   and deps.measure_coverage_slice is not None))
+        if _sight.by_test and _sight.taken:
+            deps.log(f"  {tag} [phase-c/sight] iter {iter_n}: "
+                     + _sight.summary())
+            deps.emit("phase_c.tdd.sight", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "tests": _sight.payload()})
+        # An owed red test this sweep did not observe keeps no frontier
+        # edge, whatever path produced it. A test it did observe keeps an
+        # edge only when that unit is one the sight names for it, or the
+        # edge is a crash of a vanished test, a stub that holds the test,
+        # or an escalation product (not the units that earned the product).
+        # The units the sight names are put on the frontier here, before
+        # the empty-frontier check below: the owed join that would add
+        # them runs after that check, so a frontier whose every edge was
+        # a guess would otherwise stop with the observed units never
+        # dispatched. Sight not taken leaves the frontier as it is.
+        _shadow: list[str] = []
+        if _sight.unseen:
+            _shadow = sorted(f"{k.file}::{k.fn_name}" for k, ts in
+                             frontier.items()
+                             if ts and all(_sight.is_unseen(t) for t in ts))
+        if _sight.taken:
+            _vanished_bare = {bare_test_name(v) for v in _oracle.vanished}
+            _extra_edges = {
+                (loc, bare_test_name(t))
+                for _earned, cached in escalation_products.values()
+                for loc, tests in cached.items()
+                for t in tests}
+
+            def _keep_edge(
+                loc: FnLocator, test: str,
+                _crash: dict[FnLocator, str] = crash_texts,
+                _vanished: set[str] = _vanished_bare,
+                _held: HeldStubs = _holds,
+                _extras: set[tuple[FnLocator, str]] = _extra_edges,
+            ) -> bool:
+                bare = bare_test_name(test)
+                if loc in _crash and bare in _vanished:
+                    return True
+                if bare in _held.tests_held_by(loc):
+                    return True
+                return (loc, bare) in _extras
+
+            _before_edges = {
+                (k, t) for k, ts in frontier.items() for t in ts}
+            frontier = _sight.edges_without_unseen(frontier, keep=_keep_edge)
+            eligible = _sight.edges_without_unseen(eligible, keep=_keep_edge)
+            _dropped = _before_edges - {
+                (k, t) for k, ts in frontier.items() for t in ts}
+            ordered = [(k, eligible[k]) for k, _ts in ordered if k in eligible]
+            _ordered_have = {k for k, _ in ordered}
+            for _k_seen, _ts_seen in eligible.items():
+                if _k_seen not in _ordered_have:
+                    ordered.append((_k_seen, _ts_seen))
+            if _dropped:
+                _kind_now = kind_after_sight_filter(kind, dropped=True)
+                if _kind_now != kind:
+                    deps.log(
+                        f"  {tag} [phase-c/sight] iter {iter_n}: dropped "
+                        f"{len(_dropped)} frontier edge(s); a seen test is "
+                        "dispatched only through a unit this sweep observed "
+                        "it run, or through a crash, a held stub, or an "
+                        "escalation product; attribution kind was "
+                        f"{kind}")
+                    kind = _kind_now
+        # Owed red tests no frontier unit owns, after the sight: an unseen
+        # test is unowned whatever a guess attributed to it. Always on the
+        # cargo-test line; the event is the foldable form.
+        _owned = {bare_test_name(t) for ts in frontier.values() for t in ts}
+        _unowned = tuple(sorted(
+            {bare_test_name(t) for t in _owed_red} - _owned))
+        deps.emit("phase_c.attribution.unattributed", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "tests": list(_unowned), "count": len(_unowned)})
+        _unseen_streak = _unseen_streak + 1 if _sight.all_unseen else 0
+        if _sight.unseen and not _sight.all_unseen:
+            deps.log(f"  {tag} HEALTH ‼ UNSEEN iter {iter_n}: "
+                     f"{len(_sight.unseen)} owed red test(s) have no "
+                     "observation of executing on this tree and are not "
+                     "dispatched on a guess; the seen tests continue: "
+                     + _sight.describe_unseen())
+        if (_sight.all_unseen and _unseen_stop_after > 0
+                and _unseen_streak >= _unseen_stop_after):
+            deps.log(
+                f"  {tag} HEALTH ‼ UNSEEN_STOP iter {iter_n}: every owed red "
+                f"test ({len(_sight.unseen)}) is unseen on "
+                f"{_unseen_streak} consecutive green-build sweep(s), so no "
+                "fill can be aimed on evidence. Measurement gap(s): "
+                + _sight.describe_unseen(limit=16)
+                + f". SHADOW — the guess this sweep would have dispatched "
+                f"(frontier kind {kind}): "
+                + (", ".join(_shadow[:12]) + (" …" if len(_shadow) > 12 else "")
+                   if _shadow else "nothing")
+                + f". Reading pass={pass_count} fail={fail_count}. Stopping "
+                "the RUN before dispatch; the cluster is not marked done and "
+                "every fill is on disk. Fix the measurement, then "
+                "`bash continue.sh` resumes here; TDD_UNSEEN_STOP=0 disables "
+                "this stop.")
+            deps.emit("phase_c.tdd.unseen_stop", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "pass_count": pass_count, "fail_count": fail_count,
+                "streak": _unseen_streak, "tests": _sight.payload(),
+                "shadow": _shadow, "frontier_kind": str(kind)})
+            deps.emit("phase_c.tdd.iter", data={
+                **_prov,
+                "cluster": cluster.name, "iter": iter_n, "rc": rc,
+                "frontier_size": 0, "kind": "unseen_stop",
+                "pass_count": pass_count, "fail_count": fail_count,
+                "improved": improved, "stall": stall,
+            })
+            _close_kind = "unseen_stop"
+            _session_slices = {}
+            request_graceful_stop()
+            break
         # The owner map decided a refusal and reached no record: nothing in
         # `events.jsonl` carried it, so every later argument about whether a
         # demotion was right had to re-measure the tree to find out what the
@@ -5877,8 +6052,10 @@ def run_phase_c_tdd(
         if _cov is not None and _owners_read:
             deps.emit("phase_c.coverage.owner_map", data={
                 "cluster": cluster.name, "iter": iter_n,
-                "failing": sorted(cur_failed),
+                "failing": sorted(_owed_red),
                 "measured": sorted(_cov.owners),
+                "unclaimed": sorted(_cov.unclaimed),
+                "worlds": sorted(_cov.worlds),
                 "owners": {t: [site_payload(k) for k in sorted(ks)]
                            for t, ks in sorted(_owners_read.items())},
                 # What each failing test ran only while its failure was
@@ -5911,7 +6088,7 @@ def run_phase_c_tdd(
             # absent from it, so the demotion declines (`red_dead_units`'s
             # own "every red test measured" rule).
             _red_dead = _red_dead_measured = red_dead_units(
-                (k for k, _ in ordered), cur_failed, _cov.owners,
+                (k for k, _ in ordered), _owed_red, _cov.owners,
                 exempt=_esc_keys | _product_keys | _crash_grades.keys())
         # A sweep with no coverage reading keeps the last measured set for
         # the next fire; only a measurement replaces it.
@@ -5968,7 +6145,7 @@ def run_phase_c_tdd(
         _pair_lapsed = _has_pair - _paired_tests
         # Snapshot before owner-map admission: spine locators the map
         # would add are coverage, not the attributed write.
-        _leftover_bare = {bare_test_name(t) for t in cur_failed}
+        _leftover_bare = {bare_test_name(t) for t in _owed_red}
         _attributed_locs = frozenset(_pair_locs).union(
             *( _units_for_owners.get(_t, ()) for _t in _leftover_bare ))
         if _paired_tests:
@@ -6274,7 +6451,7 @@ def run_phase_c_tdd(
             _units_for_session = attributed_units_for_session(
                 eligible, _attr.site_frontier)
             _session_slices = session_slices_for_failing(
-                cur_failed,
+                [t for t in _owed_red if not _sight.is_unseen(t)],
                 owners=_cov_owners,
                 units_by_test=_units_for_session,
                 pairs=((p.dispatcher, p.implementer) for p in _attr.pairs),
@@ -6386,7 +6563,7 @@ def run_phase_c_tdd(
         # be dispatched on, and a unit carrying only such tests leaves the
         # batch for this sweep.
         _scope = scope_to_crash_culprits(
-            ordered, crash_culprits_by_test(_sites, cur_failed),
+            ordered, crash_culprits_by_test(_sites, _owed_red),
             exempt=_holds.units)
         _not_ranked.note(_scope.dropped, "crash_scoped")
         if _scope.blocked:
@@ -7129,7 +7306,8 @@ def run_phase_c_tdd(
              f"frontier={len(eligible)} fn(s) ({kind}), "
              f"{skipped_perm} skipped as exhausted; "
              f"unowned={len(_unowned)}; "
-             f"dispatching {_batch.rendered}.{_cls_bit}")
+             + (f"unseen={len(_sight.unseen)}; " if _sight.taken else "")
+             + f"dispatching {_batch.rendered}.{_cls_bit}")
         # The run-level cut rate on screen from iteration 1, so the class is
         # read here instead of found by hand days later.
         _health = reasoning_cap.health_reading()
@@ -7182,6 +7360,7 @@ def run_phase_c_tdd(
             "dispatched": len(_batch.keys),
             "pass_completed": _batch.completes_pass,
             "unowned": len(_unowned),
+            "unseen": sorted(_sight.unseen),
             "binaries": [[lbl, p, f] for lbl, p, f in _bins],
             "build_red": _build.red,
             "build_missing": sorted(_build.missing),
@@ -7313,7 +7492,9 @@ def run_phase_c_tdd(
             # the premise and the row list this iteration's sweep judges.
             _before: dict[FnLocator, Any] | None = _bodies_before_all,
             _keys: frozenset[FnLocator] = frozenset(frontier_keys),
-            _failed: frozenset[str] = frozenset(cur_failed),
+            # The convicting premise of the rows is the owed red set, as the
+            # FLAT rows' stamp is: a withdrawn test convicts no body.
+            _failed: frozenset[str] = _owed_red,
             _elig: Mapping[FnLocator, Any] = eligible,
             _epoch: int = _destruction_epoch,
             _iter: int = iter_n,
@@ -7464,10 +7645,10 @@ def run_phase_c_tdd(
             _jn = joint_note(_joint_now, bare_test_name(_t_ev))
             if _jn:
                 _sweep_evidence[_t_ev] = f"{_sweep_evidence[_t_ev]}\n{_jn}"
-        if (deps.assert_probe is not None and cur_failed
+        if (deps.assert_probe is not None and _owed_red
                 and os.getenv("ASSERT_PROBE", "1") != "0"):
             _probe_by_file: dict[Path, list[str]] = {}
-            for _ft in sorted(cur_failed):
+            for _ft in sorted(_owed_red):
                 _fpath = _test_files.get(_ft) or _test_files.get(bare_test_name(_ft))
                 if not _fpath:
                     continue
@@ -8170,7 +8351,7 @@ def run_phase_c_tdd(
                 # here, so this stamp is the one `flat_standing_unchanged`
                 # will read.
                 _bare_failed_dispatch = frozenset(
-                    bare_test_name(t) for t in cur_failed)
+                    bare_test_name(t) for t in _owed_red)
                 _convicting_of = {
                     (k.file, k.fn_name): sorted(
                         frozenset(bare_test_name(t)
@@ -8582,7 +8763,8 @@ def run_phase_c_tdd(
             for _row_led in _this_fill_rows():
                 _runs_led.append(RunFacts.of_row(_row_led))
             _red_entries = red_ledger(
-                last_failed, reading=_due, ledger=_asks, runs=_runs_led,
+                last_failed, reading=_due, ledger=_asks, sight=_sight,
+                runs=_runs_led,
                 words={bare_test_name(t_): e_ for t_, e_ in
                        failure_evidence_by_test(output).items()})
             for _line in render_red_ledger(_red_entries):

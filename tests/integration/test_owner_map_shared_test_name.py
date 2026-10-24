@@ -47,6 +47,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters.cargo import CargoCli
+from pipeline_core.adapters.coverage_owner import ProbeWorld
 from pipeline_core.adapters.extractor import CliExtractor
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.application.reconstruct.cargo_runner import run_cargo
@@ -121,13 +122,14 @@ def _sweep(project: Path) -> frozenset[tuple[str, str]]:
     return failed
 
 
-def _owners(project: Path, failing_binaries):
+def _owners(project: Path, failed_pairs):
     from pipeline_core.adapters.coverage_owner import measure_coverage_slice
     logs: list[str] = []
     reading = measure_coverage_slice(
-        project, _CLUSTER, failing_tests={"t"}, cluster_env=_env(),
+        project, _CLUSTER, failing_tests={"t"},
+        worlds=(ProbeWorld("", _env()),),
         enumerate_fns=CliStructureReader(CliExtractor(_EXTRACTOR)).enumerate_fns,
-        timeout=300, workers=1, failing_binaries=failing_binaries,
+        timeout=300, workers=1, failed_pairs=failed_pairs,
         log=logs.append)
     assert reading is not None, f"the coverage reading could not be taken: {logs}"
     return {s.fn_name for s in reading.owners.get("t", frozenset())}, logs
@@ -150,9 +152,9 @@ def test_a_name_failing_in_two_binaries_owns_what_both_executed(
         tmp_path: Path) -> None:
     _tools_present()
     project = _workspace(tmp_path)
-    by_name = failing_binaries_by_name(_sweep(project))
-    assert by_name == {"t": frozenset({"one", "two"})}
-    owners, logs = _owners(project, by_name)
+    failed = _sweep(project)
+    assert failing_binaries_by_name(failed) == {"t": frozenset({"one", "two"})}
+    owners, logs = _owners(project, failed)
     assert {"alpha", "beta"} <= owners
     assert any("failing in several binaries measured on each" in ln for ln in logs)
 
@@ -160,7 +162,7 @@ def test_a_name_failing_in_two_binaries_owns_what_both_executed(
 def test_negative_control_the_name_alone_measures_one_binary(tmp_path: Path) -> None:
     _tools_present()
     project = _workspace(tmp_path)
-    owners, _logs = _owners(project, None)
+    owners, _logs = _owners(project, ())
     assert len(owners & {"alpha", "beta"}) == 1
 
 
@@ -267,3 +269,77 @@ def test_turning_the_green_copy_red_is_still_refused(tmp_path: Path) -> None:
     v = _gate(_keep_crate(tmp_path, alpha=3, gamma=2), base)
     ji = judge_refill({"t", "g"}, base, v)
     assert ji.new_failures == {"t"} and not ji.non_regression
+
+
+# --- a test only another build world compiles --------------------------------
+#
+# Run `1947461-b4eb65c3` (2026-10-24): the tree was judged in two worlds and
+# the owner probe ran in the home one. The last owed red test was gated on a
+# cfg only the other world sets, so the home build never compiled it, and it
+# had no owner for 14 iterations. Shape here: `tests/gated.rs` is
+# `#![cfg(other_world)]` and fails through `beta`. Asserted through the real
+# probe in both worlds: `g` owns `beta`. Negative control: the home world
+# alone leaves `g` unclaimed (asked, answered nowhere). Premise: cargo builds
+# the gated test only when the world's env sets the cfg.
+
+_GATED = """#![cfg(other_world)]
+#[test]
+fn g() {
+    assert_eq!(widgets::beta(), 2);
+}
+"""
+
+
+def _gated_workspace(tmp_path: Path) -> Path:
+    project = _workspace(tmp_path)
+    (project / "tests" / "gated.rs").write_text(_GATED)
+    return project
+
+
+def _other_env() -> dict[str, str]:
+    env = _env()
+    env["RUSTFLAGS"] = "--cfg other_world"
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "worlds" / "other")
+    return env
+
+
+def _gated_owners(project: Path, worlds: list[ProbeWorld]):
+    from pipeline_core.adapters.coverage_owner import measure_coverage_slice
+    logs: list[str] = []
+    reading = measure_coverage_slice(
+        project, _CLUSTER, worlds=worlds, failing_tests={"g"},
+        failed_pairs={("other::tests/gated.rs", "g")},
+        enumerate_fns=CliStructureReader(CliExtractor(_EXTRACTOR)).enumerate_fns,
+        timeout=300, workers=1, log=logs.append)
+    assert reading is not None, f"the coverage reading could not be taken: {logs}"
+    return reading
+
+
+def test_premise_a_cfg_gated_test_is_built_only_under_its_worlds_env(
+        tmp_path: Path) -> None:
+    project = _gated_workspace(tmp_path)
+    cluster = project / ".skeleton-filled" / _CLUSTER
+    _rc, home = run_cargo(CargoCli(), _CMD, cluster, _env(), timeout=600)
+    _rc, other = run_cargo(CargoCli(), _CMD, cluster, _other_env(), timeout=600)
+    _p, home_failed, _i = qualified_verdicts(parse_binary_results(home))
+    _p, other_failed, _i = qualified_verdicts(parse_binary_results(other))
+    assert ("tests/gated.rs", "g") not in home_failed
+    assert ("tests/gated.rs", "g") in other_failed
+
+
+def test_a_test_only_another_world_builds_is_owned_when_that_world_is_probed(
+        tmp_path: Path) -> None:
+    _tools_present()
+    project = _gated_workspace(tmp_path)
+    reading = _gated_owners(project, [ProbeWorld("main", _env()),
+                                      ProbeWorld("other", _other_env())])
+    assert "beta" in {s.fn_name for s in reading.owners.get("g", frozenset())}
+    assert reading.worlds == {"main", "other"} and not reading.unclaimed
+
+
+def test_negative_control_the_home_world_alone_leaves_it_unclaimed(
+        tmp_path: Path) -> None:
+    _tools_present()
+    project = _gated_workspace(tmp_path)
+    reading = _gated_owners(project, [ProbeWorld("main", _env())])
+    assert "g" not in reading.owners and reading.unclaimed == {"g"}

@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from pipeline_core.domain.attribution import FailureFrontier, FailureKind, canon_site
+from pipeline_core.domain.attribution import (
+    FailureFrontier,
+    FailureKind,
+    canon_site,
+    kind_after_sight_filter,
+)
 from pipeline_core.domain.models import FnLocator, FnSite
 
 A = FnLocator("src/a.rs", "producer")
@@ -27,6 +32,22 @@ def test_only_observed_paths_convict() -> None:
     assert not FailureKind.RECENTLY_FILLED.convicts
     assert not FailureKind.REVERSE_MAP.convicts
     assert not FailureKind.NO_FRONTIER.convicts
+    assert not FailureKind.OBSERVED.convicts
+
+
+def test_a_guessing_kind_that_lost_edges_is_labelled_observed() -> None:
+    """The dispatch label after the sight filter. A classifier, recency or
+    reverse-map frontier that lost an edge is no longer that guess. A
+    frontier that already observed the failure, a merged one, and an
+    injected empty frontier keep their labels even when an edge left."""
+    for kind in (FailureKind.CLASSIFIER, FailureKind.RECENTLY_FILLED,
+                 FailureKind.REVERSE_MAP):
+        assert kind_after_sight_filter(kind, dropped=True) is FailureKind.OBSERVED
+        assert kind_after_sight_filter(kind, dropped=False) is kind
+    for kind in (FailureKind.RUNTIME, FailureKind.COMPILE, FailureKind.BEHAVIOR,
+                 FailureKind.MERGED, FailureKind.NO_FRONTIER,
+                 FailureKind.CRASHED_BINARY, FailureKind.OBSERVED):
+        assert kind_after_sight_filter(kind, dropped=True) is kind
 
 
 def test_escalated_unit_is_dispatched_but_never_convicted() -> None:

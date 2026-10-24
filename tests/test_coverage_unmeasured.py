@@ -31,6 +31,7 @@ import pytest
 
 from pipeline_core.adapters import coverage_owner as cov
 from pipeline_core.adapters.coverage_owner import (
+    ProbeWorld,
     _completed,
     measure_coverage_slice,
 )
@@ -124,10 +125,14 @@ def test_negative_control_the_pre_change_shape_keeps_the_units_dead() -> None:
     so nothing is withheld and both units stay dead — the live
     `service_order` event."""
     ctl = _FIX["control"]
+    # Asked exactly what it answered: an asked name the slice leaves out is
+    # `unclaimed` now and withholds the dead set by itself, which is a
+    # different rule from the one this control isolates.
+    answered = {t: frozenset() for t, ks in ctl["owners"].items() if not ks}
     old = CoverageSlice(
         dead=frozenset(_loc(u) for u in ctl["dead"]),
-        owners={t: frozenset() for t, ks in ctl["owners"].items() if not ks},
-        failing=frozenset(_FIX["failing"]))
+        owners=answered,
+        failing=frozenset(answered))
     reading, withheld = withhold_unmeasured(old)
     assert withheld == frozenset()
     assert _CULPRIT in reading.dead and _SIBLING in reading.dead
@@ -314,7 +319,7 @@ def test_a_crashed_binary_is_re_run_per_test_and_its_dying_test_is_unmeasured(
     calls = _crash_env(monkeypatch, tmp_path)
     notes: list[str] = []
     slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["t_crash", "t_ok"],
+        project, "stable", worlds=(ProbeWorld(""),), failing_tests=["t_crash", "t_ok"],
         log=notes.append, enumerate_fns=_enumerate)
     assert slice_ is not None
     assert slice_.unmeasured_binaries == frozenset({"error_gen_3"})
@@ -349,7 +354,7 @@ def test_negative_control_the_file_on_disk_rule_reads_the_death_as_empty(
     monkeypatch.setattr(cov, "_completed",
                         lambda rc, raws: any(r.exists() for r in raws))
     slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["t_crash"],
+        project, "stable", worlds=(ProbeWorld(""),), failing_tests=["t_crash"],
         enumerate_fns=_enumerate)
     assert slice_ is not None
     assert slice_.owners.get("t_crash") == frozenset()

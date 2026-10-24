@@ -46,7 +46,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("adapters/coverage_owner.py", "_exact_run"): "coverage run of one test",
     ("adapters/coverage_owner.py", "_owner_map._cut_before_death"): "coverage run of one test",
     ("adapters/coverage_owner.py", "_owner_map._one"): "coverage run of one test",
-    ("adapters/coverage_owner.py", "measure_coverage_slice"): "coverage runs of one test each",
+    ("adapters/coverage_owner.py", "_measure_world"): "coverage runs of one test each",
 }
 
 

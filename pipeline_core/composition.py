@@ -113,6 +113,9 @@ from pipeline_core.adapters.coverage import (
     run_tarpaulin as _cov_run_tarpaulin,
 )
 from pipeline_core.adapters.coverage_owner import (
+    ProbeWorld,
+)
+from pipeline_core.adapters.coverage_owner import (
     measure_coverage_slice as _measure_coverage_slice,
 )
 from pipeline_core.adapters.dead_code import measure_world_dead_code
@@ -739,7 +742,7 @@ from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
     cargo_is_proc_macro as _cargo_is_proc_macro,
 )
-from pipeline_core.domain.cluster_env import world_key
+from pipeline_core.domain.cluster_env import world_key, world_of_env
 from pipeline_core.domain.cluster_plan import (
     merged_view_cluster,
     nightly_rules_for,
@@ -925,6 +928,7 @@ from pipeline_core.ports.fill_engine import (
     RegressionBaselinePort,
     RegressionGatePort,
 )
+from pipeline_core.ports.measurement import AttributeFailuresPort
 from pipeline_core.ports.structure import StructureReader
 from pipeline_core.prompts import shaping as _shaping
 from pipeline_core.prompts.crate_idioms import (
@@ -1183,7 +1187,7 @@ class App:
     # seam); swap via dataclasses.replace like the other boundary fields.
     # Consumers inside build_app reach them through `app_ref` (see build_app)
     # so a test's replace on the live App is seen at call time.
-    attribute_failures: Callable[..., Any]
+    attribute_failures: AttributeFailuresPort
     behavior_frontier: Callable[..., Any]
     classify_phase_c_test_failures: Callable[..., Any]
     collect_impl_blocks: Callable[..., Any]
@@ -1261,6 +1265,7 @@ class App:
 def _tdd_measure_coverage(
     log: Callable[[str], None],
     enumerate_fns: Callable[[Path], Any],
+    worlds: WorldChecks | None,
 ) -> Callable[..., Any]:
     """The coverage probe bound into run_phase_c_tdd.
 
@@ -1275,9 +1280,30 @@ def _tdd_measure_coverage(
     `failing_tests=` so pass C profiles the red set, and `cluster_env=`
     so the owner map inherits the sweep's cfg and toolchain. A two-argument
     lambda TypeErrors; functools.partial forwards keywords.
+
+    The worlds are resolved HERE, from the caller's home env, by the same
+    `WorldChecks` every compile check and the failure reader use: the home
+    world first, then each other world under `env_for`. Callers (the sweep,
+    the session turn) pass the home `cluster_env` as before and cannot take
+    a one-world reading of a tree judged in several. Run `1947461-b4eb65c3`
+    (2026-10-24) probed the home world only and its last owed red test,
+    built only under the nightly cfg, had no owner for 14 iterations.
+    `PHASE_C_ALL_WORLDS_CHECK=0` (`worlds` None) probes the home world
+    only, as every check does under that setting.
     """
-    return functools.partial(_measure_coverage_slice, log=log,
-                             enumerate_fns=enumerate_fns)
+    def measure(project_dir: Path, cluster: str, *,
+                cluster_env: Mapping[str, str] | None = None,
+                **kw: Any) -> Any:
+        home_env = dict(cluster_env) if cluster_env else None
+        probe = [ProbeWorld(world_of_env(home_env), home_env)]
+        if worlds is not None and home_env:
+            tree = Path(project_dir) / ".skeleton-filled" / cluster
+            probe += [ProbeWorld(str(c.name), worlds.env_for(c, tree, home_env))
+                      for c in worlds.others(home_env)]
+        return _measure_coverage_slice(project_dir, cluster, worlds=probe,
+                                       log=log, enumerate_fns=enumerate_fns,
+                                       **kw)
+    return measure
 
 
 def build_app(
@@ -3130,7 +3156,7 @@ def build_app(
             # caches it per iteration (`_oracle_fp` in `phase_c_tdd.py`);
             # this is the uncached adapter.
             oracle_fp=lambda sd, pd, cl: _cluster_oracle_fp(sd, pd, cl),
-            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
+            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns, _worlds),
             recorded_entry_sets=_recorded_entry_sets_for,
             # The `retro` channel of the evidence premise: what the store
             # holds about each unit, which is both the guidance a prompt may
@@ -3208,7 +3234,7 @@ def build_app(
             ask_turns=ask_client.ask_turns,
             fit_turn=ask_client.fit,
             run_cargo=helpers.run_cargo,
-            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns),
+            measure_coverage_slice=_tdd_measure_coverage(ports.log, enumerate_fns, _worlds),
             failed_body_cap=cfg.failed_body_cap,
             per_fn_fix_hard_cap=settings.fix_caps.per_fn_fix_hard_cap,
             per_impl_max_stubs=helpers.per_impl_max_stubs,

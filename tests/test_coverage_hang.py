@@ -29,7 +29,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters import coverage_owner as cov
-from pipeline_core.adapters.coverage_owner import measure_coverage_slice
+from pipeline_core.adapters.coverage_owner import ProbeWorld, measure_coverage_slice
 from pipeline_core.domain.models import FnLocator, FnSite
 
 _BIN = (Path(__file__).resolve().parents[1] / "tools" / "skeleton_extractor"
@@ -129,7 +129,7 @@ def test_a_pass_a_hang_names_the_test_and_recovery_skips_it(
     calls = _hang_env(monkeypatch, tmp_path)
     notes: list[str] = []
     slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["t_hang", "t_other"],
+        project, "stable", worlds=(ProbeWorld(""),), failing_tests=["t_hang", "t_other"],
         log=notes.append, enumerate_fns=_enumerate, timeout=120)
     assert slice_ is not None
     assert slice_.unmeasured_binaries == frozenset({"lib_gen_1"})
@@ -153,7 +153,7 @@ def test_a_binary_the_judge_named_hung_is_not_run_in_pass_a(
     project = _project(tmp_path)
     calls = _hang_env(monkeypatch, tmp_path)
     slice_ = measure_coverage_slice(
-        project, "stable", failing_tests=["t_hang", "t_other"],
+        project, "stable", worlds=(ProbeWorld(""),), failing_tests=["t_hang", "t_other"],
         enumerate_fns=_enumerate, timeout=120,
         hung={"lib_gen_1": "t_hang"})
     assert slice_ is not None
@@ -169,7 +169,7 @@ def test_the_bound_defaults_to_the_suite_timeout_and_never_to_unbounded(
     calls = _hang_env(monkeypatch, tmp_path)
     monkeypatch.setenv("PHASE_C_TEST_TIMEOUT", "77")
     assert measure_coverage_slice(
-        project, "stable", failing_tests=["t_other"],
+        project, "stable", worlds=(ProbeWorld(""),), failing_tests=["t_other"],
         enumerate_fns=_enumerate) is not None
     assert {t for c, t in calls if "/bins/" in c[0]} == {77.0}
 
@@ -233,12 +233,14 @@ def test_b_spinning_binaries_pay_the_bound_concurrently_and_read_the_same(
     bound = 1
     _spin_env(monkeypatch, tmp_path)
     t0 = time.monotonic()
-    four = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+    four = measure_coverage_slice(project, "stable", worlds=(ProbeWorld(""),),
+                               enumerate_fns=_enumerate,
                                   timeout=bound, workers=4)
     wall_four = time.monotonic() - t0
     _spin_env(monkeypatch, tmp_path)
     t0 = time.monotonic()
-    one = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+    one = measure_coverage_slice(project, "stable", worlds=(ProbeWorld(""),),
+                               enumerate_fns=_enumerate,
                                  timeout=bound, workers=1)
     wall_one = time.monotonic() - t0
     assert four is not None and one is not None
@@ -260,7 +262,8 @@ def test_c_single_test_runs_carry_their_own_bound(
     longest-completing-run reading sizes it)."""
     project = _project(tmp_path)
     calls = _spin_env(monkeypatch, tmp_path, spinners=1, fast=1)
-    slice_ = measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+    slice_ = measure_coverage_slice(project, "stable", worlds=(ProbeWorld(""),),
+                               enumerate_fns=_enumerate,
                                     timeout=1, workers=1, exact_timeout=7)
     assert slice_ is not None
     assert {t for c, t in calls if "--exact" in c} == {7.0}
@@ -268,7 +271,8 @@ def test_c_single_test_runs_carry_their_own_bound(
     monkeypatch.delenv("PHASE_C_EXACT_TEST_TIMEOUT", raising=False)
     calls = _spin_env(monkeypatch, tmp_path, spinners=1, fast=1)
     notes: list[str] = []
-    measure_coverage_slice(project, "stable", enumerate_fns=_enumerate,
+    measure_coverage_slice(project, "stable", worlds=(ProbeWorld(""),),
+                               enumerate_fns=_enumerate,
                            timeout=1, workers=1, log=notes.append)
     assert {t for c, t in calls if "--exact" in c} == {1.0}
     assert any("longest completing run" in n and "single-test bound 1s" in n

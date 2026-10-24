@@ -36,6 +36,7 @@ from enum import StrEnum
 from typing import Any
 
 from pipeline_core.domain.candidate_tiers import AskLedger, DueReading
+from pipeline_core.domain.test_sight import SightReading
 
 __all__ = ["PIPELINE_CLASSES", "RedClass", "RedEntry", "RunFacts", "red_ledger",
            "render_red_ledger"]
@@ -45,6 +46,7 @@ class RedClass(StrEnum):
     WITHDRAWN = "withdrawn"
     REFUSED_GAIN = "refused_gain"
     COMPILE_LOSS = "compile_loss"
+    UNSEEN = "unseen"
     NEVER_OFFERED = "never_offered"
     EVIDENCE_MISSING = "evidence_missing"
     MODEL_LIMIT = "model_limit"
@@ -53,7 +55,8 @@ class RedClass(StrEnum):
 
 #: The classes that are the pipeline's fault, never an acceptable end.
 PIPELINE_CLASSES = frozenset({RedClass.REFUSED_GAIN, RedClass.COMPILE_LOSS,
-                              RedClass.NEVER_OFFERED, RedClass.EVIDENCE_MISSING})
+                              RedClass.UNSEEN, RedClass.NEVER_OFFERED,
+                              RedClass.EVIDENCE_MISSING})
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,13 +138,17 @@ def _real_unit(ledger: AskLedger, unit: str, test: str) -> bool:
 
 
 def red_ledger(red: Iterable[str], *, reading: DueReading, ledger: AskLedger,
+               sight: SightReading,
                runs: Iterable[RunFacts] = (),
                words: Mapping[str, str] | None = None) -> tuple[RedEntry, ...]:
     """One entry per red test (bare names).
 
-    Order: withdrawn, unrepaired refused gain, never offered (including a
-    session route that cannot be built), unrepaired compile loss, evidence
-    missing, open while something is owed, model limit only with proof."""
+    Order: withdrawn, unrepaired refused gain, unseen (the exit sweep held no
+    observation of the test executing: a measurement gap, the pipeline's,
+    with the reason `test_sight` read), never offered (including a session
+    route that cannot be built), unrepaired compile loss, evidence missing,
+    open while something is owed, model limit only with proof. `sight` is
+    required: an exit that could not judge sight passes one not taken."""
     runs = tuple(runs)
     out: list[RedEntry] = []
     for t in sorted({_bare(x) for x in red}):
@@ -158,6 +165,14 @@ def red_ledger(red: Iterable[str], *, reading: DueReading, ledger: AskLedger,
                 "a reverted run turned it green: " + gained_by[-1].label,
                 {"runs": [r.label for r in gained_by],
                  "newly_red": sorted(gained_by[-1].newly_red)}))
+            continue
+        unseen = sight.by_test.get(t)
+        if unseen is not None and sight.is_unseen(t):
+            out.append(RedEntry(
+                t, RedClass.UNSEEN,
+                f"no observation of it executing: {unseen.reason}"
+                + (f" ({unseen.detail})" if unseen.detail else ""),
+                {"reason": str(unseen.reason), "detail": unseen.detail}))
             continue
         if t in reading.unread or t in reading.unread_spent:
             out.append(RedEntry(t, RedClass.NEVER_OFFERED,

@@ -30,6 +30,8 @@ from typing import Any
 
 import pytest
 
+from pipeline_core.adapters.coverage_owner import ProbeWorld
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(os.environ.get("INTEGRATION") != "1",
@@ -143,7 +145,8 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
     structure = _structure()
 
     reading = measure_coverage_slice(
-        project, _CLUSTER, failing_tests={"test_size"}, cluster_env=env,
+        project, _CLUSTER, failing_tests={"test_size"},
+        worlds=(ProbeWorld("", env),),
         enumerate_fns=structure.enumerate_fns, timeout=300, workers=1)
     assert reading is not None, "the coverage reading could not be taken"
     unit = FnLocator("src/lib.rs", "label")
