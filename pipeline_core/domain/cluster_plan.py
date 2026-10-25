@@ -382,7 +382,19 @@ def fill_invariants_section(
     its own gated items simply exist — run `292191-d60a5308` (2026-10-02),
     six `stable` constructors that read `stable`-only items unguarded and did
     not build in `nightly`. With no plan, or one world, the text is the
-    one-world text as before."""
+    one-world text as before.
+
+    The several-world text names no world for the tests. It used to end
+    "the tests that judge it here run in `<cluster.name>`", and the loop's
+    identity carries the HOME world's name (`one_tree_cluster`), so every
+    fill was told its tests run in the home world. Run `1700492-f6c4d66c`
+    (2026-10-24): the only target test of the `src/error.rs` fill failed
+    only in `nightly::tests/doc_error_gen_6.rs`, a file `stable` does not
+    build, and the prompt said its tests run in `stable`. Which world judges
+    a test is a fact of that test, not of the route: this section is built
+    once per route entry, before any unit is claimed, and one route run aims
+    at tests of different worlds. Each quoted failure names the world it was
+    captured in (`test_report.failure_evidence_by_test`)."""
     if cluster is None:
         world = ""
     elif len(worlds) > 1:
@@ -390,8 +402,9 @@ def fill_invariants_section(
         world = (
             f"This source is ONE tree compiled in EVERY cfg world below "
             f"({names}). A body you write is built in each of them and must "
-            f"compile in all; the tests that judge it here run in "
-            f"`{cluster.name}`.\n" + cfg_world_rules(worlds))
+            f"compile in all. Every test run judges it in every world that "
+            f"builds the test, and each failure quoted below names the world "
+            f"it failed in.\n" + cfg_world_rules(worlds))
     else:
         world = cfg_world_rules([cluster])
     return "\n\n".join(s for s in (no_std, world, macro_invariants) if s)

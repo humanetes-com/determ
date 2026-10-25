@@ -100,7 +100,12 @@ def test_an_unmarked_record_renders_exactly_as_before() -> None:
 def test_the_invariants_section_describes_every_world_when_there_are_several() -> None:
     text = fill_invariants_section(_BASE, no_std="", macro_invariants="", worlds=_PLAN)
     assert text.startswith("This source is ONE tree compiled in EVERY cfg world below (`alt`, `base`).")
-    assert "the tests that judge it here run in `base`" in text
+    # The loop identity's name is the HOME world's; which world judges a test
+    # is that test's fact, carried by its quoted failure. Run
+    # `1700492-f6c4d66c` (2026-10-24) was told its nightly-only test ran in
+    # `stable`.
+    assert "run in `base`" not in text and "run in `alt`" not in text
+    assert "each failure quoted below names the world it failed in" in text
     assert "- cfg world `alt`:" in text and "- cfg world `base`:" in text
     assert "only from a context gated by the SAME predicate" in text
     # NEGATIVE CONTROL: the one-world text names its own world only and says

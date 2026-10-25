@@ -111,7 +111,7 @@ def _localize(capture: str) -> tuple[Any, list[str]]:
 
     deps = CrashLocalizerDeps(gdb_localize=gdb, asan_sweep=asan,
                               log=lambda m: None)
-    return localize_crashes(deps, capture, "cargo test", Path("/w"), {}), calls
+    return localize_crashes(deps, capture, "cargo test", Path("/w"), lambda _w: {}), calls
 
 
 def test_the_localizer_reads_the_overflow_and_skips_the_sanitizer() -> None:

@@ -162,7 +162,7 @@ def test_u2_codependent_stub_panic_keeps_body(monkeypatch, tmp_path):
         U2Verdict,
     )
     _ext = ((TestFailure("t_answer", FailureKind.STUB_PANIC,
-                         "src/other.rs", 1, 1, "not implemented"),
+                         "src/other.rs", 1, 1, "not implemented", ""),
              FnSite("src/other.rs", "sibling", "")),)
     install_app_seams(
         monkeypatch,

@@ -63,7 +63,7 @@ def _deps(gdb_result=None, asan_result=None, *, log=None):
 
 
 def _run(deps, sweep=_SWEEP_WITH_CRASH, root=Path("/w")):
-    return localize_crashes(deps, sweep, "cargo test", root, {})
+    return localize_crashes(deps, sweep, "cargo test", root, lambda _w: {})
 
 
 def test_no_crashed_binary_short_circuits() -> None:
@@ -184,7 +184,7 @@ def test_max_binaries_caps_gdb_reruns() -> None:
     deps, calls = _deps(gdb_result=("SIGSEGV",
                                     [{"func": "a::f", "file": "src/x.rs", "line": 1}]),
                         asan_result="no-adapter")
-    localize_crashes(deps, sweep, "cargo test", Path("/w"), {}, max_binaries=2)
+    localize_crashes(deps, sweep, "cargo test", Path("/w"), lambda _w: {}, max_binaries=2)
     assert len(calls["gdb"]) == 2
 
 
@@ -207,7 +207,7 @@ def test_a_sanitized_site_supersedes_only_the_gdb_site_of_its_own_binary() -> No
     deps, _ = _deps(gdb_result=("SIGSEGV",
                                 [{"func": "a::fmt", "file": "src/error.rs", "line": 572}]),
                     asan_result=(101, _ASAN_OUT), log=logged.append)
-    sites = localize_crashes(deps, sweep, "cargo test", Path("/w"), {})
+    sites = localize_crashes(deps, sweep, "cargo test", Path("/w"), lambda _w: {})
     by_label = {s.binary_label: s for s in sites}
     assert set(by_label) == {"tests/test_source.rs", "tests/test_convert.rs"}
     assert by_label["tests/test_source.rs"].blamed_locator == FnLocator(
@@ -239,7 +239,7 @@ def test_non_memory_crash_survives_alongside_origin_site() -> None:
         gdb_localize=_gdb,
         asan_sweep=lambda *_a, **_k: (101, _ASAN_OUT),
         log=lambda _m: None)
-    sites = localize_crashes(deps, sweep, "cargo test", Path("/w"), {})
+    sites = localize_crashes(deps, sweep, "cargo test", Path("/w"), lambda _w: {})
     blamed = {s.blamed_locator for s in sites}
     assert FnLocator("src/error.rs", "construct_from_std") in blamed
     assert FnLocator("src/x.rs", "spin") in blamed
@@ -547,7 +547,7 @@ def test_two_reports_become_two_sites_neither_of_them_nobody(tmp_path: Path) -> 
     logged: list[str] = []
     deps, calls = _deps(gdb_result=None, asan_result=(1, sweep),
                         log=logged.append)
-    before = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    before = localize_crashes(deps, sweep, "cargo test", tmp_path, lambda _w: {})
     assert [(s.binary_label, s.blamed_locator) for s in before] == [
         ("tests/error_gen_3.rs", None),
         ("tests/test_downcast.rs", FnLocator("src/error.rs", "drop"))], (
@@ -562,7 +562,7 @@ def test_two_reports_become_two_sites_neither_of_them_nobody(tmp_path: Path) -> 
 
     sweep = _live_sweep(_SWEEP_ITER4, tmp_path, with_tests=True)
     deps, calls = _deps(gdb_result=None, asan_result=(1, sweep))
-    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, lambda _w: {})
     assert calls["asan"] == ["cargo test"], "one sanitized sweep, read whole"
     assert len(sites) == 2
     segv, uaf = sites
@@ -590,7 +590,7 @@ def test_three_reports_become_three_sites(tmp_path: Path) -> None:
     line 124: the turbofish is a call."""
     sweep = _live_sweep(_SWEEP_ITER2, tmp_path, with_tests=True)
     deps, _ = _deps(gdb_result=None, asan_result=(1, sweep))
-    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, lambda _w: {})
     assert [(s.binary_label, s.test_name) for s in sites] == [
         ("tests/error_gen_3.rs",
          "test_reallocate_into_boxed_dyn_error_without_backtrace_preserves_std_error_trait"),
@@ -630,7 +630,7 @@ def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: 
     deps = CrashLocalizerDeps(gdb_localize=_gdb,
                               asan_sweep=lambda *_a, **_k: (1, sweep),
                               log=lambda _m: None)
-    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, {})
+    sites = localize_crashes(deps, sweep, "cargo test", tmp_path, lambda _w: {})
     by_label = {s.binary_label: s for s in sites}
     assert set(by_label) == {
         "tests/error_gen_3.rs", "tests/test_downcast.rs", "tests/test_context.rs"}

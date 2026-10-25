@@ -245,6 +245,7 @@ class SightReading:
         self, frontier: Mapping[FnLocator, Collection[str]],
         *,
         keep: Callable[[FnLocator, str], bool] | None = None,
+        keep_units: Collection[FnLocator] = (),
     ) -> dict[FnLocator, set[str]]:
         """Frontier edges a dispatch may aim, once this reading was taken.
 
@@ -254,15 +255,30 @@ class SightReading:
         ``keep`` says the edge is one the loop added for a reason other
         than the attribution guess (a crash, a held stub, an escalation
         product). A test this reading does not judge keeps its edges. A
-        unit with no test edge stays. Each seen test's observed units are
-        then added, reusing a key the path already has, so a frontier
-        that held only a guess still carries the observation.
+        unit with no test edge stays, and so does a unit in ``keep_units``
+        (the still-stubbed functions) whose edges all went: a stub is
+        fillable with no test aimed at it, which is what the stub union
+        puts it on the frontier for.
+
+        Nothing is added. A seen test whose every edge was a guess is left
+        with no edge, and its observed units reach dispatch through the
+        measured-owner admission (`escalation_lifetime.
+        escalate_to_measured_owners`, whose empty cohort counts as served
+        for a seen test), which applies the exhaustion, flat-grade, dead
+        and pair-withholding gates. Writing the units here put every
+        observed unit of every seen test on the eligible map after the
+        exhaustion filter: an exhausted unit came back every iteration, the
+        empty-frontier stop could never fire, and the coverage spine the
+        admission gate exists to hold back was dispatched whole (2026-10-24,
+        the walks of runs `9872-51b20f30` and `1947461-b4eb65c3` spun to
+        the backstop).
 
         Sight not taken returns the same edges and ignores ``keep``: a
         sweep that could not judge sight does not refuse a guess.
         """
         if not self.taken:
             return {k: set(ts) for k, ts in frontier.items()}
+        stubs = frozenset(keep_units)
         out: dict[FnLocator, set[str]] = {}
         for key, tests in frontier.items():
             kept: set[str] = set()
@@ -276,18 +292,8 @@ class SightReading:
                         kept.add(test)
                     continue
                 kept.add(test)
-            if kept or not tests:
+            if kept or not tests or key in stubs:
                 out[key] = kept
-        for test, sight in self.by_test.items():
-            if not sight.seen:
-                continue
-            for site in sight.units:
-                found = next((k for k in out if _same_unit(k, site)), None)
-                if found is None:
-                    found = FnLocator(site.file, site.fn_name)
-                    out[found] = set()
-                if test not in {_bare(t) for t in out[found]}:
-                    out[found].add(test)
         return out
 
 

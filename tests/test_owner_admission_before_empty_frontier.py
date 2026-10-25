@@ -90,9 +90,15 @@ def test_an_empty_frontier_admits_measured_owners_before_spending_a_readmission(
         test_cmd_builder=lambda stems, include_lib=False: "cargo test",
         tag="[c]")
 
-    assert handoffs[0] == frozenset({_A})
+    # The stub stays fillable. Its edge to `t1` is a guess the sweep did
+    # not observe (coverage says `t1` entered `b` only), so `t1`'s cohort
+    # is empty and, `t1` being seen, its measured owner is admitted on the
+    # first sweep: no later than the empty-frontier sweep this test was
+    # written for.
+    assert _A in handoffs[0]
     first_b = next((i for i, h in enumerate(handoffs) if _B in h), None)
-    assert first_b == 1, f"the owner is dispatched on the empty-frontier sweep: {handoffs}"
+    assert first_b is not None and first_b <= 1, (
+        f"the owner is dispatched by the empty-frontier sweep: {handoffs}")
     names = [ev for ev, _d in events]
     owner_at = names.index("phase_c.attribution.measured_owners")
     assert "phase_c.tdd.no_move_readmission" not in names[:owner_at], (

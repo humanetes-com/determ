@@ -394,7 +394,7 @@ def test_the_localizer_blames_both_members_of_the_recursion(
     sites = localize_crashes(
         CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
                            asan_sweep=None, log=logs.append),
-        out, _CMD, root, env)
+        out, _CMD, root, lambda _w: env)
     assert sites, "no crash site localized:\n" + "\n".join(logs)
     blamed = blamed_locators(sites)
     assert {FnLocator("src/lib.rs", "ping"),
@@ -564,7 +564,7 @@ def _trace_sites(root: Path, monkeypatch: pytest.MonkeyPatch,
     sites = localize_crashes(
         CrashLocalizerDeps(gdb_localize=gdb_localize, asan_sweep=None,
                            log=logs.append),
-        out, _CMD, root, env, max_binaries=4)
+        out, _CMD, root, lambda _w: env, max_binaries=4)
     return {s.test_name: s for s in sites}, logs
 
 
@@ -703,7 +703,7 @@ def _settle_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
         localize=lambda cap, excl: localize_crashes(
             CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
                                asan_sweep=None, log=logs.append),
-            cap, _CMD, root, env, exclude=excl, max_binaries=4),
+            cap, _CMD, root, lambda _w: env, exclude=excl, max_binaries=4),
         run_suite=lambda: _run(_CMD, root, env)[1],
         is_proven=lambda _u: False, src_dir=root,
         record_settled=lambda locs, _s: recorded.append(sorted(locs)),
@@ -826,7 +826,7 @@ def test_a_gdb_site_skips_the_destructor_by_its_symbol(
     logs: list[str] = []
     sites = localize_crashes(
         CrashLocalizerDeps(gdb_localize=_gdb, asan_sweep=None, log=logs.append),
-        out, _CMD, root, env)
+        out, _CMD, root, lambda _w: env)
     assert sites, "no crash site localized:\n" + "\n".join(logs)
     drop_frames = [f for f in raw[0] if str(f.get("func", "")).endswith("::drop")
                    and "{impl" in str(f.get("func", ""))]
@@ -840,7 +840,7 @@ def test_a_gdb_site_skips_the_destructor_by_its_symbol(
     control = localize_crashes(
         CrashLocalizerDeps(gdb_localize=_no_symbol, asan_sweep=None,
                            log=lambda _m: None),
-        out, _CMD, root, env)
+        out, _CMD, root, lambda _w: env)
     assert control and control[0].blamed_locator == FnLocator(
         "src/lib.rs", "drop"), "negative control: the printed name alone blames drop"
 
@@ -935,3 +935,110 @@ def test_the_same_failure_matches_and_a_moved_case_does_not(tmp_path: Path) -> N
     assert moved != original and not judge(moved).met
     # Negative control: the name-only rule excused the moved case too.
     assert not (frozenset({pair}) - (ref.failed | ref.ignored))
+
+
+# ---- a crash of another world is localized in that world (2026-10-25) ----
+#
+# The one-tree sweep joins every world into one capture. Walking the
+# localizer's callers after run `1700492-f6c4d66c` (2026-10-24) found all
+# three passing the home env, and the sanitized build was the home world's:
+# a test only another world builds was not in it. The fix rests on two facts
+# about the real tools: a test file gated by `#![cfg(alt)]` is not built
+# without that cfg (the premise below), and a sanitized build under the
+# other world's flags runs it and reports its fault. The invented crate's
+# `stale` reads freed memory (the sanitizer's report) and then aborts (the
+# native crash the sweep sees).
+
+_WORLD_LIB = """pub fn stale() -> u64 {
+    let b = Box::new(7u64);
+    let r: *const u64 = &*b;
+    drop(b);
+    let v = unsafe { std::ptr::read_volatile(r) };
+    std::process::abort();
+    #[allow(unreachable_code)]
+    v
+}
+"""
+
+_WORLD_TESTS = """#![cfg(alt)]
+#[test]
+fn reads_stale() {
+    assert_eq!(worlds::stale(), 7);
+}
+"""
+
+
+def _world_crate(root: Path) -> None:
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(
+        _CARGO_TOML.replace("handles", "worlds")
+        + "\n[lib]\ndoctest = false\n\n[lints.rust]\n"
+        + "unexpected_cfgs = { level = \"allow\" }\n")
+    (root / "src" / "lib.rs").write_text(_WORLD_LIB)
+    (root / "tests" / "gated.rs").write_text(_WORLD_TESTS)
+
+
+def _world_envs() -> tuple[dict[str, str], dict[str, str]]:
+    home = dict(os.environ)
+    home["CARGO_TARGET_DIR"] = str(_TARGET / "worlds-home")
+    home["RUST_BACKTRACE"] = "0"
+    alt = dict(home)
+    alt["CARGO_TARGET_DIR"] = str(_TARGET / "worlds-alt")
+    alt["RUSTFLAGS"] = (home.get("RUSTFLAGS", "") + " --cfg alt").strip()
+    return home, alt
+
+
+def _world_capture(root: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    from pipeline_core.domain.test_results import join_world_captures
+    _world_crate(root)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    home, alt = _world_envs()
+    _rc_h, out_h = run_cargo(CargoCli(), _CMD, root, home, timeout=600)
+    _rc_a, out_a = run_cargo(CargoCli(), _CMD, root, alt, timeout=600)
+    return join_world_captures([("base", out_h), ("alt", out_a)])
+
+
+def test_premise_a_cfg_gated_test_file_is_built_only_under_its_cfg(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cap = _world_capture(tmp_path / "w", monkeypatch)
+    by_world = {(b.world, b.label): b for b in parse_binary_results(cap)}
+    home_gated = by_world.get(("base", "tests/gated.rs"))
+    assert home_gated is None or home_gated.executed == 0, home_gated
+    alt_gated = by_world.get(("alt", "tests/gated.rs"))
+    assert alt_gated is not None and "reads_stale" in alt_gated.failed, by_world
+
+
+def test_the_sanitizer_runs_the_other_worlds_crash_in_that_world(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+
+    from pipeline_core.adapters.asan_sweep import run_asan_sweep
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    root = tmp_path / "w"
+    cap = _world_capture(root, monkeypatch)
+    home, alt = _world_envs()
+    logs: list[str] = []
+    deps = CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                              asan_sweep=run_asan_sweep, log=logs.append)
+    sites = localize_crashes(deps, cap, _CMD, root,
+                             lambda w: {"base": home, "alt": alt}.get(w))
+    assert sites, "no crash site localized:\n" + "\n".join(logs)
+    assert {s.world for s in sites} == {"alt"}, (sites, logs)
+    sanitized = [s for s in sites if s.origin_capable]
+    assert sanitized, "the alt world's sanitized build reported nothing:\n" + "\n".join(logs)
+    assert (root / "target-asan-alt").is_dir()
+    # NEGATIVE CONTROL: the pre-change binding re-runs every world under the
+    # home env. The sanitized build then compiles without `alt`, the gated
+    # test does not exist in it, and no sanitized site comes back.
+    logs0: list[str] = []
+    control = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                           asan_sweep=run_asan_sweep, log=logs0.append),
+        cap, _CMD, root, lambda _w: home)
+    assert not [s for s in control if s.origin_capable], (control, logs0)

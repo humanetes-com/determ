@@ -105,10 +105,10 @@ def _unactionable(
         # happened and is the double-panic renderer's question; only a
         # fault whose culprit is a body that made bad memory or a cycle
         # can be settled against that body.
-        return f"{site.binary_label}: {site.fault} is not settled", ()
+        return f"{site.key}: {site.fault} is not settled", ()
     culprits = site.culprit_frames
     if not culprits:
-        return f"{site.binary_label}: {site.blame_label}", ()
+        return f"{site.key}: {site.blame_label}", ()
     if (site.origin_traced and site.origin_traced_at_reader
             and not site.origin_stack_lines):
         # Outside the write only: a written reader is judged as written, as
@@ -118,13 +118,13 @@ def _unactionable(
         # stubbed and refuted a correct body. Only an origin the sanitizer
         # printed, or a trace that runs past a crate frame handed the
         # address, names a producer.
-        return (f"{site.binary_label}: the debugger's trace stops at the "
+        return (f"{site.key}: the debugger's trace stops at the "
                 f"frame that read the bad address ({culprits[0].fn_name}); a "
                 "pointer it loaded from memory has a producer the trace "
                 "cannot see"), ()
     proven = tuple(f for f in culprits if is_proven(frame_locator(f)))
     if proven:
-        return (f"{site.binary_label}: the culprit {proven[0].file_rel}::"
+        return (f"{site.key}: the culprit {proven[0].file_rel}::"
                 f"{proven[0].fn_name} is proven on this tree"), proven
     return None
 
@@ -181,7 +181,7 @@ def settle_step(
         site0, f0 = own[0]
         return SettlementStep(
             SettlementOutcome.OWN, tuple(_distinct(f for _s, f in own)),
-            reason=(f"{site0.binary_label}: the culprit is the written body "
+            reason=(f"{site0.key}: the culprit is the written body "
                     f"{f0.fn_name} ({f0.file_rel}:{f0.line})"))
     if outside:
         return SettlementStep(SettlementOutcome.STUB,

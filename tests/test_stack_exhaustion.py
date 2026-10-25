@@ -82,7 +82,7 @@ def _sites(fixture: str, binaries: list[tuple[str, str]]):
     sweep = "\n".join(
         f"    Running {label} (target/debug/deps/x-1)\nrunning 1 test\n"
         f"test {test} ...\n" for label, test in binaries)
-    return localize_crashes(deps, sweep, "cargo test", _ROOT, {})
+    return localize_crashes(deps, sweep, "cargo test", _ROOT, lambda _w: {})
 
 
 _TWO = "stack_overflow_ring2_38934_sweep7.txt"

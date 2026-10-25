@@ -45,23 +45,36 @@ def asan_test_cmd(test_cmd: str) -> list[str]:
     return out
 
 
+def asan_target_dir_name(world: str) -> str:
+    """The sanitized target dir of `world` under the tree: `target-asan`
+    for a one-world run, `target-asan-<world>` otherwise (a `/` in a world
+    name, as in a feature world, becomes `-`)."""
+    return f"target-asan-{world.replace('/', '-')}" if world else "target-asan"
+
+
 def run_asan_sweep(
     test_cmd: str,
     cwd: Path,
     env: dict[str, str],
     *,
+    world: str = "",
     timeout: int = 900,
 ) -> tuple[int, str] | None:
     """Run the cluster test command under ASAN in an isolated target dir.
     Returns (rc, combined output) — the output carries the ASAN report when
     anything faulted — or None when the run could not start (no cargo,
-    timeout: diagnostics unavailable, caller falls back to gdb evidence)."""
+    timeout: diagnostics unavailable, caller falls back to gdb evidence).
+
+    `env` is the env of the build world whose crash is localized (its
+    RUSTFLAGS carry that world's cfg), and `world` names that world's own
+    sanitized target dir: two worlds' flags in one target dir rebuild each
+    other's artefacts on every sweep. "" is the one-world dir."""
     argv = asan_test_cmd(test_cmd)
     asan_env = {
         **env,
         "RUSTFLAGS": (env.get("RUSTFLAGS", "") + " -Zsanitizer=address").strip(),
         "RUSTDOCFLAGS": (env.get("RUSTDOCFLAGS", "") + " -Zsanitizer=address").strip(),
-        "CARGO_TARGET_DIR": str(cwd / "target-asan"),
+        "CARGO_TARGET_DIR": str(cwd / asan_target_dir_name(world)),
         # halt_on_error keeps the report tight; use-after-return detection is
         # the load-bearing flag for dangling stack-'static schemes.
         "ASAN_OPTIONS": "detect_stack_use_after_return=1:halt_on_error=1",

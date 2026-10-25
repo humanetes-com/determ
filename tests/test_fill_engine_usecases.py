@@ -1654,7 +1654,7 @@ def test_external_only_keep_names_the_blockers_in_log_event_and_verdict(
     ws = _mk_ws(tmp_path)
     blocker = FnSite("src/error.rs", "construct", "impl Error")
     ext = ((TestFailure("test_downcast", FailureKind.STUB_PANIC,
-                        "src/error.rs", 1, 1, "not implemented"),
+                        "src/error.rs", 1, 1, "not implemented", ""),
             blocker),)
     fake = FakeFill(run=(0, ""), regr=None,
                     u2=U2Verdict.accept_external_only(ext))

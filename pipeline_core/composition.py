@@ -3023,9 +3023,18 @@ def build_app(
     def _localize_crashes(sweep_output: str, test_cmd: str,
                           workspace_root: Path, env: dict[str, str], /, *,
                           exclude: Collection[str] = ()) -> tuple[Any, ...]:
+        """`env` is the home env the sweep ran under; a crash of another
+        world is re-run under that world's own env, the one the sweep ran it
+        under (`WorldChecks.env_of`, the same env `_failure_reader` reads a
+        failing test in). With the every-world check off the capture holds
+        the home world only."""
+        def _world_env(world: str) -> dict[str, str] | None:
+            if _worlds is None:
+                return dict(env)
+            return _worlds.env_of(world, workspace_root, env)
         return _app_localize_crashes(
-            _crash_localizer_deps, sweep_output, test_cmd, workspace_root, env,
-            exclude=exclude)
+            _crash_localizer_deps, sweep_output, test_cmd, workspace_root,
+            _world_env, exclude=exclude)
 
     # Every compile check of a cluster tree also builds the other worlds
     # (`cargo_runner.WorldChecks`). `PHASE_C_ALL_WORLDS_CHECK=0` checks the

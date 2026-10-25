@@ -917,9 +917,11 @@ def u2_test_gate(
             _sites = sorted(
                 _ext, key=lambda s: (s.file, s.fn_name, s.container))
             _pairs = tuple(
+                # A destroyed verdict has no section, so no world to read
+                # it from: "" (`TestFailure.world`).
                 (TestFailure(test_name=n, kind=FailureKind.STUB_PANIC,
                              panic_file=s.file, panic_line=None,
-                             panic_col=None, body=""), s)
+                             panic_col=None, body="", world=""), s)
                 for n, s in zip(sorted(_aborted),
                                 _sites * len(_aborted), strict=False))
             return U2Verdict.accept_external_only(_pairs, frozenset(_aborted))

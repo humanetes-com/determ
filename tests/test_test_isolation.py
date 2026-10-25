@@ -277,7 +277,7 @@ def test_the_localizer_reruns_a_silent_abort_by_its_own_test(
 
     localize_crashes(CrashLocalizerDeps(gdb_localize=gdb, asan_sweep=None,
                                         log=lambda _m: None),
-                     out, "cargo test", tmp_path, {})
+                     out, "cargo test", tmp_path, lambda _w: {})
     # `a` printed its panics (a stub abort, attributable from its block);
     # only the silent `c` is a native fault worth a gdb run.
     assert seen == ["c"]

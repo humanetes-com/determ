@@ -312,9 +312,16 @@ def escalate_to_measured_owners(
     permanently_exhausted: Collection[FnLocator] = (),
     served: Collection[FnLocator] = (),
     paired_tests: Collection[str] = (),
+    seen_tests: Collection[str] = (),
 ) -> dict[FnLocator, set[str]]:
     """Admit coverage-slice owners once every attributed-or-escalated unit
     has been served (or is already unable to pay).
+
+    ``seen_tests`` are the owed red tests this sweep's sight observed
+    executing (`test_sight`). For one of them an EMPTY cohort is served:
+    the sight removed every edge it had as a guess, nothing attributed is
+    left to wait on, and its measured owners are the units it was observed
+    running. Any other test with an empty cohort still admits nothing.
 
     Grade unanimity cannot fire: run ``9872-51b20f30`` (2026-09-01) served
     the whole 30-unit cohort from iter 1 (floor-seeded ``_served_at``,
@@ -350,7 +357,7 @@ def escalate_to_measured_owners(
     for tname, loc in _admissible_owners(
             owners=owners, units_by_test=units_by_test, graded=graded,
             unable=unable, permanently_exhausted=permanently_exhausted,
-            served=served, paired_tests=paired_tests):
+            served=served, paired_tests=paired_tests, seen_tests=seen_tests):
         if loc not in already:
             out.setdefault(loc, set()).add(tname)
     return out
@@ -366,6 +373,7 @@ def attach_to_eligible_owners(
     permanently_exhausted: Collection[FnLocator] = (),
     served: Collection[FnLocator] = (),
     paired_tests: Collection[str] = (),
+    seen_tests: Collection[str] = (),
 ) -> dict[FnLocator, set[str]]:
     """The measured owners already on the frontier that a test the
     admission would admit them for is not yet aimed by.
@@ -388,7 +396,7 @@ def attach_to_eligible_owners(
     for tname, loc in _admissible_owners(
             owners=owners, units_by_test=units_by_test, graded=graded,
             unable=unable, permanently_exhausted=permanently_exhausted,
-            served=served, paired_tests=paired_tests):
+            served=served, paired_tests=paired_tests, seen_tests=seen_tests):
         if loc in eligible and tname not in eligible[loc]:
             out.setdefault(loc, set()).add(tname)
     return out
@@ -403,21 +411,24 @@ def _admissible_owners(
     permanently_exhausted: Collection[FnLocator],
     served: Collection[FnLocator],
     paired_tests: Collection[str],
+    seen_tests: Collection[str] = (),
 ) -> list[tuple[str, FnLocator]]:
     """(test, owner) pairs past the measured-owner gate: the test is not
-    withheld by a pair, its attributed cohort is served or unable to pay,
-    and the owner is neither unable, exhausted nor graded flat."""
+    withheld by a pair, its attributed cohort is served or unable to pay
+    (an empty cohort counts as served only for a seen test), and the owner
+    is neither unable, exhausted nor graded flat."""
     served_keys = frozenset(served)
     unable_set = frozenset(unable)
     exhausted = frozenset(permanently_exhausted)
     graded_set = frozenset(graded)
     paired = frozenset(paired_tests)
+    seen = frozenset(str(t).rsplit("::", 1)[-1] for t in seen_tests)
     out: list[tuple[str, FnLocator]] = []
     for tname, owner_set in owners.items():
         if tname in paired:
             continue
         cohort = frozenset(units_by_test.get(tname, ()))
-        if not cohort:
+        if not cohort and str(tname).rsplit("::", 1)[-1] not in seen:
             continue
         done = ((cohort & served_keys) | (cohort & unable_set)
                 | (cohort & exhausted))

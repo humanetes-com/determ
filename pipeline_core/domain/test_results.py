@@ -670,16 +670,46 @@ def split_test_stdout_sections(output: str) -> list[tuple[str, str]]:
     otherwise the LAST matched section absorbs every subsequent binary's
     output when `cargo test` runs the whole suite in one invocation), or end
     of output — stripped. Order preserved; a name repeats in the list if
-    cargo printed its stdout section more than once."""
-    sections: list[tuple[str, list[str]]] = []
+    cargo printed its stdout section more than once. The world each section
+    was captured in is :func:`split_test_stdout_sections_in_worlds`."""
+    return [(name, body)
+            for _w, name, body in split_test_stdout_sections_in_worlds(output)]
+
+
+def split_test_stdout_sections_in_worlds(
+    output: str,
+) -> list[tuple[str, str, str]]:
+    """`(world, test_name, body)` for each section of
+    :func:`split_test_stdout_sections`, in the same order. `world` is the
+    world whose part of a :func:`join_world_captures` capture holds the
+    section, read off the :func:`world_header` that opened that part; "" for
+    a capture of one world, which carries no header. A world header also
+    closes an open section: the next world's output is never one section's
+    body.
+
+    The world was dropped here before 2026-10-25, and every reader of a
+    failure's text lost it with it. Run `1700492-f6c4d66c` (2026-10-24): the
+    one red test failed only in `nightly::tests/doc_error_gen_6.rs`, its
+    quoted failure named no world, and the same prompt said the tests run
+    in `stable`."""
+    sections: list[tuple[str, str, list[str]]] = []
+    world = ""
     cur_name: str | None = None
     cur_body: list[str] = []
     for ln in output.splitlines():
+        head = _world_of_line(ln)
+        if head is not None:
+            if cur_name is not None:
+                sections.append((world, cur_name, cur_body))
+                cur_name = None
+                cur_body = []
+            world = head
+            continue
         toks = ln.split()
         if (ln[:4] == "----" and len(toks) >= 4
                 and toks[0] == "----" and toks[2] == "stdout" and toks[3] == "----"):
             if cur_name is not None:
-                sections.append((cur_name, cur_body))
+                sections.append((world, cur_name, cur_body))
             cur_name = toks[1]
             cur_body = []
             continue
@@ -687,14 +717,14 @@ def split_test_stdout_sections(output: str) -> list[tuple[str, str]]:
             stripped = ln.strip()
             if (stripped == "failures:" or stripped.startswith("test result:")
                     or stripped.startswith("running ")):
-                sections.append((cur_name, cur_body))
+                sections.append((world, cur_name, cur_body))
                 cur_name = None
                 cur_body = []
                 continue
             cur_body.append(ln)
     if cur_name is not None:
-        sections.append((cur_name, cur_body))
-    return [(name, "\n".join(body).strip()) for name, body in sections]
+        sections.append((world, cur_name, cur_body))
+    return [(w, name, "\n".join(body).strip()) for w, name, body in sections]
 
 
 def build_phase_output(output: str) -> str:
@@ -824,12 +854,34 @@ def sweep_build(cargo_output: str, expected_labels: Iterable[str]) -> SweepBuild
 def failure_bodies_for(output: str, names: set[str]) -> dict[str, str]:
     """The stdout-section body for each of `names` present in `output` (first
     occurrence wins). A name with no captured output (empty body) is omitted
-    — a bare header tells the caller nothing a blind tail-slice wouldn't."""
-    bodies: dict[str, str] = {}
-    for name, body in split_test_stdout_sections(output):
-        if name in names and body and name not in bodies:
-            bodies[name] = body
-    return bodies
+    — a bare header tells the caller nothing a blind tail-slice wouldn't.
+
+    A name whose sections sit in two or more worlds of a joined capture
+    keeps the first section of EACH world, each under
+    :func:`world_failure_line`: keeping the first world's alone dropped the
+    other world's panic and abort from the scoped run's detail, from the
+    abort reading and from the crash judge's stub reading. A name failing in
+    one world reads byte for byte as before."""
+    per_world: dict[str, dict[str, str]] = {}
+    for world, name, body in split_test_stdout_sections_in_worlds(output):
+        if name in names and body:
+            per_world.setdefault(name, {}).setdefault(world, body)
+    out: dict[str, str] = {}
+    for name, by_world in per_world.items():
+        if len(by_world) == 1:
+            out[name] = next(iter(by_world.values()))
+        else:
+            out[name] = "\n\n".join(f"{world_failure_line(w)}\n{b}"
+                                    for w, b in by_world.items())
+    return out
+
+
+def world_failure_line(world: str) -> str:
+    """The line that names the cfg world a quoted failure was captured in,
+    written above that failure's text by every renderer of a joined
+    capture's failures (`failure_bodies_for`,
+    `test_report.failure_evidence_by_test`)."""
+    return f"(failed in cfg world `{world}`)"
 
 
 @dataclass(frozen=True, slots=True)

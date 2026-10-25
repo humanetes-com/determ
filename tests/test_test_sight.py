@@ -142,10 +142,13 @@ def test_the_frontier_edges_of_an_unseen_test_leave_and_a_seen_tests_stay() -> N
 
 def test_a_seen_test_drops_a_unit_the_sight_did_not_observe() -> None:
     """A guess aimed at a test this sweep did see is not dispatched. The
-    unit the sight names stays, and is added when the frontier did not
-    already hold it. ``keep`` preserves one more edge and does not save
-    an unseen test's edge. A path that differs only by a leading ``src/``
-    reuses the key. Sight not taken ignores ``keep`` and adds nothing."""
+    unit the sight names keeps its edge. Nothing is added: a seen test left
+    with no edge reaches its observed units through the measured-owner
+    admission, which applies the exhaustion and grade gates (adding them
+    here re-dispatched exhausted units forever). ``keep`` preserves one
+    more edge and does not save an unseen test's edge; ``keep_units`` keeps
+    a stub whose edges all went. A path that differs only by a leading
+    ``src/`` matches. Sight not taken ignores ``keep``."""
     cov = CoverageSlice(owners={"seen": frozenset({_A})},
                         failing=frozenset({"seen", "blind"}),
                         worlds=frozenset({"home"}))
@@ -168,7 +171,9 @@ def test_a_seen_test_drops_a_unit_the_sight_did_not_observe() -> None:
     assert out[extra] == {"seen"}
     assert out[stub] == set()
     lone = reading.edges_without_unseen({guess: {"seen"}})
-    assert lone == {FnLocator("src/a.rs", "alpha"): {"seen"}}
+    assert lone == {}
+    assert reading.edges_without_unseen(
+        {guess: {"seen"}}, keep_units={guess}) == {guess: set()}
     bare = FnSite("a.rs", "alpha", "impl A")
     cov2 = CoverageSlice(owners={"seen": frozenset({bare})},
                          failing=frozenset({"seen"}),

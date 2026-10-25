@@ -921,6 +921,28 @@ class CrashSite:
     # report that carried no free or allocation stack. The localizer
     # supersedes a traced site only when this is non-zero.
     origin_stack_lines: int = 0
+    # The build world the crashed binary ran in, when the sweep's capture
+    # joined worlds (`test_results.BinaryResult.world`); "" for a one-world
+    # reading. Set by the localizer, the one reader that knows which world's
+    # binary and env it re-ran: the one-tree sweep runs the same labels in
+    # every world, so a label alone does not say whose crash this is, and
+    # the sanitizer used to rebuild the home world only.
+    world: str = ""
+
+    @property
+    def key(self) -> str:
+        """The crashed binary's identity in a joined reading: its label,
+        qualified by its world (`test_results.binary_key`, written inline:
+        this module may not import `test_results`)."""
+        return f"{self.world}::{self.binary_label}" if self.world else self.binary_label
+
+    @property
+    def binary_text(self) -> str:
+        """How the evidence names the binary: its label, and the cfg world
+        it ran in when the reading joined worlds."""
+        if self.world:
+            return f"`{self.binary_label}` (cfg world `{self.world}`)"
+        return f"`{self.binary_label}`"
 
     @property
     def fault(self) -> FaultClass:
@@ -1064,7 +1086,7 @@ class CrashSite:
         where = f" while running `{self.test_name}`" if self.test_name else ""
         tests = ", ".join(f"`{t}`" for t in self.chain_tests)
         lines = [
-            f"Test binary `{self.binary_label}` died with {self.signal}"
+            f"Test binary {self.binary_text} died with {self.signal}"
             f"{where} — it never reported its remaining tests, and the crash "
             "reproduces deterministically.",
             "The sanitizer looked for the memory's origin and found NO "
@@ -1144,7 +1166,7 @@ def _render_invalid_memory(site: CrashSite) -> str:
     prescription was measured on, and no other."""
     where = f" while running `{site.test_name}`" if site.test_name else ""
     lines = [
-        f"Test binary `{site.binary_label}` died with {site.signal}"
+        f"Test binary {site.binary_text} died with {site.signal}"
         f"{where} — it never reported its remaining tests.",
     ]
     if site.destruction is not None:
@@ -1244,7 +1266,7 @@ def _render_other_fault(site: CrashSite) -> str:
     crate frame): the memory-lifetime instruction was printed for it."""
     where = f" while running `{site.test_name}`" if site.test_name else ""
     lines = [
-        f"Test binary `{site.binary_label}` died with {site.signal}"
+        f"Test binary {site.binary_text} died with {site.signal}"
         f"{where} — it never reported its remaining tests.",
         "Crate frames it was on (innermost first):",
     ]
@@ -1290,8 +1312,8 @@ def render_exhaustion_evidence(sites: Sequence[CrashSite]) -> str:
     first = sites[0]
     tests = sorted({t for s in sites for t in [s.test_name] if t})
     who = (f"Test(s) {', '.join(f'`{t}`' for t in tests)}" if tests
-           else f"Test binary `{first.binary_label}`")
-    binaries = sorted({s.binary_label for s in sites})
+           else f"Test binary {first.binary_text}")
+    binaries = sorted({s.key for s in sites})
     lines = [f"{who} died with a STACK OVERFLOW"
              + (f" ({len(binaries)} test binaries, one stack)"
                 if len(binaries) > 1 else "")

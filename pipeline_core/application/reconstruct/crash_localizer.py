@@ -25,7 +25,7 @@ concrete frames), and the exhaustion gate (crash evidence voids a prior
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pipeline_core.domain.crash_site import (
@@ -246,6 +246,7 @@ def _asan_sites(
     test_cmd: str,
     workspace_root: Path,
     env: dict[str, str],
+    world: str,
 ) -> tuple[CrashSite, ...]:
     """Run the sanitized sweep once and build one ORIGIN-bearing site per
     AddressSanitizer report — one per crashed binary.
@@ -259,10 +260,16 @@ def _asan_sites(
     `tests/error_gen_3.rs` SEGV with an empty origin, while the
     `tests/test_context.rs` and `tests/test_downcast.rs` use-after-frees —
     both with `Error::drop` in-crate on their free stacks — were never read.
+
+    `world` is the build world whose crash this sweep is for, and `env` that
+    world's env: the sanitized build compiles what that world compiles, in
+    its own target dir, and every site it yields carries the world. One
+    sanitized build of the home world could not run a test only another
+    world builds.
     """
     if deps.asan_sweep is None:
         return ()
-    asan = deps.asan_sweep(test_cmd, workspace_root, env)
+    asan = deps.asan_sweep(test_cmd, workspace_root, env, world=world)
     if asan is None:
         return ()
     _rc, out = asan
@@ -278,20 +285,29 @@ def _asan_sites(
             deps, report, hit.dangling if hit is not None else None,
             workspace_root)
         if site is not None:
-            sites.append(site)
+            sites.append(replace(site, world=world))
     return tuple(sites)
 
 
-def crash_key(label: str, test: str | None) -> str:
-    """One native crash's identity: the binary, and under test isolation the
-    one test whose process died (a binary can hold a crash that predates a
-    change beside one the change caused)."""
-    return f"{label}::{test}" if test else label
+def crash_key(binary: str, test: str | None) -> str:
+    """One native crash's identity: the binary (its world-qualified key,
+    `BinaryResult.key`), and under test isolation the one test whose process
+    died (a binary can hold a crash that predates a change beside one the
+    change caused). Keyed by the label alone, the same binary crashing in
+    two worlds was one crash, and a crash the change caused in one world
+    was excused by the other world's crash from before it."""
+    return f"{binary}::{test}" if test else binary
 
 
 def crash_keys(binaries: Sequence[BinaryResult]) -> frozenset[str]:
     """:func:`crash_key` of every native crash a reading shows."""
-    return frozenset(crash_key(b.label, t) for b, t in native_crashes(binaries))
+    return frozenset(crash_key(b.key, t) for b, t in native_crashes(binaries))
+
+
+#: The env a re-run of a crash takes, by the world it ran in (`BinaryResult
+#: .world`; "" for a one-world reading); None for a world this run has no
+#: env for. Composition binds it to `cargo_runner.WorldChecks.env_of`.
+WorldEnv = Callable[[str], "dict[str, str] | None"]
 
 
 def localize_crashes(
@@ -299,12 +315,21 @@ def localize_crashes(
     sweep_output: str,
     test_cmd: str,
     workspace_root: Path,
-    env: dict[str, str],
+    world_env: WorldEnv,
     *,
     max_binaries: int = 3,
     exclude: Collection[str] = (),
 ) -> tuple[CrashSite, ...]:
     """Localize every crashed binary visible in ``sweep_output`` (capped).
+
+    Each crash is re-run in the world it crashed in: ``world_env`` gives the
+    env of the binary's world (`BinaryResult.world`), the sanitized sweep is
+    built once per world that needs an origin, and every site carries its
+    world. A world with no env is named in the log and localized by nobody.
+    Before 2026-10-25 every re-run took the home env and the one sanitized
+    build was the home world's, so a test only another world builds was not
+    in it, and a home report could supersede another world's debugger site
+    of the same label.
 
     gdb runs first because it is cheap and confirms WHICH binary/test dies,
     but its backtrace names only the faulting frame. For an invalid-memory
@@ -330,25 +355,40 @@ def localize_crashes(
     # abort names its test exactly, so gdb re-runs that one test
     # (`test_filter`) instead of the whole binary.
     crashed = [c for c in native_crashes(parse_binary_results(sweep_output))
-               if crash_key(c[0].label, c[1]) not in exclude]
+               if crash_key(c[0].key, c[1]) not in exclude]
     if not crashed:
         return ()
     considered = crashed[:max_binaries]
     # What each isolated test's own process announced when it aborted: the
     # debugger's signal names how the process died, not why (a stack
     # overflow is a SIGSEGV to gdb), and the site's fault class reads this
-    # first.
+    # first. Keyed by the test name: a name aborting in two worlds reads one
+    # cause (the outcome readers' name key, not this function's to change).
     causes = abort_readings(sweep_output)
     sites: list[CrashSite] = []
+    envs: dict[str, dict[str, str] | None] = {}
+
+    def _env(world: str) -> dict[str, str] | None:
+        if world not in envs:
+            envs[world] = world_env(world)
+            if envs[world] is None:
+                deps.log(f"  [phase-c/crash-localizer] a crash ran in cfg world "
+                         f"`{world}`, and this run has no env for that world "
+                         "— its binaries get no crash evidence.")
+        return envs[world]
+
     for b, test_filter in considered:
         if not b.exe_path:
             # A crashed binary with no executable path cannot be re-run, so it
             # gets no backtrace and no ASAN blame — and the sweep still counts
             # its tests as failing. Silence here read as "localized nothing",
             # which is a different fact from "could not name the target".
-            deps.log(f"  [phase-c/crash-localizer] {b.label} crashed but cargo "
+            deps.log(f"  [phase-c/crash-localizer] {b.key} crashed but cargo "
                      "printed no executable path for it — cannot re-run it, so "
                      "this binary gets no crash evidence.")
+            continue
+        env = _env(b.world)
+        if env is None:
             continue
         exe = Path(b.exe_path)
         if not exe.is_absolute():
@@ -362,12 +402,12 @@ def localize_crashes(
         # (an adapter or double that does not read it) traces nothing.
         signal, frames = got[0], got[1]
         fault_addr = got[2] if len(got) > 2 else None
-        site = site_from_frames(
+        site = replace(site_from_frames(
             b.label, b.dangling, signal, frames, fault_addr=fault_addr,
-            abort=causes.get(b.dangling or ""))
+            abort=causes.get(b.dangling or "")), world=b.world)
         if site.origin_traced:
             deps.log("  [phase-c/crash-localizer] "
-                     f"{site.signal} in {b.label}: the faulting address was "
+                     f"{site.signal} in {b.key}: the faulting address was "
                      "handed down to the faulting frame; it was produced in "
                      + ", ".join(f"{f.file_rel}::{f.fn_name} (line {f.line})"
                                  for f in site.origin_frames))
@@ -380,23 +420,32 @@ def localize_crashes(
     # report. An invalid-memory fault needs it even when the debugger
     # already filled origin frames: that trace follows a pointer the
     # faulting frame was handed, and a pointer loaded from a field is
-    # produced by the loader, which is the sanitizer's question.
-    unreproduced = len(sites) < len(considered)
-    needs_origin = unreproduced or any(
-        s.fault is FaultClass.INVALID_MEMORY for s in sites)
-    if not needs_origin:
-        return tuple(sites)
-    if unreproduced:
-        why = "native re-run showed no fault (layout-dependent crash)"
-    elif any(s.origin_traced for s in sites):
-        why = ("a traced origin followed a pointer the faulting frame was "
-               "handed")
-    else:
-        why = "backtrace names only the faulting frame"
-    deps.log("  [phase-c/crash-localizer] "
-             + why
-             + " — running ASAN sweep for the memory's origin.")
-    asan = _asan_sites(deps, test_cmd, workspace_root, env)
+    # produced by the loader, which is the sanitizer's question. Decided per
+    # world: each world's sanitized build is its own, and only a world whose
+    # crash needs an origin pays for one.
+    asan: list[CrashSite] = []
+    for world in sorted({b.world for b, _t in considered}):
+        w_sites = [s for s in sites if s.world == world]
+        unreproduced = len(w_sites) < sum(
+            1 for b, _t in considered if b.world == world)
+        if not (unreproduced or any(
+                s.fault is FaultClass.INVALID_MEMORY for s in w_sites)):
+            continue
+        env = _env(world)
+        if env is None:
+            continue
+        if unreproduced:
+            why = "native re-run showed no fault (layout-dependent crash)"
+        elif any(s.origin_traced for s in w_sites):
+            why = ("a traced origin followed a pointer the faulting frame was "
+                   "handed")
+        else:
+            why = "backtrace names only the faulting frame"
+        deps.log("  [phase-c/crash-localizer] "
+                 + why
+                 + " — running ASAN sweep for the memory's origin"
+                 + (f" in cfg world `{world}`." if world else "."))
+        asan.extend(_asan_sites(deps, test_cmd, workspace_root, env, world))
     if not asan:
         return tuple(sites)
     # Each test binary is its own process and its own heap. A sanitized site
@@ -413,18 +462,19 @@ def localize_crashes(
     # origin stack: the trace followed the fault address to the frame that
     # produced it, and a SEGV report has nothing to set against that. An
     # untraced debugger site names only its innermost frame, so a
-    # sanitized site of the same binary supersedes it, origin or not.
-    stands = ({s.binary_label for s in sites if s.origin_traced}
-              - {a.binary_label for a in asan if a.origin_stack_lines > 0})
-    asan_labels = {a.binary_label for a in asan} - stands
-    kept = [s for s in sites if s.binary_label not in asan_labels]
-    kept_asan = [a for a in asan if a.binary_label not in stands]
+    # sanitized site of the same binary supersedes it, origin or not. "The
+    # same binary" is the same label in the same world (`CrashSite.key`).
+    stands = ({s.key for s in sites if s.origin_traced}
+              - {a.key for a in asan if a.origin_stack_lines > 0})
+    asan_keys = {a.key for a in asan} - stands
+    kept = [s for s in sites if s.key not in asan_keys]
+    kept_asan = [a for a in asan if a.key not in stands]
     superseded = len(sites) - len(kept)
     if superseded:
         deps.log(f"  [phase-c/crash-localizer] {superseded} gdb backtrace(s) "
                  "superseded by the sanitized site of the same binary.")
-    stood = [s for s in kept if s.binary_label in stands
-             and any(a.binary_label == s.binary_label for a in asan)]
+    stood = [s for s in kept if s.key in stands
+             and any(a.key == s.key for a in asan)]
     if stood:
         deps.log(f"  [phase-c/crash-localizer] {len(stood)} sanitized "
                  "report(s) printed no origin stack; the traced site of "

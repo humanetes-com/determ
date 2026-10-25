@@ -328,6 +328,13 @@ def test_negative_control_the_dispatchable_cohort_spends_a_readmission_first(
     monkeypatch.setattr(
         _mod, "attributed_cohorts",
         lambda _frontier, eligible: real({}, eligible))
+    # The pre-fix loop also had no sight: today a seen test's empty cohort
+    # counts as served, which admits the owner by a second route. Not taken
+    # restores the whole pre-fix shape.
+    real_sight = _mod.sight_reading
+    monkeypatch.setattr(
+        _mod, "sight_reading",
+        lambda owed, obs, taken=True: real_sight(owed, obs, taken=False))
     logs, events, batches = _replay_exhausted(monkeypatch, tmp_path)
     assert _first(logs, _READMIT) < len(logs), (
         "the recorded shape: a re-admission is spent")

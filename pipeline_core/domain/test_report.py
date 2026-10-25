@@ -40,8 +40,9 @@ from pipeline_core.domain.test_results import (
     failure_bodies_for,
     parse_binary_results,
     parse_failed_tests,
-    split_test_stdout_sections,
+    split_test_stdout_sections_in_worlds,
     strip_libtest_qualifier,
+    world_failure_line,
 )
 
 
@@ -67,6 +68,13 @@ class TestFailure:
     panic_line: int | None
     panic_col: int | None
     body: str                   # the test's `---- name stdout ----` section (uncapped)
+    # The build world whose part of a joined capture (`test_results
+    # .join_world_captures`) holds `body`; "" for a capture of one world.
+    # Required, so a producer cannot drop it by omission: the sweep of the
+    # one-tree loop judges every world, and a failure read without its
+    # world was quoted to the fill model as the home world's (run
+    # `1700492-f6c4d66c`, 2026-10-24).
+    world: str
     # The same name's failures in OTHER test binaries, each with its own
     # panic and section, in capture order. A name is not a test: two
     # integration binaries may each hold a `test_downcast_ref`, and with the
@@ -226,22 +234,43 @@ def failure_evidence_by_test(output: str, *, per_test_cap: int = 480) -> dict[st
     reasoned about WHICH test could fail instead of about why. A test that
     failed with no captured section (an aborted binary) yields no entry: a
     verdict-less crash is not evidence about a body.
+
+    In a capture that joined build worlds every copy names the world it
+    failed in (`world_failure_line` above the first copy, the world in each
+    other copy's line). The text named none, and the fill prompt said the
+    tests run in the home world: run `1700492-f6c4d66c` (2026-10-24), the
+    one red test failed only in `nightly::tests/doc_error_gen_6.rs`. The
+    same binary failing in two worlds is not "a different test binary";
+    that line now says which. A one-world capture reads as before.
     """
     out: dict[str, str] = {}
     for f in parse_test_output(output).failures:
         text = _evidence_of(f.body, per_test_cap)
+        if text and f.world:
+            text = f"{world_failure_line(f.world)}\n{text}"
         # Every binary's failure of the name: the model must see the panic
         # of the copy whose asserted call it is asked to fix.
-        extra = [e for e in (_evidence_of(o.body, per_test_cap)
-                             for o in f.others) if e]
+        extra = [(o, e) for o, e in ((o, _evidence_of(o.body, per_test_cap))
+                                     for o in f.others) if e]
         if extra:
             text = "\n".join(
                 [text or "(no captured output)"]
-                + [f"{OTHER_COPY_MARK} {f.test_name}, in a different test "
-                   f"binary, also failed:)\n{e}" for e in extra])
+                + [f"{OTHER_COPY_MARK} {f.test_name}, {_copy_place(f, o)}, "
+                   f"also failed:)\n{e}" for o, e in extra])
         if text:
             out[f.test_name] = text
     return out
+
+
+def _copy_place(primary: TestFailure, copy: TestFailure) -> str:
+    """Where another copy of a failing name failed, relative to the first:
+    another world (the same binary may be the one that failed there), or
+    another binary of the same world."""
+    if copy.world and copy.world != primary.world:
+        return f"in cfg world `{copy.world}`"
+    if copy.world:
+        return f"in a different test binary, in cfg world `{copy.world}`"
+    return "in a different test binary"
 
 
 def _evidence_of(body: str, per_test_cap: int) -> str:
@@ -333,11 +362,12 @@ def parse_test_output(text: str) -> TestRunReport:
     section still appears (kind OTHER, no location)."""
     if not text:
         return TestRunReport(frozenset(), ())
-    sections: dict[str, list[str]] = {}
-    for name, body in split_test_stdout_sections(text):
-        sections.setdefault(name, []).append(body)
+    sections: dict[str, list[tuple[str, str]]] = {}
+    for world, name, body in split_test_stdout_sections_in_worlds(text):
+        sections.setdefault(name, []).append((world, body))
     # The first section is the name's primary failure; a further section
-    # under the same name is another binary's test of that name.
+    # under the same name is another binary's test of that name, or the
+    # same binary's in another world.
     bodies = {name: bs[0] for name, bs in sections.items()}
     # Some cargo versions emit no `---- name stdout ----` header for a
     # single-test run — the panic sits in the bare output. Fall back to the
@@ -352,18 +382,23 @@ def parse_test_output(text: str) -> TestRunReport:
         if name in seen:
             continue
         seen.add(name)
-        body = text if no_sections else bodies.get(name, "")
+        # A name with no section has no world to read: "" (the one-world
+        # reading), as for a capture that joined no worlds.
+        world, body = (("", text) if no_sections
+                       else bodies.get(name, ("", "")))
         pf, pl, pc, msg = parse_panic_location(body)
         others: list[TestFailure] = []
-        for extra in ([] if no_sections else sections.get(name, [])[1:]):
+        for o_world, extra in ([] if no_sections
+                               else sections.get(name, [])[1:]):
             opf, opl, opc, omsg = parse_panic_location(extra)
             others.append(TestFailure(
                 test_name=name, kind=_classify(omsg, extra),
-                panic_file=opf, panic_line=opl, panic_col=opc, body=extra))
+                panic_file=opf, panic_line=opl, panic_col=opc, body=extra,
+                world=o_world))
         failures.append(TestFailure(
             test_name=name, kind=_classify(msg, body),
             panic_file=pf, panic_line=pl, panic_col=pc, body=body,
-            others=tuple(others)))
+            world=world, others=tuple(others)))
     passed = frozenset(_passed_names(text) - seen)
     return TestRunReport(passed, tuple(failures))
 

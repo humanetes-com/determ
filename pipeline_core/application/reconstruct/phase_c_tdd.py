@@ -4444,7 +4444,7 @@ def run_phase_c_tdd(
                 _unattributed_sites = [
                     s for s in _sites if s.origin_unattributed]
                 for _site in _sites:
-                    deps.log(f"  {tag} [phase-c/crash] {_site.binary_label}"
+                    deps.log(f"  {tag} [phase-c/crash] {_site.key}"
                              f"::{_site.test_name or '?'} {_site.signal} — "
                              f"blamed {_site.blame_label} "
                              f"(fault={_site.fault.value}, "
@@ -4458,8 +4458,8 @@ def run_phase_c_tdd(
                     # the memory — was parsed and thrown away.
                     deps.emit("phase_c.crash.localized", data={
                         "cluster": cluster.name, "iter": iter_n,
-                        "binary": _site.binary_label, "signal": _site.signal,
-                        "test": _site.test_name,
+                        "binary": _site.binary_label, "world": _site.world,
+                        "signal": _site.signal, "test": _site.test_name,
                         "frames": [[f.file_rel, f.line, f.fn_name]
                                    for f in _site.frames],
                         "origin_frames": [[f.file_rel, f.line, f.fn_name]
@@ -5319,11 +5319,14 @@ def run_phase_c_tdd(
                 _chain_fns = set(_dsubjects)
             _chain_frontier = _admit_map(
                 {k: set(_chain_from) for k in _chain_fns})
-            _chain_sites = [chain_derived_site(
+            # A chain-derived site speaks for the crash it was derived from,
+            # in that crash's world.
+            _chain_sites = [replace(chain_derived_site(
                 s.binary_label, s.test_name, s.signal,
                 sorted(_chain_frontier),
                 derived_from_tests=sorted(_chain_from),
-                raw_report=s.raw_report) for s in _unattributed_sites]
+                raw_report=s.raw_report), world=s.world)
+                for s in _unattributed_sites]
             _chain_texts = crash_evidence_by_locator(tuple(_chain_sites))
             _chain_keys = frozenset(_chain_texts)
             # Read BEFORE the merge below adds the chain keys to `crash_texts`:
@@ -5374,7 +5377,7 @@ def run_phase_c_tdd(
                         "signature unchanged.")
                 deps.emit("phase_c.crash.chain_blame", data={
                     "cluster": cluster.name, "iter": iter_n,
-                    "binaries": sorted({s.binary_label
+                    "binaries": sorted({s.key
                                         for s in _unattributed_sites}),
                     "tests": sorted(_oracle.vanished)[:50],
                     "blamed": sorted(f"{k.file}::{k.fn_name}"
@@ -5941,11 +5944,11 @@ def run_phase_c_tdd(
         # edge only when that unit is one the sight names for it, or the
         # edge is a crash of a vanished test, a stub that holds the test,
         # or an escalation product (not the units that earned the product).
-        # The units the sight names are put on the frontier here, before
-        # the empty-frontier check below: the owed join that would add
-        # them runs after that check, so a frontier whose every edge was
-        # a guess would otherwise stop with the observed units never
-        # dispatched. Sight not taken leaves the frontier as it is.
+        # Nothing is added here: a seen test left with no edge reaches its
+        # observed units through the measured-owner admission below (an
+        # empty cohort is served for a seen test), which runs before the
+        # empty-frontier check and applies the exhaustion, flat-grade, dead
+        # and pair gates. Sight not taken leaves the frontier as it is.
         _shadow: list[str] = []
         if _sight.unseen:
             _shadow = sorted(f"{k.file}::{k.fn_name}" for k, ts in
@@ -5975,15 +5978,13 @@ def run_phase_c_tdd(
 
             _before_edges = {
                 (k, t) for k, ts in frontier.items() for t in ts}
-            frontier = _sight.edges_without_unseen(frontier, keep=_keep_edge)
-            eligible = _sight.edges_without_unseen(eligible, keep=_keep_edge)
+            frontier = _sight.edges_without_unseen(
+                frontier, keep=_keep_edge, keep_units=_stub_keys)
+            eligible = _sight.edges_without_unseen(
+                eligible, keep=_keep_edge, keep_units=_stub_keys)
             _dropped = _before_edges - {
                 (k, t) for k, ts in frontier.items() for t in ts}
             ordered = [(k, eligible[k]) for k, _ts in ordered if k in eligible]
-            _ordered_have = {k for k, _ in ordered}
-            for _k_seen, _ts_seen in eligible.items():
-                if _k_seen not in _ordered_have:
-                    ordered.append((_k_seen, _ts_seen))
             if _dropped:
                 _kind_now = kind_after_sight_filter(kind, dropped=True)
                 if _kind_now != kind:
@@ -6196,6 +6197,7 @@ def run_phase_c_tdd(
                 permanently_exhausted=permanently_exhausted,
                 served=frozenset(_served_at),
                 paired_tests=_paired_tests,
+                seen_tests=_sight.seen if _sight.taken else frozenset(),
             )
             # Written into `eligible`, `ordered` and `escalation_products`
             # after the last map filter.
@@ -6253,6 +6255,7 @@ def run_phase_c_tdd(
                 permanently_exhausted=permanently_exhausted,
                 served=frozenset(_served_at),
                 paired_tests=_paired_tests,
+                seen_tests=_sight.seen if _sight.taken else frozenset(),
             )
             if _owner_attach:
                 for _loc, _ts in _owner_attach.items():
