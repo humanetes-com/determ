@@ -156,3 +156,118 @@ def test_negative_control_without_the_release_the_held_run_never_opens(
     assert calls == ["per-fn 1 stub(s)"]
     assert by["file src/a.rs"].outcome is RunOutcome.DEFERRED
     assert by["file src/a.rs"].reason == "pair_wait"
+
+
+# --- a holder that opened and left the tree as it was ----------------------
+#
+# Run `42057-641e589c` (2026-10-26, fill 6): the formatter pair opened, its
+# reply re-emitted the bodies already on disk (`every kept body was the one
+# already on disk`), and the file run it held stayed `pair_wait` for the rest
+# of the fill. Fill 5's other pair REVERTED (kept 0) and held the same way.
+# The plan's sentence: a holder that kept nothing (reverted, empty, or every
+# kept body unchanged) releases the runs it held in the same fill; a holder
+# that kept a changed body keeps the hold.
+
+
+class _PairRoute:
+    def __init__(self, run: RouteRun, calls: list[str], outcome: str,
+                 tree: dict[str, int]) -> None:
+        self.kind = run.kind
+        self.parallel = False
+        self._run = run
+        self._calls = calls
+        self._outcome = outcome
+        self._tree = tree
+
+    def plan(self) -> Sequence[RouteRun]:
+        return [self._run]
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        if not clock.may_claim():
+            return RouteRunReport(empty=True)
+        self._calls.append(run.label)
+        if self._outcome == "reverted":
+            return RouteRunReport(model_calls=1, reverted=run.targets)
+        fill_reading.note_kept(0)
+        if self._outcome == "changed":
+            self._tree["v"] += 1
+        return RouteRunReport(model_calls=1, kept=run.targets)
+
+
+def _pair_fill(tmp_path: Path, outcome: str) -> tuple[list[str], fs.FillExecution]:
+    fill_reading.reset_last_comparison()
+    _per_fn, pair, file_run = _runs()
+    calls: list[str] = []
+    tree = {"v": 0}
+    out = fs.execute_fill(
+        [_PairRoute(pair, calls, outcome, tree),
+         _Route(file_run, calls, keeps=False)],
+        hollow={}, bodies_sha=lambda _t: f"b{tree['v']}",
+        deps=fs.FillExecutionDeps(
+            log=lambda _m: None, emit=lambda *_a, **_k: None,
+            check_stop=lambda _c: None, ledger=RouteLedgerStore(tmp_path),
+            project="p", cluster="c", run_id="r", iteration=6, oracle_fp="o",
+            premise=_PLAN, ground_now=lambda: _PLAN))
+    return calls, out
+
+
+def test_premise_the_schedule_holds_the_file_run_behind_the_pair() -> None:
+    _per_fn, pair, file_run = _runs()
+    sched = schedule([pair, file_run], [], oracle_fp="o", hollow={})
+    held = [s for s in sched.deferred if s.run.label == file_run.label]
+    assert held and held[0].reason == "pair_wait"
+    assert held[0].held_by == (pair.key,)
+
+
+@pytest.mark.parametrize("outcome", ["unchanged", "reverted"])
+def test_a_pair_that_kept_nothing_releases_what_it_held(
+        tmp_path: Path, outcome: str) -> None:
+    calls, out = _pair_fill(tmp_path, outcome)
+    by = {r.label: r for r in out.rows}
+    assert calls == ["pair src/a.rs::show + src/b.rs::make", "file src/a.rs"]
+    assert by["file src/a.rs"].outcome is not RunOutcome.DEFERRED
+
+
+def test_control_a_pair_that_kept_a_changed_body_keeps_its_hold(
+        tmp_path: Path) -> None:
+    calls, out = _pair_fill(tmp_path, "changed")
+    by = {r.label: r for r in out.rows}
+    assert calls == ["pair src/a.rs::show + src/b.rs::make"]
+    assert by["file src/a.rs"].outcome is RunOutcome.DEFERRED
+    assert by["file src/a.rs"].reason == "pair_wait"
+
+
+def test_negative_control_the_pre_change_release_keeps_a_no_op_holder(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The pre-change rule: only holders the executor deferred release.
+    real = fs.release_held
+    opened: set[str] = set()
+
+    def _deferred_only(held, keys):
+        return real(held, {k for k in keys if k not in opened})
+
+    monkeypatch.setattr(fs, "release_held", _deferred_only)
+    _per_fn, pair, _file = _runs()
+    opened.add(pair.key)
+    calls, out = _pair_fill(tmp_path, "unchanged")
+    assert calls == ["pair src/a.rs::show + src/b.rs::make"]
+    by = {r.label: r for r in out.rows}
+    assert by["file src/a.rs"].reason == "pair_wait"
+
+
+def test_a_waited_piece_that_kept_nothing_releases_the_run_it_carries() -> None:
+    """Review of 2026-10-26: a run whose claims waited behind a writer is
+    queued again as a piece with its own key, and the schedule's holds name
+    the run's key, so the run's holds never ended. The piece that then kept
+    nothing ends them, when the run itself landed nothing. Controls: a run
+    that kept a body before it waited keeps its holds; a run still waiting
+    is not released."""
+    landed: set[str] = set()
+    origin = {"piece": "run"}
+    assert fs._left_tree_keys([("run", False)], {"run"}, origin, landed) == set()
+    assert fs._left_tree_keys([("piece", False)], set(), origin, landed) == {
+        "piece", "run"}
+    landed2: set[str] = set()
+    fs._left_tree_keys([("run", True)], {"run"}, origin, landed2)
+    assert fs._left_tree_keys([("piece", False)], set(), origin, landed2) == {
+        "piece"}

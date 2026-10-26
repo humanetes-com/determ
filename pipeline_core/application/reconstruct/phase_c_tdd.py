@@ -2931,6 +2931,24 @@ def run_phase_c_tdd(
             return {bare_test_name(t_): frozenset(locator_of(x_) for x_ in ss_)
                     for t_, ss_ in _hold_h.by_test.items()}
 
+        # One localization per sweep capture (`localize_crashes` re-runs the
+        # crashed binaries under gdb and the sanitizer): the ledger grade
+        # needs the sites of a capture whose tests died silently (the abort
+        # partition, `abort_verdict`), and the crash block below needs the
+        # same sites of the same capture.
+        _sites_by_capture: dict[str, tuple[Any, ...]] = {}
+
+        def _sweep_sites_for(
+                output_: str,
+                _cache: dict[str, tuple[Any, ...]] = _sites_by_capture,
+        ) -> tuple[Any, ...]:
+            if deps.localize_crashes is None:
+                return ()
+            if output_ not in _cache:
+                _cache[output_] = tuple(deps.localize_crashes(
+                    output_, test_cmd, target_src_dir, cluster_env))
+            return _cache[output_]
+
         def _sweep_view_of(output_: str, failed_: Iterable[str],
                            vanished_: Iterable[str],
                            reconciled_: bool, *,
@@ -2938,7 +2956,9 @@ def run_phase_c_tdd(
                            _epoch: int = _destruction_epoch) -> SweepView:
             """The ledger's view of one sweep capture. `failed_` is the
             sweep's reconciled failing set (crash-vanished names included,
-            which `of_sweep` takes back out)."""
+            which `of_sweep` takes back out). A capture with a test whose
+            own process died without a panic carries that capture's crash
+            sites, which the grade's abort partition reads."""
             _report_v = parse_test_output(output_)
             # Where each failing test panicked: the one reading that can
             # tell a body which got a test past an assertion from one that
@@ -2955,7 +2975,9 @@ def run_phase_c_tdd(
                 intact=reconciled_, epoch=_epoch,
                 positions=_positions_v,
                 verdicts=_reading_v.keyed(),
-                held=held_)
+                held=held_,
+                crash_sites=(_sweep_sites_for(output_)
+                             if _reading_v.aborted_silent_names else ()))
 
         def _grade_landing(row_: LedgerEntry, before_: SweepView,
                            after_: SweepView, *, _iter: int = iter_n,
@@ -4430,8 +4452,7 @@ def run_phase_c_tdd(
                          "the fns they reach are still stubs; stub panics "
                          "abort binaries too), fills run first.")
             else:
-                _sites = tuple(deps.localize_crashes(
-                    output, test_cmd, target_src_dir, cluster_env))
+                _sites = _sweep_sites_for(output)
                 crash_texts = crash_evidence_by_locator(_sites)
                 crash_blamed = blamed_locators(_sites)
                 crash_memory_blamed = memory_blamed_locators(_sites)
@@ -7699,10 +7720,16 @@ def run_phase_c_tdd(
         # executor calls it only after a keep (`fill_scheduler._GroundGate`).
         _plan_premise: dict[str, PremiseEntry] | None = None
         _ground_now: Callable[[], dict[str, PremiseEntry] | None] | None = None
+        _held_now: Callable[[], dict[str, frozenset[FnLocator]] | None] | None = None
+        # The capture `_ground_now` last read: the held view the fill's
+        # in-fill blockers-first reads is taken from the same suite run.
+        _ground_capture: list[str] = []
         if _replan_on_premise:
             _plan_premise = _premise_of_capture(output)
 
-            def _ground_now() -> dict[str, PremiseEntry] | None:
+            def _ground_now(
+                    _cap: list[str] = _ground_capture,
+            ) -> dict[str, PremiseEntry] | None:
                 # A premise like every route's baseline: read inside the
                 # tree's splice lock, so a parallel worker's in-flight splice
                 # is not in it and two cargo processes never share the target
@@ -7727,7 +7754,17 @@ def run_phase_c_tdd(
                         _lk.release()
                 if _rc_g == -1:
                     return None
+                _cap[:] = [_out_g]
                 return _premise_of_capture(_out_g)
+
+            def _held_now(
+                    _cap: list[str] = _ground_capture,
+            ) -> dict[str, frozenset[FnLocator]] | None:
+                # Per failing test, the still-stubbed functions its first
+                # failure is inside, on the capture `_ground_now` just read.
+                if not _cap:
+                    return None
+                return _held_of(_cap[0], ())
 
         def _culprits_after(captured: str) -> frozenset[FnLocator]:
             # The in-fill cargo reading names the abort and not its frames.
@@ -7922,6 +7959,7 @@ def run_phase_c_tdd(
                     on_wave_kept=lambda kept: _record_landed_rows("wave", kept),
                     fill_premise=_plan_premise,
                     fill_ground_now=_ground_now,
+                    fill_held_now=_held_now,
                 )
         except BaseException as _fill_exc:
             # Before the restore: a restored tree no longer holds these

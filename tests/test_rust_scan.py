@@ -678,6 +678,27 @@ def test_balanced_handles_a_quote_char_literal() -> None:
     assert rust_delimiters_balanced(r"""let q = '"'; let b = '{'; fn a() {}""")
 
 
+def test_balanced_treats_a_raw_string_as_opaque() -> None:
+    """A raw literal ends at quote-plus-N-hashes and has no escapes. The
+    pre-fix scan read `r#"…"#` as an ordinary string, so an interior quote
+    ended it and the brackets after that quote were counted: an odd interior
+    quote made a balanced capture look unbalanced, and an even one hid a
+    real bracket."""
+    assert rust_delimiters_balanced('assert_eq!(x, r#"he said "hi (x"#);')
+    assert rust_delimiters_balanced('r#"x" { y"#')
+    assert rust_delimiters_balanced('r#"Backtrace [ { fn: "a" }"#')
+    assert rust_delimiters_balanced('br#"a { "#')
+    assert rust_delimiters_balanced('cr##"a "# (b)"##')
+    assert rust_delimiters_balanced('fn f() { let s = r"a { b"; }')
+    # The closer is the quote plus the opener's hashes, not the first quote.
+    assert rust_delimiters_balanced('r##"a "# b"##')
+    assert not rust_delimiters_balanced('r#"ok"# fn f() {')
+    assert not rust_delimiters_balanced('r#"he said "hi"# fn f() {')
+    # An ordinary string, a byte string and a raw identifier are unchanged.
+    assert rust_delimiters_balanced(r'let s = b"esc \" still in { str";')
+    assert rust_delimiters_balanced("fn r#raw() { let v = [1]; }")
+
+
 def test_attributed_fn_names_counts_fns_not_attribute_lines() -> None:
     # The live divergence on `.skeleton-filled/stable/src/error.rs`: 30
     # `#[cold]` LINES against 16 annotated fns, because 17 attribute runs hold

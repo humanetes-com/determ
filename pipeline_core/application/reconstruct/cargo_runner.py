@@ -23,6 +23,10 @@ from pipeline_core.application.reconstruct.attribution import make_fn_site_locat
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
 from pipeline_core.application.reconstruct.crash_settler import (
+    Settlement,
+    crash_text_of,
+)
+from pipeline_core.application.reconstruct.crash_settler import (
     bound as bound_crash_settler,
 )
 from pipeline_core.application.reconstruct.tdd_ratchet import (
@@ -38,6 +42,7 @@ from pipeline_core.domain.assertion_position import (
 from pipeline_core.domain.attempt_site import quote_attempt_outputs
 from pipeline_core.domain.cluster_env import judges_every_world, world_of_env
 from pipeline_core.domain.crash_settlement import frame_locator
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import Diagnostic, FnLocator, FnSite
 from pipeline_core.domain.oracle_immutability import is_oracle_path
@@ -437,6 +442,7 @@ def test_regression_gate(
         return None  # crate not compiling now ⇒ can't judge; defer to TDD loop
     cmp = compare_readings(baseline, after)
     _settler = bound_crash_settler()
+    _settlement: Settlement | None = None
     if (_settler is not None and written and _raw
             and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
         _settlement = _settler.settle(_raw[-1], written, baseline)
@@ -453,6 +459,15 @@ def test_regression_gate(
             if _after_s is not None:
                 after, _raw = _after_s, _raw_s
                 cmp = compare_readings(baseline, after)
+    # The crash the settlement read under the write, whatever it decided,
+    # rides on the comparison and goes with every revert's detail: the pair
+    # and impl retries quote it (run `42057-641e589c`).
+    cmp = replace(cmp, crash_reading=crash_text_of(_settlement))
+
+    def _detail(c: RegressionComparison) -> str:
+        text = render_regression_detail(c)
+        return "\n\n".join(x for x in (text, c.crash_reading) if x)
+
     # Attach what the reddened tests printed, from the same capture the
     # comparison was read from — the detail used to name the tests and drop
     # their `left` / `right` (`regressed_test_outputs` carries the instance).
@@ -495,7 +510,7 @@ def test_regression_gate(
               "that never returns is not an inconclusive reading; REVERTED "
               f"(cost: {cmp.crash_lost_pass} baseline pass(es) in the hung "
               "binary, plus every binary after it)")
-        return cmp, render_regression_detail(cmp)
+        return cmp, _detail(cmp)
     if not cmp.regressed:
         if cmp.newly_crashed or cmp.newly_red:
             guard("phase-c/net_gain_accept",
@@ -575,7 +590,7 @@ def test_regression_gate(
                       "— this fill put those stub(s) back, so the panic is "
                       "its own; REVERTED rather than kept (cost: "
                       f"{cmp.abort_cost} baseline pass(es))")
-                return cmp, render_regression_detail(cmp)
+                return cmp, _detail(cmp)
             hollow_now = hollow_count(snapshot_src_tree(cwd))
             if hollow_before is not None and hollow_now < hollow_before:
                 guard("phase-c/crash_closure_kept",
@@ -593,7 +608,7 @@ def test_regression_gate(
                   f"({hollow_before} → {hollow_now}) — not a closure; "
                   "REVERTED, as the sweep would charge it (cost: "
                   f"{cmp.abort_cost} baseline pass(es))")
-            return cmp, render_regression_detail(cmp)
+            return cmp, _detail(cmp)
         if stub_free:
             guard("phase-c/crash_stub_free_reverted",
                   f"binar{_plural} {_died} crashed after the "
@@ -602,7 +617,7 @@ def test_regression_gate(
                   "now rather than kept for the next sweep's ratchet, so the "
                   "rest of the batch is judged against a live baseline "
                   f"(cost: {cmp.abort_cost} baseline pass(es))")
-            return cmp, render_regression_detail(cmp)
+            return cmp, _detail(cmp)
         guard("phase-c/crash_only_reverted",
               f"binar{_plural} {_died} crashed with no "
               "newly-red verdict in any completed binary and no stub-only "
@@ -611,8 +626,8 @@ def test_regression_gate(
               "and the ratchet would restore the snapshot; REVERTED here "
               "instead, so the rest of the fill is judged against a live "
               f"baseline (cost: {cmp.abort_cost} baseline pass(es))")
-        return cmp, render_regression_detail(cmp)
-    return cmp, render_regression_detail(cmp)
+        return cmp, _detail(cmp)
+    return cmp, _detail(cmp)
 
 
 def render_hang_detail(test: str, binary: str, timeout: int) -> str:
@@ -932,6 +947,7 @@ def u2_test_gate(
         # tree. Otherwise the reject carries the crash as the localizer read
         # it.
         _settled_text = ""
+        _settled_sites: tuple[CrashSite, ...] = ()
         _unit_locs = {FnLocator(s.file, s.fn_name) for s in unit_sites}
         # The abort is about this unit when a panic it printed is the
         # unit's own — an assertion of its test (the renderer's "the first
@@ -966,7 +982,14 @@ def u2_test_gate(
                     target_src_dir, cluster_env, structure=structure,
                     enabled=enabled, timeout=timeout, err_cap=err_cap,
                     guard=guard, baseline=baseline, settle=False)
-            _settled_text = _settlement.render()
+            _settled_text = crash_text_of(_settlement)
+            _settled_sites = _settlement.sites
+        elif (_settler is not None and _silent_aborted
+              and baseline is not None):
+            # A panic elsewhere in the capture kept the settlement out, but a
+            # silent death is still located, read-only, for the abort
+            # partition `judge_refill` reads (`U2Verdict.crash_sites`).
+            _settled_sites = _settler.localize(out or "", baseline)
         return U2Verdict.reject(
             frozenset(_aborted) | {f.test_name for f in scoped.failures},
             _render_u2_abort(_aborted, scoped, err_cap, _panics,
@@ -977,7 +1000,8 @@ def u2_test_gate(
             capture=out or "",
             positions=assertion_positions(
                 out or "", oracle_test_source(target_src_dir)),
-            abort_attributed=_attributed)
+            abort_attributed=_attributed, crash_sites=_settled_sites,
+            crash_reading=_settled_text)
     if not scoped.failures:
         # The one ACCEPT with POSITIVE evidence: these tests ran and passed.
         # Carrying the names is what lets the caller's verdict row say so —

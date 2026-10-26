@@ -270,12 +270,111 @@ def test_a_suite_of_legacy_blobs_emits_nothing_and_withdraws_nothing(tmp_path: P
 def test_an_unbalanced_render_is_refused_and_nothing_is_written(tmp_path: Path) -> None:
     """A broken file in `tests/` does not fail one test — it stops the whole
     crate compiling and takes every verdict with it, so the check that already
-    guards t0c's writer guards this one."""
+    guards t0c's writer guards this one. A check that refuses every block
+    drops each capture and writes nothing."""
     specs = [_spec("a")]
     dest, dropped, misses = _emit(tmp_path, specs, _verifier(tmp_path), balanced=lambda _b: False)
     assert dest is None and set(dropped) == {specs[0].behaviour_id}
     assert misses[0]["reason"] == "replay refused: delimiters unbalanced"
     assert list((tmp_path / "tests").iterdir()) == []
+
+
+def test_one_unbalanced_capture_is_dropped_and_the_others_are_emitted(tmp_path: Path) -> None:
+    """The check is per replay block. One capture whose own text fails it
+    is the only drop; the assembled file of the survivors is checked again
+    and, when it passes, is verified. A check that fails only the assembled
+    file still writes nothing."""
+    from pipeline_core.domain.rust_scan import rust_delimiters_balanced
+
+    good = _spec("keeper")
+    bad = _spec("broken", when="foo(")
+    dest, dropped, misses = _emit(tmp_path, [good, bad], _verifier(tmp_path))
+    assert dropped == (bad.behaviour_id,)
+    assert misses[0]["reason"] == "replay refused: delimiters unbalanced"
+    assert "replay_failed" not in misses[0]
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert replay_fn_name(good) in body and replay_fn_name(bad) not in body
+    assert rust_delimiters_balanced(body)
+
+    # The same two blocks are each balanced, and the file that contains both
+    # is not. Nothing is written.
+    both = tmp_path / "both"
+
+    def file_only(text: str) -> bool:
+        return "keeper" not in text or "broken" not in text
+
+    dest2, dropped2, misses2 = _emit(both, [good, bad], _verifier(both), balanced=file_only)
+    assert dest2 is None
+    assert set(dropped2) == {good.behaviour_id, bad.behaviour_id}
+    assert list((both / "tests").iterdir()) == []
+
+
+def test_a_raw_string_capture_is_emitted(tmp_path: Path) -> None:
+    """The renderer writes a captured quote as a raw literal. That literal
+    is balanced, so a sibling capture is not refused with it."""
+    plain = _spec("plain")
+    quoted = _spec("quoted", stdout='he said "hi (x')
+    dest, dropped, _misses = _emit(tmp_path, [plain, quoted], _verifier(tmp_path))
+    assert dropped == ()
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert 'r#"he said "hi (x"#' in body
+    assert replay_fn_name(plain) in body and replay_fn_name(quoted) in body
+
+
+def test_a_withdrawn_replay_records_whether_that_test_failed(tmp_path: Path) -> None:
+    """The miss row carries the round's verdict for that replay name. A
+    capture the last verify had already passed is not given an assertion it
+    did not fail. A capture the verdict failed keeps that test's section,
+    left and right included."""
+    liar = _spec("liar", stdout="a \nb")
+    keeper = _spec("keeper")
+    name = replay_fn_name(liar)
+    red = frozenset({name})
+
+    def verify(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp_path / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
+        failed = [n for n in present if n in red]
+        passed = [n for n in present if n not in red]
+        extra = ""
+        if name in failed:
+            extra = (
+                f"thread '{name}' panicked at tests/x.rs:1:1:\n"
+                "assertion `left == right` failed\n"
+                "  left: observed\n"
+                " right: a\\nb\n"
+            )
+        return not failed, extra + _libtest(passed, failed)
+
+    _dest, dropped, misses = _emit(tmp_path, [keeper, liar], verify)
+    assert dropped == (liar.behaviour_id,)
+    assert misses[0]["replay_failed"] == "yes"
+    assert "left: observed" in misses[0]["replay_output"]
+    assert "right:" in misses[0]["replay_output"]
+
+    # Three rounds each fail a new capture and pass the rest. The ones the
+    # last round passed are withdrawn by the budget, and the row says they
+    # were not in that failed set.
+    budget = tmp_path / "budget"
+    specs = [_spec(f"s{i}") for i in range(6)]
+    order = [replay_fn_name(s) for s in specs]
+
+    def budget_verify(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (budget / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = [n for n in order if f"fn {n}()" in body]
+        return False, _libtest(present[1:], present[:1])
+
+    _dest2, _dropped2, misses2 = _emit(budget, specs, budget_verify)
+    by_id = {m["unit"]: m for m in misses2}
+    budget_rows = [m for m in misses2 if m["reason"] == "replay still red after the verification budget"]
+    assert len(budget_rows) == 3
+    assert {m["replay_failed"] for m in budget_rows} == {"no"}
+    assert all("replay_output" not in m for m in budget_rows)
+    disagreed = [m for m in misses2 if m["reason"] == "replay disagreed with the capture"]
+    assert disagreed and {m["replay_failed"] for m in disagreed} == {"yes"}
+    assert by_id
 
 
 def test_a_red_verdict_that_names_no_capture_withdraws_rather_than_retries(tmp_path: Path) -> None:

@@ -622,7 +622,7 @@ def test_a_body_the_crash_settlement_withdraws_is_dropped_and_the_rest_judged(
         Settlement,
     )
     from pipeline_core.domain.crash_settlement import SettlementOutcome
-    from pipeline_core.domain.crash_site import CrashFrame
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
 
     root = _tree(tmp_path)
     crashed = TestStateReading(binaries=(BinaryResult(
@@ -652,9 +652,12 @@ def test_a_body_the_crash_settlement_withdraws_is_dropped_and_the_rest_judged(
             if not (self.narrow and isinstance(written, JudgedWrite)):
                 return Settlement(SettlementOutcome.OWN)
             (root / "src" / "lib.rs").write_text(written.prior["src/lib.rs"])
-            written.withdrawn.append(CrashFrame("src/lib.rs", 0, "fmt", "fmt"))
-            written.evidence = "SIGSEGV in t_a: fmt read freed memory"
-            return Settlement(SettlementOutcome.NARROWED)
+            frame = CrashFrame("src/lib.rs", 0, "fmt", "fmt")
+            written.withdrawn.append(frame)
+            return Settlement(
+                SettlementOutcome.NARROWED, withdrawn=(frame,),
+                sites=(CrashSite("tests/unit.rs", "t_a", "SIGSEGV",
+                                 frames=(frame,)),))
 
     reply = ('<FN name="fmt" block="impl fmt::Display for Report">NEW_FMT</FN>'
              '<FN name="render" block="impl Renderer">NEW_REN</FN>')
@@ -691,3 +694,140 @@ def test_a_body_the_crash_settlement_withdraws_is_dropped_and_the_rest_judged(
     out = _run(narrow=False)
     assert out.kept == frozenset()
     assert (root / "src" / "lib.rs").read_text() == "SESSION_LIB"
+
+
+def test_an_unsettled_crash_reaches_the_next_turn_with_its_frames(tmp_path):
+    """Run `42057-641e589c` (2026-10-26, fill 6): five turns of the
+    `test_downcast_mid` session came back as `(exit status -11)` alone. Every
+    settlement of those turns was UNSETTLED (stubbing the culprit lost a
+    baseline pass), nothing was withdrawn, and the crash text was printed
+    only beside a withdrawal. The turn now carries the settlement's reading
+    on every outcome but no crash. Negative control: with no settler bound
+    (no settlement read), the turn says nothing about frames."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.application.reconstruct.crash_settler import Settlement
+    from pipeline_core.domain.crash_settlement import SettlementOutcome
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+
+    root = _tree(tmp_path)
+    baseline = _reading(set(), {"t_a"})
+    died = TestStateReading(binaries=(BinaryResult(
+        label="unit", completed=False, passed=frozenset(),
+        failed=frozenset(), dangling="t_a"),))
+    asked: list[str] = []
+    site = CrashSite("tests/unit.rs", "t_a", "SIGSEGV", frames=(
+        CrashFrame("src/render.rs", 7, "render", "render"),))
+
+    def measure(raw, _role=None):
+        raw.append("capture")
+        if (root / "src" / "lib.rs").read_text() == "SESSION_LIB":
+            return baseline
+        return died
+
+    class _Unsettled:
+        def settle(self, capture, written, base, *, tag=""):
+            return Settlement(SettlementOutcome.UNSETTLED, sites=(site,),
+                              reason="the stubs cost the baseline a test")
+
+    def ask(m: object) -> str:
+        asked.append(str(m))
+        return ('<FN name="fmt" block="impl fmt::Display for Report">'
+                'NEW_FMT(f)</FN>')
+
+    def _run(settler) -> str:
+        asked.clear()
+        (root / "src" / "lib.rs").write_text("SESSION_LIB")
+        crash_settler.bind(settler)
+        try:
+            run_slice_session(
+                _ports(measure=measure, ask=ask), target_src_dir=root,
+                cluster_name="t",
+                slice_=SessionSlice(tests=("t_a",), units=(_FMT, _RENDER)),
+                records=_RECS, turn0="turn0", max_turns=2)
+        finally:
+            crash_settler.bind(None)
+        return asked[1]
+
+    turn = _run(_Unsettled())
+    assert "CRASH: a test process died under this change set" in turn
+    assert "#0 render at src/render.rs:7" in turn
+    control = _run(None)
+    assert "src/render.rs:7" not in control and "CRASH: a test" not in control
+
+
+def test_a_gain_beside_a_located_abort_of_the_red_target_is_kept(tmp_path):
+    """Run `42057-641e589c` (2026-10-26, fill 5): turn 6 of the
+    `test_downcast` session measured net +20 with nothing newly red while
+    its already-red target died in a crate body, and the session ended on
+    turn 7's +0 state (`is one the keep gate refuses`). Plan sentence: a
+    session whose suite net is a strict gain and whose only abort is an
+    already-red target with a crate frame ends on that turn, KEPT.
+
+    NEGATIVE CONTROL: the same crash localized to no crate frame — the
+    session ends on the +0 turn, as it did live."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.application.reconstruct.crash_settler import Settlement
+    from pipeline_core.domain.crash_settlement import SettlementOutcome
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+
+    root = _tree(tmp_path)
+    pas = {"p1", "p2", "p3"}
+
+    def _bin(passed, failed, aborted=frozenset()):
+        return TestStateReading(binaries=(BinaryResult(
+            label="unit", completed=True, passed=frozenset(passed),
+            failed=frozenset(failed) | aborted, aborted=aborted,
+            aborted_silent=aborted, pass_count=len(passed),
+            fail_count=len(failed) + len(aborted)),))
+
+    baseline = _bin(set(), {"t_a"} | pas)
+    gain = _bin(pas, set(), aborted=frozenset({"t_a"}))
+    flat = _bin(set(), {"t_a"} | pas)
+    replies = iter([
+        '<FN name="fmt" block="impl fmt::Display for Report">GAIN(f)</FN>',
+        '<FN name="fmt" block="impl fmt::Display for Report">FLAT(f)</FN>'])
+
+    def measure(raw, _role=None):
+        raw.append("capture")
+        lib = (root / "src" / "lib.rs").read_text()
+        return {"GAIN(f)": gain, "FLAT(f)": flat}.get(lib, baseline)
+
+    def _settler(frames):
+        site = CrashSite("tests/unit.rs", "t_a", "SIGSEGV", frames=frames)
+
+        class _S:
+            def settle(self, capture, written, base, *, tag=""):
+                return Settlement(SettlementOutcome.UNSETTLED, sites=(site,))
+
+            def localize(self, capture, base):
+                return (site,)
+        return _S()
+
+    def _run(frames):
+        nonlocal replies
+        replies = iter([
+            '<FN name="fmt" block="impl fmt::Display for Report">GAIN(f)</FN>',
+            '<FN name="fmt" block="impl fmt::Display for Report">FLAT(f)</FN>'])
+        (root / "src" / "lib.rs").write_text("SESSION_LIB")
+        crash_settler.bind(_settler(frames))
+        try:
+            ports = replace(
+                _ports(measure=measure, ask=lambda m: next(replies)),
+                enumerate_bodies=lambda: {
+                    _FMT: (root / "src" / "lib.rs").read_text(),
+                    _RENDER: _RECS[_RENDER].body_text})
+            return run_slice_session(
+                ports, target_src_dir=root, cluster_name="t",
+                slice_=SessionSlice(tests=("t_a",), units=(_FMT, _RENDER)),
+                records=_RECS, turn0="turn0", max_turns=2)
+        finally:
+            crash_settler.bind(None)
+
+    out = _run((CrashFrame("src/lib.rs", 3, "fmt", "fmt"),))
+    assert out.outcome == "kept" and out.best_turn == 1
+    assert (root / "src" / "lib.rs").read_text() == "GAIN(f)"
+    assert out.final is not None and out.final.pass_delta == 3
+
+    control = _run(())
+    assert control.best_turn == 2
+    assert (root / "src" / "lib.rs").read_text() == "FLAT(f)"

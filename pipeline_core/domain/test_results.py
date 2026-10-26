@@ -2231,6 +2231,11 @@ class RegressionComparison:
     # without a capture; `compare_readings` never fills it. See
     # `test_report.regressed_test_outputs` for the instance.
     newly_red_output: Mapping[str, str] = field(default_factory=dict)
+    # The crash the regression gate's settlement read under the write
+    # (`crash_settler.crash_text_of`), whatever it decided; "" with no
+    # settlement or no crash. Attached by the gate, so every reader of a
+    # revert (the detail, the pair's stored record) quotes one rendering.
+    crash_reading: str = ""
     # The `(file, line)` stub-panic sites of the ``newly_crashed`` binaries
     # when — and only when — every crate panic those binaries printed was a
     # stub panic (`test_report.stub_only_crash` over exactly those

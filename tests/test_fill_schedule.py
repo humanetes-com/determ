@@ -1786,3 +1786,67 @@ def test_a_joint_row_round_trips_its_digest_and_verdict() -> None:
     plain = RouteLedgerRow.from_dict(_row(_file("f", {_FMT}, set()),
                                           RunOutcome.FLAT).to_dict())
     assert plain is not None and not plain.holds_jointly and not plain.joint
+
+
+def _pair_rows_on(test: str, n: int) -> list[RouteLedgerRow]:
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {test})
+    return [_row(replace(pair, bodies_sha=f"p{i}"), RunOutcome.FLAT)
+            for i in range(n)]
+
+
+def test_a_pairs_unpaid_tries_do_not_spend_a_never_tried_joint_session(
+        monkeypatch) -> None:
+    """Run `391506-3403a6a7` (2026-10-22, fill 1): the joint session answering
+    `test_debug` opened fifth, behind four runs that changed no verdict,
+    because four unpaid PAIR tries of `test_debug` spent its grace; it then
+    paid the fill's whole +2. Plan sentence: a joint run with no row of its
+    own, sharing a test with a file run that writes its targets, orders
+    ahead of the file run and holds it `pair_wait`, whatever the pair rows
+    on that test say.
+
+    NEGATIVE CONTROL: the pre-change match (every row that holds jointly)
+    lets the pair rows lapse the joint run, and the file run opens."""
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    rows = _pair_rows_on("t_fmt", DEFAULT_UNPAID_GRACE)
+    sched = schedule([file_run, joint], rows, oracle_fp="o", hollow={})
+    assert [s.run.label for s in sched.ordered] == [joint.label]
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (file_run.label, "pair_wait")]
+
+    monkeypatch.setattr(RouteRun, "gives_same_answer",
+                        lambda self, r: r.holds_jointly)
+    old = schedule([file_run, joint], rows, oracle_fp="o", hollow={})
+    assert file_run.label in [s.run.label for s in old.ordered]
+    assert not [s for s in old.deferred if s.reason == "pair_wait"]
+
+
+def test_a_joint_sessions_unpaid_tries_do_not_spend_a_pairs_grace() -> None:
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    pair = _pair("pair src/x.rs::fmt + src/y.rs::new", {_FMT, _NEW}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    rows = [replace(_row(replace(joint, bodies_sha=f"j{i}"), RunOutcome.FLAT),
+                    joint=joint.joint) for i in range(DEFAULT_UNPAID_GRACE)]
+    sched = schedule([file_run, pair], rows, oracle_fp="o", hollow={})
+    assert [(s.run.label, s.reason) for s in sched.deferred] == [
+        (file_run.label, "pair_wait")]
+
+
+def test_a_joint_sessions_own_clock_survives_a_rebuilt_slice() -> None:
+    """A joint session's slice is rebuilt each fill, so its targets change
+    while its candidate digest does not. Its own `unpaid_grace` unpaid rows
+    under the same digest and other targets lapse it."""
+    joint = _joint("session[1 test(s), 1 unit(s)] #0", {_FMT}, {"t_fmt"})
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    older = replace(joint, targets=frozenset({_FMT, _NEW}))
+    rows = [replace(_row(replace(older, bodies_sha=f"j{i}"), RunOutcome.FLAT),
+                    joint=joint.joint) for i in range(DEFAULT_UNPAID_GRACE)]
+    sched = schedule([file_run, joint], rows, oracle_fp="o", hollow={})
+    assert not [s for s in sched.deferred if s.reason == "pair_wait"]
+
+
+def test_only_a_run_that_holds_jointly_has_an_answer_to_spend() -> None:
+    import pytest
+    file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
+    with pytest.raises(ValueError):
+        file_run.gives_same_answer(_row(file_run, RunOutcome.FLAT))

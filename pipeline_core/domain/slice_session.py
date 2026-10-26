@@ -30,6 +30,7 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.abort_verdict import AbortPartition
 from pipeline_core.domain.assertion_position import TestKey, TestOutcomes, compare_positions
 from pipeline_core.domain.attribution import locator_of, site_label
 from pipeline_core.domain.fill_schedule import RouteRun
@@ -876,6 +877,18 @@ class TurnReading:
     #: and a destroyed verdict are different facts: a net gain forgives the
     #: first and does not forgive the second.
     aborted: tuple[str, ...] = ()
+    #: The aborted targets that passed at the session's baseline, and the
+    #: red ones a crash site locates in the crate
+    #: (`TestOutcomes.aborted_green` / `aborted_located`): the inputs of the
+    #: abort partition (`abort_verdict.AbortPartition`) the gate reads.
+    aborted_green: tuple[str, ...] = ()
+    aborted_located: tuple[str, ...] = ()
+    #: The crash the bound settlement read under this change set
+    #: (`crash_settler.Settlement.render`), on every outcome but no crash:
+    #: what the transcript shows beside the verdicts. Set by the reading,
+    #: never by the renderer's caller, so no route of the session can build
+    #: a turn that omits it.
+    crash: str = ""
 
     @property
     def targets_green(self) -> bool:
@@ -891,10 +904,10 @@ class TurnReading:
         """The sweep's rule, applied to one turn: a strict net gain forgives
         a newly-red test or a crashed binary (its lost passes are already
         charged in `pass_delta`); at or below zero any loss convicts; a
-        shrunken verdict set always convicts. A destroyed verdict does not
-        take that forgiveness: the test the baseline judged no longer has
-        a reading, so a gain beside it is not a measurement the keep can
-        trust. This used to be "any newly-red test, whatever the net" — the
+        shrunken verdict set always convicts. A destroyed verdict is judged
+        by the abort partition (:attr:`refused_aborts`): it takes the gain's
+        forgiveness only when the target was already red and its crash names
+        a crate frame, and nothing is newly red beside it. This used to be "any newly-red test, whatever the net" — the
         bar that would have peeled the +15/−1 body of run
         `334902-2774708c`'s 05:39 turn while the sweep it never reached
         would have accepted it. Under test isolation the death is a
@@ -904,12 +917,29 @@ class TurnReading:
             return True
         if self.hung:
             return True
-        if self.aborted:
+        if self.refused_aborts:
             return True
         if self.pass_delta > 0:
             return False
         return bool(self.pass_delta < 0 or self.newly_red or self.crashed
                     or self.earlier)
+
+    @property
+    def refused_aborts(self) -> tuple[str, ...]:
+        """The aborted targets when the abort partition refuses this turn,
+        else (): a target that was green, or a red one whose crash names no
+        crate frame, refuses whatever was gained; a red one whose crash
+        names a crate frame stands beside a strict suite gain with nothing
+        newly red. Run `42057-641e589c` (2026-10-26, fill 5): turn 6 of the
+        `test_downcast` session, net +20 with nothing newly red and the
+        target dying in `downcast`, was refused here and the session ended
+        on a +0 turn."""
+        part = AbortPartition.of(self.aborted, green_before=self.aborted_green,
+                                 located=self.aborted_located)
+        if part.refuses(strict_gain=self.pass_delta > 0,
+                        lost=bool(self.newly_red)):
+            return self.aborted
+        return ()
 
     @property
     def green_targets(self) -> frozenset[str]:
@@ -952,8 +982,10 @@ class BestStateVerdict:
     #: green that the best had red: fewer assertions passed than the best
     #: had, which no name set shows (`TestOutcomes.refuses`).
     earlier_than_best: tuple[str, ...] = ()
-    #: Tests this turn's process killed without a panic that the best
-    #: state had not. A gain does not forgive it (`TestOutcomes.aborted`).
+    #: Tests this turn's abort partition refuses (`TurnReading.
+    #: refused_aborts`) that the best state did not also refuse: a test the
+    #: best state's gain forgave is a destroyed verdict again here when this
+    #: turn's own reading cannot forgive it.
     aborted: tuple[str, ...] = ()
 
     @property
@@ -997,7 +1029,7 @@ def judge_against_best(new: TurnReading, best: TurnReading) -> BestStateVerdict:
     outcomes = TestOutcomes(
         gained=frozenset(new.green_targets - best.green_targets),
         earlier=earlier,
-        aborted=frozenset(new.aborted) - frozenset(best.aborted))
+        aborted=frozenset(new.refused_aborts) - frozenset(best.refused_aborts))
     # Position movement and a destroyed verdict are different facts. An
     # abort makes `refuses` true even when something was gained, and that
     # must not copy the position names into `earlier_than_best`.
@@ -1077,7 +1109,7 @@ def _indent(text: str, pad: str = "    ") -> str:
 def render_test_turn(
     reading: TurnReading, rejected: Sequence[str] = (), *,
     dropped: Sequence[str] = (), dropped_diagnostics: str = "",
-    crashed: Sequence[str] = (), crash_evidence: str = "",
+    crashed: Sequence[str] = (),
     coverage_note: str = "", restored_note: str = "",
 ) -> str:
     """The verdict turn: every target's state, every newly-red sibling with
@@ -1098,8 +1130,13 @@ def render_test_turn(
 
     `crashed` names the bodies of this change set that a test process
     crashed on, which the crash settlement put back to their previous text
-    before judging the rest (`crash_settler.JudgedWrite`); `crash_evidence`
-    is that crash as the localizer read it."""
+    before judging the rest (`crash_settler.JudgedWrite`). The crash itself,
+    as the localizer read it, is `reading.crash`, printed whatever the
+    settlement decided: run `42057-641e589c` (2026-10-26, fill 6) sent five
+    turns of `test_downcast_mid` back as `(exit status -11)` alone while the
+    log held the faulting frame and the sanitizer's free stack, because the
+    text was printed only beside a withdrawal and every settlement of those
+    turns was UNSETTLED."""
     lines: list[str] = []
     if reading.clean:
         lines.append("RESULT: the change set compiled, every target test "
@@ -1111,6 +1148,12 @@ def render_test_turn(
         if crashed:
             lines.append("  (bodies a test process crashed on were dropped "
                          "first: " + ", ".join(crashed) + ")")
+        if reading.crash:
+            # A crash the settlement read beside a clean turn (a test that
+            # was already failing died in another binary) is still evidence.
+            lines.append("  (a test process died under this change set; the "
+                         "crash localizer read it as:)")
+            lines.append(_indent(reading.crash))
         return "\n".join(lines)
     if crashed:
         lines.append(
@@ -1118,8 +1161,13 @@ def render_test_turn(
             "were DROPPED (the tree keeps their previous text); the remaining "
             "bodies of the change set are on the tree and judged below. "
             "Dropped: " + ", ".join(crashed) + ". The crash:")
-        if crash_evidence:
-            lines.append(_indent(crash_evidence))
+        if reading.crash:
+            lines.append(_indent(reading.crash))
+    elif reading.crash:
+        lines.append(
+            "CRASH: a test process died under this change set without "
+            "printing a panic. The crash localizer read it as:")
+        lines.append(_indent(reading.crash))
     if dropped:
         lines.append(
             f"COMPILER: {len(dropped)} body(ies) did not compile and were DROPPED "

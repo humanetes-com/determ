@@ -1306,11 +1306,21 @@ class FillOneFn:
                     # (`judge_refill`): an attributed test that now fails at
                     # an earlier line is fewer assertions passed, and is not
                     # kept here either.
-                    if (_crash_evidence and _u2_fail_sig is not None
-                            and _attempt_baseline_test is not None
-                            and judge_refill(
-                                _evidence.tests, _attempt_baseline_test,
-                                _v).non_regression):
+                    # The same judgment for an attempt whose aimed test died
+                    # without a panic: an already-red test whose crash names
+                    # a crate frame, beside an aimed test this attempt turned
+                    # green and nothing lost, is kept (`judge_refill`, the
+                    # abort partition) and judged at the next sweep. Its U2
+                    # reject is the silent-death charge, not the verdict.
+                    _jr = (judge_refill(_evidence.tests, _attempt_baseline_test,
+                                        _v)
+                           if (_u2_fail_sig is not None
+                               and _attempt_baseline_test is not None
+                               and (_crash_evidence or _v.aborted))
+                           else None)
+                    if _jr is not None and (
+                            (_crash_evidence and _jr.non_regression)
+                            or (bool(_v.aborted) and _jr.banks)):
                         _written = [FnLocator(rel_file, fn_name), *(
                             FnLocator(u.file, u.fn_name) for u, _pre in joint.live)]
                         if SameCrashJudge(
@@ -1326,7 +1336,10 @@ class FillOneFn:
                         else:
                             self.tel.log(
                                 f"  [phase-c/per-fn] GUARD {rel_file}::{fn_name}: "
-                                "crash-evidence re-fill KEPT on non-regression "
+                                + ("crash-evidence re-fill" if _crash_evidence
+                                   else "attempt beside an already-red test's "
+                                   "located crash")
+                                + " KEPT on non-regression "
                                 f"({len(_v.self_failures)} self-failure(s), none "
                                 "passing at baseline) — judged for real at the "
                                 "next sweep, in the joint tree.")

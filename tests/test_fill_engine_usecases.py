@@ -1778,3 +1778,50 @@ def test_control_an_abort_attributed_to_the_unit_still_leaves_its_note(
         tmp_path: Path) -> None:
     fake = _exhaust_on(tmp_path, attributed=True)
     assert fake.notes == ["what the attempt tried did not work"]
+
+
+# ---- a located abort beside an aimed gain, on the per-fn route ----
+# Run `42057-641e589c` (2026-10-26): the abort partition reached the session
+# and the joint routes, while the per-fn route still reverted an attempt whose
+# aimed test died without a panic, its crate frame located, beside another
+# aimed test it turned green. Plan sentence: the per-fn route keeps that
+# attempt on non-regression, judged at the next sweep. Negative control: the
+# same reject with no crash site (unlocated) still reverts.
+
+def _located_abort_fill(tmp_path: Path, *, located: bool):  # type: ignore[no-untyped-def]
+    from dataclasses import replace
+
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+    from pipeline_core.domain.test_results import BinaryResult, TestStateReading
+    ws = _mk_ws(tmp_path)
+    baseline = TestStateReading((BinaryResult(
+        label="tests/t.rs", completed=True, passed=frozenset({"t_pass"}),
+        failed=frozenset({"t_red", "t_new"}), pass_count=1, fail_count=2),))
+    site = CrashSite("tests/t.rs", "t_red", "SIGSEGV", frames=(
+        CrashFrame("src/lib.rs", 2, "answer", "answer"),))
+    reject = U2Verdict(U2Decision.REJECT, self_failures=frozenset({"t_red"}),
+                       aborted=frozenset({"t_red"}),
+                       self_passed=frozenset({"t_new"}),
+                       detail="Your body ABORTED the test binary",
+                       crash_sites=(site,) if located else ())
+    ctx = replace(_ctx(ws), tdd_frontier_tests=FailureFrontier.of_direct(
+        {FnLocator("lib.rs", "answer"): {"t_red", "t_new"}}))
+    fake = RecordingFill(run=(0, ""), u2=reject, regr=None,
+                         regr_base=baseline, body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"), ctx=ctx)
+    return res, fake
+
+
+def test_a_located_abort_beside_an_aimed_gain_is_kept_on_per_fn(
+        tmp_path: Path) -> None:
+    res, fake = _located_abort_fill(tmp_path, located=True)
+    assert res.filled
+    assert any("located crash KEPT on non-regression" in m for m in fake.logs)
+
+
+def test_control_an_unlocated_abort_still_reverts_on_per_fn(
+        tmp_path: Path) -> None:
+    res, _fake = _located_abort_fill(tmp_path, located=False)
+    assert not res.filled

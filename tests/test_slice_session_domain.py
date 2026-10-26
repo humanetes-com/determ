@@ -628,12 +628,23 @@ def test_a_turn_says_which_bodies_crashed_and_were_dropped() -> None:
     # Run `757853-e28f1a7d` (2026-10-16): the crash settlement can now take
     # one body of a change set back off the tree; the turn has to say which,
     # and carry the crash, or the next turn re-sends it.
-    reading = TurnReading(targets=(TargetStatus("t_a", False, "boom"),))
-    text = render_test_turn(reading, crashed=["make_a"],
-                            crash_evidence="SIGSEGV in t_a\n  at make_a")
+    reading = TurnReading(targets=(TargetStatus("t_a", False, "boom"),),
+                          crash="SIGSEGV in t_a\n  at make_a")
+    text = render_test_turn(reading, crashed=["make_a"])
     assert "CRASH: 1 body(ies) crashed the test process" in text
     assert "make_a" in text and "SIGSEGV in t_a" in text
     clean = render_test_turn(TurnReading(targets=(TargetStatus("t_a", True),)),
                              crashed=["make_a"])
     assert "KEPT" in clean and "crashed on were dropped first: make_a" in clean
-    assert "CRASH:" not in render_test_turn(reading)
+    bare = TurnReading(targets=(TargetStatus("t_a", False, "boom"),))
+    assert "CRASH:" not in render_test_turn(bare)
+
+
+def test_a_crash_with_nothing_withdrawn_is_still_printed() -> None:
+    # Run `42057-641e589c` (2026-10-26): an UNSETTLED settlement withdraws
+    # nothing; its reading used to be printed only beside a withdrawal.
+    reading = TurnReading(targets=(TargetStatus("t_a", False, "aborted"),),
+                          crash="SIGSEGV\n  #0 drop at src/error.rs:660")
+    text = render_test_turn(reading)
+    assert "CRASH: a test process died under this change set" in text
+    assert "src/error.rs:660" in text

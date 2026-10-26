@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
@@ -170,6 +170,12 @@ class FillExecutionDeps:
     #: the frozen-plan negative control (`PHASE_C_REPLAN_ON_PREMISE=0`).
     premise: Mapping[str, PremiseEntry] | None = None
     ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None
+    #: The held view of the capture `ground_now` last read: per failing test
+    #: (bare name), the still-stubbed functions its first failure is inside
+    #: (the reading the sweep's `hollow` is). With it, blockers-first is
+    #: applied again inside the fill to the blockers its own keeps measured
+    #: (`_GroundGate.yields_to`); None keeps the plan-time blockers only.
+    held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +245,14 @@ class _GroundGate:
         self.moved: tuple[str, ...] = ()
         self.refused = 0
         self.admitted = 0
+        self._held_read = deps.held_now
+        #: The held view of the ground last read (`FillExecutionDeps.held_now`).
+        self.held: Mapping[str, frozenset[FnLocator]] = {}
+        #: The units runs still ahead of the cursor write (bound by the
+        #: executor): what a claim can yield to.
+        self._ahead: Callable[[], Mapping[FnLocator, str]] = dict
+        self._yields_logged: set[tuple[frozenset[FnLocator], str]] = set()
+        self.yields = 0
 
     @property
     def armed(self) -> bool:
@@ -256,6 +270,10 @@ class _GroundGate:
         if now is None:
             return
         self._now = now
+        if self._held_read is not None:
+            held = self._held_read()
+            if held is not None:
+                self.held = held
         grown = set(self.moved) | set(premise_moved(self._premise, now))
         if len(grown) == len(self.moved):
             return
@@ -321,6 +339,71 @@ class _GroundGate:
                 return False
             self.refused += 1
             return True
+
+    def bind_ahead(self, ahead: Callable[[], Mapping[FnLocator, str]]) -> None:
+        """The executor's reading of the runs still ahead of its cursor:
+        each unit they write, with the label of the first that writes it."""
+        self._ahead = ahead
+
+    def blockers_now(self) -> frozenset[FnLocator]:
+        """The still-stubbed functions red tests stop in on the ground as it
+        stands after this fill's keeps (empty before any keep)."""
+        with self._lock:
+            self._look()
+            return frozenset().union(*self.held.values()) if self.held else (
+                frozenset())
+
+    def yields_to(self, scope: frozenset[str] | None,
+                  units: frozenset[FnLocator]) -> str:
+        """The label of a run still ahead this claim waits behind, or "".
+
+        Blockers-first, applied to the blockers this fill's own keeps
+        measured: every test the claim was planned on now stops inside a
+        still-stubbed function the claim does not write, and a run still
+        ahead writes one of them. No body the claim writes can be measured
+        until that function has one, so the claim waits behind its writer
+        instead of spending its share in front of it. A claim with no named
+        tests, or with one test the ground now does not hold, does not wait.
+
+        Run `42057-641e589c` (2026-10-26), fill 3: the per-fn run opened
+        first on the sweep's blockers and spent 96.5 min and 20 calls
+        keeping 12 bodies, every one logged `kept … blocked by
+        still-stubbed sibling(s)` naming `src/ptr.rs::from_raw` or
+        `src/error.rs::object_drop` from its third keep on. Both were
+        targets of the file runs ranked 2nd and 4th; the error.rs file run
+        then cashed in its first reply (`pass 90 -> 99`), and the next
+        sweep read 111 -> 237 once those layers were written."""
+        if not self.armed or not scope:
+            return ""
+        with self._lock:
+            self._look()
+            if not self.held:
+                return ""
+            holders: set[FnLocator] = set()
+            for t in scope:
+                held = self.held.get(str(t).rsplit("::", 1)[-1])
+                if not held:
+                    return ""
+                if held & units:
+                    return ""
+                holders |= held
+            ahead = self._ahead()
+            writer = next((ahead[u] for u in sorted(
+                holders, key=lambda k: (k.file, k.fn_name)) if u in ahead), "")
+            if not writer:
+                return ""
+            self.yields += 1
+            key = (frozenset(units), writer)
+            if key not in self._yields_logged:
+                self._yields_logged.add(key)
+                self._log(
+                    f"  [phase-c/schedule] fill {self._iteration}: claim of "
+                    f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in units))} "
+                    f"waits behind {writer} — every test it was planned on "
+                    f"now stops in "
+                    f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in holders))}, "
+                    "which that run writes")
+            return writer
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -451,6 +534,100 @@ def _row_for(
                        or (UNJUDGED_WRITE_REASON if s.run.joint and unjudged
                            else "")),
         joint_repaired=rep.joint_repaired)
+
+
+def _left_tree_keys(
+    wave: Sequence[tuple[str, bool]], yielded: Collection[str],
+    origin: Mapping[str, str], landed: set[str],
+) -> set[str]:
+    """The keys of a finished wave whose runs left the tree as it was, for
+    `release_held`: each run whose row kept nothing and whose claims did not
+    wait behind a writer (`(key, kept)` per run). A piece queued again behind
+    a writer (`origin`: piece key -> the key of the run it carries) that
+    then kept nothing adds that run's key too, when the run itself landed
+    nothing: the schedule's holds name the run, not the piece. `landed`
+    accumulates the keys that kept a body over the fill."""
+    landed.update(k for k, kept in wave if kept)
+    left = {k for k, kept in wave if not kept and k not in yielded}
+    left |= {origin[k] for k in tuple(left)
+             if k in origin and origin[k] not in landed}
+    return left
+
+
+def _yield_piece(w: ScheduledRun,
+                 yielded: frozenset[FnLocator]) -> ScheduledRun | None:
+    """The part of `w` whose claims yielded, as a run to queue again: the
+    yielded units of a route that writes each target on its own (carved
+    like a re-buy, `carve_rebuys`), or the whole run when a transaction
+    yielded its opening claim. None when nothing of it is left to run."""
+    run = w.run
+    if run.unit_tests:
+        keep = yielded & run.targets
+        if not keep:
+            return None
+        tests = tuple((u, t) for u, t in run.unit_tests if u in keep)
+        piece = replace(
+            run, targets=frozenset(keep),
+            stubs_in_targets=run.stubs_in_targets & keep,
+            target_tests=frozenset().union(*(t for _, t in tests)),
+            unit_tests=tests, parent=run.plan_key,
+            files=tuple(sorted({u.file for u in keep})),
+            label=f"{run.label} [{len(keep)} waited]")
+    elif run.targets <= yielded:
+        piece = run
+    else:
+        return None
+    return replace(w, run=piece, deferred=False, reason="yielded")
+
+
+def _requeue_behind(
+    ordered: list[ScheduledRun], i: int, wave: Sequence[ScheduledRun],
+    yielded: Mapping[str, frozenset[FnLocator]],
+    blockers: frozenset[FnLocator], requeued: dict[str, int],
+    deps: FillExecutionDeps, origin: dict[str, str],
+) -> list[ScheduledRun]:
+    """`ordered` with the runs ahead of the cursor re-ordered on the
+    blockers the fill's own keeps measured: every run that writes one goes
+    first (in plan order), then the yielded claims of this wave, then the
+    rest (in plan order). The plan-time order of `fill_schedule.schedule`
+    applied again, on the ground now, with no second rule."""
+    ahead = ordered[i:]
+    writers = [x for x in ahead if x.run.targets & blockers]
+    rest = [x for x in ahead if not (x.run.targets & blockers)]
+    pieces: list[ScheduledRun] = []
+    for w in wave:
+        ys = yielded.get(w.run.key)
+        if not ys or requeued.get(w.run.plan_key, 0) >= _MAX_REQUEUES:
+            continue
+        piece = _yield_piece(w, ys)
+        if piece is None:
+            continue
+        requeued[w.run.plan_key] = requeued.get(w.run.plan_key, 0) + 1
+        if piece.run.key != w.run.key:
+            origin[piece.run.key] = origin.get(w.run.key, w.run.key)
+        pieces.append(piece)
+    new = [*writers, *pieces, *rest]
+    if [x.run.key for x in new] == [x.run.key for x in ahead]:
+        return ordered
+    deps.log(
+        f"  [phase-c/schedule] fill {deps.iteration}: blockers measured in "
+        f"this fill ({names_of(sorted(f'{u.file}::{u.fn_name}' for u in blockers))}) "
+        f"— {names_of([x.run.label for x in writers]) or 'no run ahead writes one'} "
+        "open first"
+        + (f"; {names_of([x.run.label for x in pieces])} wait behind them"
+           if pieces else ""))
+    deps.emit("phase_c.fill.blockers_reordered", data={
+        "cluster": deps.cluster, "iter": deps.iteration,
+        "blockers": sorted(f"{u.file}::{u.fn_name}" for u in blockers),
+        "writers": [x.run.label for x in writers],
+        "requeued": [x.run.label for x in pieces]})
+    return ordered[:i] + new
+
+
+#: A planned run's claims are queued again at most this many times in one
+#: fill: each requeue follows a writer that has run since, and a blocker
+#: with more writers than this is the sweep's to re-plan.
+_MAX_REQUEUES = 2
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
@@ -726,11 +903,29 @@ def execute_fill(
     reasked_minutes = 0.0
     i = 0
     # The schedule's holds and what the executor did to their holders: a
-    # held run whose every holder this executor deferred is released
-    # (`fill_schedule.release_held`) at the cursor, in schedule order.
+    # held run whose every holder this executor deferred, or ran and kept
+    # nothing, is released (`fill_schedule.release_held`) at the cursor, in
+    # schedule order.
     held = [h for h in sched.deferred if h.held_by]
-    not_opened: set[str] = set()
+    left_tree: set[str] = set()
     released: set[str] = set()
+
+    def _ahead_writers() -> dict[FnLocator, str]:
+        out: dict[FnLocator, str] = {}
+        for s_ in ordered[i:]:
+            for u_ in s_.run.targets:
+                out.setdefault(u_, s_.run.label)
+        return out
+
+    gate.bind_ahead(_ahead_writers)
+    #: How many times each planned run's claims were queued again behind a
+    #: writer (bounded: each requeue follows a writer that has then run).
+    requeued: dict[str, int] = {}
+    #: A queued-again piece's key -> the key of the run whose claims it
+    #: carries (the schedule's holds name that run), and the keys whose row
+    #: kept a body: a hold ends when neither the run nor its piece landed.
+    yield_origin: dict[str, str] = {}
+    landed_keys: set[str] = set()
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
         if deps.ledger is not None and new_rows:
@@ -738,9 +933,9 @@ def execute_fill(
 
     def _release(keys: set[str]) -> None:
         nonlocal ordered
-        not_opened.update(keys)
+        left_tree.update(keys)
         freed = release_held(
-            [h for h in held if h.run.key not in released], not_opened)
+            [h for h in held if h.run.key not in released], left_tree)
         if not freed:
             return
         released.update(h.run.key for h in freed)
@@ -751,7 +946,8 @@ def execute_fill(
             deps.log(
                 f"  [phase-c/schedule] fill {deps.iteration}: {h.run.label} "
                 f"released — the run(s) its hold waited on did not open "
-                f"this fill ({names_of(sorted(labels.get(k, k) for k in h.held_by))}); "
+                f"this fill or kept nothing on the tree "
+                f"({names_of(sorted(labels.get(k, k) for k in h.held_by))}); "
                 f"ranked {h.reason} again")
         deps.emit("phase_c.fill.hold_released", data={
             "cluster": deps.cluster, "iter": deps.iteration,
@@ -861,7 +1057,9 @@ def execute_fill(
                 scope=w.run.target_tests or None, units=w.run.targets,
                 unit_multiple=deps.unit_share_multiple,
                 call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp),
-                owed=held_units & w.run.targets)
+                owed=held_units & w.run.targets,
+                yields_to=(gate.yields_to if deps.held_now is not None
+                           else None))
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}
@@ -957,7 +1155,12 @@ def execute_fill(
             _log_row(deps, row, unchanged=rep.unchanged)
             if w.run.label in reasked:
                 reasked_minutes += row.minutes
-            fill_asks.note(row, ((u.file, u.fn_name) for u in rep.dispatched))
+            # A claim that waited behind a writer asked nothing: its units
+            # are not this run's question, whatever the route reported.
+            _waited = clocks[w.run.key].yielded
+            fill_asks.note(row, [(u.file, u.fn_name) for u in rep.dispatched]
+                           or [(f, fn) for f, fn in row.targets
+                               if FnLocator(f, fn) not in _waited])
         _flush(rows[-len(wave):])
         _notify_wave(deps, [reports.get(w.run.key) for w in wave],
                      rows[-len(wave):])
@@ -965,6 +1168,26 @@ def execute_fill(
             rep_w = reports.get(w.run.key)
             if rep_w is not None:
                 landed_fill |= rep_w.kept
+        # Claims that waited behind a run still ahead (`_GroundGate.
+        # yields_to`): the run they yielded is not a landing either, but its
+        # holds stand until its claims have run behind their writer.
+        _yielded = {w.run.key: frozenset(clocks[w.run.key].yielded)
+                    for w in wave if clocks[w.run.key].yielded}
+        # A run of this wave whose row kept nothing (reverted, empty, or
+        # every kept body already on disk) has no landing for the runs it
+        # held to split: they are released here, at the one exit every
+        # opened wave passes through.
+        _release(_left_tree_keys(
+            [(w.run.key, bool(row.kept))
+             for w, row in zip(wave, rows[-len(wave):], strict=True)],
+            _yielded, yield_origin, landed_keys))
+        # Blockers-first again, on the blockers this fill's keeps measured:
+        # the runs still ahead that write one open first, and the claims
+        # that yielded to them queue behind them (`_requeue_behind`).
+        if deps.held_now is not None and i <= len(ordered):
+            ordered = _requeue_behind(
+                ordered, i, wave, _yielded, gate.blockers_now(), requeued,
+                deps, yield_origin)
         if unjudged and i < len(ordered):
             # The same exit as a moved premise: the rest of the plan was
             # planned on a tree no verdict describes. The fill returns and
@@ -1001,8 +1224,12 @@ def execute_fill(
         # same question before it opens; the loop ends when a pass defers
         # nothing (each pass removes at least one run from the plan).
         while i < len(ordered) and gate.armed:
+            # A run that waits behind a writer still ahead (`yields_to`) is
+            # not deferred for the sweep: it opens after that writer.
             rest = [w for w in ordered[i:]
-                    if gate(w.run.target_tests or None, w.run.targets)]
+                    if not gate.yields_to(w.run.target_tests or None,
+                                          w.run.targets)
+                    and gate(w.run.target_tests or None, w.run.targets)]
             if not rest:
                 break
             deps.log(

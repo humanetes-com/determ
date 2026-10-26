@@ -31,6 +31,7 @@ from pipeline_core.domain.assertion_position import (
     leaf,
     outcomes_of,
 )
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.rust_idents import canon_container
 from pipeline_core.domain.test_results import (
@@ -896,6 +897,15 @@ class U2Verdict:
     # A failure with no position (a panic in `src/`, a helper, a closure)
     # is absent, so no keep can order it.
     positions: Mapping[TestKey, int] = field(default_factory=dict)
+    # The sites the gate's crash settlement localized under this attempt
+    # (`crash_settler.Settlement.sites`): what `judge_refill` hands
+    # `outcomes_of`, so an already-red test that now dies in a crate body is
+    # judged by the abort partition (`abort_verdict`). Empty when nothing
+    # settled: every red abort then reads unlocated, as before.
+    crash_sites: tuple[CrashSite, ...] = ()
+    # Those sites as the settlement rendered them (`crash_text_of`), for a
+    # caller that stores the reject for a later prompt.
+    crash_reading: str = ""
 
     @classmethod
     def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
@@ -933,6 +943,8 @@ class U2Verdict:
                capture: str = "",
                positions: Mapping[TestKey, int] | None = None,
                abort_attributed: bool = False,
+               crash_sites: tuple[CrashSite, ...] = (),
+               crash_reading: str = "",
                ) -> U2Verdict:
         return cls(U2Decision.REJECT, self_failures=self_failures,
                    detail=detail, no_verdict=no_verdict,
@@ -940,7 +952,8 @@ class U2Verdict:
                    aborted=aborted, crash=crash,
                    external_stub_sites=external_stub_sites,
                    capture=capture, positions=dict(positions or {}),
-                   abort_attributed=abort_attributed)
+                   abort_attributed=abort_attributed,
+                   crash_sites=crash_sites, crash_reading=crash_reading)
 
     @property
     def abort_unattributed(self) -> bool:
@@ -1048,7 +1061,8 @@ class JointImprovement:
         parts = []
         if o.lost:
             parts.append("newly red: " + ", ".join(sorted(o.lost)))
-        if o.aborted:
+        if o.aborted and o.abort.refuses(strict_gain=bool(o.gained),
+                                         lost=bool(o.lost)):
             parts.append("aborted: " + ", ".join(sorted(o.aborted)))
         if o.earlier and not o.gained:
             parts.append("panics earlier: " + ", ".join(o.earlier_tests))
@@ -1155,7 +1169,8 @@ def judge_refill(
 
     outcomes = outcomes_of(
         judged, before=replace(before, positions=_own(before.positions)),
-        after=replace(after, positions=_own(after.positions)))
+        after=replace(after, positions=_own(after.positions)),
+        crash_sites=verdict.crash_sites)
     clear = before.passed | before.ignored
     failing = frozenset(
         n for n in names

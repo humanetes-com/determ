@@ -33,6 +33,7 @@ from pipeline_core.adapters.behaviour_probe import (
     materialized_probe,
     probe_env,
     subprocess_runner,
+    t0d_target_dir,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_coverage import (
@@ -49,7 +50,10 @@ from pipeline_core.domain.behaviour_probe import is_probe_spec, program_for
 from pipeline_core.domain.cargo_toml import cargo_package_name
 from pipeline_core.domain.models import BuildCluster, FnRecord
 
-COVERAGE_SUBDIR = Path("target") / "coverage" / "behaviour_exercises"
+# Profraw sits under the world's task 0d target directory. A path beside
+# `target/` would be harvested as source; `t0d_target_dir` is the directory
+# cargo was given, and grcov has to read the binaries written there.
+COVERAGE_TAIL = Path("coverage") / "behaviour_exercises"
 
 
 def grcov_binary() -> Path | None:
@@ -60,22 +64,25 @@ def grcov_binary() -> Path | None:
     return cargo_bin if cargo_bin.exists() else None
 
 
-def instrumented_env(cluster: BuildCluster | None) -> dict[str, str]:
-    env = probe_env(cluster)
+def instrumented_env(cluster: BuildCluster | None,
+                      project_dir: Path | None = None) -> dict[str, str]:
+    env = probe_env(cluster, project_dir)
     env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
     env["CARGO_INCREMENTAL"] = "0"
     return env
 
 
 def grcov_command(grcov: Path, profraw_dir: Path, project_dir: Path,
-                  out_json: Path) -> list[str]:
+                  out_json: Path, *, binary_path: Path | None = None) -> list[str]:
     """grcov over one profraw dir → coveralls JSON at `out_json`; the base
     flag set of `coverage._grcov_cmd`, so the hit lines agree with the crate
     readings (no cluster exclusions: a spec's hits map onto fn records, not a
-    denominator)."""
+    denominator). `binary_path` is the directory cargo wrote this world's
+    binaries into; omitted, it is `target/debug` under the project."""
+    binary = binary_path if binary_path is not None else (project_dir / "target" / "debug")
     return [
         str(grcov), str(profraw_dir),
-        "--binary-path", str(project_dir / "target" / "debug"),
+        "--binary-path", str(binary),
         "--source-dir", str(project_dir),
         "--output-type", "coveralls",
         "--token", "unused",
@@ -162,8 +169,9 @@ def exercises_by_coverage(
     # the model wrote compiled under that import — re-running it without one
     # fails to build and the spec is silently "not attributed".
     crate = _crate_name(project_dir)
-    env = instrumented_env(cluster)
-    cov_root = project_dir / COVERAGE_SUBDIR
+    env = instrumented_env(cluster, project_dir)
+    world_target = t0d_target_dir(project_dir, cluster)
+    cov_root = world_target / COVERAGE_TAIL
     cov_root.mkdir(parents=True, exist_ok=True)
     build_env = dict(env)
     build_env["LLVM_PROFILE_FILE"] = str(cov_root / "build-%p-%m.profraw")
@@ -207,8 +215,10 @@ def exercises_by_coverage(
             log(f"  [behaviour-exercises] {spec.behaviour_id}: no profraw written")
             continue
         out_json = profraw_dir / "coverage.json"
-        rc, _out, err = counted(grcov_command(grcov, profraw_dir, project_dir, out_json),
-                                project_dir, spec_env, 120)
+        rc, _out, err = counted(
+            grcov_command(grcov, profraw_dir, project_dir, out_json,
+                          binary_path=world_target / "debug"),
+            project_dir, spec_env, 120)
         if rc != 0 or not out_json.exists():
             log(f"  [behaviour-exercises] {spec.behaviour_id}: grcov failed "
                 f"(rc={rc}): {err[-300:].strip()}")

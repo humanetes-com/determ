@@ -247,6 +247,20 @@ def behaviour_book_key(module_name: str) -> str:
     return f"{BEHAVIOUR_PHASE_PREFIX}/{module_name}/{BEHAVIOUR_BOOK_SEGMENT}"
 
 
+BEHAVIOUR_HARVEST_SEGMENT = "harvest"
+
+
+def behaviour_module_harvest_key(module_name: str) -> str:
+    """`task0d/<module>/harvest`, marked done only when every cluster's
+    `task0d/<cluster>` suite was written.
+
+    Three segments, so it is not a cluster harvest key and it is not the book
+    key. `plan_behaviour_tags` still requires each cluster's two-segment key:
+    a module key that replaced those would leave the tag waiting on cluster
+    keys nothing writes."""
+    return f"{BEHAVIOUR_PHASE_PREFIX}/{module_name}/{BEHAVIOUR_HARVEST_SEGMENT}"
+
+
 def is_behaviour_phase(key: str) -> bool:
     """True for a task0d state key (`task0d/<cluster>`, `task0d/<module>/book`)."""
     return key == BEHAVIOUR_PHASE_PREFIX or key.startswith(f"{BEHAVIOUR_PHASE_PREFIX}/")

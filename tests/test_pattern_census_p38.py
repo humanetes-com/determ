@@ -44,3 +44,41 @@ def test_a_rebuy_flat_with_a_measurable_aim_and_no_flat_body_still_hits() -> Non
 def test_the_new_label_is_not_read_as_a_re_buy() -> None:
     sc = _event("unmeasurable", ["t1"], ["t1"])
     assert pc.p38_unfounded_flat(sc, set()) == []
+
+
+def _session_event(reason: str) -> dict:
+    return {"iter": 3, "cluster": "stable", "inputs": {"standing_flat": {}},
+            "runs": [{"kind": "session", "label": "session[1 test(s)] #0",
+                      "reason": reason, "target_tests": ["t_a"],
+                      "targets": ["src/a.rs::f", "src/a.rs::g"]}],
+            "deferred": []}
+
+
+def _route(kind: str, outcome: str, targets: list[str], it: int,
+           tests: list[str]) -> dict:
+    return {"kind": kind, "outcome": outcome, "targets": targets,
+            "iteration": it, "cluster": "stable", "target_tests": tests,
+            "oracle_fp": "o",
+            "label": f"{kind} {it}", "net_pass_delta": 2 if outcome == "cashed" else 0}
+
+
+def test_a_session_rebuy_after_a_cash_on_its_slice_is_a_hit() -> None:
+    routes = [_route("session", "flat", ["src/a.rs::f"], 1, ["t_a"]),
+              _route("file", "cashed", ["src/a.rs::g"], 2, ["t_b"])]
+    assert pc.p38_session_rebuy_after_cash(
+        _session_event("rebuy_flat"), routes) == [
+            ("session[1 test(s)] #0", "file 2")]
+
+
+def test_control_a_flat_row_or_a_cash_off_the_slice_is_no_hit() -> None:
+    flat = [_route("session", "flat", ["src/a.rs::f"], 1, ["t_a"]),
+            _route("file", "flat", ["src/a.rs::g"], 2, ["t_b"])]
+    off = [_route("session", "flat", ["src/a.rs::f"], 1, ["t_a"]),
+           _route("file", "cashed", ["src/z.rs::h"], 2, ["t_b"])]
+    ev = _session_event("rebuy_flat")
+    assert pc.p38_session_rebuy_after_cash(ev, flat) == []
+    assert pc.p38_session_rebuy_after_cash(ev, off) == []
+    # A session ranked served is not a re-buy.
+    hit = [_route("session", "flat", ["src/a.rs::f"], 1, ["t_a"]),
+           _route("file", "cashed", ["src/a.rs::g"], 2, ["t_b"])]
+    assert pc.p38_session_rebuy_after_cash(_session_event("served"), hit) == []

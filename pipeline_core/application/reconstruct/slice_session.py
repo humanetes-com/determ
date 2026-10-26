@@ -39,7 +39,10 @@ from pipeline_core.application.reconstruct.attribution import (
 )
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
 from pipeline_core.application.reconstruct.crash_settler import (
+    CrashSettler,
     JudgedWrite,
+    Settlement,
+    crash_text_of,
 )
 from pipeline_core.application.reconstruct.crash_settler import (
     bound as bound_crash_settler,
@@ -71,6 +74,7 @@ from pipeline_core.domain.attribution import (
 )
 from pipeline_core.domain.context_pull import PullKind, extract_context_pulls
 from pipeline_core.domain.crash_keep import SameCrashJudge
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.ignored_inputs import (
     declined_by_ignored_inputs,
@@ -305,6 +309,7 @@ def _red_target_positions(
 
 def _target_outcomes(
     baseline: TestStateReading, after: TestStateReading, tests: Sequence[str],
+    crash_sites: Sequence[CrashSite] = (),
 ) -> TestOutcomes:
     """The session's targets between the baseline and `after`.
 
@@ -312,8 +317,27 @@ def _target_outcomes(
     `earlier_tests` is what the position rule names, and a caller empties
     it when something was gained. `aborted` is not emptied by a gain: a
     silent death removes the measurement. Read by the turn judge and by
-    the peel, so a peeled subset is held to the bar the turn was."""
-    return outcomes_of(tests, before=baseline.keyed(), after=after.keyed())
+    the peel, so a peeled subset is held to the bar the turn was.
+    `crash_sites` locate an aborted target in the crate (the abort
+    partition, `abort_verdict`); none, and every abort reads unlocated."""
+    return outcomes_of(tests, before=baseline.keyed(), after=after.keyed(),
+                       crash_sites=crash_sites)
+
+
+def _abort_sites(settler: CrashSettler | None, settlement: Settlement | None,
+                 outcomes: TestOutcomes, capture: str,
+                 baseline: TestStateReading | None,
+                 ) -> tuple[CrashSite, ...]:
+    """The crash sites that judge `outcomes`' aborts: the settlement's when
+    it read this very capture (it did not change the tree), else a
+    read-only localization of `capture`, and only when a target aborted."""
+    if not outcomes.aborted:
+        return ()
+    if settlement is not None and not settlement.changed_tree:
+        return settlement.sites
+    if settler is None or not capture:
+        return ()
+    return settler.localize(capture, baseline)
 
 
 def _admit_from_file_requests(
@@ -669,13 +693,18 @@ def run_slice_session(
         # again. A later restore of this turn's files puts those bodies back
         # with the rest of the pre-image.
         _settler = bound_crash_settler()
+        settlement: Settlement | None = None
         if (after is not None and baseline is not None
                 and _settler is not None and written
                 and crash_keys(after.binaries) - crash_keys(baseline.binaries)):
-            if _settler.settle(raw[-1] if raw else "", written, baseline,
-                               tag=f"{label} ").changed_tree:
+            settlement = _settler.settle(raw[-1] if raw else "", written,
+                                         baseline, tag=f"{label} ")
+            if settlement.changed_tree:
                 raw.clear()
                 after = ports.measure_suite(raw, MeasureRole.JUDGMENT)
+        # Whatever the settlement decided, the crash it read is what the
+        # model is shown beside the verdicts (`TurnReading.crash`).
+        crash_text = crash_text_of(settlement)
         if after is None or baseline is None:
             return TurnReading(targets=tuple(
                 TargetStatus(t, False, "(suite inconclusive)") for t in slice_.tests)), after
@@ -717,6 +746,10 @@ def run_slice_session(
         # process died without a panic is a different loss (`TurnReading.aborted`).
         positions_now = _red_target_positions(after, slice_.tests)
         outcomes = _target_outcomes(baseline, after, slice_.tests)
+        _sites = _abort_sites(_settler, settlement, outcomes,
+                              raw[-1] if raw else "", baseline)
+        if _sites:
+            outcomes = _target_outcomes(baseline, after, slice_.tests, _sites)
         earlier = () if outcomes.gained else outcomes.earlier_tests
         aborted = tuple(sorted(outcomes.aborted))
         hung = tuple(cmp.hung_tests)
@@ -732,7 +765,10 @@ def run_slice_session(
             pass_delta=cmp.net_pass_delta,
             newly_green=tuple(sorted(cmp.newly_green)),
             executed_shrank=cmp.cur_executed < cmp.base_executed,
-            positions=positions_now, earlier=earlier, aborted=aborted)
+            positions=positions_now, earlier=earlier, aborted=aborted,
+            aborted_green=tuple(sorted(outcomes.aborted_green)),
+            aborted_located=tuple(sorted(outcomes.aborted_located)),
+            crash=crash_text)
         return reading, after
 
     try:
@@ -886,7 +922,6 @@ def run_slice_session(
                 size=len(cs.routed))
             reading, after = _read(raw, _jw)
             crashed: list[str] = []
-            crash_ev = ""
             if _jw.withdrawn:
                 _kept_r, _gone_r = split_withdrawn(
                     cs.routed,
@@ -896,7 +931,6 @@ def run_slice_session(
                     file_text=lambda f: (target_src_dir / f).read_text(
                         encoding="utf-8", errors="replace"))
                 crashed = [r.unit.fn_name for r in _gone_r]
-                crash_ev = _jw.evidence
                 cs = ChangeSet(tuple(_kept_r), cs.rejected)
                 ports.log(f"  [phase-c/session] {label}: turn {turns} — "
                           f"WITHDREW {len(crashed)} body(ies) a test process "
@@ -1056,7 +1090,7 @@ def run_slice_session(
                         "what the failing assertions see.")
             pending = (render_test_turn(
                 reading, rejected, dropped=dropped, dropped_diagnostics=dropped_diag,
-                crashed=crashed, crash_evidence=crash_ev,
+                crashed=crashed,
                 coverage_note=note, restored_note=restored_note)
                 + "\n" + render_budget_turn(max_turns - turns))
     except BaseException:
@@ -1287,11 +1321,17 @@ def _peel(
         cmp = compare_readings(baseline, after)
         # The turn judge's bar (`TurnReading.regressed`): a strict net gain
         # forgives a newly-red test; a target failing earlier than at
-        # baseline is a loss only at or below zero; a destroyed verdict
-        # refuses even beside the gain.
+        # baseline is a loss only at or below zero; a destroyed verdict is
+        # judged by the abort partition, on the peeled tree's own crash.
         _outcomes = _target_outcomes(baseline, after, slice_.tests)
+        _sites = _abort_sites(bound_crash_settler(), None, _outcomes,
+                              raw[-1] if raw else "", baseline)
+        if _sites:
+            _outcomes = _target_outcomes(baseline, after, slice_.tests, _sites)
         _earlier = () if _outcomes.gained else _outcomes.earlier_tests
-        if (not cmp.regressed and not _outcomes.aborted
+        _aborts_refuse = _outcomes.abort.refuses(
+            strict_gain=cmp.net_pass_delta > 0, lost=bool(cmp.newly_red))
+        if (not cmp.regressed and not _aborts_refuse
                 and not (_earlier and cmp.net_pass_delta <= 0)):
             ports.log(f"  [phase-c/session] {label}: peeled {len(reverted)} unit(s) — "
                       f"the remaining {len(remaining) + len(unrestored)} hold "

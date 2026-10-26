@@ -39,10 +39,12 @@ attempt stands (:class:`TestOutcomes`).
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
+from pipeline_core.domain.abort_verdict import AbortPartition, located_tests
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.generation import parse_gen_tests_filename
 from pipeline_core.domain.test_results import (
     binary_key,
@@ -431,9 +433,15 @@ class TestOutcomes:
     (stack exhaustion, a signal) in the code it now runs.
 
     :attr:`refuses` is the decided rule, and the only one: any loss refuses,
-    any abort refuses, and an earlier position refuses only when nothing
-    gained. An abort refuses whatever was gained because it removes the
-    measurement every later decision reads. Run `2157238-210637e6`
+    an abort refuses by :class:`abort_verdict.AbortPartition` (a test that
+    was green, or a red test whose crash names no crate frame, refuses
+    whatever was gained; a red test whose crash names a crate frame is
+    forgiven beside a strict gain and no loss), and an earlier position
+    refuses only when nothing gained. `aborted_green` and `aborted_located`
+    are set only by :func:`outcomes_of` from the crash sites it is handed;
+    without sites every red abort is unlocated, so it refuses as an
+    unlocated abort always has: it removes the measurement every later
+    decision reads. Run `2157238-210637e6`
     (2026-10-11): a file route kept five `construct_from_*` bodies that each
     called themselves, red before and red after, "non-regression"; from the
     next sweep 26 test binaries died of stack exhaustion and 86 to 95 tests
@@ -451,11 +459,29 @@ class TestOutcomes:
     later: tuple[PositionMove, ...] = ()
     unpositioned: frozenset[str] = frozenset()
     aborted: frozenset[str] = frozenset()
+    #: The aborted tests that passed before (a lost verdict).
+    aborted_green: frozenset[str] = frozenset()
+    #: The aborted tests that were failing before and whose crash site names
+    #: an authorable crate frame (`abort_verdict.located_tests`).
+    aborted_located: frozenset[str] = frozenset()
+
+    @property
+    def abort(self) -> AbortPartition:
+        return AbortPartition.of(self.aborted, green_before=self.aborted_green,
+                                 located=self.aborted_located)
+
+    def refuses_with(self, *, strict_gain: bool) -> bool:
+        """The decided rule with the caller's gain: a session judges on the
+        suite's net, a route on the aimed tests it turned green, the ledger
+        on what the landing's own keep turned green."""
+        return (bool(self.lost)
+                or self.abort.refuses(strict_gain=strict_gain,
+                                      lost=bool(self.lost))
+                or (bool(self.earlier) and not self.gained))
 
     @property
     def refuses(self) -> bool:
-        return (bool(self.lost) or bool(self.aborted)
-                or (bool(self.earlier) and not self.gained))
+        return self.refuses_with(strict_gain=bool(self.gained))
 
     @property
     def earlier_tests(self) -> tuple[str, ...]:
@@ -517,6 +543,7 @@ class KeyedVerdicts:
 
 def outcomes_of(
     tests: Iterable[str], *, before: KeyedVerdicts, after: KeyedVerdicts,
+    crash_sites: Sequence[CrashSite] = (),
 ) -> TestOutcomes:
     """The :class:`TestOutcomes` of `tests` (names; a qualified name is read
     by its leaf) between two readings, judged per :class:`TestKey`.
@@ -549,9 +576,18 @@ def outcomes_of(
     aborted = {k for k in keys
                if (k in before.passed or k in before.failed)
                and k not in before.aborted and k in after.aborted_silent}
+    # The abort partition's inputs (`abort_verdict.AbortPartition`): which
+    # aborted tests passed before, and which red ones a crash site of
+    # `crash_sites` locates in the crate. No sites, nothing located.
+    aborted_green = {k for k in aborted
+                     if k in before.passed and k not in before.failed}
+    located = located_tests(crash_sites) if crash_sites else frozenset()
     return TestOutcomes(
         gained=frozenset(k.test for k in gained),
         lost=frozenset(k.test for k in lost),
         earlier=earlier, later=later,
         unpositioned=frozenset(k.test for k in red_both - moved - same),
-        aborted=frozenset(k.test for k in aborted))
+        aborted=frozenset(k.test for k in aborted),
+        aborted_green=frozenset(k.test for k in aborted_green),
+        aborted_located=frozenset(k.test for k in aborted - aborted_green
+                                  if k.test in located))

@@ -280,7 +280,13 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      `rebuy_flat` off route rows while the flat list was empty on every
      iteration.  A run with neither source cannot hit.  No reaction key:
      the schedule ranks each unit on its own graded landing and prints
-     nothing new, so a post-fix hit is a defect.
+     nothing new, so a post-fix hit is a defect.  Sessions are judged by
+     their own clause: a session ranked `rebuy_flat` or `rebuy_readmitted`
+     whose test's latest graded session row (flat, reverted, declined) is
+     followed, before that fill, by a route row that cashed on a unit of
+     the session's slice.  Run 391506-3403a6a7 (2026-10-22, fill 2): the
+     one session that paid opened 17th of 18 at the re-buy level after five
+     cashes on its slice.
 
   P39 unevidenced stub narrowing — the engine replaced a whole fill with
      the frontier's stubs (`deferring the impl route this iter`) although
@@ -2585,8 +2591,9 @@ def _p32_events_by_run() -> dict[str, dict[str, list[dict]]]:
                     ev = json.loads(line)
                 except ValueError:
                     continue
-                out[str(ev.get("run_id", ""))][kind].append(
-                    dict(ev.get("data") or {}))
+                data = dict(ev.get("data") or {})
+                data.setdefault("_ts", ev.get("ts", ""))
+                out[str(ev.get("run_id", ""))][kind].append(data)
     except OSError:
         pass
     _P32_EVENTS = dict(out)
@@ -2905,6 +2912,49 @@ def p38_unfounded_flat(schedule: dict, flat: set[str]) -> list[tuple[str, list[s
     return out
 
 
+def p38_session_rebuy_after_cash(
+        schedule: dict, routes: list[dict]) -> list[tuple[str, str]]:
+    """The sessions one schedule event ranks as a re-buy (`rebuy_flat`,
+    `rebuy_readmitted`) whose test's latest graded session row is followed,
+    before this fill, by a row that CASHED on a unit the session's slice
+    executes, as (session label, cashing row label). That cash moved what
+    the try saw (`fill_schedule.try_premise_moved`); the grade is stale.
+    Run `391506-3403a6a7` (2026-10-22, fill 2) is the instance: the one
+    session that paid opened 17th of 18 at the re-buy level."""
+    # `routes` are every route row before this schedule event, from any run
+    # (the schedule ranks on the whole ledger under the oracle), in order.
+    cluster = schedule.get("cluster")
+    earlier = [r for r in routes
+               if cluster is None or r.get("cluster") in (None, cluster)]
+    out: list[tuple[str, str]] = []
+    for r in [*(schedule.get("runs") or ()), *(schedule.get("deferred") or ())]:
+        if r.get("kind") != "session" or r.get("reason") not in (
+                "rebuy_flat", "rebuy_readmitted"):
+            continue
+        tests = set(r.get("target_tests") or ())
+        units = {str(t) if isinstance(t, str) else "::".join(t)
+                 for t in r.get("targets") or ()}
+        tried = [i for i, x in enumerate(earlier)
+                 if x.get("kind") == "session"
+                 and tests & set(x.get("target_tests") or ())
+                 and x.get("outcome") in ("flat", "reverted", "declined")]
+        if not tried:
+            continue
+        oracle = earlier[tried[-1]].get("oracle_fp")
+        for x in earlier[tried[-1] + 1:]:
+            if oracle and x.get("oracle_fp") not in (None, oracle):
+                continue
+            paid = (x.get("outcome") == "cashed"
+                    or int(x.get("net_pass_delta", 0) or 0) > 0)
+            wrote = {str(t) if isinstance(t, str) else "::".join(t)
+                     for t in x.get("targets") or ()}
+            if paid and wrote & units:
+                out.append((str(r.get("label") or "?"),
+                            str(x.get("label") or "?")))
+                break
+    return out
+
+
 def p38_flat_set(schedule: dict,
                  service_order: list[dict]) -> set[str] | None:
     """The standing-FLAT set one schedule event can be judged against, or
@@ -2940,7 +2990,15 @@ def detect_p38(run: Run, iters: list[dict]) -> list[dict]:
     if not ev or not (ev["service_order"] or ev["schedule"]):
         return []
     hits: list[str] = []
+    every_route = sorted(
+        (r for rs in _p51_events_by_run().values() for r in rs.get("route", ())),
+        key=lambda r: str(r.get("ts", "")))
     for sc in ev["schedule"]:
+        before = [r for r in every_route
+                  if str(r.get("ts", "")) < str(sc.get("_ts", ""))]
+        for label, cash in p38_session_rebuy_after_cash(sc, before):
+            hits.append(f"iter {sc.get('iter')} {label}: re-buy after "
+                        f"{cash} cashed on its slice")
         flat = p38_flat_set(sc, ev["service_order"])
         if flat is None:
             continue
@@ -3575,7 +3633,7 @@ CLASS_NAMES = {
     "P35": "fill-wide premise refusal (a keep moved some tests and every unclaimed unit of the fill was refused; pre-fix the gate was not scoped to each claim's tests)",
     "P36": "bound-only input drop (a call ended input too long after replanning from vLLM's threshold, never the prompt's size; pre-fix no exact count)",
     "P37": "owner-less abort (coverage listed signal-killed binaries as hung and their tests had no owner set; pre-fix the premise cut ran only for completed runs)",
-    "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it)",
+    "P38": "unfounded flat re-buy (a fill deferred a run rebuy_flat while none of the units that would make it one had a standing flat body; the set is the schedule event's standing_flat map, or the service-order flat list on fills that predate it; or a session ranked a re-buy after a row cashed on a unit of its slice)",
     "P39": "unevidenced stub narrowing (a fill was replaced by the frontier's stubs while no stub held a failing test; pre-fix the engine narrowed on route coverage alone)",
     "P40": "requested and not held (a whole-file request answered with the file: the builder that sent the prompt did not render it whole)",
     "P41": "blind probe (the assertion probe observed fewer than half the failing tests; pre-fix it never rewrote a helper fn the test asserts through)",

@@ -56,8 +56,27 @@ def safe_probe_name(name: str) -> str:
     return cleaned or "probe"
 
 
-def probe_env(cluster: BuildCluster | None) -> dict[str, str]:
-    return cluster_cargo_env(cluster)
+def t0d_target_dir(project_dir: Path, cluster: BuildCluster | None) -> Path:
+    """Cargo output for one task 0d world: `<project>/target/t0d-<world>`.
+
+    The directory sits under `target`, whose name `discovery` skips exactly,
+    so the next harvest does not read build output as source. A sibling
+    named `target-t0d-<world>` matches the git exclude and is still walked.
+    This is not set on `cluster_cargo_env`: task 2a reads that function and
+    chooses its own target directory."""
+    name = cluster.name if cluster is not None and cluster.name else "default"
+    return Path(project_dir) / "target" / f"t0d-{name}"
+
+
+def probe_env(cluster: BuildCluster | None, project_dir: Path | None = None) -> dict[str, str]:
+    """`cluster_cargo_env`, plus this world's task 0d target directory when
+    `project_dir` is given. Callers that build or run the original crate
+    during task 0d pass the project; a caller that only wants the toolchain
+    env leaves it out and shares no directory it does not already share."""
+    env = cluster_cargo_env(cluster)
+    if project_dir is not None:
+        env["CARGO_TARGET_DIR"] = str(t0d_target_dir(project_dir, cluster))
+    return env
 
 
 @contextmanager
@@ -98,7 +117,7 @@ def run_probe(
     raw — the domain's `normalize_stdout` is applied where the Then is
     recorded, so the raw text stays available for the log."""
     runner = run or subprocess_runner
-    env = probe_env(cluster)
+    env = probe_env(cluster, project_dir)
     if extra_env:
         env.update(extra_env)
     with materialized_probe(project_dir, program, name) as target:

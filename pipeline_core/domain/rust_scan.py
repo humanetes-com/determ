@@ -736,9 +736,41 @@ def count_cfg_attrs(text: str, needles: Sequence[str]) -> int:
         i = p + len(marker)
 
 
+def _raw_string_hashes(text: str, quote: int) -> int | None:
+    """Hash count of a raw-string opener whose opening quote is at `quote`,
+    or None when that quote is an ordinary string.
+
+    The prefix is optional `b` or `c`, then `r`, then N hashes, then `"`.
+    `r#"…"#`, `br"…"`, `cr##"…"##` are the same form. A quote that is not
+    that prefix is an ordinary string (`"…"`, `b"…"`, `c"…"`), escapes and
+    all. `r#ident` is a raw identifier and is not a string: the character
+    after the hashes has to be the quote, which is this index."""
+    j = quote - 1
+    hashes = 0
+    while j >= 0 and text[j] == "#":
+        hashes += 1
+        j -= 1
+    if j < 0 or text[j] != "r":
+        return None
+    j -= 1
+    if j >= 0 and text[j] in "bc":
+        if j > 0 and text[j - 1] in _IDENT_CHARS:
+            return None
+        return hashes
+    if j >= 0 and text[j] in _IDENT_CHARS:
+        return None
+    return hashes
+
+
 def rust_delimiters_balanced(text: str) -> bool:
     """Best-effort syntactic sanity check: are ``{}``, ``[]``, ``()`` balanced in
-    ``text``? Respects string literals, char literals, and line/block comments.
+    ``text``? Respects string literals (ordinary and raw), char literals, and
+    line/block comments.
+
+    A raw literal (`r"…"`, `r#"…"#`, any hash count, optional `b`/`c` prefix)
+    ends at a quote followed by exactly that many hashes and does not treat
+    `\\` as an escape. Reading it as an ordinary string ends the literal at
+    the first interior quote, and the brackets after that quote are counted.
 
     Catches the most common LLM-output corruption (extra closing paren, missing
     brace) without a full Rust parser. Used to validate gen_tests siblings before
@@ -749,6 +781,7 @@ def rust_delimiters_balanced(text: str) -> bool:
     pairs = {")": "(", "]": "[", "}": "{"}
     stack: list[str] = []
     in_str = False
+    raw_hashes = -1
     in_chr = False
     in_line_cmt = False
     in_blk_cmt = 0
@@ -779,6 +812,18 @@ def rust_delimiters_balanced(text: str) -> bool:
             i += 1
             continue
         if in_str:
+            if raw_hashes >= 0:
+                if c == '"':
+                    k = 0
+                    while k < raw_hashes and i + 1 + k < n and text[i + 1 + k] == "#":
+                        k += 1
+                    if k == raw_hashes:
+                        in_str = False
+                        raw_hashes = -1
+                        i += 1 + k
+                        continue
+                i += 1
+                continue
             if c == "\\":
                 esc = True
             elif c == '"':
@@ -793,7 +838,9 @@ def rust_delimiters_balanced(text: str) -> bool:
             i += 1
             continue
         if c == '"':
+            opened = _raw_string_hashes(text, i)
             in_str = True
+            raw_hashes = -1 if opened is None else opened
             i += 1
             continue
         if c == "/" and nxt == "/":

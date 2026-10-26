@@ -56,8 +56,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from pipeline_core.domain.abort_verdict import crash_units_by_test
 from pipeline_core.domain.coverage_slice import CoverageSlice, matching_test_key
-from pipeline_core.domain.crash_site import CrashSite, authorable_frames
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite
 
@@ -132,20 +133,9 @@ class Observations:
            failure_sites: Mapping[str, frozenset[FnSite]],
            failed_pairs: Iterable[tuple[str, str]],
            home: str) -> Observations:
-        crash_units: dict[str, set[FnLocator]] = {}
-        crashed: set[str] = set()
-        for site in crash_sites:
-            test = _bare(site.test_name or "")
-            if not test:
-                continue
-            crashed.add(test)
-            units = {FnLocator(f.file_rel, f.fn_name)
-                     for f in authorable_frames(site.frames)}
-            units |= {FnLocator(f.file_rel, f.fn_name)
-                      for f in authorable_frames(site.origin_frames)}
-            units |= set(site.culprit_locators)
-            if units:
-                crash_units.setdefault(test, set()).update(units)
+        sites = tuple(crash_sites)
+        crashed = {t for site in sites if (t := _bare(site.test_name or ""))}
+        crash_units = crash_units_by_test(sites)
         worlds: dict[str, set[str]] = {}
         for label, name in failed_pairs:
             world, sep, _rest = str(label).partition("::")
@@ -155,7 +145,7 @@ class Observations:
             owners=dict(positive_owners if positive_owners is not None
                         else (coverage.owners if coverage is not None else {})),
             recorded={_bare(t): frozenset(v) for t, v in recorded.items()},
-            crash_units={t: frozenset(v) for t, v in crash_units.items()},
+            crash_units=crash_units,
             crashed=frozenset(crashed),
             failure_sites={_bare(t): frozenset(v)
                            for t, v in failure_sites.items()},

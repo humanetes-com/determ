@@ -1958,7 +1958,7 @@ def build_app(
         the pre-strip window, where `pd` still holds the ORIGINAL crate — the
         tree the captured values came from — which is what makes a red verdict
         here a statement about the capture and not about a reconstruction."""
-        env = probe_env(cl)
+        env = probe_env(cl, pd)
         env.update(extra)
         cmd = ["cargo", "test", "--test", stem, "--", "--test-threads=1"]
         if crate:
@@ -2022,7 +2022,7 @@ def build_app(
         settle_test_gate=lambda pd, crate, f, body, cl: _settle_test_gate(
             Path(pd), crate, Path(f), body, cl),
         tests_failing_alone=lambda pd, cl, crate, stem, names: failing_alone(
-            Path(pd), crate, stem, names, env=probe_env(cl),
+            Path(pd), crate, stem, names, env=probe_env(cl, pd),
             timeout=cfg.test_timeout),
         perturb_env=lambda c: perturbed_env(probe_env(c)),
         cluster_cfg_attr=cluster_cfg_attr,

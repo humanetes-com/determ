@@ -1191,3 +1191,112 @@ def test_a_test_already_dead_at_baseline_is_not_charged_again() -> None:
     v = U2Verdict(U2Decision.REJECT, self_failures=frozenset({"rec"}),
                   capture=dead)
     assert judge_refill({"rec"}, baseline, v).non_regression
+
+
+def test_regression_gate_detail_carries_the_settlements_crash() -> None:
+    """Run `42057-641e589c` (2026-10-26): the pair and impl retries quote the
+    regression gate's detail and nothing else, and that detail never held
+    the crash the gate's own settlement had read. A revert whose capture
+    crashed now carries the settlement's reading, whatever it decided.
+    Negative control: no settler bound, no crash text."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        test_regression_gate,
+    )
+    from pipeline_core.application.reconstruct.crash_settler import Settlement
+    from pipeline_core.domain.crash_settlement import SettlementOutcome
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.test_results import (
+        TestStateReading,
+        parse_binary_results,
+    )
+    base = TestStateReading(parse_binary_results(
+        "    Running tests/a.rs (t/a-1)\n"
+        "running 2 tests\ntest x ... ok\ntest y ... ok\n"
+        "test result: ok. 2 passed; 0 failed; 0 ignored\n"))
+    cur_out = ("    Running tests/a.rs (t/a-1)\n"
+               "running 2 tests\ntest x ... ok\ntest y ...\n")
+    site = CrashSite("tests/a.rs", "y", "SIGSEGV", frames=(
+        CrashFrame("src/lib.rs", 9, "drop_rest", "drop_rest"),))
+
+    class _Unsettled:
+        def settle(self, capture, written, baseline, *, tag=""):
+            return Settlement(SettlementOutcome.UNSETTLED, sites=(site,))
+
+    def _run() -> str:
+        res = test_regression_gate(
+            _const_run_cargo(101, cur_out), "cargo test", Path("."), {},
+            base, enabled=True, timeout=120, guard=lambda *_a: None,
+            written=[FnLocator("src/lib.rs", "mine")])
+        assert res is not None
+        return res[1]
+
+    crash_settler.bind(_Unsettled())  # type: ignore[arg-type]
+    try:
+        detail = _run()
+    finally:
+        crash_settler.bind(None)
+    assert "#0 drop_rest at src/lib.rs:9" in detail
+    assert "src/lib.rs:9" not in _run()
+    # The comparison carries the same text, for a reader that stores the
+    # revert (the pair's record).
+    crash_settler.bind(_Unsettled())  # type: ignore[arg-type]
+    try:
+        res = test_regression_gate(
+            _const_run_cargo(101, cur_out), "cargo test", Path("."), {},
+            base, enabled=True, timeout=120, guard=lambda *_a: None,
+            written=[FnLocator("src/lib.rs", "mine")])
+    finally:
+        crash_settler.bind(None)
+    assert res is not None and "src/lib.rs:9" in res[0].crash_reading
+
+
+def test_u2_gate_locates_a_silent_death_beside_a_panic_without_settling() -> None:
+    """Review of 2026-10-26: `U2Verdict.crash_sites` was filled only when the
+    settler ran, which is a capture with no crate panic and no stub site, so
+    an aimed test that died silently beside another test's panic carried no
+    site and its abort always read unlocated. The gate now locates it
+    read-only (`CrashSettler.localize`). Negative control: a settler with
+    nothing to localize leaves the verdict without sites, and the settlement
+    itself is never asked."""
+    from pipeline_core.application.reconstruct import crash_settler
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.test_results import ABORT_MARK
+    baseline = _iso_reading(_isolated("rec", _STUB_RED))
+    # Another binary opened and died on a crate panic (its section never
+    # printed a trailer): the capture holds a panic, so the gate does not
+    # settle. The aimed test's own isolated process died silently.
+    capture = "\n".join([
+        "     Running tests/x.rs (target/debug/deps/x-1)",
+        "running 1 test", "test other ... ",
+        "thread 'other' panicked at src/b.rs:7:9:", "boom",
+        "     Running tests/t.rs (target/debug/deps/t-1)",
+        _isolated("rec", [ABORT_MARK, ""])])
+    site = CrashSite("tests/t.rs", "rec", "SIGSEGV", frames=(
+        CrashFrame("src/a.rs", 3, "make", "make"),))
+    asked: list[str] = []
+
+    class _S:
+        def __init__(self, sites):
+            self.sites = sites
+
+        def settle(self, *a, **k):
+            asked.append("settle")
+            raise AssertionError("not settled beside a panic")
+
+        def localize(self, capture, base):
+            asked.append("localize")
+            return self.sites
+
+    try:
+        crash_settler.bind(_S((site,)))  # type: ignore[arg-type]
+        v = _gate(_const_run_cargo(101, capture), {"rec"}, baseline=baseline)
+        assert v.decision is U2Decision.REJECT and v.aborted == {"rec"}
+        assert v.crash_sites == (site,)
+        crash_settler.bind(_S(()))  # type: ignore[arg-type]
+        v2 = _gate(_const_run_cargo(101, capture), {"rec"}, baseline=baseline)
+        assert v2.crash_sites == ()
+    finally:
+        crash_settler.bind(None)
+    assert "settle" not in asked and asked.count("localize") == 2

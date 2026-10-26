@@ -147,7 +147,8 @@ class PairLastError:
 
 
 def pair_last_error(compile_err: str, preview: str, failed_body: str,
-                    *, kind: LastErrorKind | None = None) -> PairLastError:
+                    *, kind: LastErrorKind | None = None,
+                    crash: str = "") -> PairLastError:
     """LAST_ERROR for the next pair fill.
 
     ``kind`` is the verdict the revert RECORDED, when the record carries
@@ -174,8 +175,12 @@ def pair_last_error(compile_err: str, preview: str, failed_body: str,
     this prompt string, so dropping the rustc lines here does not
     re-honour the rejected call. Empty parts are omitted; all-empty is
     "".
+
+    ``crash`` is the crash the gate's settlement read (`PAIR_LAST_CRASH`),
+    quoted whole after the excerpt and before the previous bodies.
     """
-    if (preview or "").strip() or (failed_body or "").strip():
+    crash = (crash or "").strip()
+    if (preview or "").strip() or (failed_body or "").strip() or crash:
         resolved = resolve_kind(kind, preview)
         known = resolved.compiled
         if not known:
@@ -190,6 +195,10 @@ def pair_last_error(compile_err: str, preview: str, failed_body: str,
         # situation it belongs to rather than trailing the quoted body.
         head = _with_instruction(preview, resolved) if known else (
             (preview or "").strip())
+        if crash:
+            head = "\n\n".join(x for x in (
+                head, "The crash the localizer read under that write:\n"
+                + crash) if x)
         return PairLastError(crash_last_error(head, failed_body), resolved)
     err = (compile_err or "").strip()
     return PairLastError(err, LastErrorKind.COMPILE if err
@@ -223,6 +232,16 @@ def pair_record_container(pair: FormatterPair) -> str:
 # joint_members and crash_vtable saw no panic on fill 1's last
 # record, so fill 2 dropped the slots).
 PAIR_CRASH_CALLEES = "crash_callees"
+
+# The crash the gate's settlement read under the pair's last reverted write
+# (`crash_settler.crash_text_of`), stored whole: the preview beside it is cut
+# to a budget, and the crash text a gate appends to its detail is what that
+# budget cut first (run `42057-641e589c`, 2026-10-26: the pair's next prompt
+# never carried the localized site). Rewritten on every revert, "" for one
+# with no crash, so a stale crash never outlives the write it describes.
+PAIR_LAST_CRASH = "last_crash"
+#: The stored crash is a prompt section, not a store dump.
+PAIR_LAST_CRASH_CAP = 4000
 
 
 def locators_from_scope(names: Iterable[str]) -> frozenset[FnLocator]:

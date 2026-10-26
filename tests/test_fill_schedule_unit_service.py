@@ -193,3 +193,62 @@ def test_recorded_450977_fill_2_opens_the_session_with_three_turns_of_share() ->
     # The live schedule gave it 11 minutes.
     live = next(r for r in fix["schedule_runs"] if r["kind"] == "session")
     assert live["share_minutes"] is None or live["share_minutes"] < price.floor(3)
+
+
+# --- a session's re-buy grade stands only while what its try saw holds ------
+#
+# Run `391506-3403a6a7` (2026-10-22, fill 2): the one session that paid
+# opened 17th of 18 at the re-buy level, because its test's last graded
+# session try predated five cashes on units its slice executes and only a
+# cash on the test itself voided that try. Plan sentence: a one-test session
+# whose latest graded try is FLAT, followed by a CASHED row that wrote one
+# of the slice's units and paid a different test, ranks served, not a
+# re-buy.
+
+
+def _session_after(*later: RouteLedgerRow) -> str:
+    # The old try was a different slice (two units), as on the live ledger:
+    # today's three-unit slice is a new identity, so the tests decide.
+    tests = ("t_a",)
+    tried = _row(RouteKind.SESSION, UNITS[:2], RunOutcome.FLAT, tests=tests,
+                 minutes=30.0, calls=4, started="2026-10-22T10:00:00")
+    run = RouteRun(kind=RouteKind.SESSION, label="session", bodies_sha="new",
+                   targets=frozenset(UNITS[:3]), target_tests=frozenset(tests))
+    sched = schedule([run], [tried, *later], oracle_fp="o", hollow={},
+                     session_min_turns=0)
+    return sched.ordered[0].reason if sched.ordered else sched.deferred[0].reason
+
+
+def _later(outcome: RunOutcome, units: Iterable[FnLocator]) -> RouteLedgerRow:
+    # A row that records its green set: a cash that turned `t_b` green, not
+    # the session's test (an unrecorded set reads as paying every test).
+    from dataclasses import replace
+    return replace(_row(RouteKind.FILE, units, outcome, tests=("t_b",),
+                        started="2026-10-22T11:00:00"),
+                   newly_green=("t_b",) if outcome is RunOutcome.CASHED
+                   else ())
+
+
+def test_a_cash_on_a_slice_unit_voids_the_sessions_rebuy_grade() -> None:
+    assert _session_after(_later(RunOutcome.CASHED, UNITS[:3])) == "served"
+
+
+def test_control_a_later_flat_keep_does_not_void_it() -> None:
+    assert _session_after(_later(RunOutcome.FLAT, UNITS[:3])) == "rebuy_flat"
+
+
+def test_control_a_cash_outside_the_slice_does_not_void_it() -> None:
+    far = FnLocator("src/z.rs", "far")
+    assert _session_after(_later(RunOutcome.CASHED, [far]),
+                          _later(RunOutcome.FLAT, [UNITS[2]])) == "rebuy_flat"
+
+
+def test_negative_control_the_test_only_rule_keeps_the_rebuy(monkeypatch) -> None:
+    # The pre-change rule: a unit's own try is voided by any later cash on
+    # it (unchanged), a session's only by a cash on its test.
+    from pipeline_core.domain import fill_schedule as fsch
+    monkeypatch.setattr(
+        fsch, "try_premise_moved",
+        lambda later, units: len(tuple(units)) == 1
+        and any(fsch._row_paid(r) for r in later))
+    assert _session_after(_later(RunOutcome.CASHED, UNITS[:3])) == "rebuy_flat"

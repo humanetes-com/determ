@@ -26,7 +26,7 @@ from __future__ import annotations
 import hashlib
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -84,6 +84,7 @@ from pipeline_core.domain.reach_probe import (
 )
 from pipeline_core.domain.rule_probe import (
     DROP_REASON,
+    RuleAsk,
     RuleTrial,
     apply_trials,
     judge_rule_on_captures,
@@ -96,6 +97,7 @@ from pipeline_core.domain.workspace_layout import (
     BEHAVIOUR_PHASE_PREFIX,
     behaviour_book_key,
     behaviour_harvest_key,
+    behaviour_module_harvest_key,
 )
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
@@ -274,130 +276,202 @@ def _public_index(deps: Task0dDeps, project_dir: Path,
     return names if names else None
 
 
-def _run_probes(
+def _union_text(parts: Sequence[tuple[str, str]]) -> str:
+    """One text when every world produced the same one, otherwise each world's
+    text under a `// <world>` mark. A single world, or worlds that agree, keeps
+    the text the one-world prompt already carried."""
+    kept: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, text in parts:
+        if text in seen:
+            continue
+        seen.add(text)
+        kept.append((name, text))
+    if len(kept) <= 1:
+        return kept[0][1] if kept else ""
+    return "\n".join(f"// {name}\n{text}" for name, text in kept)
+
+
+def _cluster_label(names: Sequence[str]) -> str:
+    return "+".join(names)
+
+
+@dataclass
+class _ProbePlan:
+    """What one world would have asked, before any model call."""
+
+    cluster: BuildCluster
+    targets: tuple[str, ...]
+    class_asks: tuple[tuple[str, str], ...]
+    edges: tuple[UseCaseEdge, ...]
+    by_name: dict[str, GlossaryEntry]
+    surface: str
+    inventory: str
+    example: str
+    edge_reading: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class _AskedProbe:
+    asks: tuple[tuple[str, str], ...]
+    batch: tuple[str, ...]
+    edge_batch: tuple[UseCaseEdge, ...]
+    reply: str
+    contributors: frozenset[str]
+
+
+def _probe_plan(
     deps: Task0dDeps,
     project_dir: Path,
-    module_name: str,
     cluster: BuildCluster,
     suite: BehaviourSuite,
     records: list[FnRecord],
     mods: list[ModRecord],
     types: list[TypeRecord],
-    default_cluster: str,
     sources: Sequence[tuple[str, str]] = (),
-) -> tuple[list[BehaviourSpec], int, int, int, list[dict[str, str]], tuple[int, int]]:
-    """(admitted probe specs, admitted count, proposed count, cargo runs,
-    misses, (public-API edges an example asserts, edges))."""
-    misses: list[dict[str, str]] = []
-    if deps.PROBE_MAX_PER_CLUSTER <= 0:
-        return [], 0, 0, 0, misses, (0, 0)
+) -> _ProbePlan:
+    """The probe ask this world would make, with no model call and no cargo.
+
+    An empty plan (the kill switch, or nothing to ask) still carries the
+    edge reading, which is zero when edges are off."""
     files = frozenset(r.file for r in records) | frozenset(t.file for t in types)
     reachable = externally_reachable_files(mods, files)
     type_files = {t.name: t.file for t in types if t.is_pub and t.is_exactly_pub}
     cfg_set = CfgSet.of(set(cluster.cfg_true), set(cluster.cfg_false))
     index = _public_index(deps, project_dir, cluster.name)
-    targets = probe_targets(
-        records,
-        suite.specs,
-        max_targets=deps.PROBE_MAX_PER_CLUSTER,
-        reachable_files=reachable,
-        type_files=type_files,
-        cfg_set=cfg_set,
-        public_index=index,
-    )
-    # Compositions. The vocabulary is built HERE, from the same records and
-    # sources the book reads later: the suite carries no glossary yet (the
-    # book is the last stage of the pass), and a target kind that read the
-    # suite's would read an empty one.
+    targets: tuple[str, ...] = ()
+    if deps.PROBE_MAX_PER_CLUSTER > 0:
+        targets = probe_targets(
+            records, suite.specs, max_targets=deps.PROBE_MAX_PER_CLUSTER,
+            reachable_files=reachable, type_files=type_files, cfg_set=cfg_set,
+            public_index=index)
     edges: tuple[UseCaseEdge, ...] = ()
     edge_reading = (0, 0)
     by_name: dict[str, GlossaryEntry] = {}
-    if deps.PROBE_EDGES_PER_CLUSTER > 0:
+    if deps.PROBE_MAX_PER_CLUSTER > 0 and deps.PROBE_EDGES_PER_CLUSTER > 0:
         glossary = glossary_entries(records, types, sources, reachable_files=reachable,
                                     cfg_set=cfg_set, public_index=index)
         by_name = {g.name: g for g in glossary}
         edges, asserted, total = edges_to_ask(glossary, suite.specs,
                                               max_edges=deps.PROBE_EDGES_PER_CLUSTER)
         edge_reading = (asserted, total)
-    # Ask by CLASS, not by unit — and ask even when there is no leftover unit.
-    # Behaviours are transversal ("an error built from a string downcasts to
-    # `&str`" spans the constructor, the vtable, `object_downcast` and
-    # `Error::downcast`), so a unit-shaped ask cannot reach one. Gating the
-    # whole phase on `probe_targets` being non-empty left the unit axis as the
-    # ON-SWITCH of the mechanism built to leave it: a crate whose harvest
-    # already names every public fn — harvest SUCCEEDING — would never ask by
-    # class at all. `PROBE_MAX_PER_CLUSTER` stays the kill switch, checked
-    # above, so the documented `0` still turns probes off entirely.
     class_of = probe_coverage_class if deps.PIN_ENV_DEBUG else behaviour_class_name
-    class_asks = class_targets(
-        suite.specs,
-        class_of,
-        max_targets=deps.PROBE_CLASSES_PER_CLUSTER,
-        prompts=class_prompts(pin_env_debug=deps.PIN_ENV_DEBUG),
-    )
-    if not targets and not class_asks and not edges:
-        return [], 0, 0, 0, misses, edge_reading
-    surface = deps.public_surface(project_dir, cluster.name)
-    inventory = deps.symbol_inventory(project_dir, cluster.name)
-    example = _style_example(suite.specs)
-    # One prompt carrying every class ask, with the leftover unit names as the
-    # callable inventory beside it — NOT the same class asks repeated once per
-    # unit batch, which is what `for batch in batches(targets)` did: with a cap
-    # of 12 and a batch of 6 that was two identical class requests and twice
-    # the GPU for one cohort. Without class asks the old per-unit batching is
-    # still what there is to do.
-    _Round = tuple[tuple[tuple[str, str], ...], tuple[str, ...], tuple[UseCaseEdge, ...]]
-    rounds: list[_Round] = (
-        [(class_asks, tuple(targets), ())] if class_asks
-        else [((), tuple(b), ()) for b in batches(targets, PROBE_BATCH_SIZE)]
-    )
-    # One more prompt for the compositions: a different question (two items
-    # and the order they are used in), answered in the same block shape.
-    rounds.extend(((), (), tuple(b)) for b in _edge_batches(edges, deps.PROBE_BLOCKS_PER_REPLY))
+    class_asks: tuple[tuple[str, str], ...] = ()
+    if deps.PROBE_MAX_PER_CLUSTER > 0:
+        class_asks = class_targets(
+            suite.specs, class_of, max_targets=deps.PROBE_CLASSES_PER_CLUSTER,
+            prompts=class_prompts(pin_env_debug=deps.PIN_ENV_DEBUG))
+    return _ProbePlan(
+        cluster, targets, class_asks, edges, by_name,
+        deps.public_surface(project_dir, cluster.name),
+        deps.symbol_inventory(project_dir, cluster.name),
+        _style_example(suite.specs), edge_reading)
+
+
+def _ask_probe_rounds(
+    deps: Task0dDeps, module_name: str, plans: Sequence[_ProbePlan],
+) -> list[_AskedProbe]:
+    """One prompt per round over the union of the plans. A world that
+    contributed nothing to a round is not a contributor, and does not run
+    that reply."""
+    active = [p for p in plans if p.targets or p.class_asks or p.edges]
+    if not active:
+        return []
+    class_asks: list[tuple[str, str]] = []
+    seen_class: set[str] = set()
+    targets: list[str] = []
+    seen_t: set[str] = set()
+    edges: list[UseCaseEdge] = []
+    seen_e: set[UseCaseEdge] = set()
+    for plan in active:
+        for ask in plan.class_asks:
+            if ask[0] not in seen_class:
+                seen_class.add(ask[0])
+                class_asks.append(ask)
+        for name in plan.targets:
+            if name not in seen_t:
+                seen_t.add(name)
+                targets.append(name)
+        for edge in plan.edges:
+            if edge not in seen_e:
+                seen_e.add(edge)
+                edges.append(edge)
+    rounds: list[tuple[tuple[tuple[str, str], ...], tuple[str, ...],
+                       tuple[UseCaseEdge, ...], tuple[str, ...]]] = []
+    if class_asks:
+        who = tuple(p.cluster.name for p in active if p.class_asks or p.targets)
+        rounds.append((tuple(class_asks), tuple(targets), (), who))
+    else:
+        for batch in batches(tuple(targets), PROBE_BATCH_SIZE):
+            who = tuple(p.cluster.name for p in active if any(t in batch for t in p.targets))
+            rounds.append(((), batch, (), who))
+    for edge_batch in _edge_batches(edges, deps.PROBE_BLOCKS_PER_REPLY):
+        who = tuple(p.cluster.name for p in active
+                    if any(e in edge_batch for e in p.edges))
+        rounds.append(((), (), tuple(edge_batch), who))
+    asked: list[_AskedProbe] = []
+    for asks, batch, edge_batch, who in rounds:
+        if not who:
+            continue
+        involved = [p for p in active if p.cluster.name in who]
+        label = _cluster_label(tuple(p.cluster.name for p in involved))
+        edge_arg: list[tuple[str, str, str, str]] = []
+        for edge in edge_batch:
+            for plan in involved:
+                prod = plan.by_name.get(edge.producer)
+                cons = plan.by_name.get(edge.consumer)
+                if prod is not None and cons is not None:
+                    edge_arg.append((edge.producer, prod.signature,
+                                     edge.consumer, cons.signature))
+                    break
+        prompt = build_behaviour_synthesis_prompt(
+            module_name=module_name, cfg_cluster=label, target_units=batch,
+            public_surface=_union_text([(p.cluster.name, p.surface) for p in involved]),
+            symbol_inventory=_union_text([(p.cluster.name, p.inventory) for p in involved]),
+            example_usages=_union_text([(p.cluster.name, p.example) for p in involved]),
+            target_classes=asks, target_edges=tuple(edge_arg))
+        asked.append(_AskedProbe(asks, batch, edge_batch, deps.ask(prompt), frozenset(who)))
+    if len({p.cluster.name for p in active}) > 1:
+        deps.log(f"  [task0d] worlds {_cluster_label(tuple(p.cluster.name for p in active))}: "
+                 "probes asked once")
+    return asked
+
+
+def _admit_probe_rounds(
+    deps: Task0dDeps,
+    project_dir: Path,
+    module_name: str,
+    plan: _ProbePlan,
+    rounds: Sequence[_AskedProbe],
+    default_cluster: str,
+) -> tuple[list[BehaviourSpec], int, int, int, list[dict[str, str]], tuple[int, int]]:
+    """Run `rounds` this world contributed to. The exact-format refusal uses
+    this world's class asks, not the union's."""
+    misses: list[dict[str, str]] = []
+    mine = [r for r in rounds if plan.cluster.name in r.contributors]
+    if not mine:
+        return [], 0, 0, 0, misses, plan.edge_reading
+    cluster = plan.cluster
     admitted: list[BehaviourSpec] = []
     proposed = 0
     cargo_runs = 0
     per_unit: dict[str, int] = {}
-    for asks, batch, edge_batch in rounds:
-        prompt = build_behaviour_synthesis_prompt(
-            module_name=module_name,
-            cfg_cluster=cluster.name,
-            target_units=batch,
-            public_surface=surface,
-            symbol_inventory=inventory,
-            example_usages=example,
-            target_classes=asks,
-            target_edges=tuple((e.producer, by_name[e.producer].signature,
-                                e.consumer, by_name[e.consumer].signature)
-                               for e in edge_batch),
-        )
-        reply = deps.ask(prompt)
-        # Bound the WORK, not just the targets. `PROBE_MAX_PER_CLUSTER` caps how
-        # many units are asked about; the number of blocks a reply may contain
-        # was unbounded, and every block costs its own `cargo run` at up to the
-        # probe timeout. A reply that emits fifty blocks used to buy fifty
-        # compile-and-run cycles against a cap of twelve.
-        all_parsed = parse_behaviour_specs(reply)
+    world_classes = {c for c, _ in plan.class_asks}
+    for rnd in mine:
+        batch = rnd.batch
+        all_parsed = parse_behaviour_specs(rnd.reply)
         parsed = all_parsed[: deps.PROBE_BLOCKS_PER_REPLY]
         if len(all_parsed) > len(parsed):
             over = len(all_parsed) - len(parsed)
-            misses.append(
-                {
-                    "unit": batch[0] if batch else "reply",
-                    "reason": f"over the blocks-per-reply cap: {over} block(s) "
-                    f"past {deps.PROBE_BLOCKS_PER_REPLY} not run",
-                }
-            )
-            deps.log(
-                f"  [task0d] cluster {cluster.name}: {over} behaviour block(s) past the per-reply cap were not run."
-            )
+            misses.append({
+                "unit": batch[0] if batch else "reply",
+                "reason": f"over the blocks-per-reply cap: {over} block(s) "
+                f"past {deps.PROBE_BLOCKS_PER_REPLY} not run",
+            })
+            deps.log(f"  [task0d] cluster {cluster.name}: {over} behaviour block(s) "
+                     "past the per-reply cap were not run.")
         if not all_parsed:
-            # A reply that parses to nothing used to leave no log, no miss and
-            # no event — `proposed` simply stayed 0. That is the answer-dropped
-            # class: the model may well have answered. Name which way it failed,
-            # because a legacy-shaped reply says the prompt did not land while
-            # an unparseable one says the reply did not.
-            legacy = parse_behaviour_programs(reply)
+            legacy = parse_behaviour_programs(rnd.reply)
             why = (
                 "reply arrived in the legacy free-form shape (no <WHEN>)"
                 if legacy
@@ -406,24 +480,17 @@ def _run_probes(
             misses.append({"unit": batch[0] if batch else "reply", "reason": why})
             deps.log(f"  [task0d] cluster {cluster.name}: {why}.")
             continue
-        asked = {c for c, _ in asks}
         for probe in parsed:
             proposed += 1
             unit = probe.name or (batch[0] if batch else "behaviour")
             n = per_unit.get(unit, 0)
             per_unit[unit] = n + 1
-            # A `when` that compares observes `true`/`false` and throws away the
-            # value it was supposed to specify. Rejected BEFORE the cargo run:
-            # the run would succeed and store a Then carrying no information.
             if (bad := value_bearing_reason(probe.when)) is not None:
                 misses.append({"unit": unit, "reason": f"not value-bearing: {bad}", "when": probe.when})
                 deps.log(f"  [task0d] cluster {cluster.name}: behaviour for {unit} refused ({bad}).")
                 continue
-            if (
-                deps.PIN_ENV_DEBUG
-                and "EXACT_FORMAT" in asked
-                and (fmt_why := exact_format_ask_rejects(probe))
-            ):
+            if (deps.PIN_ENV_DEBUG and "EXACT_FORMAT" in world_classes
+                    and (fmt_why := exact_format_ask_rejects(probe))):
                 misses.append({"unit": unit, "reason": fmt_why, "when": probe.when})
                 deps.log(f"  [task0d] cluster {cluster.name}: behaviour for {unit} refused ({fmt_why}).")
                 continue
@@ -434,14 +501,8 @@ def _run_probes(
             if spec is None:
                 continue
             admitted.append(spec)
-            if not edge_batch:
+            if not rnd.edge_batch:
                 continue
-            # A composition is observed under every rendering its value has,
-            # not only the one asked for: a tree right on `{}` and wrong on
-            # `{:#?}` after the same two calls is the recorded class. A
-            # rendering the value does not implement fails to compile and is
-            # skipped (expected, so not a miss); each one kept is run twice
-            # like any capture.
             for other in other_observes(probe):
                 k = per_unit[unit]
                 more, runs = _capture_twice(
@@ -452,7 +513,7 @@ def _run_probes(
                 if more is not None:
                     per_unit[unit] = k + 1
                     admitted.append(more)
-    return admitted, len(admitted), proposed, cargo_runs, misses, edge_reading
+    return admitted, len(admitted), proposed, cargo_runs, misses, plan.edge_reading
 
 
 #: Tail of a non-building probe's stderr handed back with it: the
@@ -660,6 +721,54 @@ def _reach_unit(label: str) -> str:
     return "reach_" + hashlib.sha1(label.encode()).hexdigest()[:8]
 
 
+def _ask_reach_union(
+    deps: Task0dDeps,
+    module_name: str,
+    worlds: Sequence[tuple[BuildCluster, tuple[ReachTarget, ...], str, str]],
+) -> dict[str, CapturedProbe | None]:
+    """One reach prompt sequence over the union of labels. The map's value is
+    the parsed block, or None when that line had none. No cargo."""
+    by_label: dict[str, ReachTarget] = {}
+    order: list[str] = []
+    owners: dict[str, list[str]] = {}
+    surface: dict[str, str] = {}
+    example: dict[str, str] = {}
+    for cluster, targets, surf, ex in worlds:
+        surface[cluster.name] = surf
+        example[cluster.name] = ex
+        for tgt in targets:
+            if tgt.label not in by_label:
+                by_label[tgt.label] = tgt
+                order.append(tgt.label)
+            owners.setdefault(tgt.label, []).append(cluster.name)
+    out: dict[str, CapturedProbe | None] = {}
+    if not order:
+        return out
+    size = max(1, deps.PROBE_BLOCKS_PER_REPLY)
+    asked_worlds: list[str] = []
+    for start in range(0, len(order), size):
+        labels = order[start:start + size]
+        batch = tuple(by_label[lab] for lab in labels)
+        who: list[str] = []
+        for lab in labels:
+            for name in owners[lab]:
+                if name not in who:
+                    who.append(name)
+        for name in who:
+            if name not in asked_worlds:
+                asked_worlds.append(name)
+        reply = deps.ask(build_reach_prompt(
+            module_name, _cluster_label(who), batch,
+            _union_text([(n, surface[n]) for n in who]),
+            _union_text([(n, example[n]) for n in who])))
+        by_name = {p.name: p for p in parse_behaviour_specs(reply)}
+        for i, lab in enumerate(labels, 1):
+            out[lab] = by_name.get(reach_name(i))
+    if len(asked_worlds) > 1:
+        deps.log(f"  [task0d] worlds {_cluster_label(asked_worlds)}: reach asked once")
+    return out
+
+
 def _run_reach(
     deps: Task0dDeps,
     project_dir: Path,
@@ -670,34 +779,51 @@ def _run_reach(
     executed: frozenset[str],
     *,
     default_cluster: str,
+    prepared: Mapping[str, CapturedProbe | None] | None = None,
+    targets_override: Sequence[ReachTarget] | None = None,
 ) -> tuple[list[BehaviourSpec], list[ReachOutcome], int]:
     """The reach round (`domain/reach_probe.py`): one probe along the MIR's
     public route to each function no example enters, captured twice on the
     original, then judged by its OWN site-level coverage. Returns
-    (captured specs with `exercises` filled, outcome per target, cargo runs)."""
-    targets = reach_targets(deps.load_construction_facts(project_dir, cluster.name), executed)
+    (captured specs with `exercises` filled, outcome per target, cargo runs).
+
+    `prepared` is the union ask, keyed by label. This world runs cargo only
+    for labels in its own target list. Absent, this call asks for its own
+    targets."""
+    if targets_override is not None:
+        targets = tuple(targets_override)
+    else:
+        targets = reach_targets(deps.load_construction_facts(project_dir, cluster.name), executed)
+        if not targets:
+            return [], [], 0
+        # The per-cluster probe cap bounds this round too: one probe per target,
+        # each captured twice. Targets past it are said, not dropped silently.
+        cap = max(0, deps.PROBE_MAX_PER_CLUSTER)
+        if len(targets) > cap:
+            deps.log(f"  [task0d] cluster {cluster.name}: reach probes capped at {cap} of "
+                     f"{len(targets)} routed function(s) (TASK0D_PROBE_MAX); the rest "
+                     "are not asked this round.")
+            targets = targets[:cap]
     if not targets:
         return [], [], 0
-    # The per-cluster probe cap bounds this round too: one probe per target,
-    # each captured twice. Targets past it are said, not dropped silently.
-    cap = max(0, deps.PROBE_MAX_PER_CLUSTER)
-    if len(targets) > cap:
-        deps.log(f"  [task0d] cluster {cluster.name}: reach probes capped at {cap} of "
-                 f"{len(targets)} routed function(s) (TASK0D_PROBE_MAX); the rest "
-                 "are not asked this round.")
-        targets = targets[:cap]
     surface = deps.public_surface(project_dir, cluster.name)
     example = _style_example(suite.specs)
     taken: list[tuple[ReachTarget, BehaviourSpec]] = []
     outcomes: dict[str, ReachOutcome] = {}
     cargo_runs = 0
     size = max(1, deps.PROBE_BLOCKS_PER_REPLY)
+    if prepared is None:
+        prepared = {}
+        for start in range(0, len(targets), size):
+            batch = targets[start:start + size]
+            reply = deps.ask(build_reach_prompt(module_name, cluster.name, batch, surface, example))
+            by_name = {p.name: p for p in parse_behaviour_specs(reply)}
+            for i, tgt in enumerate(batch, 1):
+                prepared[tgt.label] = by_name.get(reach_name(i))
     for start in range(0, len(targets), size):
         batch = targets[start:start + size]
-        reply = deps.ask(build_reach_prompt(module_name, cluster.name, batch, surface, example))
-        by_name = {p.name: p for p in parse_behaviour_specs(reply)}
         for i, tgt in enumerate(batch, 1):
-            probe = by_name.get(reach_name(i))
+            probe = prepared.get(tgt.label)
             if probe is None:
                 outcomes[tgt.label] = ReachOutcome(tgt.label, PROBE_FAILED,
                                                    reason="the reply carried no block for this line")
@@ -746,6 +872,7 @@ def run_rule_probes(
     *,
     default_cluster: str,
     memo: dict[str, str],
+    prepared: Mapping[str, str] | None = None,
 ) -> BehaviourSuite:
     """`book` after each of its kept rules was tested on new captures
     (`domain/rule_probe.py`): confirmed captures join the rule, refuted ones
@@ -758,7 +885,9 @@ def run_rule_probes(
     the rules it is an example of → remove what the emitter withdrew from
     the book (a rule citing a withdrawn capture would cite nothing). The
     caller saves the returned suite; the Gherkin view is rewritten here.
-    `memo` maps a prompt to its reply, shared across worlds."""
+    `memo` maps a prompt to its reply, shared across worlds. `prepared`
+    maps a rule id to a reply already asked over the worlds together;
+    a rule in that map is not asked again. Absent, this call asks."""
     asks = rule_probe_asks(book.features, max_rules=deps.RULE_PROBES_MAX)
     if not asks:
         return book
@@ -775,11 +904,14 @@ def run_rule_probes(
     misses: list[dict[str, str]] = []
     proposed = cargo_runs = 0
     for ask in asks:
-        reply = asked(deps.ask, build_rule_probe_prompt(
-            crate=module_name, cfg_cluster=cluster.name, sentence=ask.sentence,
-            glossary=book.glossary, shown=[by_id[i] for i in ask.shown if i in by_id],
-            near=[by_id[i] for i in ask.near if i in by_id],
-            programs=deps.RULE_PROBE_PROGRAMS))
+        if prepared is not None and ask.rule_id in prepared:
+            reply = prepared[ask.rule_id]
+        else:
+            reply = asked(deps.ask, build_rule_probe_prompt(
+                crate=module_name, cfg_cluster=cluster.name, sentence=ask.sentence,
+                glossary=book.glossary, shown=[by_id[i] for i in ask.shown if i in by_id],
+                near=[by_id[i] for i in ask.near if i in by_id],
+                programs=deps.RULE_PROBE_PROGRAMS))
         for probe in parse_behaviour_specs(reply)[:deps.RULE_PROBE_PROGRAMS]:
             proposed += 1
             unit = probe.name or "rule"
@@ -968,6 +1100,32 @@ def _reading_line(
     return line, payload
 
 
+@dataclass
+class _Harvested:
+    """One world whose suite was written this launch, still inside its phase."""
+
+    cluster: BuildCluster
+    key: str
+    suite: BehaviourSuite
+    records: list[FnRecord]
+    mods: list[ModRecord]
+    types: list[TypeRecord]
+    sources: list[tuple[str, str]]
+    t0: float
+    ph: Any
+    plan: _ProbePlan | None = None
+    admitted: int = 0
+    proposed: int = 0
+    edge_reading: tuple[int, int] = (0, 0)
+    cargo_n: int = 0
+    misses: list[dict[str, str]] = field(default_factory=list)
+    admitted_ids: set[str] = field(default_factory=set)
+    filled: int = 0
+    sites: dict[str, frozenset[str]] | None = None
+    # None: the reach round was skipped or it failed. () is a round with no target.
+    reach_targets: tuple[ReachTarget, ...] | None = None
+
+
 def run_task0d(
     deps: Task0dDeps,
     project_dir: Path,
@@ -975,24 +1133,28 @@ def run_task0d(
     clusters: list[BuildCluster],
     src_dir: Path,
 ) -> None:
-    """Harvest → probes → exercises → save, per cluster; skips a cluster whose
-    phase is already marked done. The harvested part is committed even when
-    a later stage raises. Then the module's book stage (doc examples, ONE
-    behaviour book for every world, rule probes; `_book_once`) under its own
-    state key `task0d/<module>/book`, committed and marked like a cluster's
-    harvest.
+    """Harvest → probes → exercises → save. Skips a cluster whose phase is
+    already marked done. The harvested part is committed even when a later
+    stage raises. Probe and reach asks are one prompt over the worlds
+    harvested in this launch; cargo, the stored suite and the reach outcomes
+    stay that world's. Then the module's book stage (doc examples, ONE
+    behaviour book for every world, rule probes; `_book_once`) under
+    `task0d/<module>/book`.
+
+    `task0d/<module>/harvest` is committed when every world's suite was
+    written (this launch, or an earlier one still marked done) and this
+    launch wrote at least one. A launch that only resumes the book does not
+    write it. `plan_behaviour_tags` still requires each cluster's own key.
 
     The book stage runs when any cluster was harvested in this launch or when
-    its key is not done: a launch that died during the book (an hour and more
-    of model calls) resumes it here over the suites on disk, instead of
-    finding every cluster done and leaving the book to nobody. Re-harvesting a
-    cluster first sets a done book key back to pending, so a launch that dies
-    between that harvest and the rebuilt book cannot leave a book built over
-    the old suite marked done. The caller runs this only before task0c."""
+    its key is not done: a launch that died during the book resumes it here
+    over the suites on disk. Re-harvesting a cluster first sets a done book
+    key back to pending. The caller runs this only before task0c."""
     default_cluster = next((c.name for c in clusters if c.is_default), clusters[0].name if clusters else "default")
     book_key = behaviour_book_key(module_name)
     book_was_done = book_done = deps.phase_valid(project_dir, book_key)
     passed: dict[str, BehaviourSuite] = {}
+    passes: list[_Harvested] = []
     for cluster in clusters:
         key = phase_key(cluster.name)
         if deps.phase_valid(project_dir, key):
@@ -1032,119 +1194,177 @@ def run_task0d(
             types = list(deps.enumerate_types(src_dir) or [])
         except Exception as e:
             deps.log(f"  [task0d] cluster {cluster.name}: fn enumeration failed (probes and exercises skipped): {e}")
-        admitted = proposed = 0
-        edge_reading = (0, 0)
-        cargo_n = 0
-        misses: list[dict[str, str]] = []
-        admitted_ids: set[str] = set()
-        _ph.step("t0d.probes")
+        passes.append(_Harvested(
+            cluster, key, suite, records, mods, types, list(sources), t0, _ph))
+    if len(passes) > 1:
+        deps.log(f"  [task0d] worlds {_cluster_label(tuple(p.cluster.name for p in passes))}: harvest")
+    for p in passes:
+        p.ph.step("t0d.probes")
         try:
-            probes, admitted, proposed, probe_cargo, misses, edge_reading = _run_probes(
-                deps, project_dir, module_name, cluster, suite, records, mods, types, default_cluster,
-                sources=sources,
-            )
-            cargo_n += probe_cargo
-            admitted_ids = {p.behaviour_id for p in probes}
+            p.plan = _probe_plan(
+                deps, project_dir, p.cluster, p.suite, p.records, p.mods, p.types, p.sources)
+        except Exception as e:
+            deps.log(f"  [task0d] cluster {p.cluster.name}: probes failed "
+                     f"(non-fatal, harvested suite kept): {e}")
+    plans = [p.plan for p in passes if p.plan is not None]
+    try:
+        rounds = _ask_probe_rounds(deps, module_name, plans)
+    except Exception as e:
+        rounds = []
+        for p in passes:
+            if p.plan is not None:
+                deps.log(f"  [task0d] cluster {p.cluster.name}: probes failed "
+                         f"(non-fatal, harvested suite kept): {e}")
+                p.plan = None
+    for p in passes:
+        if p.plan is None:
+            continue
+        try:
+            probes, p.admitted, p.proposed, probe_cargo, p.misses, p.edge_reading = _admit_probe_rounds(
+                deps, project_dir, module_name, p.plan, rounds, default_cluster)
+            p.cargo_n += probe_cargo
+            p.admitted_ids = {s.behaviour_id for s in probes}
             if probes:
-                suite = merge_suites(suite, BehaviourSuite(cfg_cluster=cluster.name, specs=tuple(probes)))
+                p.suite = merge_suites(
+                    p.suite, BehaviourSuite(cfg_cluster=p.cluster.name, specs=tuple(probes)))
         except Exception as e:
-            deps.log(f"  [task0d] cluster {cluster.name}: probes failed (non-fatal, harvested suite kept): {e}")
+            deps.log(f"  [task0d] cluster {p.cluster.name}: probes failed "
+                     f"(non-fatal, harvested suite kept): {e}")
+    for p in passes:
         try:
-            suite, _held = _hold_out(deps, project_dir, cluster.name, suite)
+            p.suite, _held = _hold_out(deps, project_dir, p.cluster.name, p.suite)
         except Exception as e:
-            deps.log(f"  [task0d] cluster {cluster.name}: holding captures out failed "
+            deps.log(f"  [task0d] cluster {p.cluster.name}: holding captures out failed "
                      f"(non-fatal, every capture stays in the suite): {e}")
-        filled = 0
-        _ph.step("t0d.exercises")
-        sites: dict[str, frozenset[str]] | None = None
+        p.ph.step("t0d.exercises")
         if deps.EXERCISES_ENABLED:
             try:
-                sites = {}
-                specs, filled, ex_cargo = _fill_exercises(deps, project_dir, cluster, suite.specs,
-                                                          records, sites)
-                cargo_n += ex_cargo
-                suite = suite.with_specs(specs)
+                p.sites = {}
+                specs, p.filled, ex_cargo = _fill_exercises(
+                    deps, project_dir, p.cluster, p.suite.specs, p.records, p.sites)
+                p.cargo_n += ex_cargo
+                p.suite = p.suite.with_specs(specs)
             except Exception as e:
-                sites = None
-                deps.log(f"  [task0d] cluster {cluster.name}: exercises failed (non-fatal, harvested suite kept): {e}")
-        # The reach round needs the site-level executed set the exercises just
-        # measured: without it every function would look unexecuted.
-        _ph.step("t0d.reach")
-        if sites is None or deps.PROBE_MAX_PER_CLUSTER <= 0:
-            # Said, not silent: t0c's prompt quotes the reach outcomes, and a
-            # skipped round leaves every routed function without one.
-            deps.log(f"  [task0d] cluster {cluster.name}: reach probes skipped — "
+                p.sites = None
+                deps.log(f"  [task0d] cluster {p.cluster.name}: exercises failed "
+                         f"(non-fatal, harvested suite kept): {e}")
+    # The reach round needs the site-level executed set the exercises just
+    # measured: without it every function would look unexecuted. The cap is
+    # applied per world before the one ask, so a world is not asked about a
+    # target past its own budget.
+    reach_ready: list[_Harvested] = []
+    for p in passes:
+        p.ph.step("t0d.reach")
+        if p.sites is None or deps.PROBE_MAX_PER_CLUSTER <= 0:
+            deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes skipped — "
                      + ("the exercises reading is off or failed, and the round "
                         "judges a probe by the site-level coverage it measures"
-                        if sites is None else
+                        if p.sites is None else
                         "TASK0D_PROBE_MAX is 0"))
-        else:
-            try:
-                executed = frozenset(x for v in sites.values() for x in v)
-                reach_specs, reach_out, reach_cargo = _run_reach(
-                    deps, project_dir, module_name, cluster, suite, records, executed,
-                    default_cluster=default_cluster)
-                cargo_n += reach_cargo
-                if reach_specs:
-                    suite = merge_suites(suite, BehaviourSuite(cfg_cluster=cluster.name,
-                                                               specs=tuple(reach_specs)))
-                    admitted_ids |= {s.behaviour_id for s in reach_specs}
-                    filled += sum(1 for s in reach_specs if s.exercises)
-                deps.save_reach(project_dir, cluster.name, reach_out)
-                if reach_out:
-                    counts = {k: sum(1 for o in reach_out if o.outcome == k)
-                              for k in (REACHED, PROBE_MISSED, PROBE_FAILED)}
-                    deps.log(f"  [task0d] cluster {cluster.name}: reach probes: {len(reach_out)} "
-                             f"function(s) no example entered, asked along their public route — "
-                             f"{counts[REACHED]} reached, {counts[PROBE_MISSED]} ran without entering "
-                             f"it, {counts[PROBE_FAILED]} did not capture; {reach_cargo} cargo invocation(s)")
-                    deps.emit("task0d.reach", cluster=cluster.name, **counts,
-                              cargo_invocations=reach_cargo)
-            except Exception as e:
-                deps.log(f"  [task0d] cluster {cluster.name}: reach probes failed (non-fatal, suite kept): {e}")
-        # Captures become REAL tests here, or they stay notes about the crate.
-        # Emitted from the observed value, never re-asked of the model, and
-        # deliberately NOT put through t0c's admission contract: that contract
-        # exists to catch a guessed literal, and this value was printed by the
-        # crate itself. It IS compiled and run against the original first —
-        # emission without execution puts an entry no fill can ever satisfy
-        # into the oracle, which is the class t0c's runtime gate exists for.
-        # A capture that fails that gate is withdrawn from the SUITE too: a
-        # value that cannot be replayed is not a specification, and leaving it
-        # listed would hand t1.5 a MUST no tree can meet.
-        _ph.step("t0d.emit")
+            continue
         try:
-            suite, emit_misses, withdrawn = _emit_captures(deps, project_dir, module_name, cluster, suite)
-            misses.extend(emit_misses)
+            executed = frozenset(x for v in p.sites.values() for x in v)
+            targets = reach_targets(
+                deps.load_construction_facts(project_dir, p.cluster.name), executed)
+            cap = max(0, deps.PROBE_MAX_PER_CLUSTER)
+            if len(targets) > cap:
+                deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes capped at {cap} of "
+                         f"{len(targets)} routed function(s) (TASK0D_PROBE_MAX); the rest "
+                         "are not asked this round.")
+                targets = targets[:cap]
+            p.reach_targets = targets
+            if targets:
+                reach_ready.append(p)
+        except Exception as e:
+            deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes failed "
+                     f"(non-fatal, suite kept): {e}")
+    try:
+        prepared_reach = _ask_reach_union(deps, module_name, [
+            (p.cluster, p.reach_targets or (),
+             deps.public_surface(project_dir, p.cluster.name),
+             _style_example(p.suite.specs))
+            for p in reach_ready
+        ]) if reach_ready else {}
+    except Exception as e:
+        prepared_reach = {}
+        for p in reach_ready:
+            deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes failed "
+                     f"(non-fatal, suite kept): {e}")
+            p.reach_targets = None
+    for p in passes:
+        if p.reach_targets is None:
+            continue
+        try:
+            reach_specs, reach_out, reach_cargo = _run_reach(
+                deps, project_dir, module_name, p.cluster, p.suite, p.records,
+                frozenset(), default_cluster=default_cluster,
+                prepared=prepared_reach, targets_override=p.reach_targets)
+            p.cargo_n += reach_cargo
+            if reach_specs:
+                p.suite = merge_suites(
+                    p.suite, BehaviourSuite(cfg_cluster=p.cluster.name, specs=tuple(reach_specs)))
+                p.admitted_ids |= {s.behaviour_id for s in reach_specs}
+                p.filled += sum(1 for s in reach_specs if s.exercises)
+            deps.save_reach(project_dir, p.cluster.name, reach_out)
+            if reach_out:
+                counts = {k: sum(1 for o in reach_out if o.outcome == k)
+                          for k in (REACHED, PROBE_MISSED, PROBE_FAILED)}
+                deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes: {len(reach_out)} "
+                         f"function(s) no example entered, asked along their public route — "
+                         f"{counts[REACHED]} reached, {counts[PROBE_MISSED]} ran without entering "
+                         f"it, {counts[PROBE_FAILED]} did not capture; {reach_cargo} cargo invocation(s)")
+                deps.emit("task0d.reach", cluster=p.cluster.name, **counts,
+                          cargo_invocations=reach_cargo)
+        except Exception as e:
+            deps.log(f"  [task0d] cluster {p.cluster.name}: reach probes failed "
+                     f"(non-fatal, suite kept): {e}")
+    for p in passes:
+        p.ph.step("t0d.emit")
+        try:
+            p.suite, emit_misses, withdrawn = _emit_captures(
+                deps, project_dir, module_name, p.cluster, p.suite)
+            p.misses.extend(emit_misses)
             # Only THIS pass's captures count against this pass's reading; the
             # emitter also withdraws specs merged in from a previous pass's suite.
-            admitted = len(admitted_ids - set(withdrawn))
+            p.admitted = len(p.admitted_ids - set(withdrawn))
         except Exception as e:
-            deps.log(f"  [task0d] cluster {cluster.name}: behaviour-test emission failed (non-fatal, suite kept): {e}")
-        deps.save_suite(project_dir, suite)
-        passed[cluster.name] = suite
+            deps.log(f"  [task0d] cluster {p.cluster.name}: behaviour-test emission failed "
+                     f"(non-fatal, suite kept): {e}")
+        deps.save_suite(project_dir, p.suite)
+        passed[p.cluster.name] = p.suite
         # Written on every pass, empty list included: the file states what THIS
         # pass could not capture, so leaving the previous pass's file in place
         # when nothing was missed would report a stale set as current.
-        deps.record_misses(project_dir, cluster.name, misses)
+        deps.record_misses(project_dir, p.cluster.name, p.misses)
         line, payload = _reading_line(
-            cluster.name, suite, filled, admitted, proposed, elapsed_s=time.monotonic() - t0,
-            cargo_invocations=cargo_n, edges=edge_reading,
+            p.cluster.name, p.suite, p.filled, p.admitted, p.proposed,
+            elapsed_s=time.monotonic() - p.t0, cargo_invocations=p.cargo_n,
+            edges=p.edge_reading,
         )
         deps.log(line)
         deps.emit("task0d.harvest", **payload)
         deps.commit_and_mark(
             project_dir,
-            key,
+            p.key,
             "done",
-            commit_message=f"pipeline: {key} — {len(suite.specs)} behaviour(s)",
+            commit_message=f"pipeline: {p.key} — {len(p.suite.specs)} behaviour(s)",
             detail=(
-                f"{len(suite.specs)} behaviours, runtime then "
-                f"{sum(runtime_then_counts(suite.specs).values())}, "
-                f"exercises {filled}, probes {admitted}/{proposed}"
+                f"{len(p.suite.specs)} behaviours, runtime then "
+                f"{sum(runtime_then_counts(p.suite.specs).values())}, "
+                f"exercises {p.filled}, probes {p.admitted}/{p.proposed}"
             ),
         )
-        _ph.close()
+        p.ph.close()
+    if passes and all(
+        c.name in passed or deps.phase_valid(project_dir, phase_key(c.name)) for c in clusters
+    ):
+        harvest_key = behaviour_module_harvest_key(module_name)
+        if not deps.phase_valid(project_dir, harvest_key):
+            deps.commit_and_mark(
+                project_dir, harvest_key, "done",
+                commit_message=f"pipeline: {harvest_key} — {len(clusters)} world(s)",
+                detail="every world's suite was written",
+            )
     if book_done:
         deps.log(f"  [task0d] {module_name}: book stage already done — skipping.")
         phase_skipped("t0d", "book stage already done", module=module_name)
@@ -1187,6 +1407,66 @@ def _doc_examples_once(
                      f"(non-fatal, the suites are kept): {e}")
 
 
+def _rule_replies(
+    deps: Task0dDeps,
+    module_name: str,
+    clusters: Sequence[BuildCluster],
+    books: Mapping[str, BehaviourSuite],
+    probe_worlds: frozenset[str],
+) -> dict[str, str]:
+    """One reply per rule id when more than one world is probed this launch.
+
+    A single world is left to `run_rule_probes`, so its prompt names that
+    world. The shared prompt joins the worlds that carry the rule, unions
+    the shown and near examples by id, and unions the glossary
+    (`union_glossary`: a name some of those worlds lack is marked with the
+    worlds that have it). No cargo."""
+    present = [c for c in clusters if c.name in probe_worlds and c.name in books]
+    if len(present) < 2:
+        return {}
+    grouped: dict[str, list[tuple[str, RuleAsk]]] = {}
+    order: list[str] = []
+    for c in present:
+        for ask in rule_probe_asks(books[c.name].features, max_rules=deps.RULE_PROBES_MAX):
+            if ask.rule_id not in grouped:
+                order.append(ask.rule_id)
+                grouped[ask.rule_id] = []
+            grouped[ask.rule_id].append((c.name, ask))
+    if not order:
+        return {}
+    out: dict[str, str] = {}
+    asked: list[str] = []
+    for rule_id in order:
+        pairs = grouped[rule_id]
+        names = [name for name, _ask in pairs]
+        for name in names:
+            if name not in asked:
+                asked.append(name)
+        shown_ids: list[str] = []
+        near_ids: list[str] = []
+        for _name, ask in pairs:
+            for i in ask.shown:
+                if i not in shown_ids:
+                    shown_ids.append(i)
+            for i in ask.near:
+                if i not in near_ids:
+                    near_ids.append(i)
+        by_id = {s.behaviour_id: s for name, _ask in pairs for s in books[name].specs}
+        prompt = build_rule_probe_prompt(
+            crate=module_name,
+            cfg_cluster=_cluster_label(names),
+            sentence=pairs[0][1].sentence,
+            glossary=union_glossary({name: books[name].glossary for name, _ask in pairs}),
+            shown=[by_id[i] for i in shown_ids if i in by_id],
+            near=[by_id[i] for i in near_ids if i in by_id],
+            programs=deps.RULE_PROBE_PROGRAMS,
+        )
+        out[rule_id] = deps.ask(prompt)
+    if len(asked) > 1:
+        deps.log(f"  [task0d] worlds {_cluster_label(asked)}: rule probes asked once")
+    return out
+
+
 def _book_once(
     deps: Task0dDeps,
     project_dir: Path,
@@ -1226,6 +1506,13 @@ def _book_once(
         if deps.RULE_PROBES_MAX > 0:
             ph.step("t0d.rule_probes")
             memo: dict[str, str] = {}
+            try:
+                prepared_rules = _rule_replies(
+                    deps, module_name, clusters, books, probe_worlds)
+            except Exception as e:
+                prepared_rules = {}
+                deps.log(f"  [task0d] {module_name}: the shared rule-probe ask failed "
+                         f"({e}); each world asks for itself.")
             default_cluster = next((c.name for c in clusters if c.is_default),
                                    clusters[0].name if clusters else "default")
             for c in clusters:
@@ -1234,7 +1521,8 @@ def _book_once(
                 try:
                     books[c.name] = run_rule_probes(
                         deps, project_dir, module_name, c, books[c.name],
-                        default_cluster=default_cluster, memo=memo)
+                        default_cluster=default_cluster, memo=memo,
+                        prepared=prepared_rules or None)
                 except Exception as e:
                     deps.log(f"  [task0d] cluster {c.name}: rule probes failed (non-fatal, "
                              f"the book is kept as built): {e}")

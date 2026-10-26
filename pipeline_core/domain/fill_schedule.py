@@ -208,6 +208,27 @@ class RouteRun:
         without it and a joint session cannot drop it."""
         return self.kind is RouteKind.PAIR or bool(self.joint)
 
+    def gives_same_answer(self, row: RouteLedgerRow) -> bool:
+        """Whether `row` is a try of the answer this holding run gives: the
+        record that spends its grace. A joint session's is the rows of its
+        own candidate digest; a pair's is the pair rows that were not a
+        joint session.
+
+        Run `391506-3403a6a7` (2026-10-22, fill 1): a never-tried joint
+        session lost its right to go first because four unpaid PAIR tries of
+        `test_debug` counted as its own (`holds_jointly` was the match), and
+        it then paid the fill's whole +2 fifth in line, after 100 minutes of
+        runs that changed no verdict. Only a run that holds jointly has a
+        grace, so any other run is refused here: a kind added to
+        `holds_jointly` without an answer of its own fails loudly instead of
+        inheriting another kind's record."""
+        if self.joint:
+            return row.joint == self.joint
+        if self.kind is RouteKind.PAIR:
+            return row.kind is RouteKind.PAIR and not row.joint
+        raise ValueError(f"{self.label}: only a run that holds jointly has "
+                         "a grace to spend")
+
     @property
     def plan_key(self) -> str:
         """The key of the run as its route planned it."""
@@ -709,6 +730,27 @@ def _row_paid(r: RouteLedgerRow) -> bool:
     return r.outcome is RunOutcome.CASHED or r.net_pass_delta > 0
 
 
+def try_premise_moved(later: Iterable[RouteLedgerRow],
+                      units: Collection[FnLocator]) -> bool:
+    """Has what a graded try saw moved since: a row opened after it CASHED
+    on a unit of `units` (wrote one and paid). The one rule both halves of
+    the rank read — a unit's own try (`UnitService._target_class`) and a
+    session's try of its test (`UnitService.session_rebuy`, over the units
+    its current slice executes). A later FLAT keep moves a body, not the
+    evidence, and does not count: counting it made every re-buy "served" on
+    `450977-5f48b68a`'s ledger. A cash on a unit outside `units` says
+    nothing about this try either.
+
+    Run `391506-3403a6a7` (2026-10-22, fill 2): the one session that paid
+    opened 17th of 18 at the re-buy level, 89 minutes in, because its
+    test's last graded session try predated five cashes on units its slice
+    executes and only a cash on the test itself voided that try."""
+    wanted = frozenset(units)
+    return any(_row_paid(r) and any(FnLocator(f, fn) in wanted
+                                    for f, fn in r.targets)
+               for r in later)
+
+
 def row_paid_test(r: RouteLedgerRow, test: str, *,
                   aimed_later: bool = False) -> bool:
     """Did this row pay `test` — turn it green — rather than merely pay?
@@ -958,6 +1000,11 @@ def consecutive_unpaid(rows: Iterable[RouteLedgerRow], run: RouteRun,
     a reasoning-capped (UNMEASURED) row consumed one and counts — see
     :func:`_unpaid_streak` for why this clock and the rank differ there.
     """
+    if run.joint:
+        # A joint session's slice is rebuilt each fill from the frontier, so
+        # its targets and tests (its work key) change between fills while
+        # the answer it re-asks does not: its clock is the candidate digest.
+        return _unpaid_streak(rows, lambda r: r.joint == run.joint, oracle_fp)
     key = _served_key(run)
     return _unpaid_streak(rows, lambda r: _served_key_of(r) == key, oracle_fp)
 
@@ -1258,7 +1305,9 @@ class UnitService:
                                             RunOutcome.DECLINED)):
                 return None
             at = next(i for i, r in enumerate(self._opened_rows) if r is last)
-            if any(row_paid_test(r, t) for r in self._opened_rows[at + 1:]):
+            later = self._opened_rows[at + 1:]
+            if (any(row_paid_test(r, t) for r in later)
+                    or try_premise_moved(later, run.targets)):
                 return None
             rank = (_RANK_REBUY_REVERTED
                     if last.outcome is RunOutcome.REVERTED
@@ -1352,7 +1401,7 @@ class UnitService:
                    and (run.kind is not RouteKind.SESSION
                         or session_row_tried(r, min_turns=self._min_turns))]
         if (not here_at or self.cut_by_share(opened[here_at[-1]])
-                or any(_row_paid(r) for r in opened[here_at[-1] + 1:])):
+                or try_premise_moved(opened[here_at[-1] + 1:], (t,))):
             # Never tried on this route, starved by its share, or a later
             # try on another route PAID (the verdicts this route last saw
             # moved): served, and this try is new. A later flat keep
@@ -1591,10 +1640,22 @@ def carve_coverage_split(run: RouteRun, attributed: Collection[FnLocator],
 
 
 def release_held(held: Sequence[ScheduledRun],
-                 not_opened: Collection[str]) -> tuple[ScheduledRun, ...]:
-    """The held runs every holder of which is known not to open this fill
-    (``not_opened``: run keys the executor deferred), released: no longer
-    deferred, ranked again with the reason they had before the hold.
+                 left_tree: Collection[str]) -> tuple[ScheduledRun, ...]:
+    """The held runs every holder of which has nothing on the tree for them
+    to split (``left_tree``: run keys the executor deferred, and run keys
+    that opened and kept nothing — reverted, empty, or every kept body the
+    one already on disk), released: no longer deferred, ranked again with
+    the reason they had before the hold.
+
+    A hold protects one pending judgment: the holder's landing, read by the
+    next sweep without a split write beside it. A holder that landed nothing
+    leaves nothing to protect. Run `42057-641e589c` (2026-10-26, fill 6): the
+    formatter pair re-emitted its on-disk bodies after 16.3 min (`every kept
+    body was the one already on disk`), and the `src/error.rs` and
+    `src/ptr.rs` file, impl and per-fn runs and three multi-test sessions it
+    held stayed `pair_wait` for the rest of the fill while single-test
+    sessions spent the budget. Fill 5's formatter pair that REVERTED (kept
+    0) held its runs the same way.
 
     The schedule's pass holds a run only behind a run it OPENS, because a
     hold on a run that never opens is a wait for nothing — no grace clock
@@ -1607,7 +1668,7 @@ def release_held(held: Sequence[ScheduledRun],
     planned run that held `src/error.rs::context` beside its table fns
     never opened. One rule for both holds (`pair_wait`, `coverage_split`);
     a run with no recorded holder is not a hold and is never released."""
-    gone = frozenset(not_opened)
+    gone = frozenset(left_tree)
     return tuple(
         replace(h, deferred=False, reason=h.prior_reason or h.reason,
                 share_minutes=None)
@@ -2517,25 +2578,33 @@ def admit_ranked(
     ranked = sorted(ranked, key=_sort_key)
     _per_test: dict[tuple[str, str], int] = {}
 
-    def _test_spent(kind: str, test: str) -> bool:
-        """`unpaid_grace` tries in a row of `kind`'s writes aimed at `test`
-        that did not turn it green. Cached per fill."""
+    def _hold_spent(p: RouteRun, test: str) -> bool:
+        """`unpaid_grace` tries in a row of the answer `p` gives
+        (`RouteRun.gives_same_answer`), aimed at `test`, that did not turn
+        it green. Cached per fill, per answer."""
         if unpaid_grace <= 0:
             return False
-        key = (kind, test)
+        key = (f"joint:{p.joint}" if p.joint else "pair", test)
         if key not in _per_test:
-            _per_test[key] = (
-                unpaid_tries_for_test(
-                    rows_list, test, oracle_fp,
-                    match=lambda r: r.holds_jointly)
-                if kind == "pair" else
-                unpaid_attributed_writes(rows_list, test, attr, oracle_fp))
+            _per_test[key] = unpaid_tries_for_test(
+                rows_list, test, oracle_fp, match=p.gives_same_answer)
+        return _per_test[key] >= unpaid_grace
+
+    def _attributed_spent(test: str) -> bool:
+        """`unpaid_grace` attributed writes in a row aimed at `test` that
+        did not turn it green. Cached per fill."""
+        if unpaid_grace <= 0:
+            return False
+        key = ("attributed", test)
+        if key not in _per_test:
+            _per_test[key] = unpaid_attributed_writes(
+                rows_list, test, attr, oracle_fp)
         return _per_test[key] >= unpaid_grace
 
     def _grace_left(p: RouteRun, run: RouteRun) -> bool:
         return (_served_key(p) not in spent
                 and not ((shared := p.target_tests & run.target_tests)
-                         and all(_test_spent("pair", t) for t in shared)))
+                         and all(_hold_spent(p, t) for t in shared)))
 
     def _orders(a: RouteRun, b: RouteRun) -> bool:
         """`a` goes before `b` in the order. A hop pair's claim to go
@@ -2649,7 +2718,7 @@ def admit_ranked(
                 split_holders = [
                     o for o in non_split_runs
                     if o in opened_runs and (run.target_tests & o.target_tests)]
-                if split_holders and not all(_test_spent("attributed", t)
+                if split_holders and not all(_attributed_spent(t)
                                              for t in shared):
                     waiting.append(replace(
                         s, deferred=True, share_minutes=0.0,
@@ -2924,8 +2993,17 @@ class RunClock:
                  units: frozenset[FnLocator] = frozenset(),
                  unit_multiple: float = 0.0,
                  call_price: float | None = None,
-                 owed: frozenset[FnLocator] = frozenset()) -> None:
+                 owed: frozenset[FnLocator] = frozenset(),
+                 yields_to: Callable[
+                     [frozenset[str] | None, frozenset[FnLocator]], str,
+                 ] | None = None) -> None:
         self.share_minutes = share_minutes
+        #: The fill's in-fill blockers-first (`fill_scheduler._GroundGate.
+        #: yields_to`): the run a claim waits behind, or "".
+        self._yields_to = yields_to
+        #: The units this run's claims yielded: the executor queues them
+        #: again behind the runs they waited for.
+        self.yielded: set[FnLocator] = set()
         #: Minutes one call of this run's kind takes (:func:`call_price`);
         #: what a granted claim reserves while its unit is in flight.
         self.call_price = call_price
@@ -2984,6 +3062,8 @@ class RunClock:
                 units: Iterable[FnLocator] | None = None) -> str:
         """Make the next claim, or say why not: ``""`` when claimed,
         ``"premise"`` when the ground this claim was planned on has moved,
+        ``"yield"`` when every test it was planned on now stops in a stub a
+        run still ahead writes (the claim waits behind that run),
         ``"share"`` when the share is spent and the last claim bought
         nothing. Budget follows payoff: within the share, always; past a
         spent share while the last claim cashed, or while the claim names
@@ -3009,6 +3089,15 @@ class RunClock:
             if self._reserved.pop(me, None) is not None:
                 self._returned.notify_all()
         while True:
+            # Asked before the premise: a claim whose tests a keep moved
+            # into a stub a run still ahead writes waits behind that run
+            # instead of being refused for the sweep to re-plan.
+            if (self._yields_to is not None
+                    and self._yields_to(scope, claimed)):
+                with self._lock:
+                    self.refused += 1
+                    self.yielded |= claimed
+                return "yield"
             if (self._ground_moved is not None
                     and self._ground_moved(scope, claimed)):
                 with self._lock:

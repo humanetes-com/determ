@@ -238,7 +238,8 @@ def test_a_culprit_that_is_part_of_the_write_goes_back_to_its_prior_text(
     assert "old_a" in text and "bad_a" not in text and "bad_b" in text
     assert STUB_BODY not in text
     assert write.withdrawn_names == ("make_a",)
-    assert write.evidence
+    # The retry is shown the write's own site, from the one writer.
+    assert got.own_sites and "make_a" in got.render()
     # The refutation is the written body the stack ran.
     assert recorded == [[MAKE_A]]
 

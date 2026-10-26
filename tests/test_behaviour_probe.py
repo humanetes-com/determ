@@ -213,6 +213,7 @@ def test_run_probe_writes_runs_and_always_removes_the_example(tmp_path: Path) ->
     assert seen["cwd"] == tmp_path
     env = seen["env"]
     assert "--cfg x" in env["RUSTFLAGS"] and env["RUSTUP_TOOLCHAIN"] == "nightly"
+    assert env["CARGO_TARGET_DIR"] == str(tmp_path / "target" / "t0d-nightly")
     assert not (tmp_path / "examples").exists(), "examples/ created by the probe is removed"
 
 

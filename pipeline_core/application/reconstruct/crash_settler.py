@@ -82,16 +82,19 @@ class JudgedWrite(Collection[FnLocator]):
     tree; two impls of one name are two bodies under one locator.
 
     The settler fills `withdrawn` (the culprit frames it put back to their
-    pre-write text) and `evidence` (the crash as the localizer read it) only
-    when it commits. A route that does not pass one cannot be narrowed: OWN
-    convicts its whole write, as before. Run `757853-e28f1a7d` (2026-10-16):
-    two four-body file attempts were restored whole on one culprit body."""
+    pre-write text) only when it commits. The crash text a retry carries is
+    the :class:`Settlement`'s (`Settlement.render`), never a field here: a
+    field written on one outcome reads empty on every other, which is how a
+    session turn whose settlement was UNSETTLED reached the model as a bare
+    `(exit status -11)` (run `42057-641e589c`, 2026-10-26, fill 6). A route
+    that does not pass one cannot be narrowed: OWN convicts its whole write,
+    as before. Run `757853-e28f1a7d` (2026-10-16): two four-body file
+    attempts were restored whole on one culprit body."""
 
     written: frozenset[FnLocator]
     prior: Mapping[str, str]
     size: int
     withdrawn: list[CrashFrame] = field(default_factory=list)
-    evidence: str = ""
 
     @property
     def withdrawn_locators(self) -> frozenset[FnLocator]:
@@ -124,6 +127,9 @@ class Settlement:
     #: The written bodies a terminal OWN step named: the culprit the write
     #: is convicted on, whether or not it could be withdrawn.
     own: tuple[CrashFrame, ...] = ()
+    #: The sites whose culprit is a body of the write, from the rounds that
+    #: withdrew it: what a retry of the withdrawn bodies is shown first.
+    own_sites: tuple[CrashSite, ...] = ()
 
     @property
     def settled(self) -> bool:
@@ -139,12 +145,28 @@ class Settlement:
         return tuple(dict.fromkeys(frame_locator(f) for f in self.stubbed))
 
     def render(self) -> str:
-        """The crashes as the localizer read them, for a retry prompt — the
-        fault-class renderer's text (`CrashSite.render`), never a class
-        sentence of the caller's own."""
-        if not self.sites:
+        """The crashes as the localizer read them, for whatever the caller
+        shows the model next — the fault-class renderer's text
+        (`CrashSite.render_evidence`), never a class sentence of the
+        caller's own. The write's own sites first when a round withdrew a
+        body of it, else the first reading's, two at most. A settlement
+        that changed the tree also names the bodies it put back to stubs:
+        the verdicts the caller reads next describe that tree.
+
+        The ONE writer of crash text for every route (the per-fn gate, the
+        session turn, the file and impl retries, the regression gate's
+        detail). Empty only when nothing was localized."""
+        shown = (self.own_sites or self.sites)[:2]
+        if not shown:
             return ""
-        return "\n\n".join(s.render_evidence() for s in self.sites[:2])
+        text = "\n\n".join(s.render_evidence() for s in shown)
+        if self.changed_tree and self.stubbed:
+            text += (
+                "\n\nBefore the verdicts were read, the crash settlement put "
+                "these unproven bodies the crash ran through back to stubs: "
+                + ", ".join(f"{u.file}::{u.fn_name}"
+                            for u in self.stubbed_locators) + ".")
+        return text
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +195,19 @@ class CrashSettler:
         # (file, fn, occurrence) of every body `_stub` put back, so the
         # committed ones can be journalled as kept edits.
         self._stubbed_at: list[tuple[str, str, int]] = []
+
+    def localize(self, capture: str,
+                 baseline: TestStateReading | None) -> tuple[CrashSite, ...]:
+        """The crash sites of `capture` the baseline did not show, read and
+        nothing put back: what a reader that judges an abort without settling
+        it (the session's peel, a reading whose settlement changed the tree)
+        hands the abort partition. Empty when the localizer fails."""
+        before = (crash_keys(baseline.binaries) if baseline is not None
+                  else frozenset())
+        try:
+            return tuple(self.deps.localize(capture, before))
+        except Exception:  # noqa: BLE001 — a reading never ends a fill; no site reads unlocated
+            return ()
 
     def settle(
         self,
@@ -328,8 +363,6 @@ class CrashSettler:
                 reason = f"refutation not recorded ({type(exc).__name__})"
             if committed and write is not None and withdrawn:
                 write.withdrawn.extend(withdrawn)
-                write.evidence = "\n\n".join(
-                    s.render_evidence() for s in (own_sites or first_sites)[:2])
             if committed:
                 d.log(f"  {tag}[phase-c/crash-settle] {str(outcome).upper()} "
                       f"after {rounds} reading(s): the write stands"
@@ -353,7 +386,8 @@ class CrashSettler:
             withdrawn = []
         result = Settlement(outcome=outcome, stubbed=tuple(stubbed),
                             sites=first_sites, rounds=rounds, reason=reason,
-                            withdrawn=tuple(withdrawn), own=own)
+                            withdrawn=tuple(withdrawn), own=own,
+                            own_sites=(tuple(own_sites) if withdrawn else ()))
         d.emit("phase_c.crash.settle", {
             "outcome": str(outcome), "rounds": rounds, "reason": reason,
             "written": sorted(f"{u.file}::{u.fn_name}" for u in written_locs),
@@ -489,6 +523,15 @@ class CrashSettler:
                 text = text[:b] + STUB_BODY + text[e:]
             txn.write(rel, text)
         return True
+
+
+def crash_text_of(settlement: Settlement | None) -> str:
+    """The crash a caller shows the model next: the settlement's own
+    rendering (`Settlement.render`) whenever it read a crash, whatever it
+    decided. Empty when no settlement ran or it found no crash left."""
+    if settlement is None or settlement.outcome is SettlementOutcome.NO_CRASH:
+        return ""
+    return settlement.render()
 
 
 def withdraw_crashing_bodies(

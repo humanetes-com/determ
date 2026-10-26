@@ -121,6 +121,21 @@ def test_write_gen_tests_pass_happy(tmp_path: Path) -> None:
     assert has_gen_tests_mod_decl(parent_text, 1)
 
 
+def test_write_gen_tests_pass_raw_string_is_not_quarantined(tmp_path: Path) -> None:
+    """A raw literal with an interior quote and a bracket is balanced. The
+    scanner that read it as an ordinary string quarantined the sibling."""
+    src = _src(tmp_path, content="pub fn x() {}\n")
+    block = (
+        "#[cfg(test)]\nmod gen_tests_1 {\n"
+        '    fn t() { let _ = r#"he said "hi (x"#; }\n'
+        "}\n"
+    )
+    sibling = write_gen_tests_pass(src, "pub fn x() {}\n", block, "", pass_n=1)
+    assert sibling.exists()
+    assert not sibling.with_suffix(".rs.broken").exists()
+    assert has_gen_tests_mod_decl(src.read_text(encoding="utf-8"), 1)
+
+
 def test_write_gen_tests_pass_broken_delimiters_quarantined(tmp_path: Path) -> None:
     src = _src(tmp_path, content="pub fn x() {}\n")
     unbalanced = "fn t() { { { } }\n"  # extra opening brace

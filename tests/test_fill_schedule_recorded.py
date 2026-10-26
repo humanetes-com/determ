@@ -676,7 +676,10 @@ def test_fill_1_of_the_3495074_run_opens_the_writers_of_the_widest_blocker_first
     assert len(Blockers.of(held, blamed).tests_stopped_by(drop)) == 98
 
     out, opened = replay(fix, crash_blamed=blamed, hollow=held)
-    by_label = {s.run.label: s.run for s in out.schedule.ordered}
+    # A held run whose holder kept nothing opens in the same fill
+    # (`release_held`), so the opened runs include deferred ones.
+    by_label = {s.run.label: s.run
+                for s in (*out.schedule.ordered, *out.schedule.deferred)}
     blockers = Blockers.of(held, blamed)
     # Writers by the one predicate: a session carrying `drop` for another
     # test's slice does not write it.

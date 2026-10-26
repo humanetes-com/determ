@@ -75,6 +75,7 @@ from pipeline_core.domain.generation import (
     is_claimed_pipeline_gen_test,
     parse_gen_tests_integration_filename,
 )
+from pipeline_core.domain.rust_scan import rust_delimiters_balanced
 from pipeline_core.domain.test_results import parse_binary_results
 from pipeline_core.log import emit, log
 
@@ -113,6 +114,50 @@ def replay_fn_name(spec: BehaviourSpec) -> str:
     while "__" in safe:
         safe = safe.replace("__", "_")
     return f"behaviour_{safe.strip('_').lower()}"
+
+
+def replay_failure_section(output: str, fn_name: str, *, limit: int = 800) -> str:
+    """The slice of a verify run's output that belongs to `fn_name`.
+
+    The replay's assertion text lives in that output: an ordinary `assert_eq!`
+    prints left and right there, and a world-pinned replay prints the rendered
+    text in its failure message. A capture the verdict did not fail has no
+    section. The slice stops at the next test line or the trailer, and is
+    bounded so a cargo log is not copied whole into the miss record."""
+    if not output or not fn_name or fn_name not in output:
+        return ""
+    lines = output.splitlines()
+    start = next((i for i, ln in enumerate(lines) if fn_name in ln), -1)
+    if start < 0:
+        return ""
+    end = min(len(lines), start + 40)
+    for j in range(start + 1, end):
+        if lines[j].startswith("test result:"):
+            end = j
+            break
+        if lines[j].startswith("test ") and fn_name not in lines[j]:
+            end = j
+            break
+    return "\n".join(lines[start:end]).strip()[:limit]
+
+
+def _balanced_replay_blocks(
+    specs: Sequence[BehaviourSpec], balanced: Callable[[str], bool],
+) -> tuple[list[BehaviourSpec], list[BehaviourSpec]]:
+    """(blocks the check accepts, blocks it refuses).
+
+    One capture is judged on its own replay text. The assembled file is a
+    separate check: a block set can still be wrapped in a file the same
+    check refuses, and that file is not written."""
+    good: list[BehaviourSpec] = []
+    bad: list[BehaviourSpec] = []
+    for spec in specs:
+        block = render_replay_test(spec, fn_name=replay_fn_name(spec))
+        if block and not balanced(block):
+            bad.append(spec)
+        else:
+            good.append(spec)
+    return good, bad
 
 
 def replayable(specs: Iterable[BehaviourSpec]) -> list[BehaviourSpec]:
@@ -306,7 +351,7 @@ def emit_behaviour_tests(
     settle: Settle,
     perturb_env: Mapping[str, str] = (),  # type: ignore[assignment]
     cfg_attr: str = "",
-    balanced: Callable[[str], bool] = lambda _s: True,
+    balanced: Callable[[str], bool] = rust_delimiters_balanced,
     recapture: Recapture | None = None,
 ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
     """Write the replayable captures as one `tests/<stem>_gen_1.rs`, verified.
@@ -356,9 +401,27 @@ def emit_behaviour_tests(
     if not keep:
         return None, (), misses, ()
 
-    def _drop(spec: BehaviourSpec, reason: str) -> None:
+    # The verify output of the round a drop is charged to. A budget drop is
+    # whoever remained after the last continue, which includes a capture that
+    # round had already passed. `replay_failed` says which, and the assertion
+    # text is kept only for a name that round failed.
+    round_out = ""
+    round_failed: frozenset[str] | None = None
+
+    def _drop(spec: BehaviourSpec, reason: str, *, verdict: bool = False) -> None:
+        row = {"unit": spec.behaviour_id, "reason": reason, "when": spec.when}
+        if verdict and round_failed is not None:
+            name = replay_fn_name(spec)
+            failed_this = name in round_failed
+            row["replay_failed"] = "yes" if failed_this else "no"
+            section = replay_failure_section(round_out, name) if failed_this else ""
+            if section:
+                row["replay_output"] = section
         dropped.append(spec.behaviour_id)
-        misses.append({"unit": spec.behaviour_id, "reason": reason, "when": spec.when})
+        misses.append(row)
+
+    def _drop_verdict(spec: BehaviourSpec, reason: str) -> None:
+        _drop(spec, reason, verdict=True)
 
     (Path(project_dir) / "tests").mkdir(parents=True, exist_ok=True)
     dest = _free_dest(project_dir, stem)
@@ -396,6 +459,23 @@ def emit_behaviour_tests(
     # `tests/` file in the crate AND every capture still listed as a MUST.
     try:
         for _round in range(MAX_VERIFY_ROUNDS):
+            # One capture whose own replay text fails the check is dropped.
+            # The others are rendered again, and the assembled file is checked
+            # with the same function: a broken tests/ file is still not written.
+            good, bad = _balanced_replay_blocks(keep, balanced)
+            for s in bad:
+                _drop(s, "replay refused: delimiters unbalanced")
+            keep = good
+            if not keep:
+                log(
+                    f"  [task0d] cluster {cfg_cluster}: behaviour test file REFUSED "
+                    f"(delimiters unbalanced) — every remaining capture's replay "
+                    "text failed the check."
+                )
+                emit("task0d.behaviour_tests_refused", data={"cluster": cfg_cluster, "captures": len(bad)})
+                with suppress(OSError):
+                    dest.unlink()
+                return None, tuple(dropped), misses, ()
             body = render_behaviour_test_file(keep, crate=crate, cfg_attr=cfg_attr)
             if not balanced(body):
                 log(
@@ -412,6 +492,8 @@ def emit_behaviour_tests(
 
             ok, out = verify(dest.stem, {})
             failed, executed, saw_verdict = _verdict_of(out)
+            round_out = out
+            round_failed = failed
             if not saw_verdict:
                 # No verdict at all: the file did not compile, or the binary died
                 # before libtest reported anything. Nothing can be attributed to a
@@ -438,7 +520,7 @@ def emit_behaviour_tests(
                         "process owns the rest."
                     )
                     continue
-                keep, went = _withdraw(keep, failed, _drop, "replay disagreed with the capture")
+                keep, went = _withdraw(keep, failed, _drop_verdict, "replay disagreed with the capture")
                 log(
                     f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
                     f"reproduce as a test against the original and were withdrawn."
@@ -450,7 +532,7 @@ def emit_behaviour_tests(
                 # file does not stay.
                 if keep:
                     for s in keep:
-                        _drop(s, "replay red on a verdict naming no capture in the file")
+                        _drop(s, "replay red on a verdict naming no capture in the file", verdict=True)
                 with suppress(OSError):
                     dest.unlink()
                 return None, tuple(dropped), misses, ()
@@ -501,6 +583,8 @@ def emit_behaviour_tests(
                         _drop(s, "perturbed replay reported no verdict — environment-dependence not ruled out")
                     return None, tuple(dropped), misses, ()
                 if failed2:
+                    round_out = out2
+                    round_failed = failed2
                     still: list[BehaviourSpec] = []
                     env_went: list[BehaviourSpec] = []
                     split = False
@@ -516,7 +600,7 @@ def emit_behaviour_tests(
                             # set_var should have isolated it.
                             if dict(spec.required_env) == dict(perturb_env):
                                 env_went.append(spec)
-                                _drop(spec, "replay disagreed with the capture")
+                                _drop(spec, "replay disagreed with the capture", verdict=True)
                             else:
                                 still.append(spec)
                             continue
@@ -535,14 +619,14 @@ def emit_behaviour_tests(
                         stdouts = [o for o in outs if o is not None]
                         if not stdouts or not capture_moved(spec, stdouts[0]):
                             env_went.append(spec)
-                            _drop(spec, env_reason)
+                            _drop(spec, env_reason, verdict=True)
                             continue
                         worlds = split_env_worlds(spec, stdouts, perturb_env)
                         if worlds is None:
                             env_went.append(spec)
                             _drop(spec, "the perturbed world's recaptures "
                                         "agreed on no leading text — nothing "
-                                        "in this render is the crate's")
+                                        "in this render is the crate's", verdict=True)
                             continue
                         orig, twin = worlds
                         still.append(orig)
@@ -566,7 +650,8 @@ def emit_behaviour_tests(
                         continue
                     if keep:
                         for s in keep:
-                            _drop(s, "perturbed replay red on a verdict naming no capture in the file")
+                            _drop(s, "perturbed replay red on a verdict naming no capture in the file",
+                                  verdict=True)
                     with suppress(OSError):
                         dest.unlink()
                     return None, tuple(dropped), misses, ()
@@ -602,7 +687,7 @@ def emit_behaviour_tests(
         with suppress(OSError):
             dest.unlink()
         for s in keep:
-            _drop(s, "replay still red after the verification budget")
+            _drop(s, "replay still red after the verification budget", verdict=True)
         return None, tuple(dropped), misses, ()
     except BaseException:
         with suppress(OSError):

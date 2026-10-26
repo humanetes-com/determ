@@ -159,6 +159,9 @@ def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path
     assert any(c[:4] == ["cargo", "run", "--quiet", "--example"] for c in calls)
     assert all("-C instrument-coverage" in e["RUSTFLAGS"] for e in envs)
     assert all(e["CARGO_INCREMENTAL"] == "0" for e in envs)
+    assert all(e["CARGO_TARGET_DIR"] == str(tmp_path / "target" / "t0d-stable") for e in envs)
+    grcov_bins = [c[c.index("--binary-path") + 1] for c in calls if c and c[0].endswith("grcov")]
+    assert grcov_bins and all(p == str(tmp_path / "target" / "t0d-stable" / "debug") for p in grcov_bins)
     profile_files = {e["LLVM_PROFILE_FILE"] for e in envs if "LLVM_PROFILE_FILE" in e}
     assert len(profile_files) >= 3, "each spec runs under its own LLVM_PROFILE_FILE"
     assert any("doc-test spec(s) skipped" in ln for ln in logs)

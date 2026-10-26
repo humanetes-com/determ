@@ -199,6 +199,57 @@ def test_the_stage_confirms_one_rule_drops_the_refuted_one_and_keeps_both_captur
     assert kept.features[1].rules[0].sentence == WRONG and not emitted0 and not w0.prompts
 
 
+def test_two_worlds_ask_each_rule_once(tmp_path: Path) -> None:
+    """The shared ask joins the worlds that carry the rule and unions the
+    examples. A reply handed in is not asked again."""
+    from pipeline_core.application.tasks.task0d import _rule_replies
+
+    stable = BehaviourSpec(
+        "ex-s", "let v = 1;", "v", ObservableOutcome.display("1"),
+        subkind=BehaviourSubKind.OUTCOME, cfg_cluster="stable")
+    nightly = BehaviourSpec(
+        "ex-n", "let v = 2;", "v", ObservableOutcome.display("2"),
+        subkind=BehaviourSubKind.OUTCOME, cfg_cluster="nightly")
+
+    def book(name: str, spec: BehaviourSpec, glossary: tuple[GlossaryEntry, ...]) -> BehaviourSuite:
+        return BehaviourSuite(
+            name, (spec,),
+            features=(
+                Feature(
+                    "item", "fn", (spec.behaviour_id,),
+                    (Rule("rule::item::0", "v is the input.", (spec.behaviour_id,), "item"),),
+                ),
+            ),
+            glossary=glossary,
+        )
+
+    books = {
+        "stable": book("stable", stable, (GlossaryEntry("show", "fn", signature="fn show()"),)),
+        "nightly": book("nightly", nightly, (
+            GlossaryEntry("show", "fn"), GlossaryEntry("only_nightly", "fn"))),
+    }
+    w = _World()
+    replies = _rule_replies(
+        w.deps(RULE_PROBES_MAX=1, RULE_PROBE_PROGRAMS=1), "krate",
+        [_cluster("stable"), _cluster("nightly", default=False)],
+        books, frozenset({"stable", "nightly"}))
+    assert set(replies) == {"rule::item::0"} and len(w.prompts) == 1
+    assert "Cluster: stable+nightly" in w.prompts[0]
+    assert 'id="ex-s"' in w.prompts[0] and 'id="ex-n"' in w.prompts[0]
+    assert "only_nightly" in w.prompts[0] and "only in the nightly build" in w.prompts[0]
+
+    again = _World()
+
+    def ask(prompt: str) -> str:
+        again.prompts.append(prompt)
+        return "<THEN id=\"ex-s\">1</THEN>"
+
+    run_rule_probes(
+        again.deps(ask=ask, RULE_PROBES_MAX=1), tmp_path, "krate", _cluster(),
+        books["stable"], default_cluster="stable", memo={}, prepared=replies)
+    assert not [p for p in again.prompts if p.startswith("Test a rule")]
+
+
 def test_a_held_out_rule_capture_is_judged_by_nobody_and_emitted_nowhere(tmp_path: Path) -> None:
     out, w, emitted = _stage(tmp_path, share=100)
     held = w.saved["held"]

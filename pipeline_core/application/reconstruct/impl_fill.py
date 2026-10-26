@@ -42,6 +42,7 @@ from pipeline_core.application.reconstruct.context import (
 )
 from pipeline_core.application.reconstruct.crash_settler import (
     JudgedWrite,
+    crash_text_of,
     withdraw_crashing_bodies,
 )
 from pipeline_core.application.reconstruct.fill_reading import (
@@ -223,6 +224,8 @@ from pipeline_core.domain.models import (
 )
 from pipeline_core.domain.pair_fill import (
     PAIR_CRASH_CALLEES,
+    PAIR_LAST_CRASH,
+    PAIR_LAST_CRASH_CAP,
     PairDispatch,
     blocks_after_pair_fill,
     crash_named_extras,
@@ -418,6 +421,14 @@ def escalated_followup_think(grade_on: object) -> bool:
     no off switch, so a cold launch stamped that into `code_id`. Accessor
     and stub calls stay on today's no-think followup either way."""
     return bool(grade_on) and followup_think_env_on()
+
+
+def _with_crash(excerpt: str, crash: str) -> str:
+    """`excerpt` with the crash the settlement read appended once (a gate's
+    own detail may already quote the same reading)."""
+    if not crash or crash in excerpt:
+        return excerpt
+    return "\n\n".join(x for x in (excerpt, crash) if x)
 
 
 def _audit_reply(
@@ -2600,12 +2611,12 @@ def prepare_impl_fill(
                         frozenset(FnLocator(file_rel, b.fn_name)
                                   for b in _landed),
                         {file_rel: _pre.text("replace")}, size=len(_landed))
-                    withdraw_crashing_bodies(
+                    _crash_err = crash_text_of(withdraw_crashing_bodies(
                         _jw,
                         lambda sink: _test_regression_baseline(
                             tdd_test_cmd, target_src_dir, cluster_env, sink,
                             role=MeasureRole.JUDGMENT),
-                        _baseline_test, tag=f"{glabel} ")
+                        _baseline_test, tag=f"{glabel} "))
                     if _jw.withdrawn:
                         _kept_c, _gone_c = split_withdrawn(
                             _landed,
@@ -2618,7 +2629,6 @@ def prepare_impl_fill(
                         _landed = list(_kept_c)
                         spliced_now = len(_landed)
                         _crash_peeled = tuple(b.fn_name for b in _gone_c)
-                        _crash_err = _jw.evidence
                         _note_reverted(file_rel, _crash_peeled)
                         _log(f"  [phase-c/file] {glabel}: PEELED "
                              f"{len(_crash_peeled)} body(ies) a test process "
@@ -3124,10 +3134,12 @@ def prepare_impl_fill(
                     _revert_reason = "compile failed"
                     prior_error = _focus_cargo_errors(cargo_out, file_rel)
                     _file_kind = LastErrorKind.COMPILE
-                if _crash_err:
-                    # The crash peel had named bodies of this reply before
-                    # the remainder was reverted too: the whole-group retry
-                    # carries that crash beside the remainder's own reason.
+                if _crash_err and _crash_err not in prior_error:
+                    # The settlement read a crash under this reply (whatever
+                    # it decided) and the remainder was reverted too: the
+                    # whole-group retry carries that crash beside the
+                    # remainder's own reason, once — the gate's own detail
+                    # may already quote the same reading.
                     prior_error = "\n\n".join(
                         x for x in (prior_error, _crash_err) if x)
                 if _text_refused:
@@ -4055,18 +4067,19 @@ def prepare_impl_fill(
                 # on run `757853-e28f1a7d` (2026-10-16, iter 4) this route's
                 # `into_boxed_dyn_error` attempt aborted the same binaries the
                 # file route's peel had just narrowed to that one body.
+                _crash_err_i = ""
                 if rc == 0 and len(_impl_spliced) > 1 and tdd_test_cmd:
                     _jw_i = JudgedWrite(
                         frozenset(FnLocator(block.file, n)
                                   for n in _impl_spliced),
                         {block.file: _attempt_pre_text},
                         size=len(_impl_spliced))
-                    withdraw_crashing_bodies(
+                    _crash_err_i = crash_text_of(withdraw_crashing_bodies(
                         _jw_i,
                         lambda sink: _test_regression_baseline(
                             tdd_test_cmd, target_src_dir, cluster_env, sink,
                             role=MeasureRole.JUDGMENT),
-                        _baseline_test, tag=f"{block_id} ")
+                        _baseline_test, tag=f"{block_id} "))
                     _gone_i = sorted({f.fn_name for f in _jw_i.withdrawn
                                       if f.file_rel == block.file})
                     if _gone_i:
@@ -4160,7 +4173,8 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
                          f"fn(s) — regressed sibling test(s): "
                          f"{_cmp.summary} (attempt {fix_attempt}).")
-                    last_error_excerpt = _regr_detail
+                    last_error_excerpt = _with_crash(_regr_detail,
+                                                     _crash_err_i)
                     # The gate runs the tests only after a clean compile,
                     # so this branch is always a body rustc ACCEPTED.
                     last_error_kind = regression_detail_kind(_cmp)
@@ -4507,6 +4521,11 @@ def prepare_impl_fill(
                         locate=_site_locator(),
                         target_container=block.container)
                     or _focus_cargo_errors(cargo_out, block.file))
+                if _u2_impl_reject:
+                    # The block compiled and its tests ran: a crash the
+                    # settlement read under it goes with the test detail.
+                    last_error_excerpt = _with_crash(last_error_excerpt,
+                                                     _crash_err_i)
                 # rustc rejected it: it never ran, so there is no faulting
                 # call to order the next body away from.
                 last_error_kind = LastErrorKind.COMPILE
@@ -5395,7 +5414,8 @@ def prepare_impl_fill(
             str(_pair_rec.get("last_compile_error") or ""),
             str(_pair_rec.get("last_error_preview") or ""),
             str(_pair_rec.get("last_failed_body") or ""),
-            kind=kind_from_record(_pair_rec))
+            kind=kind_from_record(_pair_rec),
+            crash=str(_pair_rec.get(PAIR_LAST_CRASH) or ""))
         _raw_err = _pair_err.text
         _last_error = with_blamed_type_api(
             _raw_err, _crate_type_records) if _raw_err else ""
@@ -5592,6 +5612,8 @@ def prepare_impl_fill(
                         # What the reddened tests printed, beside their
                         # names: the next prompt renders both.
                         _rec[REGRESSED_OUTPUT] = dict(_rcmp.newly_red_output)
+                        _rec[PAIR_LAST_CRASH] = _rcmp.crash_reading[
+                            :PAIR_LAST_CRASH_CAP]
                         _rec["last_prompt_sha"] = _kept_sha
                         retros_cache[_pair_key] = _rec
                         _save_retrospectives(project_dir, retros_cache)
@@ -5602,6 +5624,30 @@ def prepare_impl_fill(
                          "tests assert.")
                 except Exception as _re:
                     _log(f"  [phase-c/pair/retro] {pair_id}: {_re}")
+
+            def _record_pair_u2_revert(_v: U2Verdict, *,
+                                       _reply: str = _pair_reply) -> None:
+                """The pair's memory of a U2 revert (its convicting tests
+                still failing, nothing reddened): the gate's detail, the
+                crash its settlement read, and the bodies, which is what the
+                next pair prompt's LAST_ERROR reads (`pair_last_error`). The
+                regression revert stores the same fields beside its
+                diagnosis; this one asks no diagnosis, so a stored one
+                stays."""
+                with _counters_lock:
+                    _rec = dict(retros_cache.get(_pair_key, {}) or {})
+                    _rec["last_error_preview"] = _v.detail[:240]
+                    # A silent death is a crash; any other reject is read
+                    # from its text (`resolve_kind`), as an older record is.
+                    if _v.aborted:
+                        _rec[LAST_ERROR_KIND] = LastErrorKind.CRASHED.value
+                    else:
+                        _rec.pop(LAST_ERROR_KIND, None)
+                    _rec["last_failed_body"] = _reply[:_FAILED_BODY_CAP]
+                    _rec[PAIR_LAST_CRASH] = _v.crash_reading[
+                        :PAIR_LAST_CRASH_CAP]
+                    retros_cache[_pair_key] = _rec
+                    _save_retrospectives(project_dir, retros_cache)
 
             with _splice_check_lock:
                 _snaps = {b.file: capture(target_src_dir / b.file, None)
@@ -5901,6 +5947,7 @@ def prepare_impl_fill(
                     _emit("phase_c.pair.fill.reverted", data={
                         "cluster": cluster_name, "why": "u2",
                         "failing": sorted(_pair_u2.self_failures)})
+                    _record_pair_u2_revert(_pair_u2)
                     return
                 # The keep's ignored-input decline (`domain/ignored_inputs`):
                 # a joint write that drops a declared input of one of its
@@ -6940,7 +6987,8 @@ def fill_impl_blocks(
             unit_evidence=kw.get("unit_evidence"),
             on_wave_kept=kw.get("on_wave_kept"),
             premise=kw.get("fill_premise"),
-            ground_now=kw.get("fill_ground_now")))
+            ground_now=kw.get("fill_ground_now"),
+            held_now=kw.get("fill_held_now")))
     return prepared.finish()
 
 

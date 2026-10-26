@@ -148,6 +148,7 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     suite = w.saved["stable"]
     assert suite.specs and w.committed == [
         ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)"),
+        ("task0d/anyhow/harvest", "done", "pipeline: task0d/anyhow/harvest — 1 world(s)"),
         ("task0d/anyhow/book", "done",
          "pipeline: task0d/anyhow/book — 1 world(s) booked (stable), rule probes on none"),
     ]
@@ -238,7 +239,8 @@ def test_each_cluster_gets_its_own_suite(tmp_path: Path) -> None:
     w = _World()
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
     assert set(w.saved) == {"stable", "nightly"}
-    assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/nightly", "task0d/anyhow/book"]
+    assert [c[0] for c in w.committed] == [
+        "task0d/stable", "task0d/nightly", "task0d/anyhow/harvest", "task0d/anyhow/book"]
     s = w.saved["nightly"].specs[0]
     assert replace(s, cfg_cluster="stable") != s and s.cfg_cluster == "nightly"
 
@@ -325,6 +327,60 @@ def test_pin_env_debug_on_passes_recapture(tmp_path: Path) -> None:
     run_task0d(w.deps(emit_tests=emit_tests), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
     assert seen.get("recapture") is not None
     assert callable(seen["recapture"])
+
+
+def test_two_worlds_share_one_probe_ask_and_each_runs_its_own_cargo(tmp_path: Path) -> None:
+    """One synthesis prompt over both worlds. Cargo, and the stamp on the
+    suite, stay that world's. Identical surface text is not marked."""
+    w = _World(reply=_REPLY)
+    run_task0d(
+        w.deps(), tmp_path, "anyhow",
+        [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
+    synthesis = [p for p in w.prompts if "write ONE behaviour" in p]
+    assert len(synthesis) == 1
+    assert "Cluster: stable+nightly" in synthesis[0]
+    assert "unnamed_public" in synthesis[0]
+    assert "// stable" not in synthesis[0] and "// nightly" not in synthesis[0]
+    names = [n for n, _prog in w.probes_run]
+    assert any(n.startswith("stable_") for n in names)
+    assert any(n.startswith("nightly_") for n in names)
+    assert w.saved["stable"].cfg_cluster == "stable"
+    assert w.saved["nightly"].cfg_cluster == "nightly"
+    assert all(s.cfg_cluster == "nightly" for s in w.saved["nightly"].specs)
+
+
+def test_worlds_whose_surface_differs_are_marked_in_the_one_ask(tmp_path: Path) -> None:
+    w = _World(reply=_REPLY)
+
+    def surface(_pd: Path, cluster: str) -> str:
+        if cluster == "nightly":
+            return "pub fn unnamed_public() -> u8;\npub fn only_nightly() -> u8;"
+        return "pub fn unnamed_public() -> u8;"
+
+    run_task0d(
+        w.deps(public_surface=surface), tmp_path, "anyhow",
+        [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
+    synthesis = [p for p in w.prompts if "write ONE behaviour" in p]
+    assert len(synthesis) == 1
+    assert "// stable\n" in synthesis[0] and "// nightly\n" in synthesis[0]
+    assert "only_nightly" in synthesis[0]
+
+
+def test_a_copied_stable_stamp_is_not_a_nightly_cfg_world() -> None:
+    """The cfg-world class reads the stamp. The same example text stamped
+    with the default cluster is not that class, so copying one world's suite
+    into the other's file would drop the class."""
+    from pipeline_core.domain.behaviour import BehaviourClass, BehaviourSpec, classified
+
+    spec = BehaviourSpec(
+        behaviour_id="testassert::tests/gate.rs::gated::0",
+        setup='#[cfg(feature = "extra")]\nlet v = 1;',
+        when="v",
+        cfg_cluster="nightly",
+    )
+    assert classified(spec, default_cluster="stable").klass is BehaviourClass.CFG_WORLD
+    copied = classified(replace(spec, cfg_cluster="stable"), default_cluster="stable")
+    assert copied.klass is not BehaviourClass.CFG_WORLD
 
 
 def test_the_class_asks_are_sent_once_not_once_per_unit_batch(tmp_path: Path) -> None:
@@ -530,8 +586,13 @@ def test_re_harvesting_a_cluster_reopens_a_done_book_stage_first(tmp_path: Path,
                tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)],
                tmp_path / "src")
     assert w.marked == [("task0d/anyhow/book", "pending")]
-    assert [c[0] for c in w.committed] == ["task0d/nightly", "task0d/anyhow/book"]
+    assert [c[0] for c in w.committed] == [
+        "task0d/nightly", "task0d/anyhow/harvest", "task0d/anyhow/book"]
     assert probed == ["nightly"]
+    # The world already harvested is not in this launch's ask.
+    synthesis = [p for p in w.prompts if "write ONE behaviour" in p]
+    assert len(synthesis) == 1 and "Cluster: nightly" in synthesis[0]
+    assert "stable+nightly" not in synthesis[0]
 
 
 def test_a_failed_book_marks_the_stage_failed_and_commits_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -543,5 +604,5 @@ def test_a_failed_book_marks_the_stage_failed_and_commits_nothing(tmp_path: Path
     monkeypatch.setattr(t0d, "build_book_from_source", boom)
     w = _World()
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
-    assert [c[0] for c in w.committed] == ["task0d/stable"]
+    assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/anyhow/harvest"]
     assert w.marked == [("task0d/anyhow/book", "failed")]

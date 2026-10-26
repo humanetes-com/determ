@@ -51,6 +51,7 @@ from pipeline_core.domain.assertion_position import (
     outcomes_of,
 )
 from pipeline_core.domain.attribution import container_key
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.oracle_ledger import bare_test_name
@@ -831,6 +832,12 @@ class SweepView:
     #: `of_sweep` requires it): :attr:`keyed` then reads every name as a
     #: test of one binary, the one its positions name when they name one.
     verdicts: KeyedVerdicts | None = None
+    #: The crash sites the sweep localized for its capture, when a test's
+    #: own process died without a panic: what `classify` hands
+    #: `outcomes_of`, so an already-red convicting test that now dies in a
+    #: crate body is judged by the abort partition (`abort_verdict`), not
+    #: refuted on sight. Empty: every red abort reads unlocated, as before.
+    crash_sites: tuple[CrashSite, ...] = ()
 
     @property
     def ran(self) -> frozenset[str]:
@@ -861,6 +868,7 @@ class SweepView:
         aborted: Iterable[str], aborted_silent: Iterable[str],
         verdicts: KeyedVerdicts,
         held: Mapping[str, frozenset[FnLocator]] | None = None,
+        crash_sites: Sequence[CrashSite] = (),
     ) -> SweepView:
         """The ledger's view of a sweep whose failed set the score has already
         padded with crash-vanished tests.
@@ -887,7 +895,7 @@ class SweepView:
                    held=dict(held or {}),
                    aborted=frozenset(aborted),
                    aborted_silent=frozenset(aborted_silent),
-                   verdicts=verdicts)
+                   verdicts=verdicts, crash_sites=tuple(crash_sites))
 
 
 def judgment_attributed(
@@ -1003,15 +1011,25 @@ def classify(
         if not (convicting & after.ran):
             return BodyState.UNMEASURED, delta
         outcomes = outcomes_of(convicting, before=before.keyed,
-                               after=after.keyed)
-        if outcomes.aborted:
+                               after=after.keyed,
+                               crash_sites=after.crash_sites)
+        # The abort partition (`abort_verdict`), with the gain the landing's
+        # own keep was judged on beside the convicting tests that turned
+        # green here: a convicting test that was red and now dies in a crate
+        # body is not a refutation of a landing that paid. The session that
+        # kept net +20 beside such an abort (run `42057-641e589c`, fill 5)
+        # would otherwise be graded REFUTED here and never re-seeded.
+        _gain = bool(outcomes.gained) or bool(entry.kept_green)
+        if outcomes.abort.refuses(strict_gain=_gain, lost=bool(lost)):
             return BodyState.REFUTED, delta + tuple(
                 (t, "aborted") for t in sorted(outcomes.aborted))
+        delta = delta + tuple(
+            (t, "aborted") for t in sorted(outcomes.aborted))
         # The decided rule: an earlier position refuses only when no
         # convicting test gained (`lost` already returned above). Run
         # `24951-a72c4642` (2026-09-29) is the all-red case this grade
         # exists for, graded `flat` before it.
-        if outcomes.refuses:
+        if outcomes.refuses_with(strict_gain=_gain):
             return BodyState.REFUTED, delta + tuple(
                 (t, "regressed") for t in outcomes.earlier_tests)
         # A convicting test still red that stops later is recorded whatever

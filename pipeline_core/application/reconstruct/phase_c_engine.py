@@ -460,6 +460,7 @@ class PhaseCFillEngine:
         # the first claim after a keep that moved it (`fill_scheduler`).
         fill_premise: Mapping[str, PremiseEntry] | None = None,
         fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None,
+        fill_held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -625,7 +626,8 @@ class PhaseCFillEngine:
                 session_min_turns=session_min_turns,
                 unit_share_multiple=unit_share_multiple,
                 on_wave_kept=on_wave_kept,
-                premise=fill_premise, ground_now=fill_ground_now))
+                premise=fill_premise, ground_now=fill_ground_now,
+                held_now=fill_held_now))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result
