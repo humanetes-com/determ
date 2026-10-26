@@ -148,7 +148,6 @@ def test_phase_writes_suite_marks_done_and_logs_reading_with_three_flags(tmp_pat
     suite = w.saved["stable"]
     assert suite.specs and w.committed == [
         ("task0d/stable", "done", f"pipeline: task0d/stable — {len(suite.specs)} behaviour(s)"),
-        ("task0d/anyhow/harvest", "done", "pipeline: task0d/anyhow/harvest — 1 world(s)"),
         ("task0d/anyhow/book", "done",
          "pipeline: task0d/anyhow/book — 1 world(s) booked (stable), rule probes on none"),
     ]
@@ -240,7 +239,7 @@ def test_each_cluster_gets_its_own_suite(tmp_path: Path) -> None:
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)], tmp_path / "src")
     assert set(w.saved) == {"stable", "nightly"}
     assert [c[0] for c in w.committed] == [
-        "task0d/stable", "task0d/nightly", "task0d/anyhow/harvest", "task0d/anyhow/book"]
+        "task0d/stable", "task0d/nightly", "task0d/anyhow/book"]
     s = w.saved["nightly"].specs[0]
     assert replace(s, cfg_cluster="stable") != s and s.cfg_cluster == "nightly"
 
@@ -587,7 +586,7 @@ def test_re_harvesting_a_cluster_reopens_a_done_book_stage_first(tmp_path: Path,
                tmp_path / "src")
     assert w.marked == [("task0d/anyhow/book", "pending")]
     assert [c[0] for c in w.committed] == [
-        "task0d/nightly", "task0d/anyhow/harvest", "task0d/anyhow/book"]
+        "task0d/nightly", "task0d/anyhow/book"]
     assert probed == ["nightly"]
     # The world already harvested is not in this launch's ask.
     synthesis = [p for p in w.prompts if "write ONE behaviour" in p]
@@ -604,5 +603,114 @@ def test_a_failed_book_marks_the_stage_failed_and_commits_nothing(tmp_path: Path
     monkeypatch.setattr(t0d, "build_book_from_source", boom)
     w = _World()
     run_task0d(w.deps(), tmp_path, "anyhow", [_cluster()], tmp_path / "src")
-    assert [c[0] for c in w.committed] == ["task0d/stable", "task0d/anyhow/harvest"]
+    assert [c[0] for c in w.committed] == ["task0d/stable"]
     assert w.marked == [("task0d/anyhow/book", "failed")]
+
+
+def _phase_events(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    import pipeline_core.log as plog
+    from pipeline_core.domain.phase_registry import PHASE_ENTER, PHASE_EXIT
+
+    seen: list[dict[str, object]] = []
+    monkeypatch.setattr(plog, "_emit_sink", lambda event, **f: seen.append(
+        {"event": event, **f}) if event in (PHASE_ENTER, PHASE_EXIT) else None)
+    return seen
+
+
+def _overlapping_world_scopes(events: list[dict[str, object]]) -> list[tuple[str, str]]:
+    """Pairs of t0d scopes of DIFFERENT worlds that were open at once."""
+    from pipeline_core.domain.phase_registry import PHASE_ENTER
+
+    open_now: dict[str, str] = {}
+    pairs: list[tuple[str, str]] = []
+    for e in events:
+        if e.get("phase") != "t0d" or not e.get("cluster"):
+            continue
+        sid, cl = str(e["scope"]), str(e["cluster"])
+        if e["event"] == PHASE_ENTER:
+            pairs += [(other, cl) for other in open_now.values() if other != cl]
+            open_now[sid] = cl
+        else:
+            open_now.pop(sid, None)
+    return pairs
+
+
+def test_each_world_is_committed_before_the_next_world_runs_cargo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A world's probes, exercises, reach and emission run and its key is
+    committed before the next world's cargo starts, and no two worlds'
+    scopes are open at once, so a process that dies in nightly's hours keeps
+    stable, and each world's step times are its own. The probe ask stays one
+    prompt over both worlds."""
+    events = _phase_events(monkeypatch)
+    timeline: list[str] = []
+    w = _World(reply=_REPLY)
+
+    def exercises(pd: Path, cl: BuildCluster, specs: object, recs: object,
+                  sites_out: object = None) -> object:
+        timeline.append(f"exercises {cl.name}")
+        return {}
+
+    def commit(pd: Path, key: str, status: str, commit_message: str, detail: str = "") -> None:
+        timeline.append(f"commit {key}")
+        w.committed.append((key, status, commit_message))
+
+    run_task0d(w.deps(exercises_by_coverage=exercises, commit_and_mark=commit),
+               tmp_path, "anyhow", [_cluster("stable"), _cluster("nightly", default=False)],
+               tmp_path / "src")
+    assert timeline[:4] == ["exercises stable", "commit task0d/stable",
+                            "exercises nightly", "commit task0d/nightly"]
+    assert _overlapping_world_scopes(events) == []
+    synthesis = [p for p in w.prompts if "write ONE behaviour" in p]
+    assert len(synthesis) == 1 and "Cluster: stable+nightly" in synthesis[0]
+    # The shared ask sits under the module's scope, not under a world's.
+    probe_steps = [e for e in events if e.get("phase") == "t0d.probes"
+                   and e["event"] == "phase.enter"]
+    assert [e.get("cluster") for e in probe_steps] == [None, "stable", "nightly"]
+
+
+def test_negative_control_the_interleaved_schedule_overlaps() -> None:
+    """The schedule the one-ask commit shipped with (both worlds' scopes
+    opened at harvest, each step called world after world) is what the
+    overlap reader flags."""
+    from pipeline_core.domain.phase_registry import PHASE_ENTER, PHASE_EXIT
+
+    interleaved = [
+        {"event": PHASE_ENTER, "phase": "t0d", "cluster": "stable", "scope": "1"},
+        {"event": PHASE_ENTER, "phase": "t0d", "cluster": "nightly", "scope": "2"},
+        {"event": PHASE_EXIT, "phase": "t0d", "cluster": "stable", "scope": "1"},
+        {"event": PHASE_EXIT, "phase": "t0d", "cluster": "nightly", "scope": "2"},
+    ]
+    assert _overlapping_world_scopes(interleaved) == [("stable", "nightly")]
+
+
+def test_an_exact_format_refusal_applies_only_to_a_round_that_asked_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A world that asked EXACT_FORMAT refuses a format-less block in the
+    round that asked it, and not in its composition round, which asks no
+    class. Reading the world's whole class set refused both."""
+    import pipeline_core.application.tasks.task0d as t0d
+    from pipeline_core.domain.behaviour_probe import CapturedProbe
+    from pipeline_core.domain.use_cases import UseCaseEdge
+
+    bare = CapturedProbe(name="unnamed_public", given="let v = crate_x::unnamed_public();",
+                         when="v", observe="")
+    monkeypatch.setattr(t0d, "parse_behaviour_specs", lambda _r: [bare])
+    monkeypatch.setattr(t0d, "other_observes", lambda _p: ())
+    w = _World()
+    deps = w.deps(PIN_ENV_DEBUG=True)
+    edge = UseCaseEdge(consumer="b", producer="a", via="T")
+    plan = t0d._ProbePlan(_cluster(), (), (("EXACT_FORMAT", "ask"),), (edge,), {},
+                          "", "", "", (1, 1))
+    class_round = t0d._AskedProbe((("EXACT_FORMAT", "ask"),), (), (), "r", frozenset({"stable"}))
+    edge_round = t0d._AskedProbe((), (), (edge,), "r", frozenset({"stable"}))
+
+    def refused(rounds: list[object]) -> int:
+        _a, _n, _p, _c, misses, _e = t0d._admit_probe_rounds(
+            deps, tmp_path, "anyhow", plan, rounds, "stable")  # type: ignore[arg-type]
+        return sum(1 for m in misses if "EXACT_FORMAT ask requires" in m["reason"])
+
+    assert refused([class_round]) == 1
+    assert refused([edge_round]) == 0

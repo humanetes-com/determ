@@ -76,7 +76,7 @@ from pipeline_core.domain.generation import (
     parse_gen_tests_integration_filename,
 )
 from pipeline_core.domain.rust_scan import rust_delimiters_balanced
-from pipeline_core.domain.test_results import parse_binary_results
+from pipeline_core.domain.test_results import parse_binary_results, split_test_stdout_sections
 from pipeline_core.log import emit, log
 
 BEHAVIOUR_TEST_STEM = "behaviour"
@@ -117,28 +117,23 @@ def replay_fn_name(spec: BehaviourSpec) -> str:
 
 
 def replay_failure_section(output: str, fn_name: str, *, limit: int = 800) -> str:
-    """The slice of a verify run's output that belongs to `fn_name`.
+    """`fn_name`'s own failure block in a verify run's output, or "".
 
-    The replay's assertion text lives in that output: an ordinary `assert_eq!`
-    prints left and right there, and a world-pinned replay prints the rendered
-    text in its failure message. A capture the verdict did not fail has no
-    section. The slice stops at the next test line or the trailer, and is
-    bounded so a cargo log is not copied whole into the miss record."""
-    if not output or not fn_name or fn_name not in output:
+    libtest prints the `test <name> ... FAILED` status lines first and each
+    failing test's captured output later, under `---- <name> stdout ----`.
+    The block is where an ordinary `assert_eq!` prints left and right and a
+    world-pinned replay prints its rendered text, so it is read through the
+    one splitter of those blocks (`split_test_stdout_sections`). A reader that
+    started at the first line naming the test, as this one did until
+    2026-10-26, recorded the status line alone for every failure but the last
+    and every other test's block for the last. Bounded so a cargo log is not
+    copied whole into the miss record."""
+    if not output or not fn_name:
         return ""
-    lines = output.splitlines()
-    start = next((i for i, ln in enumerate(lines) if fn_name in ln), -1)
-    if start < 0:
-        return ""
-    end = min(len(lines), start + 40)
-    for j in range(start + 1, end):
-        if lines[j].startswith("test result:"):
-            end = j
-            break
-        if lines[j].startswith("test ") and fn_name not in lines[j]:
-            end = j
-            break
-    return "\n".join(lines[start:end]).strip()[:limit]
+    for name, body in split_test_stdout_sections(output):
+        if name == fn_name:
+            return body.strip()[:limit]
+    return ""
 
 
 def _balanced_replay_blocks(

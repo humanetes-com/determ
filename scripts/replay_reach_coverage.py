@@ -21,15 +21,24 @@ probe_missed row, then one cargo run --example and one grcov per row.
 Worlds run one after another: the example file is written into the crate.
 
 HOW TO INTERPRET. One block per probe_missed row. SAME means the routed
-label was in this run's site labels, so the recorded miss did not
-reproduce. JOIN means the routed label was absent and some other label was
-present: that is the only reading that would change a reach prompt. NO-HIT
-means coverage named nothing. The question is unanswerable from this
-replay, and the printed prompt line is the one task 0c already quotes.
-RUN-FAILED means the program did not run. The summary's decision line is
-`asks unchanged` unless a JOIN row exists. A project with no reach file
-prints that and leaves the asks as they are. probe_failed rows are counted
-and not run.
+label was in this run's site labels: the recorded miss did not reproduce,
+so the live round's judgment of that row disagrees with a clean replay and
+is a measurement question, not a prompt question. JOIN means the routed
+label was absent and a site of the same `file::fn` under another container
+label was present: the probe entered the function and the label did not
+match, the only reading that would change how a reach target is named.
+MISSED means the program ran, hit other sites, and no site of that
+`file::fn`: a plain miss, the prompt's question. NO-HIT means coverage
+named nothing; the printed prompt line is the one task 0c already quotes.
+RUN-FAILED means the program did not run. The summary's decision line names
+JOIN rows when any exist and SAME rows when any exist; otherwise `asks
+unchanged`. A project with no reach file prints that and leaves the asks as
+they are. probe_failed rows are counted and not run.
+
+First run, 2026-10-26, on the files of run 42057-641e589c: SAME 10, JOIN 4
+under the earlier definition (any other label), of which one
+(`src/context.rs::source`, routed `ContextError<C,Error>`, hit
+`ContextError<C,E>`) is a JOIN under this one.
 """
 from __future__ import annotations
 
@@ -72,6 +81,11 @@ from pipeline_core.domain.models import BuildCluster  # noqa: E402
 from pipeline_core.domain.reach_probe import PROBE_FAILED, PROBE_MISSED, outcomes_from_json  # noqa: E402
 
 EXTRACTOR = REPO / "tools" / "skeleton_extractor" / "target" / "release" / "skeleton-extractor"
+
+
+def _fn_of(label: str) -> str:
+    """`src/x.rs::f` of a site label `src/x.rs::f [impl ...]`."""
+    return label.split(" [", 1)[0]
 
 
 def _cluster(project: Path, name: str) -> BuildCluster:
@@ -144,7 +158,7 @@ def main() -> int:
     owned = scratch_root is None
     if scratch_root is None:
         scratch_root = Path(tempfile.mkdtemp(prefix="reach-replay-"))
-    counts = {"JOIN": 0, "NO-HIT": 0, "SAME": 0, "RUN-FAILED": 0, "NO-PROGRAM": 0}
+    counts = {"JOIN": 0, "MISSED": 0, "NO-HIT": 0, "SAME": 0, "RUN-FAILED": 0, "NO-PROGRAM": 0}
     failed_rows = 0
     try:
         _copy(origin, scratch_root)
@@ -228,11 +242,13 @@ def main() -> int:
                 if row.label in sites:
                     counts["SAME"] += 1
                     print(f"world {world} SAME {row.label}")
-                elif sites:
+                elif same_fn := sorted(s for s in sites if _fn_of(s) == _fn_of(row.label)):
                     counts["JOIN"] += 1
-                    shown = ", ".join(sorted(sites))
                     print(f"world {world} JOIN {row.label}")
-                    print(f"  hit under: {shown}")
+                    print(f"  hit under: {', '.join(same_fn)}")
+                elif sites:
+                    counts["MISSED"] += 1
+                    print(f"world {world} MISSED {row.label} ({len(sites)} other site(s) hit)")
                 else:
                     counts["NO-HIT"] += 1
                     print(f"world {world} NO-HIT {row.label}")
@@ -241,12 +257,16 @@ def main() -> int:
                         print(f"  {line}")
         print(
             "summary "
-            + " ".join(f"{k}={counts[k]}" for k in ("JOIN", "NO-HIT", "SAME", "RUN-FAILED", "NO-PROGRAM"))
+            + " ".join(f"{k}={counts[k]}" for k in
+                       ("JOIN", "MISSED", "NO-HIT", "SAME", "RUN-FAILED", "NO-PROGRAM"))
             + f" probe_failed_not_run={failed_rows}")
         if counts["JOIN"]:
-            print("JOIN: coverage named a site the routed label is not. "
-                  "That is the only reading that would change a reach prompt.")
-        else:
+            print("JOIN: the probe entered the routed function under another "
+                  "container label; the target's label is the question.")
+        if counts["SAME"]:
+            print("SAME: the clean replay reached rows the live round stored as "
+                  "missed; the live judgment is the question before any prompt.")
+        if not counts["JOIN"] and not counts["SAME"]:
             print("asks unchanged")
         # reach_path is the writer the files were read from; naming it keeps
         # a missing world visible beside the glob.

@@ -193,14 +193,10 @@ def test_behaviour_plan_refuses_a_harvest_whose_book_stage_is_not_done():
 
 def test_the_book_key_is_a_behaviour_phase_no_cluster_key_can_equal():
     from pipeline_core.application.tasks.task0d import phase_key
-    from pipeline_core.domain.workspace_layout import behaviour_module_harvest_key
     assert behaviour_book_key("anyhow") == "task0d/anyhow/book"
     assert is_behaviour_phase(behaviour_book_key("anyhow"))
     # a cluster named like the module still gets a two-segment key
     assert phase_key("anyhow") == "task0d/anyhow" != behaviour_book_key("anyhow")
-    assert behaviour_module_harvest_key("anyhow") == "task0d/anyhow/harvest"
-    assert behaviour_module_harvest_key("anyhow") != behaviour_book_key("anyhow")
-    assert behaviour_module_harvest_key("anyhow") != phase_key("anyhow")
     kept = drop_pre_augment_phases(dict(_LIVE_PHASES, **{"task0d/anyhow/book": "done"}),
                                    keep_behaviours=True)
     assert kept["task0d/anyhow/book"] == "done"

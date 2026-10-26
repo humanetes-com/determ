@@ -323,36 +323,74 @@ def test_a_raw_string_capture_is_emitted(tmp_path: Path) -> None:
     assert replay_fn_name(plain) in body and replay_fn_name(quoted) in body
 
 
+def _libtest_in_cargo_order(passed: list[str], failed: dict[str, tuple[str, str]]) -> str:
+    """libtest's own layout: every status line first, then one
+    `---- name stdout ----` block per failure, then the name list and the
+    trailer (checked against a real `cargo test --test-threads=1` on
+    2026-10-26)."""
+    status = [f"test {n} ... ok" for n in passed] + [f"test {n} ... FAILED" for n in failed]
+    lines = [f"running {len(status)} tests", *status, "", "failures:", ""]
+    for n, (left, right) in failed.items():
+        lines += [f"---- {n} stdout ----", "",
+                  f"thread '{n}' (1) panicked at tests/x.rs:1:1:",
+                  "assertion `left == right` failed", f"  left: {left}", f" right: {right}", ""]
+    lines += ["", "failures:", *[f"    {n}" for n in failed], "",
+              f"test result: FAILED. {len(passed)} passed; {len(failed)} failed; "
+              "0 ignored; 0 measured; 0 filtered out; finished in 0.00s"]
+    return "\n".join(lines)
+
+
+def _first_line_reader(output: str, fn_name: str) -> str:
+    """The reader this module shipped first: from the first line naming the
+    test to the next `test ` line. Kept here as the negative control."""
+    lines = output.splitlines()
+    start = next((i for i, ln in enumerate(lines) if fn_name in ln), -1)
+    if start < 0:
+        return ""
+    end = min(len(lines), start + 40)
+    for j in range(start + 1, end):
+        if lines[j].startswith("test result:") or (
+                lines[j].startswith("test ") and fn_name not in lines[j]):
+            end = j
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
 def test_a_withdrawn_replay_records_whether_that_test_failed(tmp_path: Path) -> None:
     """The miss row carries the round's verdict for that replay name. A
     capture the last verify had already passed is not given an assertion it
-    did not fail. A capture the verdict failed keeps that test's section,
-    left and right included."""
+    did not fail. A capture the verdict failed keeps its own block, left and
+    right included, and not another failure's."""
     liar = _spec("liar", stdout="a \nb")
+    fibber = _spec("fibber", stdout="c")
     keeper = _spec("keeper")
-    name = replay_fn_name(liar)
-    red = frozenset({name})
+    asserted = {replay_fn_name(liar): ("observed_liar", "a\\nb"),
+                replay_fn_name(fibber): ("observed_fibber", "c")}
 
     def verify(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
         body = (tmp_path / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
         present = re.findall(r"fn (behaviour_\w+)\(\)", body)
-        failed = [n for n in present if n in red]
-        passed = [n for n in present if n not in red]
-        extra = ""
-        if name in failed:
-            extra = (
-                f"thread '{name}' panicked at tests/x.rs:1:1:\n"
-                "assertion `left == right` failed\n"
-                "  left: observed\n"
-                " right: a\\nb\n"
-            )
-        return not failed, extra + _libtest(passed, failed)
+        failed = {n: asserted[n] for n in present if n in asserted}
+        passed = [n for n in present if n not in asserted]
+        return not failed, _libtest_in_cargo_order(passed, failed)
 
-    _dest, dropped, misses = _emit(tmp_path, [keeper, liar], verify)
-    assert dropped == (liar.behaviour_id,)
-    assert misses[0]["replay_failed"] == "yes"
-    assert "left: observed" in misses[0]["replay_output"]
-    assert "right:" in misses[0]["replay_output"]
+    _dest, dropped, misses = _emit(tmp_path, [keeper, liar, fibber], verify)
+    assert set(dropped) == {liar.behaviour_id, fibber.behaviour_id}
+    rows = {m["unit"]: m for m in misses}
+    for spec, own, other in ((liar, "observed_liar", "observed_fibber"),
+                             (fibber, "observed_fibber", "observed_liar")):
+        row = rows[spec.behaviour_id]
+        assert row["replay_failed"] == "yes"
+        assert f"left: {own}" in row["replay_output"] and "right:" in row["replay_output"]
+        assert other not in row["replay_output"]
+
+    # Negative control: the first-line reader on the same output records the
+    # status line alone for the first failure and the other failure's block
+    # for the second.
+    out = _libtest_in_cargo_order([replay_fn_name(keeper)], asserted)
+    first, second = asserted
+    assert _first_line_reader(out, first) == f"test {first} ... FAILED"
+    assert "observed_liar" in _first_line_reader(out, second)
 
     # Three rounds each fail a new capture and pass the rest. The ones the
     # last round passed are withdrawn by the budget, and the row says they

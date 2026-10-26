@@ -11,7 +11,11 @@ run with its own `LLVM_PROFILE_FILE` — a test-assertion spec through
 `cargo test --test <stem> -- --exact <name>`, a probe spec by
 re-materialising its program as an example — and grcov over that spec's
 profraw alone (the base flags of `coverage._grcov_cmd`, which both crate
-readings use). The per-file hit lines map onto the extractor's fn records in the
+readings use), with `--binary-path` the one binary that wrote it. Cargo names
+that file in its JSON messages (`domain.cargo_artifacts`): the build names each
+test target's executable, `cargo run` names the example's. A directory there
+makes grcov load every binary under it per spec: 43.8 s against 0.4 s per
+profraw on the workspace of run `42057-641e589c`, 2026-10-25. The per-file hit lines map onto the extractor's fn records in the
 domain (`behaviour_coverage.units_for_hit_lines`, the `line_to_fn_record`
 contract, crate-root file paths).
 
@@ -44,9 +48,11 @@ from pipeline_core.domain.behaviour_coverage import (
     normalize_record_files,
     sites_for_hit_lines,
     test_command,
+    test_target_of,
     units_for_hit_lines,
 )
 from pipeline_core.domain.behaviour_probe import is_probe_spec, program_for
+from pipeline_core.domain.cargo_artifacts import executables_from_messages
 from pipeline_core.domain.cargo_toml import cargo_package_name
 from pipeline_core.domain.models import BuildCluster, FnRecord
 
@@ -77,8 +83,9 @@ def grcov_command(grcov: Path, profraw_dir: Path, project_dir: Path,
     """grcov over one profraw dir → coveralls JSON at `out_json`; the base
     flag set of `coverage._grcov_cmd`, so the hit lines agree with the crate
     readings (no cluster exclusions: a spec's hits map onto fn records, not a
-    denominator). `binary_path` is the directory cargo wrote this world's
-    binaries into; omitted, it is `target/debug` under the project."""
+    denominator). `binary_path` is the binary that wrote the profraw, or a
+    directory when cargo named none; omitted, it is `target/debug` under the
+    project."""
     binary = binary_path if binary_path is not None else (project_dir / "target" / "debug")
     return [
         str(grcov), str(profraw_dir),
@@ -175,12 +182,15 @@ def exercises_by_coverage(
     cov_root.mkdir(parents=True, exist_ok=True)
     build_env = dict(env)
     build_env["LLVM_PROFILE_FILE"] = str(cov_root / "build-%p-%m.profraw")
-    rc, _out, err = counted(["cargo", "test", "--no-run", "--quiet"],
-                            project_dir, build_env, timeout)
+    rc, build_out, err = counted(
+        ["cargo", "test", "--no-run", "--quiet", "--message-format=json"],
+        project_dir, build_env, timeout)
     if rc != 0:
         log(f"  [behaviour-exercises] instrumented build failed (rc={rc}): "
             f"{err[-800:]}")
         return {}, invocations
+    built = executables_from_messages(build_out)
+    unnamed = 0
     recs = normalize_record_files(_record_dict(r) for r in fn_records)
     texts: dict[str, str] = {}
     out: dict[str, frozenset[str]] = {}
@@ -192,8 +202,11 @@ def exercises_by_coverage(
         spec_env = dict(env)
         spec_env["LLVM_PROFILE_FILE"] = str(profraw_dir / "%p-%m.profraw")
         cmd = test_command(spec)
+        binary: str | None = None
         if cmd is not None:
             rc, _out, err = counted(cmd, project_dir, spec_env, timeout)
+            target_of = test_target_of(spec)
+            binary = built.get(("test", target_of[0])) if target_of else None
         else:
             # `program_for`, not `spec.setup`: a capture in the constrained
             # shape stores SETUP statements, not a whole program, so passing
@@ -204,9 +217,11 @@ def exercises_by_coverage(
             # (given, when, kind) for the constrained shape.
             with materialized_probe(project_dir, program_for(spec, crate=crate),
                                     f"exercise_{i}") as target:
-                rc, _out, err = counted(
-                    ["cargo", "run", "--quiet", "--example", target],
+                rc, run_out, err = counted(
+                    ["cargo", "run", "--quiet", "--message-format=json",
+                     "--example", target],
                     project_dir, spec_env, timeout)
+            binary = executables_from_messages(run_out).get(("example", target))
         if rc != 0:
             log(f"  [behaviour-exercises] {spec.behaviour_id}: run failed "
                 f"(rc={rc}) — not attributed: {err[-300:].strip()}")
@@ -215,9 +230,12 @@ def exercises_by_coverage(
             log(f"  [behaviour-exercises] {spec.behaviour_id}: no profraw written")
             continue
         out_json = profraw_dir / "coverage.json"
+        if binary is None:
+            # Correct and slow: grcov finds the binary among every one there.
+            unnamed += 1
         rc, _out, err = counted(
             grcov_command(grcov, profraw_dir, project_dir, out_json,
-                          binary_path=world_target / "debug"),
+                          binary_path=Path(binary) if binary else world_target / "debug"),
             project_dir, spec_env, 120)
         if rc != 0 or not out_json.exists():
             log(f"  [behaviour-exercises] {spec.behaviour_id}: grcov failed "
@@ -248,4 +266,7 @@ def exercises_by_coverage(
     log(f"  [behaviour-exercises] attributed {len(out)} / {len(runnable)} "
         f"runnable spec(s) to units by coverage ({invocations} cargo/grcov "
         "invocation(s)).")
+    if unnamed:
+        log(f"  [behaviour-exercises] HEALTH ‼ cargo named no binary for {unnamed} "
+            f"spec(s); grcov read the whole {world_target / 'debug'} for those.")
     return out, invocations

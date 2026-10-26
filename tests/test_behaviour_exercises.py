@@ -107,17 +107,26 @@ def _cluster() -> BuildCluster:
                         excluded_cfg=[], active_cfg=[], prompt_nightly_rule="")
 
 
-def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path) -> None:
+def _artifact(kind: str, name: str, exe: str | None) -> str:
+    return json.dumps({"reason": "compiler-artifact", "fresh": True, "executable": exe,
+                       "target": {"kind": [kind], "name": name}})
+
+
+def _exercise_run(tmp_path: Path, *, name_binaries: bool) -> list[str]:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "lib.rs").write_text(_SRC, encoding="utf-8")
     calls: list[list[str]] = []
     envs: list[dict[str, str]] = []
+    debug = tmp_path / "target" / "t0d-stable" / "debug"
+    test_exe = str(debug / "deps" / "t-0123")
+    example_exe = str(debug / "examples" / "x")
 
     def fake_run(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int):
         calls.append(cmd)
         envs.append(env)
         if cmd[:2] == ["cargo", "test"] and "--no-run" in cmd:
-            return 0, "", ""
+            out = "\n".join([_artifact("lib", "demo", None), _artifact("test", "t", test_exe)])
+            return 0, out if name_binaries else "", ""
         if cmd[:2] == ["cargo", "test"]:
             name = cmd[-1]
             if name == "test_fails":
@@ -129,7 +138,9 @@ def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path
             profraw = Path(env["LLVM_PROFILE_FILE"].replace("%p-%m", "1-2"))
             profraw.write_bytes(b"prof")
             assert (cwd / "examples" / f"{cmd[-1]}.rs").exists()
-            return 0, "out", ""
+            # The program's own stdout is interleaved with cargo's messages.
+            out = "\n".join(['{"reason": "x"}', "2", _artifact("example", cmd[-1], example_exe)])
+            return 0, out if name_binaries else "out", ""
         # grcov: one file, hits depend on which spec ran (by profraw dir)
         out_json = Path(cmd[cmd.index("--output-path") + 1])
         spec_dir = out_json.parent.name
@@ -154,19 +165,54 @@ def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path
         "probe::stable::b::0": frozenset({"src/lib.rs::b"}),
     }, "a failing run is absent (never an empty set); the doc-test is skipped"
     assert n == len(calls), "every cargo/grcov call is one invocation"
-    assert calls[0] == ["cargo", "test", "--no-run", "--quiet"], "one instrumented build first"
+    assert calls[0] == ["cargo", "test", "--no-run", "--quiet", "--message-format=json"], \
+        "one instrumented build first"
     assert ["cargo", "test", "--quiet", "--test", "t", "--", "--exact", "test_a"] in calls
-    assert any(c[:4] == ["cargo", "run", "--quiet", "--example"] for c in calls)
+    assert any(c[:5] == ["cargo", "run", "--quiet", "--message-format=json", "--example"]
+               for c in calls)
     assert all("-C instrument-coverage" in e["RUSTFLAGS"] for e in envs)
     assert all(e["CARGO_INCREMENTAL"] == "0" for e in envs)
     assert all(e["CARGO_TARGET_DIR"] == str(tmp_path / "target" / "t0d-stable") for e in envs)
     grcov_bins = [c[c.index("--binary-path") + 1] for c in calls if c and c[0].endswith("grcov")]
-    assert grcov_bins and all(p == str(tmp_path / "target" / "t0d-stable" / "debug") for p in grcov_bins)
+    if name_binaries:
+        # grcov reads the one binary that wrote the profraw, never the directory.
+        assert grcov_bins == [test_exe, example_exe]
+        assert not any("HEALTH" in ln for ln in logs)
+    else:
+        assert grcov_bins == [str(debug), str(debug)]
     profile_files = {e["LLVM_PROFILE_FILE"] for e in envs if "LLVM_PROFILE_FILE" in e}
     assert len(profile_files) >= 3, "each spec runs under its own LLVM_PROFILE_FILE"
     assert any("doc-test spec(s) skipped" in ln for ln in logs)
     assert any("test_fails" in ln and "run failed" in ln for ln in logs)
     assert not (tmp_path / "examples").exists()
+    return logs
+
+
+def test_exercises_by_coverage_runs_each_spec_alone_and_maps_hits(tmp_path: Path) -> None:
+    _exercise_run(tmp_path, name_binaries=True)
+
+
+def test_exercises_fall_back_to_the_directory_and_say_so(tmp_path: Path) -> None:
+    """The pre-change reading: cargo names no binary, grcov is given the
+    world's debug directory (correct, and one load of every binary in it per
+    spec), and the run says how many specs took that path."""
+    logs = _exercise_run(tmp_path, name_binaries=False)
+    assert any("HEALTH ‼ cargo named no binary for 2 spec(s)" in ln for ln in logs)
+
+
+def test_executables_are_read_off_cargo_messages() -> None:
+    from pipeline_core.domain.cargo_artifacts import executables_from_messages
+    out = "\n".join([
+        _artifact("lib", "demo", None),
+        _artifact("test", "t", "/t/deps/t-1"),
+        "plain program output",
+        "{not json",
+        "[1, 2]",
+        '{"reason": "build-finished", "success": true}',
+        _artifact("example", "x", "/t/examples/x"),
+    ])
+    assert executables_from_messages(out) == {
+        ("test", "t"): "/t/deps/t-1", ("example", "x"): "/t/examples/x"}
 
 
 def test_exercises_without_grcov_returns_nothing(tmp_path: Path, monkeypatch) -> None:
