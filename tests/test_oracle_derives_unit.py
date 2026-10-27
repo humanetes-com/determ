@@ -97,3 +97,36 @@ def test_negative_control_pre_fix_prompt_carried_no_requirement() -> None:
     assert derive_requirements_text([]) == ""
     assert "Default" in derive_requirements_text(
         scan_required_derives({"t.rs": _INTEGRATION}, {"Counter"}))
+
+
+# The cited line of run `42057-641e589c` (2026-10-26), at the
+# `task0c-augmented-anyhow` tag: two `String`s compared, and the last segment of
+# `io::Error` read as the crate's `Error`.
+_DOWNCAST_LINE = """
+#[test]
+fn reallocated_box_keeps_its_source() {
+    assert_eq!(boxed.downcast_ref::<io::Error>().unwrap().to_string(), "io err");
+}
+"""
+
+
+def test_a_row_the_replaced_declaration_does_not_derive_is_not_asked() -> None:
+    from pipeline_core.domain.oracle_derives import confirmed_by_declaration
+
+    rows = scan_required_derives({"tests/error_gen_1.rs": _DOWNCAST_LINE}, {"Error"})
+    # Negative control: the token scan alone asks both.
+    assert {(r.type_name, r.trait) for r in rows} == {("Error", "Debug"), ("Error", "PartialEq")}
+    kept, dropped = confirmed_by_declaration(rows, {"Error": frozenset()})
+    assert kept == () and {r.trait for r in dropped} == {"Debug", "PartialEq"}
+    assert derive_requirements_text(kept) == ""
+
+
+def test_a_row_the_declaration_derives_is_kept_whatever_the_spelling() -> None:
+    from pipeline_core.domain.oracle_derives import confirmed_by_declaration
+
+    rows = scan_required_derives({"tests/integration.rs": _INTEGRATION}, {"Counter"})
+    kept, dropped = confirmed_by_declaration(
+        rows, {"Counter": frozenset({"core::default::Default", "Clone"})})
+    assert [(r.type_name, r.trait) for r in kept] == [("Counter", "Default")] and dropped == ()
+    # A type the map does not name confirms nothing.
+    assert confirmed_by_declaration(rows, {})[0] == ()

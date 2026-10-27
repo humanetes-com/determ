@@ -629,6 +629,99 @@ def _requeue_behind(
 #: with more writers than this is the sweep's to re-plan.
 _MAX_REQUEUES = 2
 
+#: The parent key of a per-fn run the fill opens when its plan holds no
+#: per-fn run to carve it from.
+_OPENED_PER_FN_KEY = "per-fn:opened-in-fill"
+#: The plan index an opened run carries, above any route's own plan.
+_OPENED_SEQ_BASE = 1000
+
+
+def _open_for_blockers(
+    ordered: list[ScheduledRun], i: int, held: Mapping[str, frozenset[FnLocator]],
+    *, parent: str, planned_held: Collection[FnLocator],
+    landed: Collection[FnLocator], opened: set[FnLocator],
+    asked: FillAsks, bodies_sha: Callable[[frozenset[FnLocator]], str],
+    deps: FillExecutionDeps,
+) -> list[ScheduledRun]:
+    """`ordered` with one per-fn run at the cursor on every blocker the
+    fill's own keeps measured that nothing would write before the sweep.
+
+    The obligation is the plan's: every still-stubbed function a red test's
+    first failure sits in is aimed by a run. At plan time the driver puts
+    every held stub of the sweep in the batch and `fill_schedule.
+    _cover_blockers` opens a deferred writer; inside the fill the held view
+    after each keep (`_GroundGate.held`) was read only by `yields_to` and
+    `_requeue_behind`, which order the runs already planned. A blocker no
+    planned run aims at waited for the next sweep, and the sweep's plan then
+    spent a whole fill before the layer under it was measured. Run
+    `2355041-eae39441` (2026-10-27): fill 3's keep of `src/ensure.rs::new`
+    put 19 tests' first failure in `write_str`, which no run of fill 3
+    targeted (its ensure runs aimed `as_str` and `new`), so both were
+    refused and the fill ended with about 145 of 200 budget minutes unspent;
+    in fill 4 the `src/error.rs::fmt` keeps put 47 tests in
+    `src/fmt.rs::debug` and the `write_str` keep put 19 in `as_str`, and no
+    run of fill 4 aimed either. Ending the fill at such a keep instead would
+    also defer the runs ahead on other branches of the chain (that fill 3
+    landed 20 bodies through).
+
+    Only a blocker the fill's keeps measured is opened: one the sweep
+    already held (`planned_held`) was the plan's to place, and a held stub
+    the plan left out (cut by the dispatch cap, exhausted) stays out. A
+    blocker is also left out when a run still ahead aims at it, when a run of
+    this fill kept a body for it (the sweep grades that body first), when
+    every run of this fill that asked it did so under evidence nothing has
+    moved since (`FillAsks`), or when this fill already opened a run on it:
+    each unit is opened at most once per fill, so the loop ends. The run is
+    a carved run of the per-fn route (`parent`), which writes exactly the
+    targets it is handed; it ranks as a never-served per-fn run and its
+    tests are the ones the ground now holds in its targets."""
+    if not held:
+        return ordered
+    ahead = {u for x in ordered[i:] for u in x.run.targets}
+    blockers = frozenset().union(*held.values())
+    new = sorted(
+        (u for u in blockers
+         if u not in ahead and u not in planned_held and u not in landed
+         and u not in opened
+         and not asked.would_defer(((u.file, u.fn_name),))),
+        key=lambda k: (k.file, k.fn_name))
+    if not new:
+        return ordered
+    tests_of = {u: frozenset(t for t, hs in held.items() if u in hs)
+                for u in new}
+    targets = frozenset(new)
+    names = tuple(f"{u.file}::{u.fn_name}" for u in new)
+    run = RouteRun(
+        kind=RouteKind.PER_FN,
+        label=f"per-fn {len(new)} blocker(s) measured in fill {deps.iteration}",
+        targets=targets,
+        target_tests=frozenset().union(*tests_of.values()),
+        stubs_in_targets=targets,
+        files=tuple(sorted({u.file for u in new})),
+        unit_tests=tuple((u, tests_of[u]) for u in new),
+        # Distinct per opened run: `key` carries it, and two runs of one
+        # fill must not share a key.
+        seq=_OPENED_SEQ_BASE + len(opened),
+        bodies_sha=bodies_sha(targets),
+        parent=parent)
+    position = ordered[i - 1].position if 0 < i <= len(ordered) else 0
+    opened_run = ScheduledRun(
+        run=run, rank=0, weight=2, reason="never_served", level=0,
+        position=position, blocker_writer=names)
+    opened.update(new)
+    deps.log(
+        f"  [phase-c/schedule] fill {deps.iteration}: blockers measured in "
+        f"this fill that no run ahead writes ({names_of(list(names))}) — "
+        f"{run.label} opened at the cursor; "
+        f"{len(run.target_tests)} failing test(s) now first-fail inside them "
+        f"({names_of(sorted(run.target_tests))})")
+    deps.emit("phase_c.fill.blocker_opened", data={
+        "cluster": deps.cluster, "iter": deps.iteration,
+        "blockers": list(names),
+        "tests": {n: sorted(tests_of[u]) for n, u in zip(names, new,
+                                                          strict=True)}})
+    return [*ordered[:i], opened_run, *ordered[i:]]
+
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
              unchanged: bool = False) -> None:
@@ -892,6 +985,7 @@ def execute_fill(
     # given to write (`RunClock.owed`).
     held_units = (HeldStubs.of_map(hollow).units if deps.scheduled
                   else frozenset[FnLocator]())
+    plan_held = held_units
     # Units a run of this fill kept a body for; no later run of the fill
     # rewrites them before the sweep grades them (`withhold_landed`).
     landed_fill: set[FnLocator] = set()
@@ -918,6 +1012,16 @@ def execute_fill(
         return out
 
     gate.bind_ahead(_ahead_writers)
+    # The route a blocker the fill measures with no writer ahead is opened
+    # on (`_open_for_blockers`): the per-fn route, carved from its planned
+    # run, or registered under its own key when it planned none.
+    per_fn_route = next((r for r in routes if r.kind is RouteKind.PER_FN),
+                        None)
+    per_fn_parent = next((k for k, r in by_key.items() if r is per_fn_route),
+                         _OPENED_PER_FN_KEY)
+    if per_fn_route is not None:
+        by_key.setdefault(per_fn_parent, per_fn_route)
+    opened_for_blockers: set[FnLocator] = set()
     #: How many times each planned run's claims were queued again behind a
     #: writer (bounded: each requeue follows a writer that has then run).
     requeued: dict[str, int] = {}
@@ -1188,6 +1292,17 @@ def execute_fill(
             ordered = _requeue_behind(
                 ordered, i, wave, _yielded, gate.blockers_now(), requeued,
                 deps, yield_origin)
+            # A blocker those keeps measured that no run ahead writes gets
+            # a run of its own here, before the plan goes on.
+            if per_fn_route is not None and deps.scheduled and gate.armed:
+                _before_open = len(ordered)
+                ordered = _open_for_blockers(
+                    ordered, i, gate.held, parent=per_fn_parent,
+                    planned_held=plan_held, landed=landed_fill,
+                    opened=opened_for_blockers,
+                    asked=fill_asks, bodies_sha=bodies_sha, deps=deps)
+                if len(ordered) != _before_open:
+                    held_units = held_units | ordered[i].run.targets
         if unjudged and i < len(ordered):
             # The same exit as a moved premise: the rest of the plan was
             # planned on a tree no verdict describes. The fill returns and

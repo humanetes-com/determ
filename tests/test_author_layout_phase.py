@@ -10,6 +10,11 @@ from pipeline_core.application.author_layout_phase import (
     make_pin_selector,
     run_layout_phase,
 )
+from pipeline_core.domain.authored_layout import (
+    component_uids,
+    item_slot,
+    shared_item_ids_agree,
+)
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
     BehaviourSubKind,
@@ -18,7 +23,13 @@ from pipeline_core.domain.behaviour import (
     StaticAssertKind,
 )
 from pipeline_core.domain.models import TypeRecord
-from pipeline_core.domain.private_surface import classify_private_surface
+from pipeline_core.domain.private_surface import (
+    PrivateSurface,
+    PrivateSurfaceItem,
+    SurfaceItemKind,
+    classify_private_surface,
+)
+from pipeline_core.domain.type_header import declaration_text
 
 
 def _surface():
@@ -462,3 +473,318 @@ def test_an_adoption_that_never_compiled_does_not_unseat_the_registry(tmp_path):
         "a definition that was never compiled here keeps its slot; replacing it "
         "gives the crate two layouts for one uid, which is what the registry "
         "exists to prevent")
+
+
+# --- one ask over the worlds that author a component -------------------------
+
+def _world_surface(world: str, extra: str):
+    """`Error` → `ErrorImpl` → a world-specific helper type. The two worlds'
+    components share `ErrorImpl` and differ by one item, the shape of run
+    `42057-641e589c` (stable and nightly's 34/33-item component differed by
+    three fns)."""
+    types = [
+        TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="pub struct Error { inner: Box<ErrorImpl> }"),
+        TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl", is_pub=False,
+                   definition=f"struct ErrorImpl {{ h: {extra} }}"),
+        TypeRecord(file="src/error.rs", kind="struct", name=extra, is_pub=False,
+                   definition=f"struct {extra} {{ x: u8 }}"),
+    ]
+    return classify_private_surface(types, [], cfg_cluster=world)
+
+
+_UNION_REPLY = (
+    '<LAYOUT_ITEM name="ErrorImpl" kind="struct">struct ErrorImpl { h: Box<u8> }</LAYOUT_ITEM>'
+    '<LAYOUT_ITEM name="Helper" kind="struct">struct Helper { x: u16 }</LAYOUT_ITEM>'
+    '<LAYOUT_ITEM name="NightlyOnly" kind="struct">struct NightlyOnly { y: u16 }</LAYOUT_ITEM>')
+
+
+def _two_world_phase(compiles: dict[str, bool], *, attempts: int = 3):
+    prompts: list[str] = []
+    logs: list[str] = []
+    files = {"stable": {"src/error.rs": "struct ErrorImpl { h: Helper }\nstruct Helper { x: u8 }\n"},
+             "nightly": {"src/error.rs": "struct ErrorImpl { h: NightlyOnly }\n"
+                                         "struct NightlyOnly { x: u8 }\n"}}
+
+    refusals = {"stable": 0, "nightly": 0}
+
+    def _compile(cluster):
+        if compiles[cluster]:
+            return True, ""
+        # A different diagnostic each time, so the repeated-diagnostic stop
+        # does not end the loop early and every attempt is spent.
+        refusals[cluster] += 1
+        return False, f"error[E0277]: refusal {refusals[cluster]} in {cluster}"
+
+    def _author_deps_for(_pd, cluster):
+        def run_model(p):
+            prompts.append(p)
+            return _UNION_REPLY
+        return AuthorLayoutDeps(
+            run_model=run_model,
+            read_skeleton=lambda rel: files[cluster].get(rel),
+            write_skeleton=lambda rel, txt: files[cluster].__setitem__(rel, txt),
+            compile_check=lambda: _compile(cluster),
+            log=logs.append, max_attempts=attempts)
+
+    deps = LayoutPhaseDeps(
+        log=logs.append,
+        load_surface=lambda _pd, c: _world_surface(c, "Helper" if c == "stable" else "NightlyOnly"),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None)
+    return deps, prompts, logs, files
+
+
+def test_a_component_no_world_compiles_is_asked_once_not_once_per_world(tmp_path):
+    deps, prompts, logs, files = _two_world_phase({"stable": False, "nightly": False})
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert len(prompts) == 3, "three attempts in all, not three per world"
+    assert "Cluster: stable+nightly" in prompts[0] or "stable+nightly" in prompts[0]
+    assert "NightlyOnly" in prompts[0] and "Helper" in prompts[0]
+    night = res["nightly"].components[0]
+    assert not night.authored and night.asked_with == "stable"
+    assert any("not asked again" in m for m in logs)
+    assert "NightlyOnly { x: u8 }" in files["nightly"]["src/error.rs"], "rolled back"
+
+
+def test_negative_control_without_peers_each_world_asks_again(tmp_path, monkeypatch):
+    """The pre-change phase, with no peers: the second world asks the same
+    question from scratch."""
+    import pipeline_core.application.author_layout_phase as phase
+
+    real = phase.author_layout
+    monkeypatch.setattr(phase, "author_layout",
+                        lambda *a, **k: real(*a, **{**k, "peers": (), "handled": None}))
+    deps, prompts, _logs, _files = _two_world_phase({"stable": False, "nightly": False})
+    run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert len(prompts) == 6
+
+
+def test_a_world_that_compiles_the_shared_reply_commits_it(tmp_path):
+    """Stable refuses every reply, nightly takes the first: nightly commits in
+    stable's pass and makes no call of its own."""
+    deps, prompts, _logs, files = _two_world_phase({"stable": False, "nightly": True})
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert len(prompts) == 3
+    night = res["nightly"].components[0]
+    assert night.authored and night.asked_with == "stable" and not night.adopted
+    assert "NightlyOnly { y: u16 }" in files["nightly"]["src/error.rs"]
+    assert not res["stable"].components[0].authored
+
+
+def test_when_the_asking_world_commits_a_peer_that_refused_keeps_its_own_path(tmp_path):
+    """Stable commits on attempt 1 and nightly refused that reply: nightly is
+    not recorded as failed, it adopts or extends in its own pass as before."""
+    deps, prompts, _logs, _files = _two_world_phase({"stable": True, "nightly": False},
+                                                    attempts=1)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert res["stable"].components[0].authored
+    night = res["nightly"].components[0]
+    assert night.asked_with == "" and len(prompts) == 2, "nightly asked in its own pass"
+
+
+def test_a_derive_row_the_declaration_refutes_stays_out_of_the_prompt(tmp_path):
+    """Run `42057-641e589c`: a test comparing two Strings through
+    `io::Error` made the prompt demand `Error: Debug, PartialEq` of a type
+    whose declaration derives neither."""
+    from pipeline_core.domain.models import FieldRecord
+
+    test_src = ('#[test]\nfn t() {\n    assert_eq!(boxed.downcast_ref::<io::Error>()'
+                '.unwrap().to_string(), "io err");\n}\n')
+    types = [
+        TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="#[repr(transparent)]\npub struct Error { inner: Box<ErrorImpl> }",
+                   fields=(FieldRecord(name="inner", ty="Box<ErrorImpl>", is_pub=False),)),
+        TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl", is_pub=False,
+                   definition="#[derive(PartialEq)]\nstruct ErrorImpl { vtable: u8 }"),
+    ]
+    surface = classify_private_surface(types, [], cfg_cluster="stable",
+                                       author_private_fields=True)
+    prompts: list[str] = []
+    logs: list[str] = []
+    files = {"src/lib.rs": "#[repr(transparent)]\npub struct Error { inner: Box<ErrorImpl> }\n",
+             "src/error.rs": "#[derive(PartialEq)]\nstruct ErrorImpl { vtable: u8 }\n"}
+    test_src += "#[test]\nfn u() { assert_eq!(a, ErrorImpl { vtable: 1 }); }\n"
+
+    def run_model(p):
+        prompts.append(p)
+        return ""
+
+    deps = LayoutPhaseDeps(
+        log=logs.append, load_surface=lambda _pd, _c: surface,
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "", symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=lambda _pd, _c: AuthorLayoutDeps(
+            run_model=run_model, read_skeleton=files.get,
+            write_skeleton=files.__setitem__, compile_check=lambda: (False, "x"),
+            log=logs.append, max_attempts=1,
+            frozen_test_sources=lambda: {"tests/error_gen_1.rs": test_src}),
+        recompute_leaf_order=lambda _pd, _c: None)
+    run_layout_phase(tmp_path, "anyhow", ["stable"], deps)
+    assert prompts and "`Error` must derive" not in prompts[0]
+    assert "`ErrorImpl` must derive: PartialEq" in prompts[0], "a confirmed row stays"
+    assert any("not asked" in m and "Error: Debug" in m for m in logs)
+
+
+def _fn_item(sig: str) -> PrivateSurfaceItem:
+    return PrivateSurfaceItem(
+        SurfaceItemKind.FN_SIG, "get", "src/a.rs", sig, frozenset())
+
+
+def test_a_type_head_ignores_the_field_block_the_model_writes():
+    """Two worlds' ErrorImpl differed by fields on run 42057-641e589c and
+    were still one item. The ordinal check cannot see that; the slot can."""
+    a = PrivateSurfaceItem(
+        SurfaceItemKind.STRUCT, "ErrorImpl", "src/error.rs",
+        "struct ErrorImpl { h: Helper }")
+    b = PrivateSurfaceItem(
+        SurfaceItemKind.STRUCT, "ErrorImpl", "src/error.rs",
+        "struct ErrorImpl { h: NightlyOnly }")
+    assert item_slot(a) == item_slot(b)
+    assert shared_item_ids_agree([(("ErrorImpl",), (a,)), (("ErrorImpl",), (b,))])
+    left = (_fn_item("fn get(a: u8)"), _fn_item("fn get(a: u16)"))
+    right = (_fn_item("fn get(a: u16)"), _fn_item("fn get(a: u8)"))
+    assert component_uids(left) == component_uids(right) == ("get.1", "get.2")
+    assert shared_item_ids_agree(
+        [(component_uids(left), left), (component_uids(left), left)])
+    assert not shared_item_ids_agree(
+        [(component_uids(left), left), (component_uids(right), right)])
+    bare = "fn get(a: u8)"
+    assert declaration_text(f'#[cfg(not(feature = "std"))] {bare}') == declaration_text(bare)
+    assert declaration_text(f"{bare} {{ 1 }}") == declaration_text(f"{bare};")
+
+
+def _dup_fn_surface(world: str, first: str, second: str) -> PrivateSurface:
+    return PrivateSurface(
+        cfg_cluster=world,
+        replaceable=(_fn_item(first), _fn_item(second)),
+        frozen_public=frozenset())
+
+
+def test_swapped_duplicate_names_are_not_one_ask(tmp_path):
+    """The ordinal strings match, which is what the old union check compared,
+    and the declarations do not. Each world is asked alone."""
+    prompts: list[str] = []
+    logs: list[str] = []
+    stable = _dup_fn_surface("stable", "fn get(a: u8)", "fn get(a: u16)")
+    nightly = _dup_fn_surface("nightly", "fn get(a: u16)", "fn get(a: u8)")
+    assert component_uids(stable.components[0]) == component_uids(nightly.components[0])
+
+    def _deps(_pd, _cluster):
+        return AuthorLayoutDeps(
+            run_model=lambda p: prompts.append(p) or "",
+            read_skeleton=lambda _rel: None,
+            write_skeleton=lambda _rel, _txt: None,
+            compile_check=lambda: (False, "error[E0277]: no"),
+            log=logs.append, max_attempts=1, chunk_coverage_retries=0)
+
+    deps = LayoutPhaseDeps(
+        log=logs.append,
+        load_surface=lambda _pd, c: stable if c == "stable" else nightly,
+        load_suite=lambda _pd, c: BehaviourSuite(cfg_cluster=c),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_deps,
+        recompute_leaf_order=lambda _pd, _c: None)
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert any("different item in the other world" in m for m in logs)
+    assert prompts and all("stable+nightly" not in p for p in prompts)
+    assert len(prompts) == 2
+    assert res["nightly"].components[0].asked_with == ""
+
+
+_REPLY_A = (
+    '<LAYOUT_ITEM name="ErrorImpl" kind="struct">struct ErrorImpl { h: Box<u8> }</LAYOUT_ITEM>'
+    '<LAYOUT_ITEM name="Helper" kind="struct">struct Helper { x: u16 }</LAYOUT_ITEM>'
+    '<LAYOUT_ITEM name="NightlyOnly" kind="struct">struct NightlyOnly { y: u16 }</LAYOUT_ITEM>')
+_REPLY_B = _REPLY_A.replace("Box<u8>", "Box<i32>")
+
+
+def _split_commit_phase(nightly: list[bool] | None = None):
+    """Stable refuses reply A and commits reply B. Nightly's compile results
+    are per call, in the order the ask compiles that world: the shared
+    attempts first, then a rejudge of the reply stable commits."""
+    prompts: list[str] = []
+    logs: list[str] = []
+    files = {
+        "stable": {"src/error.rs": "struct ErrorImpl { h: Helper }\nstruct Helper { x: u8 }\n"},
+        "nightly": {"src/error.rs": "struct ErrorImpl { h: NightlyOnly }\n"
+                                    "struct NightlyOnly { x: u8 }\n"},
+    }
+    calls = {"stable": 0, "nightly": 0}
+    plan = {"stable": [False, True], "nightly": nightly if nightly is not None else [True, False]}
+
+    def _compile(cluster):
+        i = calls[cluster]
+        calls[cluster] = i + 1
+        seq = plan[cluster]
+        if i < len(seq) and seq[i]:
+            return True, ""
+        return False, f"error[E0277]: refusal {i} in {cluster}"
+
+    def _author_deps_for(_pd, cluster):
+        def run_model(p):
+            prompts.append(p)
+            return _REPLY_A if len(prompts) == 1 else _REPLY_B
+        return AuthorLayoutDeps(
+            run_model=run_model,
+            read_skeleton=lambda rel: files[cluster].get(rel),
+            write_skeleton=lambda rel, txt: files[cluster].__setitem__(rel, txt),
+            compile_check=lambda: _compile(cluster),
+            log=logs.append, max_attempts=2)
+
+    deps = LayoutPhaseDeps(
+        log=logs.append,
+        load_surface=lambda _pd, c: _world_surface(c, "Helper" if c == "stable" else "NightlyOnly"),
+        load_suite=lambda _pd, _c: _suite_with_pin(),
+        public_surface_text=lambda _pd, _c: "",
+        symbol_inventory_text=lambda _pd, _c: "",
+        author_deps_for=_author_deps_for,
+        recompute_leaf_order=lambda _pd, _c: None)
+    return deps, prompts, logs, files
+
+
+def test_a_peer_that_compiled_an_earlier_attempt_is_judged_on_the_committed_reply(tmp_path):
+    """Nightly took reply A. Stable commits reply B. Nightly is compiled
+    against B, B fails there, and nightly does not keep A's text."""
+    deps, prompts, _logs, files = _split_commit_phase()
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert res["stable"].components[0].authored
+    assert "Box<i32>" in files["stable"]["src/error.rs"]
+    night = res["nightly"].components[0]
+    assert night.asked_with == ""
+    assert "Box<u8>" not in files["nightly"]["src/error.rs"]
+    assert "NightlyOnly { x: u8 }" in files["nightly"]["src/error.rs"]
+    assert len(prompts) >= 3
+
+
+def test_a_peer_that_accepts_the_committed_reply_keeps_that_reply(tmp_path):
+    """The same split, except nightly also compiles B. It keeps B, not A,
+    and makes no call of its own."""
+    deps, prompts, _logs, files = _split_commit_phase([True, True])
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    night = res["nightly"].components[0]
+    assert night.authored and night.asked_with == "stable"
+    assert "Box<i32>" in files["nightly"]["src/error.rs"]
+    assert "Box<u8>" not in files["nightly"]["src/error.rs"]
+    assert len(prompts) == 2
+
+
+def test_negative_control_without_rejudge_the_peer_keeps_the_earlier_reply(
+        tmp_path, monkeypatch):
+    """The pre-change commit: the peer stays on the reply it already
+    compiled, and the asking world's later reply is what the registry stores."""
+    import pipeline_core.application.author_layout as layout
+
+    monkeypatch.setattr(layout, "_rejudge_peer_on_committed_reply", lambda *a, **k: None)
+    deps, prompts, _logs, files = _split_commit_phase()
+    res = run_layout_phase(tmp_path, "anyhow", ["stable", "nightly"], deps)
+    assert res["stable"].components[0].authored
+    assert "Box<i32>" in files["stable"]["src/error.rs"]
+    night = res["nightly"].components[0]
+    assert night.authored and night.asked_with == "stable"
+    assert "Box<u8>" in files["nightly"]["src/error.rs"]
+    assert len(prompts) == 2

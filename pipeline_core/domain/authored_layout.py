@@ -32,6 +32,11 @@ from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     find_definition_span,
 )
+from pipeline_core.domain.type_header import (
+    TypeHeader,
+    declaration_text,
+    parse_type_header,
+)
 
 _OPEN = "<LAYOUT_ITEM"
 _CLOSE = "</LAYOUT_ITEM>"
@@ -137,6 +142,51 @@ def component_uids(items: tuple[PrivateSurfaceItem, ...]) -> tuple[str, ...]:
     return tuple(uids)
 
 
+# The file, the surface kind, and either the parsed type head or the
+# declaration text: see :func:`item_slot`.
+ItemSlot = tuple[str, SurfaceItemKind, TypeHeader | str]
+
+
+def item_slot(item: PrivateSurfaceItem) -> ItemSlot:
+    """The declaration a protocol uid denotes, not the body the model writes.
+
+    Duplicate names are numbered by position in one component
+    (:func:`component_uids`). Two worlds that list those names in a different
+    order therefore share the ordinals and not the items, and a reply keyed
+    by the ordinals is spliced into the other world's declaration. A type
+    whose head parses is the file, the surface kind, and that head
+    (visibility, kind, name, generics). Fields are not in it: they are what
+    the reply writes, and the two worlds' ``ErrorImpl`` on run
+    ``42057-641e589c`` differed by fields and were still one item. Attributes
+    are not in it. A fn, or an item whose head does not parse, is the file,
+    the kind, and :func:`declaration_text` of its definition.
+    """
+    header = parse_type_header(item.definition)
+    if header is not None:
+        return (item.file, item.kind, header)
+    return (item.file, item.kind, declaration_text(item.definition))
+
+
+def shared_item_ids_agree(
+    groups: Sequence[tuple[tuple[str, ...], tuple[PrivateSurfaceItem, ...]]],
+) -> bool:
+    """True when every uid that occurs in more than one group is the same slot.
+
+    A uid that occurs once has nothing to disagree with. This is the check a
+    union of two worlds' items has to pass on top of the ordinal strings
+    matching: equal ordinals are not equal declarations.
+    """
+    seen: dict[str, ItemSlot] = {}
+    for uids, items in groups:
+        for uid, item in zip(uids, items, strict=True):
+            slot = item_slot(item)
+            prev = seen.get(uid)
+            if prev is not None and prev != slot:
+                return False
+            seen[uid] = slot
+    return True
+
+
 _REPR_ATTR = re.compile(r"^[ \t]*#\[repr\([^\]]*\)\][ \t]*$", re.MULTILINE)
 _ITEM_DECL = re.compile(
     r"^([ \t]*)(?:pub(?:[ \t]*\([^)]*\))?[ \t]+)?(?:struct|enum|union)[ \t]",
@@ -185,13 +235,46 @@ def carry_frozen_repr(frozen: str, authored: str) -> str:
     return authored[:decl.start()] + carried + authored[decl.start():]
 
 
+_DERIVE_ATTR = re.compile(r"^[ \t]*#\[\s*derive\s*\([^\]]*\)\s*\][ \t]*\n?", re.MULTILINE)
+
+
+def carry_frozen_derives(frozen: str, authored: str) -> str:
+    """A public type's `#[derive(...)]` list as the frozen declaration has it.
+
+    A derive is a trait impl, and on a public type a trait impl is public API:
+    the reconstruction keeps the crate's public surface, so the list is not
+    the model's to change. The model designs the private fields of such a
+    type (`PUB_FIELDS`), and `_public_contract_broken` already holds its head;
+    the head parser skips attributes, so a derive the reply added or dropped
+    used to land. On run `42057-641e589c` (2026-10-26) the reply for `Error`
+    was `#[derive(Debug, PartialEq)] pub struct Error { ptr: NonNull<()> }`:
+    `Debug` conflicts with the crate's hand-written impl (E0119), and
+    `PartialEq` would have compiled and widened the public API.
+
+    The frozen declaration covers every trait the crate's tests need of the
+    type, because those tests compile against it: what it does not derive is
+    implemented elsewhere by hand or not at all. So the reply's plain
+    `#[derive]` attributes are replaced by the frozen ones, verbatim, before
+    the item's declaration line. `cfg_attr`-wrapped derives are left as they
+    are, the same scope `derive_traits` reads."""
+    stripped = _DERIVE_ATTR.sub("", authored)
+    attrs = [m.group(0).strip() for m in _DERIVE_ATTR.finditer(frozen)]
+    decl = _ITEM_DECL.search(stripped)
+    if decl is None:
+        return authored
+    indent = decl.group(1)
+    carried = "".join(f"{indent}{a}\n" for a in attrs)
+    return stripped[:decl.start()] + carried + stripped[decl.start():]
+
+
 def carry_frozen_facts(
     items: tuple[PrivateSurfaceItem, ...], authored: Mapping[str, AuthoredItem],
 ) -> dict[str, AuthoredItem]:
     """``authored`` (keyed by protocol uid) with the facts of the crate that
     are not layout choices put back: the frozen ``#[repr(...)]``
-    (:func:`carry_frozen_repr`) and the frozen module-external visibility
-    (:func:`frozen_visibility.carry_frozen_visibility`).
+    (:func:`carry_frozen_repr`), the frozen module-external visibility
+    (:func:`frozen_visibility.carry_frozen_visibility`), and on a public type
+    its frozen ``#[derive(...)]`` list (:func:`carry_frozen_derives`).
 
     This dict is the ONE text every consumer of a committed layout stores:
     the splice writes it, and the registry, the layout store's locate keys and
@@ -208,7 +291,7 @@ def carry_frozen_facts(
 
     ``PUB_FIELDS`` items are not given visibility: their frozen fields are
     elided (there is nothing to carry), and `_public_contract_broken` refuses
-    a field turned ``pub`` on a public type."""
+    a field turned ``pub`` on a public type. They are given their derives."""
     out = dict(authored)
     for uid, it in zip(component_uids(items), items, strict=True):
         block = out.get(uid)
@@ -238,7 +321,9 @@ def carry_stored_definition(item: PrivateSurfaceItem, stored: str) -> str:
 
 def _carry_item(item: PrivateSurfaceItem, stored: str) -> str:
     text = carry_frozen_repr(item.definition, stored)
-    if item.kind is not SurfaceItemKind.PUB_FIELDS:
+    if item.kind is SurfaceItemKind.PUB_FIELDS:
+        text = carry_frozen_derives(item.definition, text)
+    else:
         text = carry_frozen_visibility(item.definition, text)
     return text
 

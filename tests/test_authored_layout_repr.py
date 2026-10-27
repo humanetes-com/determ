@@ -126,3 +126,55 @@ def test_contract_line_stays_above_the_carried_repr() -> None:
     assert out == ("/// The TypeId stored is the message's own type, so downcast::<&str>() finds it.\n"
                    "#[repr(transparent)]\n"
                    "pub struct Error {\n    inner: Own<ErrorImpl>,\n}")
+
+
+def test_a_public_type_keeps_its_frozen_derive_list() -> None:
+    """A derive on a public type is public API. Run `42057-641e589c`
+    (2026-10-26): the reply for `Error` carried `#[derive(Debug, PartialEq)]`
+    against a crate whose `Debug` is hand-written (E0119) and which has no
+    `PartialEq`; the head check skips attributes, so it landed."""
+    from pipeline_core.domain.authored_layout import carry_frozen_derives
+
+    reply = ("/// Pointer-sized handle.\n#[repr(transparent)]\n"
+             "#[derive(Debug, PartialEq)]\npub struct Error {\n    ptr: NonNull<()>,\n}")
+    frozen_none = "#[repr(transparent)]\npub struct Error {}"
+    out = carry_frozen_derives(frozen_none, reply)
+    assert "derive" not in out and "#[repr(transparent)]" in out and "ptr: NonNull<()>" in out
+    frozen_clone = "#[derive(Clone)]\npub struct Error {}"
+    out = carry_frozen_derives(frozen_clone, reply)
+    assert out.count("#[derive(") == 1 and "#[derive(Clone)]\npub struct Error" in out
+    assert carry_frozen_derives(frozen_clone, out) == out, "idempotent"
+    # A derive inside a doc comment is not an attribute.
+    doc = "/// #[derive(Debug)] is shown here\npub struct Error { a: u8 }"
+    assert carry_frozen_derives(frozen_none, doc) == doc
+
+
+def test_only_a_public_types_derives_are_carried() -> None:
+    """Through `carry_frozen_facts`, the one text every consumer stores: a
+    private struct's derives stay the model's choice."""
+    from pipeline_core.domain.authored_layout import AuthoredItem, carry_frozen_facts
+    from pipeline_core.domain.models import FieldRecord, TypeRecord
+    from pipeline_core.domain.private_surface import (
+        SurfaceItemKind,
+        classify_private_surface,
+    )
+
+    surface = classify_private_surface([
+        TypeRecord(file="src/lib.rs", kind="struct", name="Error", is_pub=True,
+                   definition="pub struct Error { inner: Box<ErrorImpl> }",
+                   fields=(FieldRecord(name="inner", ty="Box<ErrorImpl>", is_pub=False),)),
+        TypeRecord(file="src/error.rs", kind="struct", name="ErrorImpl", is_pub=False,
+                   definition="struct ErrorImpl { vtable: u8 }"),
+    ], [], cfg_cluster="stable", author_private_fields=True)
+    comp = next(c for c in surface.components if any(i.name == "Error" for i in c))
+    kinds = {i.name: i.kind for i in comp}
+    assert kinds["Error"] is SurfaceItemKind.PUB_FIELDS
+    authored = {
+        "Error": AuthoredItem("Error", "struct",
+                              "#[derive(Debug, PartialEq)]\npub struct Error { p: Box<ErrorImpl> }"),
+        "ErrorImpl": AuthoredItem("ErrorImpl", "struct",
+                                  "#[derive(Debug)]\nstruct ErrorImpl { v: u8 }"),
+    }
+    out = carry_frozen_facts(comp, authored)
+    assert "derive" not in out["Error"].definition
+    assert out["ErrorImpl"].definition.startswith("#[derive(Debug)]")

@@ -24,9 +24,11 @@ from pipeline_core.domain.authored_layout import (
     carry_frozen_facts,
     component_uids,
     definition_replacements,
+    derive_traits,
     layout_regressions,
     parse_authored_layout,
     shared_definitions_text,
+    shared_item_ids_agree,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import (
@@ -54,6 +56,7 @@ from pipeline_core.domain.layout_retrigger import (
     members_in_use_text,
 )
 from pipeline_core.domain.oracle_derives import (
+    confirmed_by_declaration,
     derive_requirements_text,
     scan_required_derives,
 )
@@ -164,6 +167,48 @@ class ComponentResult:
     # disproved, and replacing the crate's definition on that evidence is how
     # two clusters end up with two layouts for one uid.
     refuted_uids: tuple[str, ...] = ()
+    # Non-empty when this component was decided inside ANOTHER world's pass,
+    # by the one ask over both worlds' items (`PeerWorld`): that world's name.
+    # This world's own pass then makes no call for it.
+    asked_with: str = ""
+
+
+@dataclass(frozen=True)
+class PeerWorld:
+    """Another world of this launch whose matching component is decided by the
+    same ask. Every attempt's reply covers the union of both components' items
+    and is compiled in each world; a world that compiles it commits.
+
+    Why: a component the first world could not author was asked again, from
+    scratch, by the next world. On run `42057-641e589c` (2026-10-26) the
+    34-item `Error` component failed three attempts in `stable` (12 calls,
+    ~40 min) and the same three in `nightly` (11 calls, ~54 min); the two
+    components differed by three fns. The 3 runs read in full did the same."""
+
+    surface: PrivateSurface
+    deps: AuthorLayoutDeps
+    select_pins: Callable[[tuple[PrivateSurfaceItem, ...]], list[BehaviourSpec]]
+    behaviour_specs: Sequence[BehaviourSpec] = ()
+
+
+@dataclass
+class _PeerSide:
+    """One peer world's state for one component during the shared ask."""
+
+    world: str
+    deps: AuthorLayoutDeps
+    comp: tuple[PrivateSurfaceItem, ...]
+    uids: tuple[str, ...]
+    gate: LayoutGate
+    pristine: dict[str, str | None]
+    committed: bool = False
+    stopped: bool = False
+    tried: bool = False
+    reason: str = "no attempt"
+    attempt: int = 0
+    defs: tuple[tuple[str, str], ...] = ()
+    items: tuple[tuple[str, AuthoredItem], ...] = ()
+    seen_diags: list[str] = field(default_factory=list)
 
 
 class LayoutOutcome(Enum):
@@ -201,6 +246,10 @@ class LayoutComponentRecord:
 class AuthorLayoutResult:
     cfg_cluster: str
     components: tuple[ComponentResult, ...] = field(default_factory=tuple)
+    # world → component uids → what the shared ask decided there. Read by
+    # that world's own pass (`author_layout(handled=...)`).
+    peer_results: Mapping[str, Mapping[frozenset[str], ComponentResult]] = field(
+        default_factory=dict)
 
     @property
     def all_authored(self) -> bool:
@@ -326,6 +375,8 @@ def author_layout(
     extra_guidance: str = "",
     registry: Mapping[str, AuthoredItem] | None = None,
     behaviour_specs: Sequence[BehaviourSpec] = (),
+    peers: Sequence[PeerWorld] = (),
+    handled: Mapping[frozenset[str], ComponentResult] | None = None,
 ) -> AuthorLayoutResult:
     """Author every connected component of `surface`. Each component is
     committed to the skeleton only after the rewritten scaffold compiles; a
@@ -343,8 +394,23 @@ def author_layout(
     selected from it (`select_component_behaviours`) and put in the prompt;
     the pins alone let a layout that wraps a payload and keys the wrapper's
     own TypeId pass every gate and fail `Error::msg("x").is::<&str>()`.
-    Empty (the default) leaves the prompt exactly as it was."""
+    Empty (the default) leaves the prompt exactly as it was.
+
+    `peers` are the worlds whose pass comes after this one. A component this
+    world authors is asked once over its items and each peer's matching
+    component's items (`PeerWorld`). The union is refused when its ids would
+    rename an item, or when a shared id denotes a different declaration in
+    another world. When this world commits, a peer that was not compiled
+    against that reply is restored and judged on it; a peer that still does
+    not commit keeps the path it always had (adopt, or extend around the
+    fixed definitions). When no attempt commits here, a peer that committed
+    an earlier reply keeps that reply, and a peer that did not is recorded
+    as failed and is not asked again. `handled` is what an earlier
+    world's pass decided for this world's components."""
     results: list[ComponentResult] = []
+    peer_results: dict[str, dict[frozenset[str], ComponentResult]] = {
+        p.surface.cfg_cluster: {} for p in peers}
+    claimed: dict[str, set[frozenset[str]]] = {p.surface.cfg_cluster: set() for p in peers}
     oracle = _oracle_sources(deps)
     frozen_tests = _frozen_test_sources(deps) or oracle
     # Read ONCE for the whole surface, not per component: on the retrigger path
@@ -355,6 +421,16 @@ def author_layout(
     filled_now = deps.filled_bodies() if deps.filled_bodies is not None else ""
     for comp in surface.components:
         names = tuple(i.name for i in comp)
+        done = handled.get(frozenset(component_uids(comp))) if handled else None
+        if done is not None:
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
+                     + (f"authored by the one ask with {done.asked_with}, compiled "
+                        "here (no model call)." if done.authored else
+                        f"left frozen — the one ask with {done.asked_with} found no "
+                        "layout that compiles here; not asked again: "
+                        f"{first_diagnostic(done.reason) or done.reason}"))
+            results.append(done)
+            continue
         pins = select_pins(comp)
         if not pins and surface.component_is_layout_sensitive(comp):
             reason = ("layout-sensitive (feeds a public type's size) but NO "
@@ -421,8 +497,7 @@ def author_layout(
         # anyway, where the microcrate with a handful of items did not.
         # Restricted to the types this component actually declares, so the note
         # names items the reply is expected to emit.
-        derives_note = derive_requirements_text(scan_required_derives(
-            frozen_tests, [i.name for i in comp if i.kind in _DERIVABLE_KINDS]))
+        derives_note = _confirmed_derives_note(surface.cfg_cluster, names, comp, frozen_tests, deps)
 
         # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
         # cfg-cluster is already this crate's definition of that type, and this
@@ -465,10 +540,53 @@ def author_layout(
                      f"existing layout could not be INSTALLED here ({why}) — "
                      "re-authoring, but the crate-wide definition stands: "
                      "nothing compiled, so nothing about it was disproved.")
+        sides = _peer_sides(comp, uids, peers, claimed, registry or {}, deps)
+        peer_only: dict[str, PrivateSurfaceItem] = {}
+        for s in sides:
+            for u, i in zip(s.uids, s.comp, strict=True):
+                if u not in uids:
+                    peer_only.setdefault(u, i)
+        ask_comp = comp + tuple(peer_only.values())
+        # The reply is keyed by the ids the union's own numbering gives; each
+        # world reads it by its own. The ordinal strings must agree, and a
+        # shared ordinal must be the same declaration: duplicate names are
+        # numbered by position in each component, so a different order still
+        # produces the same ids and would splice the block into the other item.
+        renames = bool(sides) and component_uids(ask_comp) != uids + tuple(peer_only)
+        disagrees = bool(sides) and not renames and not shared_item_ids_agree(
+            [(uids, comp)] + [(s.uids, s.comp) for s in sides])
+        if renames or disagrees:
+            detail = ("the union of the worlds' items renames an item id"
+                      if renames else
+                      "a shared item id denotes a different item in the other world")
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {detail} "
+                     "— asked for this world alone.")
+            for s in sides:
+                claimed[s.world].discard(frozenset(s.uids))
+            sides, ask_comp = [], comp
+        label = "+".join([surface.cfg_cluster] + [s.world for s in sides])
+        if sides:
+            union_specs = list({b.behaviour_id: b for b in (
+                list(behaviour_specs) + [b for p in peers for b in p.behaviour_specs])}.values())
+            pins = list({b.behaviour_id: b for b in (
+                pins + [b for s, p in _side_peers(sides, peers) for b in p.select_pins(s.comp)])
+                         }.values())
+            behaviours = select_component_behaviours(
+                union_specs, component_names=tuple(i.name for i in ask_comp),
+                public_types=_pinned_public_types(surface, comp),
+                cap=None)[:COMPONENT_BEHAVIOUR_CAP]
+            for s, p in _side_peers(sides, peers):
+                for u, a in _public_anchors(p.surface, s.comp).items():
+                    anchors.setdefault(u, a)
+            paths_note = field_path_requirements_text(_component_field_paths(ask_comp, oracle))
+            derives_note = _confirmed_derives_note(label, names, ask_comp, frozen_tests, deps)
+            deps.log(f"  [t1.5] {label}/{names}: one ask over "
+                     f"{len(ask_comp)} item(s) for {len(sides) + 1} world(s); each "
+                     "attempt's reply is compiled in every world.")
         # Partly covered: the model must EXTEND the fixed definitions (adding
         # what this cluster's cfg needs), never redesign them — so it gets their
         # exact current text and an instruction to reproduce it verbatim.
-        fixed = [registry[u] for u in uids if registry and u in registry]
+        fixed = [registry[u] for u in component_uids(ask_comp) if registry and u in registry]
         shared = ("\n\nThese definitions are ALREADY FIXED for this crate by "
                   "another cfg-cluster. Reproduce each one EXACTLY as given and "
                   "design only the remaining items around them:\n"
@@ -481,9 +599,10 @@ def author_layout(
                     _anchors: dict[str, str] = anchors,
                     _shared: str = shared, _paths: str = paths_note,
                     _derives: str = derives_note,
-                    _members: str = members_note) -> str:
+                    _members: str = members_note,
+                    _label: str = label) -> str:
             return build_layout_authoring_prompt(
-                module_name=module_name, cfg_cluster=surface.cfg_cluster,
+                module_name=module_name, cfg_cluster=_label,
                 items=chunk_items, public_surface=public_surface,
                 layout_pins=_pins, symbol_inventory=symbol_inventory,
                 extra_guidance=(extra_guidance + _shared + _paths + _derives
@@ -531,14 +650,18 @@ def author_layout(
         for attempt in range(1, deps.max_attempts + 1):
             hint = _retry_hint(violations) if violations else ""
             authored, reason = _author_component(
-                comp, surface.cfg_cluster, _prompt, hint, deps)
+                ask_comp, label, _prompt, hint, deps)
             if authored is None:
-                deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {reason} "
+                deps.log(f"  [t1.5] {label}/{names}: {reason} "
                          f"(attempt {attempt})")
                 _learned(reason)
+                for s in sides:
+                    s.reason = reason
                 if _stop_mechanical(reason, attempt):
                     break
                 continue
+            for s in sides:
+                _try_peer_side(s, authored, attempt, surface.cfg_cluster, _learned)
             tried = _try_commit(comp, authored, deps, gate, pristine)
             reason, errors = tried.reason, tried.errors
             # Before the success line and before the next attempt: a probe the
@@ -551,6 +674,13 @@ def author_layout(
                 committed_defs = authored_locate_keys(comp, kept)
                 committed_items = tuple((u, kept[u]) for u in uids
                                        if u in kept)
+                # The registry stores THIS reply. A peer that compiled an
+                # earlier one has not been judged on it; the text its pass
+                # records would not be the text cluster start installs.
+                for s in sides:
+                    if not (s.tried and s.attempt == attempt):
+                        _rejudge_peer_on_committed_reply(
+                            s, authored, attempt, surface.cfg_cluster, _learned)
                 pin_note = _verified_note(gate)
                 deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: authored "
                          f"layout compiles (attempt {attempt}).{pin_note}")
@@ -596,7 +726,170 @@ def author_layout(
         results.append(ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
             authored_items=committed_items, refuted_uids=refuted))
-    return AuthorLayoutResult(surface.cfg_cluster, tuple(results))
+        for s in sides:
+            # A peer this world's commit leaves uncommitted keeps its own path
+            # (adopt, or extend around the fixed definitions): the question it
+            # would ask is no longer the one asked here. A peer of a component
+            # no attempt committed here has been asked; it is not asked again.
+            if s.committed or not committed:
+                peer_results[s.world][frozenset(s.uids)] = ComponentResult(
+                    tuple(i.name for i in s.comp), s.committed, s.reason,
+                    authored_defs=s.defs, authored_items=s.items,
+                    adopted=s.committed and committed and _same_text(s.items, committed_items),
+                    asked_with=surface.cfg_cluster)
+    return AuthorLayoutResult(surface.cfg_cluster, tuple(results),
+                              peer_results=peer_results)
+
+
+def _side_peers(
+    sides: Sequence[_PeerSide], peers: Sequence[PeerWorld],
+) -> list[tuple[_PeerSide, PeerWorld]]:
+    by_world = {p.surface.cfg_cluster: p for p in peers}
+    return [(s, by_world[s.world]) for s in sides]
+
+
+def _same_text(
+    a: tuple[tuple[str, AuthoredItem], ...], b: tuple[tuple[str, AuthoredItem], ...],
+) -> bool:
+    """True when every uid both carry has the same committed definition."""
+    other = dict(b)
+    return all(other[u].definition == it.definition for u, it in a if u in other)
+
+
+def _peer_sides(
+    comp: tuple[PrivateSurfaceItem, ...],
+    uids: tuple[str, ...],
+    peers: Sequence[PeerWorld],
+    claimed: dict[str, set[frozenset[str]]],
+    registry: Mapping[str, AuthoredItem],
+    deps: AuthorLayoutDeps,
+) -> list[_PeerSide]:
+    """Each peer's component that shares the most item ids with `comp`, when
+    that component would be authored in its own pass: not gated there for a
+    harvest gap, and not fully covered by the registry (adoption comes first
+    there, as it does here). A peer component is claimed once."""
+    sides: list[_PeerSide] = []
+    mine = set(uids)
+    for p in peers:
+        world = p.surface.cfg_cluster
+        best: tuple[int, tuple[PrivateSurfaceItem, ...]] | None = None
+        for cand in p.surface.components:
+            ids = frozenset(component_uids(cand))
+            overlap = len(mine & ids)
+            if overlap and ids not in claimed[world] and (best is None or overlap > best[0]):
+                best = (overlap, cand)
+        if best is None:
+            continue
+        pc = best[1]
+        pu = component_uids(pc)
+        ppins = p.select_pins(pc)
+        if not ppins and p.surface.component_is_layout_sensitive(pc):
+            continue
+        if adopt_component(pu, registry) is not None:
+            continue
+        claimed[world].add(frozenset(pu))
+        poracle = _oracle_sources(p.deps)
+        gate = LayoutGate(
+            root=_calibrated_pin_probe(p.surface, pc, ppins, p.deps),
+            in_file=_calibrated_field_path_probes(
+                p.surface, pc, _component_field_paths(pc, poracle), p.deps))
+        sides.append(_PeerSide(world, p.deps, pc, pu, gate,
+                               {f: p.deps.read_skeleton(f) for f in {i.file for i in pc}}))
+    return sides
+
+
+def _restore_side(side: _PeerSide) -> None:
+    """Put the peer's skeleton back to the snapshot taken before any attempt."""
+    for rel, orig in side.pristine.items():
+        if orig is not None:
+            side.deps.write_skeleton(rel, orig)
+
+
+def _rejudge_peer_on_committed_reply(
+    side: _PeerSide, authored: Mapping[str, AuthoredItem], attempt: int,
+    asked_in: str, learned: Callable[[str], None],
+) -> None:
+    """Compile the reply the asking world is committing, in a peer that was
+    not judged on it.
+
+    The peer locks on the first reply that compiles there, and later attempts
+    are not compiled in it. The registry then stores the asking world's later
+    reply, the peer's pass records the earlier one, and the next cluster
+    start installs the registry over that peer. The recorded run
+    ``42057-641e589c`` failed every attempt in both worlds and did not take
+    this path. Restoring the pristine scaffold first is required: the earlier
+    reply is already spliced, and a commit locates the frozen definitions.
+
+    The candidate is the reply before this world's carry. The peer's commit
+    carries it against the peer's own frozen definitions.
+    """
+    _restore_side(side)
+    side.committed = False
+    side.stopped = False
+    _try_peer_side(side, authored, attempt, asked_in, learned)
+
+
+def _try_peer_side(
+    side: _PeerSide, authored: Mapping[str, AuthoredItem], attempt: int,
+    asked_in: str, learned: Callable[[str], None],
+) -> None:
+    """Compile this attempt's reply in one peer world, with the same accept,
+    rollback and stop rules the asking world applies to itself.
+
+    Returns immediately once this peer has committed or stopped on a reply.
+    A later reply the asking world commits is not left there:
+    ``_rejudge_peer_on_committed_reply`` restores the scaffold and clears
+    both flags before calling back in, and only for a peer this attempt
+    did not already judge.
+    """
+    if side.committed or side.stopped:
+        return
+    names = tuple(i.name for i in side.comp)
+    mine = {u: authored[u] for u in side.uids if u in authored}
+    tried = _try_commit(side.comp, mine, side.deps, side.gate, side.pristine)
+    side.gate = _gate_after(side.gate, tried)
+    side.tried = True
+    side.attempt = attempt
+    if tried.committed:
+        side.committed = True
+        kept = dict(tried.authored)
+        side.defs = authored_locate_keys(side.comp, kept)
+        side.items = tuple((u, kept[u]) for u in side.uids if u in kept)
+        side.reason = ""
+        side.deps.log(f"  [t1.5] {side.world}/{names}: authored layout compiles "
+                      f"(attempt {attempt}, the one ask with {asked_in}).")
+        return
+    side.reason = tried.reason
+    learned(f"in the {side.world} world: {tried.reason}")
+    diag = first_diagnostic(tried.errors) if tried.errors else ""
+    side.deps.log(f"  [t1.5] {side.world}/{names}: authored scaffold did not "
+                  f"compile (attempt {attempt}, the one ask with {asked_in}) — "
+                  f"reverted" + (f": {diag}" if diag else f": {tried.reason}"))
+    if (not tried.errors and is_mechanical_reason(tried.reason)) or (
+            diag and diag in side.seen_diags):
+        side.stopped = True
+    elif diag:
+        side.seen_diags.append(diag)
+
+
+def _confirmed_derives_note(
+    cfg_cluster: str, names: tuple[str, ...], comp: tuple[PrivateSurfaceItem, ...],
+    frozen_tests: Mapping[str, str], deps: AuthorLayoutDeps,
+) -> str:
+    """The derive requirements the scan reads off the tests AND the declaration
+    each item replaces derives (`confirmed_by_declaration`). A row the
+    declaration refutes is not asked, and the log names it."""
+    derivable = [i for i in comp if i.kind in _DERIVABLE_KINDS]
+    rows = scan_required_derives(frozen_tests, [i.name for i in derivable])
+    declared: dict[str, set[str]] = {}
+    for i in derivable:
+        declared.setdefault(i.name, set()).update(derive_traits(i.definition))
+    kept, dropped = confirmed_by_declaration(rows, declared)
+    if dropped:
+        deps.log(f"  [t1.5] {cfg_cluster}/{names}: derive requirement(s) not asked — "
+                 "the declaration being replaced does not derive them: "
+                 + ", ".join(f"{r.type_name}: {r.trait} ({r.origin})" for r in dropped))
+    return derive_requirements_text(kept)
 
 
 def _gate_after(gate: LayoutGate, tried: CommitAttempt) -> LayoutGate:

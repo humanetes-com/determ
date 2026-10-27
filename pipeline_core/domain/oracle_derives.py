@@ -38,7 +38,8 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
-__all__ = ["RequiredDerive", "scan_required_derives", "derive_requirements_text"]
+__all__ = ["RequiredDerive", "scan_required_derives", "derive_requirements_text",
+           "confirmed_by_declaration"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +105,38 @@ def scan_required_derives(
                 _add(ty, "PartialEq", "compared with assert_eq!/assert_ne!", origin)
                 _add(ty, "Debug", "printed by a failing assert_eq!/assert_ne!", origin)
     return tuple(sorted(found.values(), key=lambda r: (r.type_name, r.trait)))
+
+
+def _trait_leaf(name: str) -> str:
+    """`core::fmt::Debug` and `PartialEq<Rhs>` → `Debug`, `PartialEq`."""
+    return name.split("<", 1)[0].strip().rsplit("::", 1)[-1].strip()
+
+
+def confirmed_by_declaration(
+    reqs: Iterable[RequiredDerive], declared: Mapping[str, Iterable[str]],
+) -> tuple[tuple[RequiredDerive, ...], tuple[RequiredDerive, ...]]:
+    """(rows the declaration being replaced derives, rows it does not).
+
+    The scan reads tokens, so a row can be false: the equality branch takes
+    every capitalized token inside an `assert_eq!` as a compared type, and on
+    run `42057-641e589c` (2026-10-26) `assert_eq!(boxed.downcast_ref::<io::Error>()
+    .unwrap().to_string(), "io err")` became "`Error` must derive: Debug,
+    PartialEq" for the crate's own `Error`, whose `Debug` is a hand-written
+    impl and which has no `PartialEq`. The model obeyed, rustc answered E0119,
+    and the component failed every attempt in both worlds.
+
+    The declaration the layout replaces is the crate's own, and the crate's
+    tests compile against it, so it settles every row. A trait it derives is a
+    derive the replacement must keep. A trait it does not derive is either
+    implemented elsewhere by hand (a derive then conflicts) or not implemented
+    at all (the test does not need it). `declared` maps a type name to the
+    traits its declaration derives; a type absent from it confirms nothing."""
+    kept: list[RequiredDerive] = []
+    dropped: list[RequiredDerive] = []
+    leaves = {ty: {_trait_leaf(t) for t in traits} for ty, traits in declared.items()}
+    for r in reqs:
+        (kept if _trait_leaf(r.trait) in leaves.get(r.type_name, ()) else dropped).append(r)
+    return tuple(kept), tuple(dropped)
 
 
 def derive_requirements_text(reqs: Iterable[RequiredDerive]) -> str:

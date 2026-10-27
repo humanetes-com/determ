@@ -24,6 +24,8 @@ from typing import Any
 from pipeline_core.application.author_layout import (
     AuthorLayoutDeps,
     AuthorLayoutResult,
+    ComponentResult,
+    PeerWorld,
     author_layout,
 )
 from pipeline_core.domain.authored_layout import AuthoredItem
@@ -125,12 +127,20 @@ def run_layout_phase(
     # drop below.
     registry: dict[str, AuthoredItem] = (
         deps.load_registry(project_dir) if deps.load_registry else {})
+    # Every world's surface and suite first: a component is asked once over
+    # the worlds that author it (`PeerWorld`), so each pass needs the worlds
+    # after it. What an earlier pass decided for a later world is `handled`.
+    loaded: list[tuple[str, PrivateSurface, BehaviourSuite]] = []
     for cluster in cluster_names:
         try:
             surface = deps.load_surface(project_dir, cluster)
         except Exception as e:
             deps.log(f"  [t1.5] {cluster}: could not load private surface ({e}) — skipping.")
             continue
+        loaded.append((cluster, surface, deps.load_suite(project_dir, cluster)
+                       if not surface.is_empty else BehaviourSuite(cfg_cluster=cluster)))
+    handled: dict[str, dict[frozenset[str], ComponentResult]] = {}
+    for index, (cluster, surface, suite) in enumerate(loaded):
         if surface.author_private_fields != deps.author_private_fields:
             deps.log(
                 f"  [t1.5] {cluster}: WARNING — this workspace was baked with "
@@ -142,8 +152,10 @@ def run_layout_phase(
         if surface.is_empty:
             deps.log(f"  [t1.5] {cluster}: no private-replaceable layout — frozen skeleton kept.")
             continue
-        suite = deps.load_suite(project_dir, cluster)
         select_pins = make_pin_selector(suite, surface)
+        peers = [PeerWorld(s, deps.author_deps_for(project_dir, c), make_pin_selector(su, s),
+                           su.specs)
+                 for c, s, su in loaded[index + 1:] if not s.is_empty]
         res = author_layout(
             surface,
             module_name=module_name,
@@ -153,8 +165,12 @@ def run_layout_phase(
             deps=deps.author_deps_for(project_dir, cluster),
             registry=registry,
             behaviour_specs=suite.specs,
+            peers=peers,
+            handled=handled.get(cluster),
         )
         results[cluster] = res
+        for world, decided in res.peer_results.items():
+            handled.setdefault(world, {}).update(decided)
         # A definition this cluster DISPROVED is dropped before anything is
         # stored, and only then does first-cluster-wins apply to what is left:
         # the slot is empty, so this cluster's replacement lands in it, and if
@@ -206,9 +222,11 @@ def run_layout_phase(
                 deps.log(f"  [t1.5] {cluster}: layout-outcomes persist failed (non-fatal): {e}")
         authored = sum(1 for c in res.components if c.authored)
         adopted = sum(1 for c in res.components if c.adopted)
+        shared = sum(1 for c in res.components if c.asked_with)
         deps.log(
             f"  [t1.5] {cluster}: authored {authored}/{len(res.components)} "
-            f"component(s) ({adopted} adopted from an earlier cluster); "
+            f"component(s) ({adopted} adopted from an earlier cluster, "
+            f"{shared} decided by an earlier world's ask); "
             f"{len(res.gated)} gated (harvest gap); "
             f"{len(res.components) - authored - len(res.gated)} left frozen.")
         # The model may have renamed private helpers → recompute leaf-first

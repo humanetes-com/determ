@@ -1601,6 +1601,35 @@ class PhaseCFillEngine:
         )
 
 
+def _fold_per_fn_results(prev: ClusterFillResult | None,
+                         new: ClusterFillResult) -> ClusterFillResult:
+    """One fill's per-fn result over every per-fn run it opened.
+
+    A fill can open the per-fn route more than once: a carved re-buy piece,
+    a yielded piece queued again, and a run the fill opens on a blocker its
+    own keeps measured (`fill_scheduler._open_for_blockers`). The route kept
+    the last run's result only, so the fill's counts, errors, payoff and
+    class histogram described its last per-fn run. Counts add, the lists
+    concatenate, the stub count and the dispatch sets are the latest (the
+    passes read them off the tree and the shared sets, which already span
+    the fill)."""
+    if prev is None:
+        return new
+    hist = (prev.fill_classes or FillClassHistogram()).combined_with(
+        new.fill_classes)
+    return replace(
+        new,
+        fns_filled=prev.fns_filled + new.fns_filled,
+        bytes_filled=prev.bytes_filled + new.bytes_filled,
+        attempts=prev.attempts + new.attempts,
+        errors=(*prev.errors, *new.errors),
+        payoff=combine_payoffs(prev.payoff, new.payoff),
+        fill_classes=hist,
+        joint_sets=tuple(dict.fromkeys((*prev.joint_sets, *new.joint_sets))),
+        unclaimed_fns=tuple(sorted(set(prev.unclaimed_fns)
+                                   | set(new.unclaimed_fns))))
+
+
 class _PerFnRoute:
     """The engine's own route: the per-fn passes, as ONE run of the fill
     schedule (its levels are a compile-order barrier inside the route, not
@@ -1672,7 +1701,7 @@ class _PerFnRoute:
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])
         before_landed = frozenset(kw["landed_fn"])
-        self.result = eng._per_fn_passes(
+        res = eng._per_fn_passes(
             project_dir=kw["project_dir"], target_src_dir=kw["target_src_dir"],
             tests_dir_files=kw["tests_dir_files"], module_name=kw["module_name"],
             cluster_name=kw["cluster_name"], cluster=kw["cluster"],
@@ -1693,7 +1722,7 @@ class _PerFnRoute:
             claim_refusal=clock.refusal, claim_release=clock.release,
             crash_sites=kw.get("crash_sites"),
             _landed_fn=kw["landed_fn"])
-        res = self.result
+        self.result = _fold_per_fn_results(self.result, res)
         disp = frozenset(kw["dispatched"]) - before_disp
         kept = frozenset(kw["landed_fn"]) - before_landed
         rev = (frozenset(kw["reverted"]) - before_rev) | (disp - kept)

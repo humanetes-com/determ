@@ -142,6 +142,56 @@ def parse_type_header(text: str) -> TypeHeader | None:
     return None
 
 
+def declaration_text(text: str) -> str:
+    """The declaration, attributes skipped, body cut at ``{`` or ``;``.
+
+    Whitespace is collapsed and comments and strings are not part of it. This
+    is the identity of an item whose head :func:`parse_type_header` does not
+    read (a fn, or a block with no type keyword): the signature is the item,
+    and the body is not. A ``#[cfg]`` in front of the item is skipped with
+    every other attribute — when the item exists is carried from the frozen
+    definition, and it does not make a second item.
+    """
+    mask = code_mask(text)
+    n = len(text)
+    i = 0
+    while i < n:
+        if mask[i] or text[i].isspace():
+            i += 1
+            continue
+        if text[i] == "#":
+            j = i + 1
+            while j < n and (mask[j] or text[j] in " \t\r\n!"):
+                j += 1
+            i = _skip_group(text, mask, j) if j < n and text[j] == "[" else i + 1
+            continue
+        break
+    start = i
+    depth = 0
+    end = n
+    while i < n:
+        if mask[i]:
+            i += 1
+            continue
+        ch = text[i]
+        if ch == "{":
+            if depth == 0:
+                end = i
+                break
+            depth += 1
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]}":
+            if depth:
+                depth -= 1
+        elif ch == ";" and depth == 0:
+            end = i
+            break
+        i += 1
+    chars = [text[k] for k in range(start, end) if not mask[k]]
+    return "".join("".join(chars).split())
+
+
 def headers_match(a: TypeHeader | None, b: TypeHeader | None) -> bool:
     """True iff both heads parse and declare the same public contract."""
     return a is not None and b is not None and a == b
