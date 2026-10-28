@@ -50,16 +50,31 @@ from pathlib import Path
 
 _RULES_MARK = "checked against the examples it cites"
 _PANIC_HEAD = re.compile(r"^thread '[^']*'( \(\d+\))? panicked at \S+")
+# `test_results.world_failure_line`: since 2026-10-25 (`89610e0`) a joined
+# capture's failure opens with the cfg world it failed in. Left in, the core
+# below was that line plus the panic head, which no prompt quotes verbatim, so
+# every row of run `2355041-eae39441` read MISSING whatever the prompt held.
+_WORLD_LINE = re.compile(r"^\(failed in cfg world `[^`]*`\)\s*")
 
 
 def _fold(text: str) -> str:
     return " ".join(text.split())
 
 
+# A test that failed in more than one binary or world records each failure
+# after this marker. The prompt renderers quote the failing source line between
+# the message and the next failure, so a core that runs past the first
+# failure's message is text no prompt holds (run `2355041-eae39441`: 13 of 14
+# MISSING rows were the prompt quoting the failure in full).
+_NEXT_FAILURE = re.compile(r"\(another test named ")
+
+
 def _core(words: str) -> str:
-    """The test's words minus libtest's `thread ... panicked at <site>` head:
-    the message and the observed values, the part a prompt must quote."""
-    return _PANIC_HEAD.sub("", _fold(words)).strip()[:80]
+    """The first failure's message, minus the world line and libtest's
+    `thread ... panicked at <site>` head: the message and the observed
+    values, the part a prompt must quote."""
+    body = _PANIC_HEAD.sub("", _WORLD_LINE.sub("", _fold(words))).strip()
+    return _NEXT_FAILURE.split(body, maxsplit=1)[0].strip()[:80]
 
 
 def main(argv: list[str]) -> int:

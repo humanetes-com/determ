@@ -235,6 +235,12 @@ def identity_name(identity: str) -> str:
     return identity.split(_BODY_SEP, 1)[0]
 
 
+def identity_container(identity: str) -> str:
+    """The container key of a :func:`body_identity`, "" when the identity
+    is the bare name (the keep did not distinguish homonyms)."""
+    return identity.split(_BODY_SEP, 1)[1] if _BODY_SEP in identity else ""
+
+
 def _split_body(item: tuple[str, ...]) -> tuple[str, str, str, str]:
     if len(item) >= 4:
         return item[0], item[1], item[2], item[3]

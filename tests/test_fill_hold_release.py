@@ -34,6 +34,7 @@ from pipeline_core.domain.fill_schedule import (
     ScheduledRun,
     release_held,
     schedule,
+    withhold_landed,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -105,7 +106,11 @@ class _Route:
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
         if not clock.may_claim():
             return RouteRunReport(empty=True)
-        self._calls.append(run.label)
+        mark = ""
+        if run.frozen:
+            mark = " frozen " + ",".join(
+                sorted(f"{a}::{b}" for a, b in run.frozen))
+        self._calls.append(run.label + mark)
         if self._keeps:
             fill_reading.note_kept(0)
         return RouteRunReport(model_calls=1,
@@ -150,7 +155,7 @@ def test_a_run_held_behind_a_pair_the_executor_deferred_opens(
 
 def test_negative_control_without_the_release_the_held_run_never_opens(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fs, "release_held", lambda _h, _g: ())
+    monkeypatch.setattr(fs, "release_held", lambda *_a: ())
     calls, out, _log = _fill(tmp_path)
     by = {r.label: r for r in out.rows}
     assert calls == ["per-fn 1 stub(s)"]
@@ -228,18 +233,22 @@ def test_a_pair_that_kept_nothing_releases_what_it_held(
     assert by["file src/a.rs"].outcome is not RunOutcome.DEFERRED
 
 
-def test_control_a_pair_that_kept_a_changed_body_keeps_its_hold(
+def test_a_pair_that_kept_a_changed_body_releases_and_its_body_is_not_rewritten(
         tmp_path: Path) -> None:
+    """374.1: the hold ends when the holder finishes, whatever it kept. The
+    released file run writes a unit the pair kept, and `withhold_landed`
+    defers it (a transaction with no per-unit claims), so the kept body is
+    the one the sweep grades."""
     calls, out = _pair_fill(tmp_path, "changed")
     by = {r.label: r for r in out.rows}
     assert calls == ["pair src/a.rs::show + src/b.rs::make"]
     assert by["file src/a.rs"].outcome is RunOutcome.DEFERRED
-    assert by["file src/a.rs"].reason == "pair_wait"
+    assert by["file src/a.rs"].reason == "landed_this_fill"
 
 
 def test_negative_control_the_pre_change_release_keeps_a_no_op_holder(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The pre-change rule: only holders the executor deferred release.
+    # The rule before 370.3: only holders the executor deferred release.
     real = fs.release_held
     opened: set[str] = set()
 
@@ -255,19 +264,109 @@ def test_negative_control_the_pre_change_release_keeps_a_no_op_holder(
     assert by["file src/a.rs"].reason == "pair_wait"
 
 
-def test_a_waited_piece_that_kept_nothing_releases_the_run_it_carries() -> None:
-    """Review of 2026-10-26: a run whose claims waited behind a writer is
-    queued again as a piece with its own key, and the schedule's holds name
-    the run's key, so the run's holds never ended. The piece that then kept
-    nothing ends them, when the run itself landed nothing. Controls: a run
-    that kept a body before it waited keeps its holds; a run still waiting
-    is not released."""
-    landed: set[str] = set()
+def test_a_waited_piece_finishing_finishes_the_run_it_carries() -> None:
+    """A run whose claims waited behind a writer is queued again as a piece
+    with its own key; the schedule's holds name the run's key. The run has
+    finished when its piece has, whatever either kept; a run still waiting
+    has not."""
     origin = {"piece": "run"}
-    assert fs._left_tree_keys([("run", False)], {"run"}, origin, landed) == set()
-    assert fs._left_tree_keys([("piece", False)], set(), origin, landed) == {
-        "piece", "run"}
-    landed2: set[str] = set()
-    fs._left_tree_keys([("run", True)], {"run"}, origin, landed2)
-    assert fs._left_tree_keys([("piece", False)], set(), origin, landed2) == {
-        "piece"}
+    assert fs._finished_keys([("run", True)], {"run"}, origin) == set()
+    assert fs._finished_keys([("piece", True)], set(), origin) == {"piece", "run"}
+    assert fs._finished_keys([("other", False)], set(), origin) == {"other"}
+
+
+# --- 374.1: a hold ends when its holder finishes ---------------------------
+#
+# Run `2355041-eae39441` (2026-10-27), fill 7: the Display pair kept +2 at its
+# wave, and seven runs it held waited the whole fill; one, a session that then
+# rewrote a unit outside the pair, cashed +4 in 7.4 minutes when it opened in
+# fill 8. A session is released when its holder finishes. When it opens,
+# `withhold_landed` freezes every body this fill kept by then, so it cannot
+# rewrite those bodies.
+
+_OTHER = FnLocator("src/c.rs", "other")
+
+
+def _disjoint_fill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch | None = None,
+                   ) -> tuple[list[str], fs.FillExecution]:
+    fill_reading.reset_last_comparison()
+    _per_fn, pair, _file = _runs()
+    side = RouteRun(kind=RouteKind.FILE, label="file src/c.rs",
+                    targets=frozenset({_OTHER}), target_tests=frozenset({"t_show"}),
+                    files=("src/c.rs",), bodies_sha="c")
+    touching = RouteRun(kind=RouteKind.SESSION, label="session touching",
+                        targets=frozenset({_FMT, _OTHER}),
+                        target_tests=frozenset({"t_show"}), files=("src/a.rs",), seq=1)
+    apart = RouteRun(kind=RouteKind.SESSION, label="session apart",
+                     targets=frozenset({FnLocator("src/d.rs", "elsewhere")}),
+                     target_tests=frozenset({"t_show", "t_peek"}), files=("src/d.rs",), seq=2)
+    calls: list[str] = []
+    tree = {"v": 0}
+    out = fs.execute_fill(
+        [_PairRoute(pair, calls, "changed", tree), _Route(side, calls, keeps=False),
+         _Route(touching, calls, keeps=False), _Route(apart, calls, keeps=False)],
+        hollow={}, bodies_sha=lambda _t: f"b{tree['v']}",
+        deps=fs.FillExecutionDeps(
+            log=lambda _m: None, emit=lambda *_a, **_k: None,
+            check_stop=lambda _c: None, ledger=RouteLedgerStore(tmp_path),
+            project="p", cluster="c", run_id="r", iteration=7, oracle_fp="o",
+            premise=_PLAN, ground_now=lambda: _PLAN))
+    return calls, out
+
+
+def test_premise_the_three_runs_are_held_behind_the_pair() -> None:
+    _per_fn, pair, _file = _runs()
+    side = RouteRun(kind=RouteKind.FILE, label="file src/c.rs",
+                    targets=frozenset({_OTHER}), target_tests=frozenset({"t_show"}),
+                    files=("src/c.rs",), bodies_sha="c")
+    sched = schedule([pair, side], [], oracle_fp="o", hollow={})
+    assert [s.reason for s in sched.deferred] == ["pair_wait"]
+
+
+def test_a_changed_keep_releases_the_runs_that_cannot_rewrite_it(
+        tmp_path: Path) -> None:
+    calls, out = _disjoint_fill(tmp_path)
+    by = {r.label: r for r in out.rows}
+    assert calls[0] == "pair src/a.rs::show + src/b.rs::make"
+    # Every session opens with every body this fill kept frozen on it, the
+    # one apart from the pair's units included.
+    assert any(c.startswith("session apart") for c in calls)
+    touching = [c for c in calls if c.startswith("session touching")]
+    assert touching and "src/a.rs::show" in touching[0]
+    assert by["session touching"].outcome is not RunOutcome.DEFERRED
+    # The session opened on the file's unit. That unit was asked, so the
+    # file run does not ask it again in this fill.
+    assert "file src/c.rs" not in calls
+    assert by["file src/c.rs"].outcome is RunOutcome.DEFERRED
+    assert by["file src/c.rs"].reason == "asked_this_fill"
+
+
+def test_negative_control_the_kept_nothing_release_holds_them_all(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """370.3's rule: only a holder that kept nothing released."""
+    real = fs.release_held
+    kept_holders: set[str] = set()
+    _per_fn, pair, _file = _runs()
+    kept_holders.add(pair.key)
+
+    def _kept_nothing_only(held, keys):
+        return real(held, {k for k in keys if k not in kept_holders})
+
+    monkeypatch.setattr(fs, "release_held", _kept_nothing_only)
+    calls, _out = _disjoint_fill(tmp_path)
+    assert calls == ["pair src/a.rs::show + src/b.rs::make"]
+
+
+def test_release_held_releases_a_session_and_leaves_the_freeze_to_its_open() -> None:
+    """Release only lifts the hold. The freeze is written when the session
+    opens (`withhold_landed`), from the bodies kept by then."""
+    sess = RouteRun(kind=RouteKind.SESSION, label="s", targets=frozenset({_FMT}),
+                    target_tests=frozenset({"t"}))
+    h = ScheduledRun(run=sess, rank=0, weight=1, reason="pair_wait", level=2,
+                     deferred=True, held_by=("k",), prior_reason="served")
+    (out,) = release_held([h], {"k"})
+    assert not out.deferred and out.reason == "served"
+    assert out.run.frozen == frozenset()
+    opened, withheld = withhold_landed(out.run, {_FMT, _PEEK})
+    assert withheld == frozenset()
+    assert opened is not None and opened.frozen == frozenset({_FMT, _PEEK})

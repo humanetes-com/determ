@@ -234,6 +234,13 @@ def build_slice_session_prompt(
             "table installs it yet; it is editable so that a table an "
             "editable unit builds can name it, with both written in one "
             "change set.\n")
+    if slice_.frozen:
+        frozen_names = ", ".join(
+            f"`{f}::{fn}`" for f, fn in sorted(slice_.frozen))
+        coverage_legend += (
+            "These units were kept by an earlier run of this fill and are "
+            f"not editable: {frozen_names}. A body for one of them is "
+            "refused.\n")
     tests_section = "\n\n".join(
         f'<TEST path="{p}">\n{txt}\n</TEST>' for p, txt in test_blocks) or "(none)"
     first_file = slice_.files[0] if slice_.files else ""

@@ -41,6 +41,7 @@ from pipeline_core.domain.attribution import record_site
 from pipeline_core.domain.fn_execution import site_label
 from pipeline_core.domain.fn_reachability import (
     MirBlock,
+    PublicIndex,
     PublicSurface,
     call_or_item,
     defined_type_names,
@@ -948,7 +949,7 @@ def nameable_api(api_text: str, file: str, facts: WorldFacts | None) -> str:
     # rest of the list was not checked — it used to come back unchanged and
     # list `pub struct DisplayError` as importable.
     indexed = bool(facts.item_names)
-    listed = facts.item_names.get(file, frozenset()) if indexed else frozenset()
+    listed = PublicIndex.of(facts.item_names).names_in(file) if indexed else frozenset()
     unnameable_here = {t.name for t in facts.unnameable if t.file == file}
     kept: list[str] = []
     hidden: list[str] = []

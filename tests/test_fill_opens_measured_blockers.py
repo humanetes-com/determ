@@ -32,13 +32,14 @@ from pipeline_core.application.reconstruct.phase_c_engine import (
 )
 from pipeline_core.domain.fill_class import FillClassHistogram
 from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
-from pipeline_core.domain.models import ClusterFillResult, FnLocator
+from pipeline_core.domain.models import ClusterFillResult, FnLocator, FnSite
 
 _TOP = FnLocator("src/a.rs", "top")      # held at plan time
 _MID = FnLocator("src/a.rs", "mid")      # what keeping `top` exposes
 _LOW = FnLocator("src/a.rs", "low")      # what keeping `mid` exposes
 _SIDE = FnLocator("src/c.rs", "side")    # another branch, its own file run
 _STUBS = (_TOP, _MID, _LOW, _SIDE)
+_MID_SITE = FnSite(_MID.file, _MID.fn_name, "")
 
 
 def _fn(fn: FnLocator) -> tuple[str, ...]:
@@ -67,14 +68,14 @@ class _Tree:
                      else (False, _fn(_SIDE), False))
         return out
 
-    def held(self) -> dict[str, frozenset[FnLocator]]:
-        held: dict[str, frozenset[FnLocator]] = {}
+    def held(self) -> dict[str, frozenset[FnSite]]:
+        held: dict[str, frozenset[FnSite]] = {}
         for t, (passed, site, _a) in self.premise().items():
             if passed:
                 continue
             loc = FnLocator(site[1], site[2])
             if loc in _STUBS and loc not in self.kept:
-                held[t] = frozenset({loc})
+                held[t] = frozenset({FnSite(loc.file, loc.fn_name, "")})
         return held
 
 
@@ -232,3 +233,78 @@ def test_the_fill_result_spans_every_per_fn_run() -> None:
     assert got.fill_classes is not None
     assert got.fill_classes.as_dict()["unreachable"] == 2
     assert got.fill_classes.as_dict()["cashed"] == 1
+
+
+class _RecordingPerUnit(_PerUnit):
+    """The per-unit route, recording each run it is handed."""
+
+    def __init__(self, *a, seen: list[RouteRun], **k) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*a, **k)
+        self._seen = seen
+
+    def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+        self._seen.append(run)
+        return super().run(run, clock)
+
+
+def test_the_opened_run_carries_the_tests_its_blockers_now_hold(
+        tmp_path: Path) -> None:
+    """The open remainder of the opener: the run it opens was prompted with
+    the sweep's frontier, in which the measured blocker held no test, so its
+    ask said nothing about the tests that now stop in it. The run carries
+    them (`held_tests`), and the per-fn route turns them into the same
+    held-stub sentence the sweep writes for the stubs it held."""
+    from pipeline_core.domain.crash_settlement import with_held_stub_evidence
+    seen: list[RouteRun] = []
+
+    def routes(calls: list[str], tree: _Tree) -> list:
+        return [_RecordingPerUnit(_top_per_fn(), calls, tree, seen=seen),
+                _Whole(_side_run(), calls, tree)]
+
+    _fill(tmp_path, routes, hollow=_HOLLOW)
+    opened = [r for r in seen if r.held_tests]
+    assert opened, "an opened run reached the route"
+    first = opened[0]
+    assert dict(first.held_tests) == {_MID_SITE: frozenset({"t1", "t2"})}
+    by_loc = [(FnLocator(s.file, s.fn_name), t) for s, t in first.held_tests]
+    text = with_held_stub_evidence({}, by_loc)[_MID]
+    assert "2 failing test(s) stop at its `unimplemented!()`" in text
+    # Control: the planned run carries none, so a stub the sweep held is not
+    # told twice, and a crash reading already present wins over the count.
+    assert all(not r.held_tests for r in seen if not r.parent)
+    assert with_held_stub_evidence({_MID: "crash"}, by_loc) == {_MID: "crash"}
+
+
+def test_the_per_fn_route_hands_the_passes_the_held_sentence() -> None:
+    """The route is the one place an opened run's ground reaches the unit's
+    prompt (`crash_evidence` → `fill_one_fn`'s CRASH_EVIDENCE). Control: a
+    planned run's map is passed through unchanged."""
+    from pipeline_core.application.reconstruct.phase_c_engine import _PerFnRoute
+
+    got: list[dict] = []
+
+    class _Engine:
+        def _per_fn_passes(self, **kw):  # type: ignore[no-untyped-def]
+            got.append(dict(kw["crash_evidence"] or {}))
+            return ClusterFillResult()
+
+    base = {"crash_evidence": {}, "dispatched": set(), "reverted": set(),
+            "landed_fn": set()}
+    for name in ("project_dir", "target_src_dir", "tests_dir_files",
+                 "module_name", "cluster_name", "cluster", "check_cmd",
+                 "cluster_env", "max_passes", "leaf_name_counts", "fr_path",
+                 "tdd_frontier_keys", "skip_end_pass_test",
+                 "tdd_frontier_tests", "tdd_test_cmd", "crash_blamed",
+                 "crash_blocked", "dispatch_ranks", "behaviour_specs",
+                 "cfg_dead", "is_cfg_dead", "answer_lost", "landed_before",
+                 "heal_file"):
+        base[name] = None
+    route = _PerFnRoute(_Engine(), **base)  # type: ignore[arg-type]
+    clock = RunClock(share_minutes=None, fill_remaining=lambda: None)
+    opened = RouteRun(kind=RouteKind.PER_FN, label="per-fn 1 blocker(s)",
+                      targets=frozenset({_MID}), parent="per-fn:x",
+                      held_tests=((_MID_SITE, frozenset({"t1"})),))
+    route.run(opened, clock)
+    route.run(_top_per_fn(), clock)
+    assert "1 failing test(s) stop at" in got[0][_MID]
+    assert got[1] == {}

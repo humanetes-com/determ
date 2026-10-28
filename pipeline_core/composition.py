@@ -71,7 +71,10 @@ from pipeline_core.adapters.auto_operator import (
     seed_auto_operator_default as _auto_op_seed_default,
 )
 from pipeline_core.adapters.behaviour_exercises import exercises_by_coverage
-from pipeline_core.adapters.behaviour_misses import save_behaviour_misses
+from pipeline_core.adapters.behaviour_misses import (
+    load_behaviour_misses,
+    save_behaviour_misses,
+)
 from pipeline_core.adapters.behaviour_probe import probe_env, run_probe
 from pipeline_core.adapters.behaviour_probe import (
     subprocess_runner as _probe_subprocess_runner,
@@ -2016,6 +2019,7 @@ def build_app(
             (w for w in (construction_facts.load(pd) or ("", ()))[1] if w.cluster == c), None),
         save_reach=save_reach,
         record_misses=save_behaviour_misses,
+        load_misses=load_behaviour_misses,
         emit_tests=functools.partial(
             emit_behaviour_tests, balanced=_rust_delimiters_balanced),
         verify_tests=_verify_behaviour_tests,

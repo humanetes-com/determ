@@ -151,6 +151,16 @@ def test_an_ambiguous_name_without_a_block_is_rejected_with_candidates() -> None
     assert "ambiguous" in cs.rejected[0] and "impl fmt::Debug for Renderer" in cs.rejected[0]
 
 
+def test_a_frozen_unit_is_refused_even_when_the_records_still_hold_it() -> None:
+    cs = route_change_set([
+        {"fn_name": "fmt", "block": "impl fmt::Display for Report", "body": "A",
+         "where_clause": None},
+        {"fn_name": "render", "block": "", "body": "B", "where_clause": None},
+    ], _records(), frozen=(FnLocator("src/lib.rs", "fmt"),))
+    assert [r.unit for r in cs.routed] == [_RENDER]
+    assert any("kept by an earlier run" in line for line in cs.rejected)
+
+
 def test_a_name_outside_the_editable_set_never_routes() -> None:
     cs = route_change_set(
         [{"fn_name": "secret", "block": "impl X", "body": "A", "where_clause": None}], _records())
@@ -313,6 +323,23 @@ def _turn0(**kwargs) -> str:
         **kwargs,
     }
     return build_slice_session_prompt(**args)
+
+
+def test_turn0_names_units_an_earlier_run_kept_as_not_editable() -> None:
+    from pipeline_core.prompts.slice_session import build_slice_session_prompt
+    sl = SessionSlice(
+        tests=("t_pair",), units=(_DISP, _RENDER),
+        frozen=frozenset({FnLocator("src/lib.rs", "fmt")}))
+    recs = _records()
+    text = build_slice_session_prompt(
+        module_name="m", cluster_name="t", slice_=sl, records=recs,
+        all_records=list(recs.values()),
+        file_texts={"src/lib.rs": "fn fmt() {}", "src/render.rs": "fn render() {}"},
+        target_evidence={"t_pair": 'left: "a"'},
+        test_blocks=(), types_section="")
+    assert "`src/lib.rs::fmt`" in text
+    assert "not editable" in text
+    assert "not editable" not in _turn0()
 
 
 def test_turn0_renders_prior_regression_and_omits_empty_notes() -> None:

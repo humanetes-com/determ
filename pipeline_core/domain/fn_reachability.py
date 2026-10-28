@@ -186,7 +186,49 @@ class PublicSurface:
 
     def names_item(self, file: str, name: str) -> bool:
         """The index lists an item called `name` defined in `file`."""
-        return name in self.item_names.get(file, frozenset())
+        return name in PublicIndex.of(self.item_names).names_in(file)
+
+
+def _crate_rel(path: str) -> str:
+    """``path`` rooted at the crate: posix separators, no leading slash, and
+    a ``src/`` prefix on a path that names a source file without one."""
+    p = path.replace("\\", "/").lstrip("/")
+    while p.startswith("./"):
+        p = p[2:]
+    return p if p.startswith(("src/", "tests/", "examples/", "benches/")) else f"src/{p}"
+
+
+@dataclass(frozen=True, slots=True)
+class PublicIndex:
+    """Rustdoc's nameable items by defining file, joined by file whatever
+    root the caller's records were enumerated from.
+
+    The index is measured with crate-root paths (`src/lib.rs`); task 0d
+    enumerates records from `src/` (`lib.rs`). Read as a plain mapping, every
+    lookup missed: on run `2355041-eae39441` (2026-10-27) the behaviour
+    book's vocabulary was the crate's three macros, against 42 entries for
+    the same original crate enumerated from its root, so every book feature
+    was a macro, every rule probe asked about one macro, and no composition
+    edge existed. The only lookups are :meth:`names_in` and :meth:`names`;
+    both sides of the join are rooted by one rule."""
+
+    by_file: Mapping[str, frozenset[str]] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, names: Mapping[str, Iterable[str]] | None) -> PublicIndex:
+        out: dict[str, set[str]] = {}
+        for f, ns in (names or {}).items():
+            out.setdefault(_crate_rel(f), set()).update(ns)
+        return cls({k: frozenset(v) for k, v in out.items()})
+
+    def names_in(self, file: str) -> frozenset[str]:
+        return self.by_file.get(_crate_rel(file), frozenset())
+
+    def names(self) -> frozenset[str]:
+        return frozenset(n for v in self.by_file.values() for n in v)
+
+    def __bool__(self) -> bool:
+        return bool(self.by_file)
 
 
 def _walk_strings(node: object, out: set[str]) -> None:

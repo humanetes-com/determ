@@ -70,6 +70,7 @@ from pipeline_core.domain.behaviour_probe import (
 )
 from pipeline_core.domain.behaviour_select import behaviour_class_name
 from pipeline_core.domain.cfg import CfgSet, cluster_cfg_set
+from pipeline_core.domain.fn_reachability import PublicIndex
 from pipeline_core.domain.fn_routes import WorldFacts
 from pipeline_core.domain.held_out import capture_key, split_held_out
 from pipeline_core.domain.models import BuildCluster, FnRecord, ModRecord, TypeRecord
@@ -165,6 +166,9 @@ class Task0dDeps:
     # row is classified OTHER, ranked last and unpinnable, which is the same
     # silent-hole class under another name.
     record_misses: Callable[[Path, str, list[dict[str, str]]], object] = lambda _p, _c, _m: None
+    # What `record_misses` wrote, so a later stage of the same pass adds its
+    # rows instead of rewriting the file without the harvest's.
+    load_misses: Callable[[Path, str], list[dict[str, str]]] = lambda _p, _c: []
     # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`,
     # after compiling and running them against the original.
     emit_tests: EmitTests = (
@@ -263,7 +267,7 @@ def _style_example(specs: tuple[BehaviourSpec, ...]) -> str:
 
 
 def _public_index(deps: Task0dDeps, project_dir: Path,
-                  cluster: str) -> Mapping[str, frozenset[str]] | None:
+                  cluster: str) -> PublicIndex | None:
     """The world's measured public index (rustdoc's nameable items by
     defining file), from the construction facts t0b stored; None when none
     were measured — the mod-chain walk then stands in."""
@@ -272,7 +276,7 @@ def _public_index(deps: Task0dDeps, project_dir: Path,
     except Exception:  # noqa: BLE001 — a missing reading is "not measured"
         return None
     names = getattr(facts, "item_names", None)
-    return names if names else None
+    return PublicIndex.of(names) if names else None
 
 
 def _union_text(parts: Sequence[tuple[str, str]]) -> str:
@@ -844,6 +848,10 @@ def _run_reach(
             [outcomes[t.label] for t in targets if t.label in outcomes], cargo_runs)
 
 
+#: The `stage` of a miss row written by the rule probes (`run_rule_probes`).
+RULE_PROBE_STAGE = "rule_probe"
+
+
 def run_rule_probes(
     deps: Task0dDeps,
     project_dir: Path,
@@ -953,6 +961,18 @@ def run_rule_probes(
              f"{len(withdrawn)} withdrawn at emission), {confirmed} confirmed, {refuted} refuted, "
              f"{len(dropped)} rule(s) dropped ({DROP_REASON}); {len(misses)} miss(es), "
              f"{cargo_runs} cargo invocation(s)")
+    # The rule probes' own misses, beside the harvest's: the log line is
+    # only the count, and `record_misses` rewrites the file whole, so a
+    # write of these alone would erase the harvest rows. Earlier rule-probe
+    # rows are replaced, including by a pass that missed nothing — leaving
+    # the previous pass's rule rows standing would report misses this pass
+    # did not have. A pass that asked no rule returns above and does not
+    # touch the file.
+    kept_rows = [m for m in deps.load_misses(project_dir, cluster.name)
+                 if m.get("stage") != RULE_PROBE_STAGE]
+    deps.record_misses(project_dir, cluster.name, kept_rows + [
+        {**{k: str(v) for k, v in m.items()}, "stage": RULE_PROBE_STAGE}
+        for m in misses])
     deps.emit("task0d.rule_probes", cluster=cluster.name, rules_asked=len(asks),
               proposed=proposed, captured=len(taken), held_out=len(held),
               withdrawn=len(withdrawn), confirmed=confirmed, refuted=refuted,

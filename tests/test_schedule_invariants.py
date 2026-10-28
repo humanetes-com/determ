@@ -809,3 +809,4 @@ def test_every_owed_function_some_candidate_writes_gets_an_opened_writer() -> No
                 due=due))
     assert not broken, f"{len(broken)} violation(s):\n" + "\n".join(broken[:20])
     assert starved_before > 0, "the generator never starves an owed function"
+

@@ -820,8 +820,12 @@ def u2_test_gate(
     `-- name1 name2 ...` OR filter — unlike `test_regression_gate`, which stays
     unscoped BY DESIGN.
     """
-    if not (enabled and test_cmd and fn_tests):
+    if not (enabled and test_cmd):
         return U2Verdict.accept()
+    if not fn_tests:
+        # Nothing to run is not a passing run: the body is kept on compile
+        # alone and the verdict says that (`U2Decision.NO_TESTS`).
+        return U2Verdict.no_tests()
     scoped_cmd = derive_scoped_test_cmd(test_cmd, fn_tests)
     try:
         rc, out = run_cargo_fn(scoped_cmd, target_src_dir, cluster_env or {},
@@ -1007,7 +1011,7 @@ def u2_test_gate(
         # Carrying the names is what lets the caller's verdict row say so —
         # the other accepts above (gate off, no tests, timeout, exception) have
         # nothing to carry and must not be recorded as if they had.
-        return U2Verdict.accept(frozenset(report.passed & fn_tests))
+        return U2Verdict.accept(frozenset(report.passed & fn_tests), ran=True)
     locate = make_fn_site_locator(structure, target_src_dir)
     blame = partition_blame(scoped, frozenset(unit_sites), locate)
     unjudged = frozenset(f.test_name for f in blame.no_verdict)

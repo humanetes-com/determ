@@ -108,7 +108,7 @@ from pipeline_core.domain.body_ledger import (
     tests_creditable_to_locator,
 )
 from pipeline_core.domain.body_standing import bind as bind_body_standing
-from pipeline_core.domain.body_standing import is_proven_text, proven_units
+from pipeline_core.domain.body_standing import is_proven_text, lost_to_aborts, proven_units
 from pipeline_core.domain.candidate_tiers import (
     DEFAULT_MISSES,
     JUDGED_JOINT_OUTCOMES,
@@ -220,8 +220,10 @@ from pipeline_core.domain.fill_schedule import (
     DEFAULT_UNPAID_GRACE,
     RouteKind,
     RouteLedgerRow,
+    due_this_fill,
     unit_evidence_from,
     unpaid_pair_fills,
+    unrouted_units,
 )
 from pipeline_core.domain.flat_score import (
     FlatScoreDecision,
@@ -236,12 +238,15 @@ from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
     declined_unchanged,
+    opened_in_fill,
     pass_unopened,
     render_pass_audit,
     reoffer_unopened,
+    served_units,
     split_reverted,
     unattempted_units,
     unit_bodies,
+    written_units,
 )
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.layout_retrigger import (
@@ -303,14 +308,13 @@ from pipeline_core.domain.reference_floor import (
 from pipeline_core.domain.refill_evidence import (
     compile_note,
     lesson_note,
-    tests_in_prompt,
+    tests_shown_for_name,
 )
 from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
 from pipeline_core.domain.retro_gate import bind_crate_names
-from pipeline_core.domain.rust_scan import is_hollow_body
 from pipeline_core.domain.same_failure import SignatureReader
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
@@ -331,6 +335,7 @@ from pipeline_core.domain.test_command import ensure_serial_harness
 from pipeline_core.domain.test_outcome import (
     PremiseEntry,
     StubHold,
+    held_locators,
     names_of,
     outcomes_of,
     premise_moved,
@@ -1184,8 +1189,9 @@ def run_phase_c_tdd(
     # no longer means "served"; see `escalation_fire_due`. A persisted
     # futility seed counts as served at 0.
     _served_at: dict[FnLocator, int] = {}
-    # The RANKING's view of service: only stamps earned under the
-    # route-scoped rule (`_attempted` = units a route actually opened).
+    # The ranking's view of service: stamps earned when a route opened the
+    # unit or this fill changed its body (`served_units`). A passenger
+    # whose body moved was written and leaves the never-served rank.
     # `_served_at` is the fire's premise and is deliberately inclusive — it
     # carries every floor stamp ever made, including the pre-2026-08-31
     # batch-wide ones no record can now distinguish (run `9933-efe68f37`:
@@ -1508,6 +1514,10 @@ def run_phase_c_tdd(
     # stall exit may convict only units that were dispatched AND judged
     # inside the stalled window, not everything left standing.
     _dispatched_window: list[frozenset[FnLocator]] = []
+    # The units the last fill's batch held that no route attempted
+    # (`fill_schedule.unrouted_units`); the next fill's cover opens their
+    # first writer (`due_this_fill`).
+    _unrouted_last: frozenset[FnLocator] = frozenset()
     # The resumed floor cursor's units, for the same stall-exit accounting.
     # Under the one-batch-per-relaunch crawl a traversal spans processes, so
     # the units the RECORD says this traversal already dispatched (all judged
@@ -2909,6 +2919,14 @@ def run_phase_c_tdd(
             first failure is inside — the reading the ledger needs to tell a
             test that observed a landed body from one that died first in
             another stub. Read off the tree as it stands at the grade."""
+            return held_locators(_held_sites_of(output_, vanished_))
+
+        def _held_sites_of(output_: str, vanished_: Iterable[str],
+                           ) -> dict[str, frozenset[FnSite]]:
+            """:func:`_held_of` per body, container included: the view the
+            fill reads after its own keeps, so a run opened on a measured
+            blocker names the body its tests stop in
+            (`test_outcome.HeldSites`)."""
             if deps.enumerate_fns is None:
                 return {}
             try:
@@ -2928,7 +2946,7 @@ def run_phase_c_tdd(
                     vanished=vanished_, test_files=_test_files)
             except (OSError, ValueError, TypeError, AttributeError):
                 return {}
-            return {bare_test_name(t_): frozenset(locator_of(x_) for x_ in ss_)
+            return {bare_test_name(t_): frozenset(ss_)
                     for t_, ss_ in _hold_h.by_test.items()}
 
         # One localization per sweep capture (`localize_crashes` re-runs the
@@ -3326,10 +3344,20 @@ def run_phase_c_tdd(
                     intact=_rec.reconciled)
                 bind_body_standing({u: _bodies_p[u] for u in _units_p
                                     if u in _bodies_p}, known=_bodies_p)
+                _lost_p = (lost_to_aborts(
+                    {bare_test_name(t): us for t, us in test_reverse_map.items()},
+                    passed=_sweep_view.passed, died=_sweep_view.aborted)
+                    - _units_p) if _rec.reconciled else frozenset()
                 deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: "
                          f"{len(_units_p)} of {len(_bodies_p)} unit(s) proven "
                          "on this tree (ledger or a passing attributed test); "
-                         "only these are shown as the crate's own idioms.")
+                         "only these are shown as the crate's own idioms."
+                         + (f" {len(_lost_p)} more had a passing attributed test "
+                            f"and are left out because another of their "
+                            f"{len(_sweep_view.aborted)} aborted test(s) died: "
+                            + ", ".join(sorted(f"{u.file}::{u.fn_name}"
+                                               for u in _lost_p)[:6])
+                            if _lost_p else ""))
             except Exception as exc:  # noqa: BLE001 — a reading never ends a sweep
                 bind_body_standing(None)
                 deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: not "
@@ -7320,7 +7348,14 @@ def run_phase_c_tdd(
         _joint_live = tuple(c for c in _joint_now if c.bodies and not c.repaired)
         _joint_slices = _joint_session_slices(_joint_live, eligible, iter_n)
         _elig_fill: Frontier = eligible
-        _due_fill: frozenset[FnLocator] = _due.units & frozenset(_batch.keys)
+        _due_fill: frozenset[FnLocator] = due_this_fill(
+            _due.units, _unrouted_last, _batch.keys)
+        _carried = sorted(_due_fill - _due.units)
+        if _carried:
+            deps.log(f"  {tag} [phase-c/schedule] iter {iter_n}: "
+                     f"{len(_carried)} unit(s) the last fill's batch held and "
+                     "no route attempted are owed a writer in this fill: "
+                     + ", ".join(f"{k.file}::{k.fn_name}" for k in _carried))
         _cls_bit = (f" {_prev_fill_classes.rendered()}"
                     if _saw_fill else "")
         deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: cargo test rc={rc} "
@@ -7537,17 +7572,12 @@ def run_phase_c_tdd(
                 # The batch, plus whatever the wave's routes say they kept.
                 scope = _keys | kept_hint
                 bodies_now_w = unit_bodies(recs_now, scope)
-                landed_now = changed_units(
-                    {k: v for k, v in _before.items() if k in scope},
-                    bodies_now_w)
                 # A unit that went back to a stub during the fill (a crash
                 # settlement put the culprit back, a peel restored it) landed
                 # no body: a row for it would grade the stub at the sweep.
-                landed_now = frozenset(
-                    k for k in landed_now
-                    if not (bodies_now_w.get(k)
-                            and all(is_hollow_body(b)
-                                    for b in bodies_now_w[k])))
+                landed_now = written_units(
+                    {k: v for k, v in _before.items() if k in scope},
+                    bodies_now_w)
                 if not landed_now:
                     return 0
                 items_w, file_of_w, fps_w = _layout_ctx(_epoch)
@@ -7720,7 +7750,7 @@ def run_phase_c_tdd(
         # executor calls it only after a keep (`fill_scheduler._GroundGate`).
         _plan_premise: dict[str, PremiseEntry] | None = None
         _ground_now: Callable[[], dict[str, PremiseEntry] | None] | None = None
-        _held_now: Callable[[], dict[str, frozenset[FnLocator]] | None] | None = None
+        _held_now: Callable[[], dict[str, frozenset[FnSite]] | None] | None = None
         # The capture `_ground_now` last read: the held view the fill's
         # in-fill blockers-first reads is taken from the same suite run.
         _ground_capture: list[str] = []
@@ -7759,12 +7789,12 @@ def run_phase_c_tdd(
 
             def _held_now(
                     _cap: list[str] = _ground_capture,
-            ) -> dict[str, frozenset[FnLocator]] | None:
-                # Per failing test, the still-stubbed functions its first
+            ) -> dict[str, frozenset[FnSite]] | None:
+                # Per failing test, the still-stubbed bodies its first
                 # failure is inside, on the capture `_ground_now` just read.
                 if not _cap:
                     return None
-                return _held_of(_cap[0], ())
+                return _held_sites_of(_cap[0], ())
 
         def _culprits_after(captured: str) -> frozenset[FnLocator]:
             # The in-fill cargo reading names the abort and not its frames.
@@ -8103,11 +8133,39 @@ def run_phase_c_tdd(
                         _asks.record(_u_j, _tb, _folded, rung="unit")
                         if _words_now.get(_tb, ""):
                             _asks.note_words(_u_j, _tb, _folded)
-        _landed_after_fill: frozenset[FnLocator] = (
+        # Moved is the raw tree reading (did the batch unit's body change at
+        # all); landed is a body written and still on the tree
+        # (`written_units`). A unit put back to a stub during the fill moved
+        # and landed nothing.
+        _moved_after_fill: frozenset[FnLocator] = (
             frozenset(changed_units(
                 _bodies_before, unit_bodies(_recs_after_fill, frontier_keys)))
             if _recs_after_fill is not None and _bodies_before is not None
             else frozenset())
+        _landed_after_fill: frozenset[FnLocator] = (
+            written_units(
+                _bodies_before, unit_bodies(_recs_after_fill, frontier_keys))
+            if _recs_after_fill is not None and _bodies_before is not None
+            else frozenset())
+        # The fill as a whole, not only its batch: a schedule run writes units
+        # the dispatch did not batch (a session's editable set, a file run's
+        # other members, a run opened on a measured blocker). Served and
+        # landed are facts about the unit, so the streak, the served stamp
+        # and the owed answers read these; the exhaustion charge and the
+        # landed-change audit are about the batch and keep the batch sets.
+        # Before, a unit written outside the batch kept its streak and its
+        # never-served rank and took a batch slot the next sweep
+        # (`EVIDENCED_STARVED`, 4 fires on the full read, 3 on `391506`).
+        _opened_fill = opened_in_fill(
+            _sub_dispatched, (FnLocator(*t) for t in sub.answer_lost_fns),
+            _attempted)
+        _landed_fill: frozenset[FnLocator] = (
+            written_units(
+                _bodies_before_all,
+                unit_bodies(_recs_after_fill, set(_bodies_before_all)))
+            | _landed_after_fill
+            if _recs_after_fill is not None and _bodies_before_all is not None
+            else _landed_after_fill)
         # An owed function whose body LANDED was asked under this sweep's
         # evidence: the next sweep owes it again only if its red tests say
         # something new. One offered and landing nothing is a miss; enough
@@ -8115,8 +8173,8 @@ def run_phase_c_tdd(
         # route writes (or whose every reply is refused) cannot hold the
         # cluster open. An unread red test counts a miss per sweep.
         if _due.units or _due.unread:
-            _ans, _mis = _due.answered(frozenset(_batch.keys),
-                                       _landed_after_fill)
+            _ans, _mis = _due.answered(frozenset(_batch.keys) | _opened_fill,
+                                       _landed_fill)
             _fill_rows = _this_fill_rows(iter_n)
             _session_kept = {f"{a_}::{b_}" for r_ in _fill_rows
                              if r_.kind == RouteKind.SESSION
@@ -8147,8 +8205,10 @@ def run_phase_c_tdd(
                     return False
                 if rung == "session":
                     return _session_covers(test, unit)
-                _shown = tests_in_prompt(
-                    frontier, FnLocator(*unit.rsplit("::", 1)))
+                _file, _fn = unit.rsplit("::", 1)
+                # The ask's unit is a name: every body of it the sweep told
+                # apart has its own prompt pool.
+                _shown = tests_shown_for_name(frontier, _file, _fn)
                 _bares = {x.rsplit("::", 1)[-1] for x in _shown}
                 return test in _bares or test in set(_shown)
 
@@ -8259,13 +8319,16 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "reopened": bool(_batch.completes_pass),
                 "units": sorted(f"{k.file}::{k.fn_name}" for k in _reoffer)})
-        # Fill returned — this batch was served, but only the units a
-        # route opened. A kill that never returned is not service (the
-        # dispatch persist above left these keys off `_served_at` on
-        # purpose). A unit the routes never opened keeps its
-        # never-served rank instead of silently dropping to bucket 1.
-        _served_at.update(dict.fromkeys(_attempted, iter_n))
-        _served_verified.update(_attempted)
+        # Fill returned. Served is every unit a route opened, plus every
+        # unit whose body this fill changed: a passenger the write rewrote
+        # was written, and leaving it never-served ranks the next sweep as
+        # if the body were still the one nobody touched. A kill that never
+        # returned is not service (the dispatch persist above left these
+        # keys off `_served_at` on purpose). A unit no route opened and
+        # whose body did not move keeps its never-served rank.
+        _served_now = served_units(_opened_fill, _landed_fill)
+        _served_at.update(dict.fromkeys(_served_now, iter_n))
+        _served_verified.update(_served_now)
         # A turn resets the streak, so the frontier rotates when no body
         # changed. A fault site whose body did not land stays hungry once
         # (`_fault_retried`), then a later peel resets it: counting the open
@@ -8274,7 +8337,7 @@ def run_phase_c_tdd(
         # cut, a premise refusal and a lost answer are already outside
         # `_attempted`.
         _unclaimed, _fault_retried = streak_after_turn(
-            _unclaimed, _ranked, _attempted, _landed_after_fill,
+            _unclaimed, _ranked, _opened_fill, _landed_fill,
             _fault_sites, _fault_retried)
         _persist_floor()
         _capped_n, _capped_m = summarize_capped(_fill_meta)
@@ -8313,6 +8376,7 @@ def run_phase_c_tdd(
         # them (the 2026-08-19 crawl's third batch: 4 byte-identical
         # re-authors incl. traversal step `src/error.rs::source`, 2 peeled
         # incl. the severed `src/context.rs::source`).
+        _unattempted_now: frozenset[FnLocator] | None = None
         if _recs_after_fill is not None and _bodies_before is not None:
             _recs_after = _recs_after_fill
             _batch_landed = _landed_after_fill
@@ -8349,12 +8413,16 @@ def run_phase_c_tdd(
             # on purpose — their prompt sentence is `return it unchanged
             # only if it is already right`, which `declined_unchanged`
             # already protects.
-            _batch_unchanged = _attempted - _batch_landed
-            # Passengers (landed, never opened) are not unattempted; they
-            # still earn no `_served_at` stamp — that update is `_attempted`
-            # only, a few lines up.
+            # Unchanged reads the raw move: an attempted body a settlement
+            # put back to a stub moved, and is not a failed try that
+            # returned the old body. It is named on the audit line instead.
+            _batch_restubbed = (_moved_after_fill - _batch_landed) & _attempted
+            _batch_unchanged = _attempted - _moved_after_fill
+            # Passengers (landed, never opened) are not unattempted. The
+            # served stamp above already includes `_landed_fill`.
             _batch_unattempted = unattempted_units(
                 frontier_keys, _attempted, _batch_landed)
+            _unattempted_now = _batch_unattempted
             # Split the WHOLE unchanged set, not only the escalated slice:
             # a peeled attributed refill (`src/fmt.rs::debug` on run
             # `451330-7e8a7ca9`) is reverted, not an identical reply, and
@@ -8501,6 +8569,11 @@ def run_phase_c_tdd(
                 + ("; INFERRED, unchanged (not a failed try): " + ", ".join(
                     sorted(f"{k.file}::{k.fn_name}" for k in _batch_declined)[:12])
                    if _batch_declined else "")
+                + ("; put back to a stub during the fill (moved, landed "
+                   "nothing): " + ", ".join(sorted(
+                       f"{k.file}::{k.fn_name}"
+                       for k in _batch_restubbed)[:12])
+                   if _batch_restubbed else "")
                 + ("; reverted (tree body is the snapshot, not the reply): "
                    + ", ".join(sorted(
                        f"{k.file}::{k.fn_name}"
@@ -8565,6 +8638,8 @@ def run_phase_c_tdd(
                                       for k in _batch_unattempted),
                 "unchanged": sorted(f"{k.file}::{k.fn_name}"
                                     for k in _batch_unchanged),
+                "restubbed": sorted(f"{k.file}::{k.fn_name}"
+                                    for k in _batch_restubbed),
                 "reverted": sorted(f"{k.file}::{k.fn_name}"
                                    for k in _batch_reverted),
                 "declined": sorted(f"{k.file}::{k.fn_name}"
@@ -8765,6 +8840,7 @@ def run_phase_c_tdd(
         _spared_live = [k for k in _spared_undispatched
                         if k not in _cfg_inactive]
         _spared_dead = len(_spared_undispatched) - len(_spared_live)
+        _unrouted_last = unrouted_units(_unattempted_now, _cfg_inactive)
         if _spared_live:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: "
                      f"{len(_spared_live)} frontier stub(s) were "

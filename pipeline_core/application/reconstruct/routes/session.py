@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 
 from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
 from pipeline_core.domain.attribution import locator_of
@@ -40,6 +41,8 @@ class SessionRoute:
         sl = slice_for_run(self._plans, run)
         if sl is None:
             return RouteRunReport(empty=True)
+        if run.frozen:
+            sl = replace(sl, frozen=frozenset(run.frozen))
         if not clock.may_claim():
             self._log(f"  [phase-c/session] {run.label}: not opened — the "
                       "fill share is spent.")

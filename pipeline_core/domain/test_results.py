@@ -2253,6 +2253,11 @@ class RegressionComparison:
     # aimed tests green; the route ledger recorded only the +2, and the
     # third test's unpaid-buy count restarted on a row that never moved it.
     newly_green: frozenset[str] = frozenset()
+    # Tests that failed in both readings, in binaries complete in both: the
+    # tests the change ran and left red. A test whose binary did not
+    # complete on either side is in neither this nor ``newly_green`` (it was
+    # not measured), so "aimed and not green" is never read as "stayed red".
+    still_failing: frozenset[str] = frozenset()
     # The same comparison inside each build world, when the readings joined
     # worlds (`join_world_captures`). A world's verdict is its own: a net gain
     # in one world may still trade a red test inside that world, but no world
@@ -2419,6 +2424,7 @@ def compare_readings(base: TestStateReading,
     hung_tests: list[str] = []
     newly_red: set[str] = set()
     newly_green: set[str] = set()
+    still_failing: set[str] = set()
     newly_red_aborted: set[str] = set()
     base_pass = cur_pass = base_exec = cur_exec = crash_lost = abort_lost = 0
     for label, b in base_by.items():
@@ -2456,6 +2462,7 @@ def compare_readings(base: TestStateReading,
         b_passed = {b_key[n] for n in b.passed}
         abort_lost += sum(1 for n in _ab if c_key[n] in b_passed)
         newly_green |= {n for n in c.passed if c_key[n] in b_failed}
+        still_failing |= {n for n in c.failed if c_key[n] in b_failed}
         base_pass += b.pass_count
         cur_pass += c.pass_count
         base_exec += b.executed
@@ -2473,6 +2480,7 @@ def compare_readings(base: TestStateReading,
         newly_hung=tuple(sorted(newly_hung)),
         hung_tests=tuple(sorted(hung_tests)),
         newly_green=frozenset(newly_green),
+        still_failing=frozenset(still_failing),
         per_world=per_world,
         newly_red_aborted=frozenset(newly_red_aborted),
         abort_lost_pass=abort_lost)

@@ -35,7 +35,7 @@ from enum import StrEnum
 
 from pipeline_core.domain.abort_cause import AbortReading, read_abort
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
-from pipeline_core.domain.models import FnSite
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.reference_floor import doc_test_line
 from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
 from pipeline_core.domain.test_results import (
@@ -48,12 +48,14 @@ __all__ = [
     "abort_readings",
     "RunKind",
     "SiteKind",
+    "HeldSites",
     "StubHold",
     "TestOutcome",
     "PremiseEntry",
     "outcomes_of",
     "premise_moved",
     "ground_left",
+    "held_locators",
     "moved_in_scope",
     "names_of",
     "premise_of",
@@ -269,6 +271,25 @@ class StubHold:
 
     def held_by(self, site: FnSite) -> frozenset[str]:
         return frozenset(t for t, ss in self.by_test.items() if site in ss)
+
+
+#: The held view a fill reads after its own keeps: per failing test (bare
+#: name), the still-stubbed BODIES its first failure is inside, container
+#: included (`StubHold.by_test`). Until 2026-10-28 the fill carried this as
+#: locators, so a run opened on a measured blocker could not say which body
+#: of a name its tests stop in, and the frontier it is judged with could
+#: only have named the empty-container site, which every homonym inherits
+#: through `FailureFrontier.convicting_for` (run `2129106-ead996ab`: two
+#: bodies each of `ext_context`, `from`, `as_ref` and Debug `fmt` among the
+#: opened units).
+HeldSites = Mapping[str, frozenset[FnSite]]
+
+
+def held_locators(held: HeldSites) -> dict[str, frozenset[FnLocator]]:
+    """`held` keyed by the dispatch locator: the view of readers that order
+    or write whole units (the yield, the requeue, the opener's targets)."""
+    return {t: frozenset(FnLocator(s.file, s.fn_name) for s in ss)
+            for t, ss in held.items()}
 
 
 def stub_hold_of(

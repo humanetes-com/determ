@@ -97,8 +97,15 @@ def _rows() -> list[LedgerEntry]:
 
 
 def _grade(row: LedgerEntry, before: SweepView, after: SweepView) -> BodyState:
+    from dataclasses import replace
     attributed = set(row.convicting) | {t for t, _k in row.verdict_delta}
-    state, _delta = classify(row, attributed=attributed, before=before,
+    # The keep's comparison is the tests this landing's own sweep turned
+    # green. A missing comparison is not proof, so the position reading is
+    # taken on a row that records it.
+    gained = tuple(sorted(
+        t for t in attributed if t in after.passed and t in before.failed))
+    judged = replace(row, kept_green=gained)
+    state, _delta = classify(judged, attributed=attributed, before=before,
                              after=after, body_now_sha="")
     return state
 

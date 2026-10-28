@@ -835,6 +835,11 @@ class U2Decision(Enum):
     ACCEPT = auto()               # tests pass / gate off / inconclusive
     ACCEPT_EXTERNAL_ONLY = auto()  # only-external failures — keep fill, don't charge
     REJECT = auto()               # ≥1 real self failure — revert + re-prompt
+    # The gate was handed no test: the body is kept on compile alone and
+    # nothing about it was measured. Its own decision, never an ACCEPT, so
+    # no verdict row can read "none were failing" for a body no test ran
+    # against (run `2129106-ead996ab`, 2026-10-28: 28 opened-run bodies).
+    NO_TESTS = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -906,9 +911,25 @@ class U2Verdict:
     # Those sites as the settlement rendered them (`crash_text_of`), for a
     # caller that stores the reject for a later prompt.
     crash_reading: str = ""
+    # Whether a scoped test run produced this verdict. False for the
+    # accepts that never asked (gate off, no test command, a runner
+    # exception, a build that did not finish) and for NO_TESTS.
+    ran: bool = True
+
+    @property
+    def measured(self) -> bool:
+        """A scoped run of this body's tests produced the verdict."""
+        return self.ran and self.decision is not U2Decision.NO_TESTS
 
     @classmethod
-    def accept(cls, self_passed: frozenset[str] = frozenset()) -> U2Verdict:
+    def no_tests(cls) -> U2Verdict:
+        """The gate was handed no test for this body (:attr:`U2Decision.
+        NO_TESTS`)."""
+        return cls(U2Decision.NO_TESTS, ran=False)
+
+    @classmethod
+    def accept(cls, self_passed: frozenset[str] = frozenset(), *,
+               ran: bool = False) -> U2Verdict:
         """ACCEPT covers three different states — the unit's tests PASSED, the
         gate was off or had no tests to run, and the run was inconclusive
         (timeout, exception, fail-safe). They are one decision (keep the
@@ -921,8 +942,11 @@ class U2Verdict:
         stayed byte-identical across the whole run. Every ledger consumer —
         the retro round, the payoff detector, the calibration this project owes
         its shadow detector — was reading "50 successes" off a night that
-        changed nothing."""
-        return cls(U2Decision.ACCEPT, self_passed=self_passed)
+        changed nothing.
+
+        ``ran`` is True only for the accept read off a completed scoped
+        run; the three that never asked leave it False (:attr:`measured`)."""
+        return cls(U2Decision.ACCEPT, self_passed=self_passed, ran=ran)
 
     @classmethod
     def accept_external_only(
@@ -964,6 +988,26 @@ class U2Verdict:
     @property
     def blocking_fns(self) -> frozenset[FnSite]:
         return frozenset(loc for _f, loc in self.external)
+
+
+def unmeasured_keep_reason(verdict: U2Verdict | None) -> str:
+    """The verdict-row reason of a body kept with no attributed test
+    observed passing, by what the gate actually did. One sentence used to
+    cover all of these ("none were failing, or the scoped run was
+    inconclusive"), and it was printed for 28 bodies the gate had been
+    handed no test for (run `2129106-ead996ab`, 2026-10-28)."""
+    if verdict is None:
+        return ("kept — compiles; the test gate was not asked, so no "
+                "scoped test ran")
+    if verdict.decision is U2Decision.NO_TESTS:
+        return ("kept — compiles; no test is attributed to this body, so "
+                "no scoped test ran")
+    if not verdict.ran:
+        return ("kept — compiles; the scoped test run did not happen or "
+                "did not finish (gate off, no test command, or "
+                "inconclusive)")
+    return ("kept — compiles; its attributed tests ran and none was "
+            "observed passing")
 
 
 @dataclass(frozen=True)

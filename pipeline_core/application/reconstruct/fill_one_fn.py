@@ -58,6 +58,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     hollow_count,
     snapshot_src_tree,
 )
+from pipeline_core.application.reconstruct.test_locator import attributed_test_blocks
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain import unit_clock
 from pipeline_core.domain.attribution import canon_site, record_site, site_label
@@ -103,6 +104,7 @@ from pipeline_core.domain.refill_evidence import (
     pinned_observables_from_tests,
     render_test_excerpts,
     sweep_excerpts,
+    tests_in_prompt,
     unit_notes_text,
 )
 from pipeline_core.domain.refine import (
@@ -141,7 +143,12 @@ from pipeline_core.domain.retro_gate import (
 )
 from pipeline_core.domain.splice_feedback import reply_refusal_feedback
 from pipeline_core.domain.std_api_sigs import std_api_def
-from pipeline_core.domain.test_report import U2Decision, judge_refill
+from pipeline_core.domain.test_report import (
+    U2Decision,
+    U2Verdict,
+    judge_refill,
+    unmeasured_keep_reason,
+)
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.domain.verdict import (
     Disposition,
@@ -189,6 +196,10 @@ def _cfg_dead_fns_of(ctx: PerFnPassCtx, rel_file: str) -> frozenset[str]:
 
 # Attributed leaves whose source is sliced for pins — the impl routes' cap.
 _ATTRIBUTED_TEST_LEAF_CAP = 12
+# Test files quoted in a per-fn prompt: the name match's own default
+# (`test_locator.find_tests_for_fn`, ``max_blocks=4``) and the impl routes'
+# file cap.
+_TEST_FILE_CAP = 4
 
 
 @dataclass
@@ -382,6 +393,10 @@ class FillOneFn:
         # attempt closure can write without ``nonlocal``. CASHED at the
         # return site must read this, not the else of ``not _blocked_by``.
         _observed_passed: list[frozenset[str]] = [frozenset()]
+        # The latest U2 verdict itself: whether a scoped run produced it
+        # (`U2Verdict.measured`) is what the class and the verdict row read.
+        # None until a compiling attempt asked the gate.
+        _observed_verdict: list[U2Verdict | None] = [None]
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this unit — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
@@ -469,11 +484,19 @@ class FillOneFn:
         # (`evidence_for_record`); the guidance screen judges every record
         # against it.
         _unit_loc = FnLocator(rel_file, fn_name)
+        # The gate's set is this body's (`convicting_for_body`): a test the
+        # map put on a homonym by its container does not revert this one.
         _evidence = ConvictionEvidence(
-            frozenset(ctx.tdd_frontier_tests.convicting_for(_unit_loc))
+            frozenset(ctx.tdd_frontier_tests.convicting_for_body(
+                rel_file, fn_name, container))
             if ctx.tdd_frontier_tests is not None else frozenset())
+        # The body's own attributed tests (`tests_for_body`): when the sweep
+        # told two bodies of this name apart, the other body's tests are not
+        # what this one answers for.
+        _unit_site = FnSite(rel_file, fn_name, container)
         _answers = ConvictionEvidence(
-            frozenset(ctx.tdd_frontier_tests.tests_for(_unit_loc))
+            frozenset(ctx.tdd_frontier_tests.tests_for_body(
+                rel_file, fn_name, container))
             if ctx.tdd_frontier_tests is not None else frozenset())
         _poisoned_retro = ctx.retro_gate.record(judge_guidance(
             _retro_rec.get("guidance", ""), snapshot,
@@ -662,7 +685,7 @@ class FillOneFn:
             extras_ok = self._revert_extras(Path(ctx.target_src_dir), joint, ctx)
             return out.ok and extras_ok
 
-        test_blocks = self.tests.find_tests_for_fn(
+        _named_blocks = self.tests.find_tests_for_fn(
             ctx.tests_dir_files, fn_name,
             file_rel=rel_file, src_dir=ctx.src_for_macros,
             container=container,
@@ -675,6 +698,26 @@ class FillOneFn:
         _fn_leaves = tuple(dict.fromkeys(
             t.rsplit("::", 1)[-1]
             for t in sorted(_answers.tests)))[:_ATTRIBUTED_TEST_LEAF_CAP]
+        # The TEST section: the files that hold the tests this body answers
+        # for first (`attributed_test_blocks`, the file and impl routes'
+        # rule), then the files that mention its name, one file budget. The
+        # name match alone cannot find the tests of a body no test calls by
+        # name: run `2129106-ead996ab` (2026-10-28) asked 28 stubs that held
+        # 125–128 failing tests per wave with whatever files mentioned
+        # `construct` or `request_ref`, while the run's own frontier named
+        # the tests that stop in them (`attribution.frontier_for_run`).
+        test_blocks = attributed_test_blocks(
+            _fn_leaves,
+            lambda leaf: self.tests.find_tests_for_fn(
+                ctx.tests_dir_files, leaf)[:1],
+            file_cap=_TEST_FILE_CAP)
+        _seen_paths = {p for p, _ in test_blocks}
+        for _blk in _named_blocks:
+            if len(test_blocks) >= _TEST_FILE_CAP:
+                break
+            if _blk[0] not in _seen_paths:
+                _seen_paths.add(_blk[0])
+                test_blocks.append(_blk)
         _fn_sources = tuple(
             t for leaf in _fn_leaves
             for _, t in self.tests.find_tests_for_fn(ctx.tests_dir_files, leaf))
@@ -777,8 +820,8 @@ class FillOneFn:
             # panic, the probe's observed values, the source line quoted.
             error_excerpt = refill_seed_excerpt(render_test_excerpts(
                 sweep_excerpts(
-                    sorted(ctx.tdd_frontier_tests.tests_for(_unit_loc))[:6]
-                    if ctx.tdd_frontier_tests is not None else (),
+                    tests_in_prompt(ctx.tdd_frontier_tests, _unit_site,
+                                    observed_only=False),
                     ctx.tdd_frontier_tests,
                     read_source=reconstruction_file_reader(
                         ctx.target_src_dir, ctx.project_dir))))
@@ -903,7 +946,7 @@ class FillOneFn:
                                 fn_name, container, sig_text, rel_file),)),
                         observed="\n".join(x for x in (
                             observed_stub_excerpts(
-                                (_unit_loc,), ctx.tdd_frontier_tests,
+                                (_unit_site,), ctx.tdd_frontier_tests,
                                 read_source=reconstruction_file_reader(
                                     ctx.target_src_dir, ctx.project_dir)),
                             unit_notes_text((_unit_loc,),
@@ -1276,6 +1319,14 @@ class FillOneFn:
                     _attempt_baseline_test)
                 _u2_passed = _v.self_passed
                 _observed_passed[0] = _v.self_passed
+                _observed_verdict[0] = _v
+                if _v.decision is U2Decision.NO_TESTS:
+                    self.tel.emit("phase_c.u2.no_tests", data={
+                        "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
+                        "file": rel_file, "fn": fn_name,
+                        "container": container,
+                        "answers": len(_answers.tests),
+                    })
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the
                     # normal fix path: revert + re-prompt with the failing tests
@@ -1574,9 +1625,8 @@ class FillOneFn:
                                 "still-stubbed sibling" if _blocked_by
                                 else f"accepted — {len(_u2_passed)} attributed "
                                 "test(s) observed passing" if _u2_passed
-                                else "kept — compiles, but no attributed test "
-                                "was observed passing (none were failing, or "
-                                "the scoped run was inconclusive)"),
+                                else unmeasured_keep_reason(
+                                    _observed_verdict[0])),
                         outcome=(GateOutcome.POSITIVE
                                  if _u2_passed and not _blocked_by
                                  else GateOutcome.UNMEASURABLE),
@@ -2405,7 +2455,11 @@ class FillOneFn:
             passed=_observed_passed[0],
             unreachable=tests_could_not_run(blocked_sibling=bool(_blocked_by)),
             attributed=_answers.tests,
-            measured=not _blocked_by)
+            # Measured only when a scoped run produced the verdict: a body
+            # the gate was handed no test for (or that ran inconclusively)
+            # is not WRONG_BODY because its attributed tests are red.
+            measured=(not _blocked_by and _observed_verdict[0] is not None
+                      and _observed_verdict[0].measured))
         self.tel.emit("phase_c.fill.class", data={
             "cluster": ctx.cluster_name,
             "unit": f"{rel_file}::{fn_name}",

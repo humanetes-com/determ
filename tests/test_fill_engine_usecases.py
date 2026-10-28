@@ -1618,8 +1618,20 @@ def test_a_fill_with_no_test_observed_passing_is_not_a_positive_verdict(
     rows = _verdicts(fake)
     assert rows and rows[0]["disposition"] == "accept"
     assert rows[0]["outcome"] == "unmeasurable"
-    assert "no attributed test was observed passing" in rows[0]["reason"]
+    # The row names what the gate did, never "none were failing": this
+    # fake's gate never ran (the accept of a gate that is off).
+    assert "did not happen or did not finish" in rows[0]["reason"]
+    assert "none were failing" not in rows[0]["reason"]
     assert rows[0]["evidence_keys"] == []
+    # Handed no test, the gate says so (run `2129106-ead996ab`, 2026-10-28:
+    # 28 such keeps read "none were failing").
+    from pipeline_core.domain.test_report import U2Verdict
+    fake2 = FakeFill(run=(0, ""), regr=None, u2=U2Verdict.no_tests())
+    _fill_one(fake2).run(1, Stub(file="lib.rs", fn_name="answer"),
+                         ctx=_ctx(_mk_ws(tmp_path / "b")))
+    rows2 = _verdicts(fake2)
+    assert rows2 and rows2[0]["outcome"] == "unmeasurable"
+    assert "no test is attributed to this body" in rows2[0]["reason"]
 
 
 def test_a_fill_that_turned_a_test_green_is_positive_and_names_it(

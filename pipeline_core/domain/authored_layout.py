@@ -28,6 +28,7 @@ from pipeline_core.domain.private_surface import (
     SurfaceItemKind,
 )
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
+from pipeline_core.domain.rust_scan import attr_bracket_delta
 from pipeline_core.domain.scaffold_rewrite import (
     DefReplacement,
     find_definition_span,
@@ -267,6 +268,72 @@ def carry_frozen_derives(frozen: str, authored: str) -> str:
     return stripped[:decl.start()] + carried + stripped[decl.start():]
 
 
+_CFG_HEAD = re.compile(r"#\[\s*cfg\s*\(")
+
+
+def _attribute_prefix(text: str) -> tuple[list[str], list[tuple[int, int, str]], int] | None:
+    """``text``'s lines, the outer attributes in front of its item (first
+    line, last line, the attribute joined to one line), and the index of the
+    item's first line. Blank lines and comments in front of the item belong
+    to the prefix. None when no line follows the prefix (no item)."""
+    lines = text.split("\n")
+    attrs: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if not stripped or stripped.startswith("//"):
+            i += 1
+            continue
+        if not stripped.startswith("#["):
+            return lines, attrs, i
+        depth, j, buf = 0, i, []
+        while j < len(lines):
+            part = lines[j].strip()
+            buf.append(part)
+            depth += attr_bracket_delta(part)
+            if depth <= 0:
+                break
+            j += 1
+        else:
+            return None
+        attrs.append((i, j, " ".join(buf)))
+        i = j + 1
+    return None
+
+
+def carry_frozen_cfg(frozen: str, authored: str) -> str:
+    """The item's own `#[cfg(...)]` gate as the frozen definition has it.
+
+    Whether an item exists in a world is a fact of the crate, not a layout
+    choice. On run `42057-641e589c` (2026-10-26) the authored `Backtrace`
+    enum dropped the frozen `#[cfg(not(feature = "std"))]`, so under `std`
+    the skeleton held both the enum and `pub(crate) use std::backtrace::
+    Backtrace`, and every attempt of the component failed E0255.
+
+    Only the outer attributes in front of the item are read: the reply's
+    `#[cfg(...)]` there are replaced by the frozen definition's, and removed
+    when the frozen item has none. A `cfg` inside the body (a field, a
+    variant, a statement) is the item's design and is left; so is
+    `#[cfg_attr(...)]`, the same scope the derive carry has. Every item kind:
+    the prefix is read off the text, not off a struct/enum/union matcher.
+    Returns ``authored`` unchanged when the two gates already agree."""
+    f = _attribute_prefix(frozen)
+    a = _attribute_prefix(authored)
+    if f is None or a is None:
+        return authored
+    want = [txt for _s, _e, txt in f[1] if _CFG_HEAD.match(txt)]
+    lines, attrs, decl = a
+    have = [(s, e, txt) for s, e, txt in attrs if _CFG_HEAD.match(txt)]
+    if ["".join(x.split()) for x in want] == ["".join(t.split()) for _s, _e, t in have]:
+        return authored
+    drop = {k for s, e, _t in have for k in range(s, e + 1)}
+    indent = lines[decl][:len(lines[decl]) - len(lines[decl].lstrip(" \t"))]
+    out = [ln for k, ln in enumerate(lines[:decl]) if k not in drop]
+    out += [f"{indent}{txt}" for txt in want]
+    out += lines[decl:]
+    return "\n".join(out)
+
+
 def carry_frozen_facts(
     items: tuple[PrivateSurfaceItem, ...], authored: Mapping[str, AuthoredItem],
 ) -> dict[str, AuthoredItem]:
@@ -320,7 +387,8 @@ def carry_stored_definition(item: PrivateSurfaceItem, stored: str) -> str:
 
 
 def _carry_item(item: PrivateSurfaceItem, stored: str) -> str:
-    text = carry_frozen_repr(item.definition, stored)
+    text = carry_frozen_cfg(item.definition, stored)
+    text = carry_frozen_repr(item.definition, text)
     if item.kind is SurfaceItemKind.PUB_FIELDS:
         text = carry_frozen_derives(item.definition, text)
     else:

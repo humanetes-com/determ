@@ -109,11 +109,16 @@ def grcov_command(grcov: Path, profraw_dir: Path, project_dir: Path,
 
 
 def _record_dict(r: FnRecord | Mapping[str, Any]) -> dict[str, Any]:
+    """The record's own serialization (`FnRecord.to_dict`), never a subset.
+    A hand-picked subset dropped `container`, so every site label this
+    runner produced was a bare `file::fn` while a reach target is labelled
+    with its impl (`src/x.rs::f [impl T]`): the reach round judged every
+    impl method missed and chose its targets from those same bare labels.
+    Run `2355041-eae39441` (2026-10-27): a clean replay of 21 recorded
+    misses reached 17 of them."""
     if isinstance(r, Mapping):
         return dict(r)
-    return {"file": r.file, "fn_name": r.fn_name,
-            "sig_byte_start": r.sig_byte_start, "body_byte_end": r.body_byte_end,
-            "is_test": r.is_test}
+    return r.to_dict()
 
 
 def _crate_name(project_dir: Path) -> str:

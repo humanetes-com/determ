@@ -27,6 +27,7 @@ from pipeline_core.application.reconstruct.attribution import make_fn_site_locat
 from pipeline_core.application.reconstruct.block_evidence import (
     assemble_block_evidence,
     render_prior_regression,
+    render_sibling_regression,
 )
 from pipeline_core.application.reconstruct.cargo_errors import (
     ecodes_in_text,
@@ -171,6 +172,7 @@ from pipeline_core.domain.fill_schedule import (
 from pipeline_core.domain.held_stubs import HeldStubs
 from pipeline_core.domain.identity import ContainerId, RetroKey
 from pipeline_core.domain.ignored_inputs import (
+    body_identity,
     declined_by_ignored_inputs,
     identity_name,
     ignored_inputs_feedback,
@@ -240,7 +242,11 @@ from pipeline_core.domain.pair_fill import (
     union_pair_callees,
 )
 from pipeline_core.domain.pass_payoff import UnitOutcome, assess_pass_payoff
-from pipeline_core.domain.post_fill_mismatch import still_stubbed_after_accept
+from pipeline_core.domain.post_fill_mismatch import (
+    BodyKey,
+    put_back_bodies,
+    still_stubbed_after_accept,
+)
 from pipeline_core.domain.reasoning_cap import (
     CallCapReading,
     observe_call,
@@ -316,6 +322,8 @@ from pipeline_core.domain.rust_idents import (
     signature_fixed_by_trait,
 )
 from pipeline_core.domain.rust_scan import stubbed_fn_names
+from pipeline_core.domain.sibling_regression import stamped as sibling_stamped
+from pipeline_core.domain.sibling_regression import union_of as sibling_union
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.slice_session import (
     SessionSlice,
@@ -336,6 +344,7 @@ from pipeline_core.domain.test_report import (
     U2Verdict,
     judge_refill,
     turned_green,
+    unmeasured_keep_reason,
 )
 from pipeline_core.domain.test_results import (
     REGRESSED_ATTEMPT,
@@ -941,9 +950,35 @@ def prepare_impl_fill(
             if changed:
                 _save_retrospectives(project_dir, retros_cache)
 
+    def _stamp_sibling_reddened(keys: Iterable[RetroKey], *,
+                                tests: Iterable[str],
+                                outputs: Mapping[str, str], by: str) -> None:
+        """Every unit a reverted write covered carries what that write broke
+        (`sibling_regression`), so the next route over any of them is told,
+        whichever route it is. Measured: no model call, written before any
+        retrospective is asked."""
+        names = sorted({str(n) for n in tests})
+        if not names:
+            return
+        with _counters_lock:
+            for key in keys:
+                retros_cache[key] = sibling_stamped(
+                    retros_cache.get(key), tests=names, outputs=outputs, by=by)
+            _save_retrospectives(project_dir, retros_cache)
+
+    def _sibling_regression_for(keys: Iterable[RetroKey], pins: str,
+                                skip: Iterable[str] = ()) -> str:
+        """The section for what a reverted write by any route over `keys`
+        broke, less the tests the caller's own record already renders."""
+        tests, outputs, writers = sibling_union(
+            (retros_cache.get(k) for k in keys), skip=skip)
+        return render_sibling_regression(tests, pins, outputs, writers)
+
     def _prior_regression_for(keys: Iterable[RetroKey], pins: str) -> str:
         """The rendered PRIOR_REGRESSION section for a prompt over `keys`:
-        the union of what those records say went red, with what it printed."""
+        the union of what those records say went red, with what it printed,
+        then what a reverted write by another route over them broke."""
+        keys = list(keys)
         # Grouped by what became of the attempt that reddened them: one
         # section per claim, so a kept unit's forgiven losses are not
         # labelled as a sibling's revert.
@@ -957,9 +992,12 @@ def prepare_impl_fill(
                     group.append(str(n))
             outputs.update({str(k): str(v) for k, v in dict(
                 rec.get(REGRESSED_OUTPUT) or {}).items()})
-        return "\n".join(
+        own = "\n".join(
             render_prior_regression(tuple(ns), pins, outputs, attempt)
             for attempt, ns in names.items() if ns)
+        sibling = _sibling_regression_for(
+            keys, pins, skip=[n for ns in names.values() for n in ns])
+        return "\n".join(x for x in (own, sibling) if x)
 
     def _note_declined_units(
         file_rel: str, names: Sequence[str],
@@ -2041,7 +2079,7 @@ def prepare_impl_fill(
                 refill_evidence="\n".join(
                     s for s in (_file_refill_evidence,
                                 observed_stub_excerpts(
-                                    (FnLocator(b.file, m.fn_name)
+                                    (FnSite(b.file, m.fn_name, b.container)
                                      for b in fblocks for m in b.stub_members),
                                     _frontier_tests, read_source=_read_source),
                                 unit_notes_text(
@@ -2343,7 +2381,7 @@ def prepare_impl_fill(
                         _ffb = reply_refusal_feedback(
                             _fsp, unit=_fn, file_rel=file_rel)
                         if _ffb is not None and not _dup:
-                            _text_refused[_fn] = _ffb
+                            _text_refused[body_identity(_fn, rb.container)] = _ffb
                             _cls(FillOutcomeClass.COMPILE_FAIL,
                                  f"{file_rel}::{_fn}", "file")
                         elif reason != "target_not_stub" and not _dup:
@@ -2429,7 +2467,9 @@ def prepare_impl_fill(
                             _rfb = reply_refusal_feedback(
                                 _rsp, unit=_p["fn_name"], file_rel=file_rel)
                             if _rfb is not None:
-                                _text_refused[_p["fn_name"]] = _rfb
+                                _text_refused[body_identity(
+                                    _p["fn_name"],
+                                    str(_rec.get("container", "")))] = _rfb
                                 _cls(FillOutcomeClass.COMPILE_FAIL,
                                      f"{file_rel}::{_p['fn_name']}", "file")
                 if spliced_now == 0 and _text_refused:
@@ -2437,7 +2477,9 @@ def prepare_impl_fill(
                     # the reply's own text: a failed attempt on those names,
                     # whose next turn carries the parser's diagnostic — the
                     # outcome every splice route takes (`splice_feedback`).
-                    _refused_names = frozenset(_text_refused)
+                    _refused_ids = frozenset(_text_refused)
+                    _refused_names = frozenset(
+                        identity_name(n) for n in _refused_ids)
                     if _retry_names is None:
                         # The rest of a first attempt's names are lost as
                         # before; a refused name was answered and charged.
@@ -2445,7 +2487,7 @@ def prepare_impl_fill(
                             FnLocator(file_rel, n) for n in wanted
                             if n not in _refused_names)
                     prior_error = "\n\n".join(
-                        _text_refused[n] for n in sorted(_refused_names))
+                        _text_refused[n] for n in sorted(_refused_ids))
                     _file_kind = LastErrorKind.COMPILE
                     if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
                         _log(f"  [phase-c/file] {glabel}: nothing spliced — "
@@ -2494,6 +2536,7 @@ def prepare_impl_fill(
                     return
                 _attempted_names = [b.fn_name for b in _landed]
                 _peel_reverted: tuple[str, ...] = ()
+                _peel_dropped: frozenset[BodyKey] = frozenset()
                 _peel_retry = False
                 _peel_err = ""
                 rc, cargo_out, _diags = _run_cargo_check_diag(
@@ -2527,6 +2570,9 @@ def prepare_impl_fill(
                         norm_src_rel=_norm_src_rel)
                     if isinstance(_peel, PeelResult):
                         cargo_out, _diags = _p_out, list(_p_diags)
+                        _peel_dropped = frozenset(
+                            BodyKey.of(b.fn_name, b.container)
+                            for b in _landed if b not in _peel.kept)
                         _landed = list(_peel.kept)
                         spliced_now = len(_landed)
                         _peel_reverted = _peel.reverted
@@ -2925,12 +2971,15 @@ def prepare_impl_fill(
                     # Peeled, text-refused and declined names were put
                     # back on purpose, each with its own line and verdict
                     # row (`domain/post_fill_mismatch`).
+                    _asked_bodies = frozenset(
+                        BodyKey.of(m.fn_name, b.container)
+                        for b in fblocks for m in b.stub_members)
                     _left = still_stubbed_after_accept(
                         _scan_unimplemented_records_for_cluster(
                             target_src_dir, cluster) or [],
-                        file_rel=file_rel, asked=stub_names,
-                        put_back={*_peel_reverted, *(
-                            identity_name(n) for n in _text_refused)},
+                        file_rel=file_rel, asked=_asked_bodies,
+                        put_back=put_back_bodies(
+                            _peel_dropped, _text_refused, _asked_bodies),
                         norm=_norm_src_rel)
                     if _left:
                         # The still-stubbed members were charged where the
@@ -2970,6 +3019,7 @@ def prepare_impl_fill(
                                 is U2Decision.ACCEPT_EXTERNAL_ONLY)),
                         attributed=_attr_f,
                         measured=(_u2_file is not None
+                                  and _u2_file.measured
                                   and not _u2_file.aborted))
                     _cls(_class_f, glabel, "file")
                     _emit("phase_c.file.fill.done", data={
@@ -3000,9 +3050,7 @@ def prepare_impl_fill(
                          "observed passing" if _paid_f
                          else f"kept — {len(_passed_f)} attributed test(s) "
                          "pass and none moved with this keep" if _passed_f
-                         else "kept — compiles, but no attributed test was "
-                         "observed passing (none were failing, or the scoped "
-                         "run was inconclusive)"),
+                         else unmeasured_keep_reason(_u2_file)),
                         outcome=(GateOutcome.POSITIVE
                                  if _paid_f and not _deferred_f
                                  else GateOutcome.UNMEASURABLE),
@@ -3014,9 +3062,10 @@ def prepare_impl_fill(
                     # the same retry as a peeled name: the kept remainder is
                     # judged, and the next turn carries the parser's
                     # diagnostic for exactly those names.
+                    _landed_ids = {body_identity(b.fn_name, b.container)
+                                   for b in _landed}
                     _text_retry = frozenset(
-                        n for n in _text_refused
-                        if n not in {b.fn_name for b in _landed})
+                        n for n in _text_refused if n not in _landed_ids)
                     if _text_retry and _attempt >= _FILE_FIRST_MAX_ATTEMPTS:
                         _text_retry = frozenset()
                     if _peel_retry or _text_retry or _crash_retry:
@@ -3052,7 +3101,8 @@ def prepare_impl_fill(
                             # tells the model not to re-emit.
                             _file_kind = LastErrorKind.CRASHED
                         _revert_cls = None
-                        _retry_names = _peeled | _crashed | _text_retry
+                        _retry_names = (_peeled | _crashed | frozenset(
+                            identity_name(n) for n in _text_retry))
                         _kept_names = sorted(
                             {b.fn_name for b in _landed} - _retry_names)
                         _retry_note = (
@@ -3069,7 +3119,8 @@ def prepare_impl_fill(
                                "back to their previous text: the crash below "
                                "names them." if _crashed else "")
                             + (" The bodies for "
-                               + ", ".join(f"`{n}`" for n in sorted(_text_retry))
+                               + ", ".join(f"`{identity_name(n)}`"
+                                           for n in sorted(_text_retry))
                                + " were refused for their own text before "
                                "reaching the file: the diagnostic below says "
                                "why." if _text_retry else "")
@@ -4375,6 +4426,7 @@ def prepare_impl_fill(
                                             external_only=_u2_external_only),
                                         attributed=_attr_i,
                                         measured=(_u2_impl is not None
+                                                  and _u2_impl.measured
                                                   and not _u2_impl.aborted)),
                          block_id, "impl")
                     _verdict_row(
@@ -4385,9 +4437,7 @@ def prepare_impl_fill(
                          "crash-evidenced" if _kept_i
                          else f"accepted — {len(_passed_i)} attributed test(s) "
                          "observed passing" if _passed_i
-                         else "kept — compiles, but no attributed test was "
-                         "observed passing (none were failing, or the scoped "
-                         "run was inconclusive)"),
+                         else unmeasured_keep_reason(_u2_impl)),
                         outcome=(GateOutcome.POSITIVE
                                  if _passed_i and not _kept_i
                                  else GateOutcome.UNMEASURABLE),
@@ -5552,7 +5602,15 @@ def prepare_impl_fill(
                 same transaction read the lesson back (`joint_members` exempts
                 it from `regression_scoped`; `joint_body_sha` expires it when
                 either member's body moves). Transient LLM failures update no
-                state, exactly as the per-impl retro rule."""
+                state, exactly as the per-impl retro rule. The measured part
+                goes on both members' unit records first, whatever the
+                retrospective returns, so every later route over them reads it
+                (`sibling_regression`)."""
+                _stamp_sibling_reddened(
+                    [_retro_key(s.file, s.fn_name, s.container)
+                     for s in (pair.dispatcher, pair.implementer)],
+                    tests=_rcmp.newly_red, outputs=_rcmp.newly_red_output,
+                    by=pair_id)
                 try:
                     retro = _phase_c_retrospective(
                         fn_name="*pair*",
@@ -6424,6 +6482,29 @@ def prepare_impl_fill(
                     "admitted": [{**site_payload(u), "coupling": c}
                                  for u, c in _ws.coupled.items()]})
             _sl, _records = _ws.slice_, _ws.records
+            if _sl.frozen:
+                # The run carries every body this fill kept; the slice
+                # keeps, and the prompt names, only those its grown
+                # editable set held. A landed body outside the set has no
+                # record here and is refused as out of scope anyway.
+                _blocked = tuple(dict.fromkeys(
+                    [*(u for u in _sl.units if locator_of(u) in _sl.frozen),
+                     *(u for u in _records if locator_of(u) in _sl.frozen)]))
+                if _blocked:
+                    _log(f"  [phase-c/session] {_sl.label()}: "
+                         f"{len(_blocked)} unit(s) kept by an earlier run of "
+                         "this fill are not editable: " + ", ".join(
+                             site_label(u) for u in _blocked[:6]))
+                _sl = replace(_sl, units=tuple(
+                    u for u in _sl.units if locator_of(u) not in _sl.frozen),
+                    frozen=frozenset(locator_of(u) for u in _blocked))
+                _records = {u: r for u, r in _records.items()
+                            if locator_of(u) not in _sl.frozen}
+            if not _sl.units or not _records:
+                # Every editable unit was kept by an earlier run of this
+                # fill, or none of them has a record. There is no body
+                # this session may write.
+                return RouteRunReport(empty=True)
             _units = _sl.units
             _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
             _tblocks = attributed_test_blocks(
@@ -6480,6 +6561,10 @@ def prepare_impl_fill(
                 {str(k): str(v) for k, v in dict(
                     _srec.get(REGRESSED_OUTPUT) or {}).items()},
                 regressed_attempt_of(_srec))
+            _sib_regr = _sibling_regression_for(
+                [_retro_key(u.file, u.fn_name, u.container) for u in _sl.units],
+                _spins, skip=[str(t) for t in (_srec.get("regressed") or [])])
+            _prior_regr = "\n".join(x for x in (_prior_regr, _sib_regr) if x)
             _bp = ""
             if not _blueprint.empty:
                 _bp = _blueprint.slice_for(
@@ -6721,6 +6806,13 @@ def prepare_impl_fill(
                         hung=bool(_out.final.hung)).value
                 retros_cache[_skey] = _new_rec
                 _save_retrospectives(project_dir, retros_cache)
+            if not _out.kept and _out.newly_red:
+                # A reverted session's breakage on its units' records, so the
+                # pair, file or next session over any of them is told.
+                _stamp_sibling_reddened(
+                    [_retro_key(u.file, u.fn_name, u.container) for u in _sl.units],
+                    tests=_out.newly_red, outputs=_out.newly_red_output,
+                    by=_sl.label())
             if _out.kept and _out.newly_red:
                 # The forgiven losses on the UNIT records too: the next
                 # file-first / per-impl prompt for a kept unit reads its own
@@ -6729,11 +6821,14 @@ def prepare_impl_fill(
                     [_retro_key(u.file, u.fn_name, u.container) for u in _out.kept],
                     newly_red=_out.newly_red,
                     newly_red_output=_out.newly_red_output)
-            if _out.kept and _out.final is not None:
-                note_kept(_out.final.pass_delta,
-                          newly_red=tuple(sorted(_out.newly_red)),
-                          newly_crashed=tuple(_out.final.crashed),
-                          newly_green=_out.final.newly_green)
+            # On the tree the session left: after a peel, the peel's held
+            # reading, not the best turn's reading from before it.
+            _kc = _out.kept_comparison()
+            if _kc is not None:
+                note_kept(_kc.delta, newly_red=_kc.newly_red,
+                          newly_crashed=_kc.newly_crashed,
+                          newly_green=_kc.newly_green,
+                          still_failing=_kc.still_failing)
             # A joint ask's verdict over its candidate's own tests, read on
             # the tree the session LEFT (`held_green`: after any peel), not
             # on its best reading before the peel — a net-negative seed the

@@ -87,10 +87,14 @@ def _per_fn(targets: Iterable[FnLocator], *, bodies: str = "new",
 
 def _ev(grades: dict[FnLocator, tuple[str, str | None]], *,
         standing: dict[FnLocator, str] | None = None,
-        run_id: str = "r1", iteration: int = 1) -> UnitEvidence:
-    return UnitEvidence(
-        grades={(run_id, iteration, u): g for u, g in grades.items()},
-        standing_flat=standing or {})
+        run_id: str = "r1", iteration: int = 1,
+        compared: bool = True) -> UnitEvidence:
+    """Each graded landing carries its keep's own comparison unless
+    ``compared`` is False (a keep a stop interrupted, or a route row that
+    recorded none)."""
+    keys = {(run_id, iteration, u): g for u, g in grades.items()}
+    return UnitEvidence(grades=keys, standing_flat=standing or {},
+                        compared=frozenset(keys) if compared else frozenset())
 
 
 def _deferred_units(rows: list[RouteLedgerRow], run: RouteRun,
@@ -148,6 +152,36 @@ def test_paying_is_the_unit_s_grade_not_the_row_s_cash() -> None:
     assert by[frozenset({_B})] == "served"
     control = schedule([_per_fn([_B])], rows, oracle_fp="o", hollow={})
     assert control.ordered[0].reason == "paying"
+
+
+def test_a_proven_grade_without_its_keep_s_comparison_is_not_a_payment() -> None:
+    """Proven is the tree state: a test passes with the body on the tree.
+    Only the keep's own comparison says THIS keep turned it; without it (a
+    stop interrupted the wave, or the route row recorded none) a sibling's
+    cash beside it was credited. On the 28 recorded runs that write the
+    comparison, 5 proven grades had none. Control: with the comparison the
+    same grade pays."""
+    rows = [_row([_A], RunOutcome.CASHED, kept=[_A], delta=1)]
+    blind = schedule([_per_fn([_A]), _OTHER], rows, oracle_fp="o", hollow={},
+                     unit_evidence=_ev({_A: ("sa", "proven")}, compared=False))
+    assert {s.run.label: s.reason for s in blind.ordered}["per-fn batch"] == "served"
+    seen = schedule([_per_fn([_A]), _OTHER], rows, oracle_fp="o", hollow={},
+                    unit_evidence=_ev({_A: ("sa", "proven")}))
+    assert {s.run.label: s.reason for s in seen.ordered}["per-fn batch"] == "paying"
+
+
+def test_unit_evidence_marks_a_landing_compared_by_its_row() -> None:
+    def e(state: str, it: int, sha: str, kept_green=None):  # type: ignore[no-untyped-def]
+        return SimpleNamespace(key=SimpleNamespace(file=_A.file, fn_name=_A.fn_name),
+                               run_id="r1", iteration=it, body_sha=sha,
+                               state=state, oracle_fp="o", kept_green=kept_green)
+    with_cmp = unit_evidence_from([e("landed", 3, "s1", ("t_a",)), e("proven", 4, "s1")],
+                                  {}, oracle_fp="o")
+    assert with_cmp.paid("r1", 3, _A)
+    without = unit_evidence_from([e("landed", 3, "s1"), e("proven", 4, "s1")],
+                                 {}, oracle_fp="o")
+    assert not without.paid("r1", 3, _A)
+    assert without.grade("r1", 3, _A) == ("s1", "proven")
 
 
 def test_an_advanced_landing_sorts_behind_a_unit_not_yet_tried() -> None:

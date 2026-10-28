@@ -1016,18 +1016,32 @@ def test_a_view_without_test_file_items_writes_no_index() -> None:
     assert GIVENS_INDEX_NAME not in feature_files(suite)
 
 
-def test_the_rule_prompt_sends_the_given_it_was_measured_on() -> None:
-    """The rule prompt reads the given through `example_given` and sends the
-    same bytes as before: changing what the judge reads is a measurement
-    change with its own reading."""
-    from pipeline_core.prompts.behaviour_rules import _example_block
-    suite = _suite()
-    with_helpers = [s for s in suite.specs if s.helpers]
-    assert with_helpers
-    for s in (*suite.specs, *_given_suite().specs):
-        block = _example_block(s, with_then=False)
-        old = _pasted_given(s)
-        assert ("GIVEN:\n```rust\n" + old + "\n```" in block) if old else ("GIVEN:" not in block)
+def test_the_rule_prompt_sends_each_helper_once_and_each_example_names_its_own() -> None:
+    """Stage 5. The rule prompt pasted each example's helper closure under
+    its own `GIVEN:`; over the stored stable book at 24 examples per
+    prediction prompt, 50.5% of 279,912 chars was helper text repeated
+    inside its own chunk. Claims: every helper an example uses is printed
+    once per prompt, in a HELPERS block under its key; each example's GIVEN
+    names exactly those keys and keeps its own setup. Control: the pasted
+    rendering repeats the shared closure once per example that uses it."""
+    from pipeline_core.domain.behaviour import example_given, helper_items
+    from pipeline_core.prompts.behaviour_rules import build_then_prediction_prompt
+    suite = _given_suite()
+    prompt = build_then_prediction_prompt(crate="c", glossary=(), examples=suite.specs)
+    shared = _SHARED["tests/shared/mod.rs::build"]
+    assert prompt.count(shared) == 1
+    for s in suite.specs:
+        keys = example_given(s).keys
+        used = [k for k, txt in helper_items(s) if k in keys and txt.strip()]
+        block = prompt[prompt.index(f'<EXAMPLE id="{s.behaviour_id}">'):]
+        block = block[:block.index("</EXAMPLE>")]
+        assert ("uses HELPERS: " + ", ".join(used)) in block if used else "uses HELPERS" not in block
+        if s.setup.strip():
+            assert s.setup in block
+        for k in used:
+            assert f"// HELPER {k}" in prompt
+    pasted = "".join(_pasted_given(s) for s in suite.specs)
+    assert pasted.count(shared) == 2
 
 
 _PASTES_HELPERS = re.compile(r"\*\s*\w+\.helpers\b")

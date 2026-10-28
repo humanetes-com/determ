@@ -221,3 +221,80 @@ def test_a_function_owed_on_the_session_rung_opens_a_session_writer() -> None:
                                    {_RENDER: "unit"})
     assert [s.run.label for s in opened_u] == [_file().label]
     assert [s.run.label for s in still_u] == [_session().label]
+
+
+def test_a_held_session_owed_a_function_opens_after_its_holder_with_its_keeps_frozen(
+        tmp_path) -> None:
+    """A pair holds the only session that writes an owed function. The cover
+    opens the session at its own position, after the pair, and it opens
+    with the bodies the pair kept frozen. Controls: without the owed set the
+    session waits `pair_wait` and the function is `slice_unit_starved`;
+    with the pre-fix open rule (a session returned unchanged) the session
+    opens free to rewrite the pair's kept body."""
+    import pytest
+
+    from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
+    from pipeline_core.application.reconstruct import fill_reading
+    from pipeline_core.application.reconstruct import fill_scheduler as fsx
+    from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
+
+    runs = [_session(), _pair()]
+    held = schedule(runs, _rows(), oracle_fp="o", hollow={})
+    assert {s.run.label: s.reason for s in held.deferred} == {
+        _session().label: "pair_wait"}
+    assert [v.kind for v in violations(decided_from_schedule(held), hollow={},
+                                       due={_RENDER})] == ["slice_unit_starved"]
+
+    owed = schedule(runs, _rows(), oracle_fp="o", hollow={}, due={_RENDER},
+                    due_rungs={_RENDER: "session"})
+    assert [s.run.label for s in owed.ordered] == [_pair().label, _session().label]
+    assert not violations(decided_from_schedule(owed), hollow={}, due={_RENDER})
+
+    seen: list[tuple[str, frozenset[FnLocator]]] = []
+
+    class _Route:
+        parallel = False
+
+        def __init__(self, run: RouteRun) -> None:
+            self.kind = run.kind
+            self._run = run
+
+        def plan(self) -> list[RouteRun]:
+            return [self._run]
+
+        def run(self, run: RouteRun, clock) -> RouteRunReport:
+            seen.append((run.label, frozenset(run.frozen)))
+            clock.may_claim()
+            return RouteRunReport(model_calls=1, kept=frozenset(run.targets))
+
+    def _fill(root) -> None:
+        store = RouteLedgerStore(root)
+        store.append("p", _rows())
+        fill_reading.reset_last_comparison()
+        seen.clear()
+        n = iter(range(1_000_000))
+        fsx.execute_fill(
+            [_Route(_session()), _Route(_pair())], hollow={},
+            bodies_sha=lambda _t: f"b{next(n)}",
+            deps=fsx.FillExecutionDeps(
+                log=lambda _m: None, emit=lambda *_a, **_k: None,
+                check_stop=lambda _c: None, ledger=store,
+                project="p", cluster="c", run_id="r", iteration=8,
+                oracle_fp="o", scheduled=True, due=frozenset({_RENDER}),
+                due_rungs={_RENDER: "session"}))
+
+    fixed = tmp_path / "fixed"
+    fixed.mkdir()
+    _fill(fixed)
+    assert [label for label, _f in seen] == [_pair().label, _session().label]
+    assert seen[1][1] >= {_FMT, _DEBUG}
+
+    real = fsx.withhold_landed
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(fsx, "withhold_landed", lambda run, landed: (
+            (run, frozenset()) if run.kind is RouteKind.SESSION
+            else real(run, landed)))
+        control = tmp_path / "control"
+        control.mkdir()
+        _fill(control)
+    assert seen[1] == (_session().label, frozenset())

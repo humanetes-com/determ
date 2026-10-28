@@ -1,0 +1,3175 @@
+{
+ "source": "logs/events.jsonl llm.response rows of phase t0d.*, parsed with parse_behaviour_specs, 2026-10-04 to 2026-10-27",
+ "whens": [
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err2.is::<MyErr>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "format!(\"{:?}\", err.backtrace())"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "std::error::request_ref::<Backtrace>(&*boxed)"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.context(\"more\")"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<String>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.downcast_mut::<String>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<String>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "boxed.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "trigger().unwrap_err().to_string()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.context(\"more\")"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err2.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.thiserror_provide(&mut req)"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<std::io::Error>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.probes",
+   "when": "err2.downcast_mut::<std::io::Error>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left < right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v1 == v2).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a > b).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a != b).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(true == false).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 == s2).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s.is_empty()).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(!true).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "run().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "run().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "run().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(1 == 2).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(vec![1,2,3].len() == 5).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Foo>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Inner>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Foo>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", outer().unwrap_err())"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", top().unwrap_err())"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", wrapped())"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(5 < 3).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x >= y).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x == y).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s.len() > 10).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(42 == 100).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "test1().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "test2().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "test3().unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "e.is::<Foo>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "e.downcast_ref::<A>().is_some()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "e.is::<C>()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v_left == v_right).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(big_map == HashMap::new()).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 == s2).unwrap_err()"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", e)"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", e)"
+  },
+  {
+   "run": "450922-661c5e9f",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", e)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "v.downcast_ref::<Counter>().is_some()"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", d)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "capacity_hint()"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "checked_div(1, 0)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "v.downcast_ref::<Counter>().is_some()"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "type_name_of_val(o)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "capacity_hint()"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.probes",
+   "when": "clamp_add_report(capacity_hint(), 1)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(v)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(v)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(v)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(0, 0)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(dividend, 0)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(42, zero)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(-1)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(add(20, 22))"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "encode_tag(checked_div(81, 9).unwrap())"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "(capacity_hint(), capacity_hint())"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{}:{}\", capacity_hint(), capacity_hint())"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "[capacity_hint(), capacity_hint(), capacity_hint()]"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(h, 1)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(capacity_hint(), 0usize + 1usize)"
+  },
+  {
+   "run": "80296-1d0ebc3c",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(hint, inc)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "v.downcast_ref::<Guarded>().is_some()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "obj.describe()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "cap_limit()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "checked_div(1,0)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "v.is::<Counter>()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "obj.describe()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "cap_limit()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.probes",
+   "when": "wrapping_total(&data)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "Tagged(Reason::Timeout).tagged(\"net\")"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "Tagged(Reason::Refused).tagged(\"api\")"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "Tagged(err).tagged(\"division\")"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "obj.describe()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "Reason::Timeout.describe()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "ref_obj.describe()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "cap_limit()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "cap_limit() as u64"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "[cap_limit()]"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(2, 0)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(5, zero)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "checked_div(-99, 0)"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "v.downcast_ref::<Guarded>().is_some()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "v.is::<Guarded>()"
+  },
+  {
+   "run": "101937-9cd7b627",
+   "phase": "t0d.rule_probes",
+   "when": "v.downcast_ref::<Guarded>().is_some()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err2.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "format!(\"{:?}\", err.backtrace())"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "res.unwrap_err().to_string()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.context(\"outer\")"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<String>()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.downcast_mut::<io::Error>()"
+  },
+  {
+   "run": "787070-3a3922c7",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<io::Error>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "boxed.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.chain().count()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.context(\"c\")"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<String>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.downcast_mut::<std::io::Error>().is_some()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<X>().is_some()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.is::<MyErr>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "format!(\"{:?}\", boxed)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", e)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", err)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.backtrace()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.context(\"again\")"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.into_boxed_dyn_error()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.thiserror_provide"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.chain()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.downcast::<String>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.probes",
+   "when": "e.downcast_mut::<String>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Foo>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Outer>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<Root>().is_some()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Leaf>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<M>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Unrelated>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err2"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<B>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Absent>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", f().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{}\", f().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "h().unwrap_err()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "make().unwrap_err()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "make().unwrap_err()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "e.is::<DirectErr>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "e.is::<std::io::Error>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "outer_err.is::<Inner>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<SimpleErr>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<BaseErr>().is_some()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<std::io::Error>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<MyCtx>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Root>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Outer>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", e3)"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Single>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<OuterCtx>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<L1>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{}\", f().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", f().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", f().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", c().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", outer().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:?}\", h().unwrap_err())"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "e.to_string()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "e.to_string()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "e.to_string()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<A>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Base>()"
+  },
+  {
+   "run": "1397698-aaac983d",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Top>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<io::Error>().is_some()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.context(\"additional context\")"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<std::io::Error>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast_mut::<std::io::Error>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<std::io::Error>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err2.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.backtrace().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.context(\"again\")"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.into_boxed_dyn_error()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.reallocate_into_boxed_dyn_error_without_backtrace()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.thiserror_provide(&mut req)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.chain()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast::<String>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.probes",
+   "when": "err.downcast_mut::<String>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(!true).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(always_false()).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left < right).unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 >= s2).unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(opt_a == opt_b).unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(1 == 2).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v.len() > 5).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(map.contains_key(\"a\")).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(1 == 2).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(\"hello\" != \"hello\").unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(Some(10) == Some(20)).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<L4>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<Outer>().is_some()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Solo>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left > right).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v.is_empty()).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "r.unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "r.unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "r.unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<L4>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<Outer>()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "err.chain().count()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 == s2).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v1 == v2).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(big == [1u8; 400]).unwrap_err()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err().to_string()"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "486447-5207101c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "v.downcast_ref::<Counter>().is_some()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "obj.is::<MathError>()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "capacity_hint()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "parse_pair(\"2147483648,0\")"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "v.downcast_ref::<Counter>().is_some()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", obj)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "capacity_hint()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.probes",
+   "when": "clamp_add_report(capacity_hint(), 1)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "it.next().unwrap()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "o.unwrap()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "r.unwrap()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "parse_pair(s)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "parse_pair(&s)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "parse_pair(&s)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "hint"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "opt.unwrap()"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "pair.0"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(0, 1)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(42, 1)"
+  },
+  {
+   "run": "1190712-84cee1c7",
+   "phase": "t0d.rule_probes",
+   "when": "clamp_add_report(1000, 1)"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "any.downcast_ref::<Guarded>().is_some()"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "obj.describe()"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "encode_id(1)"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "clamp_u8(300)"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.reach",
+   "when": "v"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.reach",
+   "when": "v"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "any.is::<Guarded>()"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "obj.downcast_ref::<Reason>().is_some()"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "encode_id(0x1)"
+  },
+  {
+   "run": "1264912-08467218",
+   "phase": "t0d.probes",
+   "when": "wrapping_total(&[255u8, 1u8])"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.is::<io::Error>()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "dyn_err.to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.context(\"added\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.context(\"ctx\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "<(i32, &str) as __private::BothDebug>::__dispatch_ensure((1, \"a\"), \"msg\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "<(i32, &str) as __private::BothDebug>::__dispatch_ensure((1, \"a\"), \"msg\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "core::fmt::Write::write_str(&mut buf, \"x\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "e.backtrace()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "e.chain()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "e.context(\"ctx\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.is::<io::Error>()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.chain().skip(1).next().unwrap().to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "StdError::ext_context(err, \"more\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "StdError::ext_context(err, \"more\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "StdError::provide(&err, &mut req)"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "StdError::provide(&err, &mut req)"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "core::fmt::Write::write_str(&mut buf, \"write\")"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.reach",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(10 < 5).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(Some(1) < None::<i32>).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(\"alpha\" != \"alpha\").unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!((1 + 2) < (3)).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(1 >= { let z = 2; z }).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(1 + 2 * 3 == 10).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!((1 + 2)   >   (4)).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", middle().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", d().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", outer().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "check_int().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "check_str().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "check_opt().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(10 < 2); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(\"foo\" != \"foo\"); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!([1, 2, 3].len() > 10); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(p == q).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", bare().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", top().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", wrapper().unwrap_err())"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "get_err().unwrap_err()"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "202215-c5c6347b",
+   "phase": "t0d.rule_probes",
+   "when": "get_io_err().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "err.is::<MyErr>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "err2.downcast_ref::<MyErr>().is_some()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "err.chain().count()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.context(\"second\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.context(\"ctx\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.chain()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.context(\"outer\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.chain()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "err.is::<io::Error>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "boxed.downcast_ref::<io::Error>().is_some()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", e)"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.probes",
+   "when": "format!(\"{}\", e)"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "anyhow::context::ext::StdError::ext_context(err, \"more context\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "anyhow::context::ext::StdError::ext_context(err, \"ctx\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "<&err as std::error::Error>::provide(&mut req)"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "<&err as std::error::Error>::provide(&mut req)"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "<&err as std::error::Error>::source()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "<&err as std::error::Error>::source()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "std::result::Result::<(), anyhow::Error>::Err(err).context(\"more context\").unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err.context(\"ctx\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "Write::write_str(&mut buf, \"append\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "bt"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.reach",
+   "when": "Write::write_str(&mut buf, \"append\")"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a > b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 > s2).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left < right).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(5 == 10).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x > y).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left_vec == right_vec).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "cond_literal_false().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "cond_numeric_false().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "cond_option_equality_false().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<High>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<String>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<L1>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<High>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<String>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<L1>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(false); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(x > y); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(s.starts_with(\"world\")); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 > s2).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a > b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(opt1 > opt2).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test_simple().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test_none_is_some().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "test_arith().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a != b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 != s2).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x != y).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 == s2).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!((x + y) == z).unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<C2>().is_some()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<String>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<C>().is_some()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<C2>().is_some()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.is::<String>()"
+  },
+  {
+   "run": "4012759-5c5177c6",
+   "phase": "t0d.rule_probes",
+   "when": "err.downcast_ref::<C>().is_some()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "err.is::<io::Error>()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "boxed.to_string()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx2\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.source()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.source()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx2\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "s.write_str(\"ok\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err.chain()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err.context(\"ctx\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err.chain().collect::<Vec<_>>()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "err.is::<io::Error>()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "err2.is::<io::Error>()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "format!(\"{:?}\", err)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.probes",
+   "when": "boom().unwrap_err().to_string()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"extra\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"extra\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::provide(&e, unsafe { &mut std::mem::MaybeUninit::uninit().assume_init_mut() })"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::provide(&e, unsafe { &mut std::mem::MaybeUninit::uninit().assume_init_mut() })"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&e)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&e)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"extra\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"extra\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&e)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "&e"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&e)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&e)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "core::fmt::Write::write_str(&mut buf, \"x\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.reach",
+   "when": "core::fmt::Write::write_str(&mut buf, \"x\")"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "err_int().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "err_str().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "err_opt().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(a + b == 10); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(v[0] > v[1]); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(is_positive(-1)); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test_ge_int().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test_eq_str().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test_gt_char().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left == right).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!((base + add) == target).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", outer().unwrap_err())"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", top().unwrap_err())"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", wrapper().unwrap_err())"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(5 < 3); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(a > b); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!((1 + 2) * 3 == 8); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "g().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "h().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(10 == 20).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!('m' < 'a').unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(3.14 >= 3.15).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(s1 == s2).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v1 == v2).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left > right).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(arr.len() > idx).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(**ref2 == 0).unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "format!(\"{:#}\", err)"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "42057-641e589c",
+   "phase": "t0d.rule_probes",
+   "when": "test().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "err.is::<S>()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "boxed.downcast_ref::<T>().is_some()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "err.to_string()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "err.is::<S>()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.probes",
+   "when": "boxed.downcast_ref::<T>().is_some()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.context(\"inner_ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.context(\"ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&err)"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "std::error::Error::source(&err)"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.source()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.backtrace()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.chain()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.context(\"additional context\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err.chain().map(|e| e.to_string()).collect::<Vec<_>>()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.provide(&mut req)"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.provide(&mut req)"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.source()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.source()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.ext_context(\"ctx\")"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e.provide(&mut req)"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "err"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "std::fmt::Write::write_str(&mut buf, &format!(\"{:?}\", err))"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.reach",
+   "when": "bt"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "f1().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "f2().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "f3().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "e"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x > y).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a < b).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(p != q).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(a >= b); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(s1 == s2); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(o1 == o2); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(false).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(x < y).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(v.is_empty()).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(\"foo\" == \"bar\").unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(left != right).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "ensure!(a == b).unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(left == right); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(short == long); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> anyhow::Result<()> { ensure!(a == b); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "f().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| { ensure!(v.is_empty()); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<(), Error> { ensure!(false); Ok(()) })().unwrap_err()"
+  },
+  {
+   "run": "2355041-eae39441",
+   "phase": "t0d.rule_probes",
+   "when": "(|| -> Result<()> { ensure!(v.is_empty()); Ok(()) })().unwrap_err()"
+  }
+ ]
+}

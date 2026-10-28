@@ -59,15 +59,17 @@ from pipeline_core.domain.fill_schedule import (
     withhold_landed,
 )
 from pipeline_core.domain.held_stubs import Blockers, HeldStubs
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.reasoning_cap import observe_call, run_all_replies_capped
 from pipeline_core.domain.schedule_invariants import (
     decided_from_schedule,
     violations,
 )
 from pipeline_core.domain.test_outcome import (
+    HeldSites,
     PremiseEntry,
     ground_left,
+    held_locators,
     moved_in_scope,
     names_of,
     premise_moved,
@@ -171,11 +173,13 @@ class FillExecutionDeps:
     premise: Mapping[str, PremiseEntry] | None = None
     ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None
     #: The held view of the capture `ground_now` last read: per failing test
-    #: (bare name), the still-stubbed functions its first failure is inside
-    #: (the reading the sweep's `hollow` is). With it, blockers-first is
-    #: applied again inside the fill to the blockers its own keeps measured
-    #: (`_GroundGate.yields_to`); None keeps the plan-time blockers only.
-    held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = None
+    #: (bare name), the still-stubbed bodies its first failure is inside,
+    #: container included (`test_outcome.HeldSites`, the reading the sweep's
+    #: `hollow` is). With it, blockers-first is applied again inside the
+    #: fill to the blockers its own keeps measured (`_GroundGate.yields_to`)
+    #: and a run is opened on a blocker no run writes, carrying the tests
+    #: per body; None keeps the plan-time blockers only.
+    held_now: Callable[[], HeldSites | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +251,7 @@ class _GroundGate:
         self.admitted = 0
         self._held_read = deps.held_now
         #: The held view of the ground last read (`FillExecutionDeps.held_now`).
-        self.held: Mapping[str, frozenset[FnLocator]] = {}
+        self.held: HeldSites = {}
         #: The units runs still ahead of the cursor write (bound by the
         #: executor): what a claim can yield to.
         self._ahead: Callable[[], Mapping[FnLocator, str]] = dict
@@ -350,8 +354,8 @@ class _GroundGate:
         stands after this fill's keeps (empty before any keep)."""
         with self._lock:
             self._look()
-            return frozenset().union(*self.held.values()) if self.held else (
-                frozenset())
+            return (frozenset().union(*held_locators(self.held).values())
+                    if self.held else frozenset())
 
     def yields_to(self, scope: frozenset[str] | None,
                   units: frozenset[FnLocator]) -> str:
@@ -380,8 +384,9 @@ class _GroundGate:
             if not self.held:
                 return ""
             holders: set[FnLocator] = set()
+            by_unit = held_locators(self.held)
             for t in scope:
-                held = self.held.get(str(t).rsplit("::", 1)[-1])
+                held = by_unit.get(str(t).rsplit("::", 1)[-1])
                 if not held:
                     return ""
                 if held & units:
@@ -487,7 +492,8 @@ def _pairs(locs: frozenset[FnLocator]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((loc.file, loc.fn_name) for loc in locs))
 
 
-_Kept = tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...]]
+_Kept = tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...],
+             tuple[str, ...] | None]
 
 
 def _row_for(
@@ -503,12 +509,14 @@ def _row_for(
     # for this row (deferred / budget-spent / re-graded at open): that row
     # opened no judged try, and "unrecorded" must not read as "paid nobody".
     green: tuple[str, ...] | None = None
+    still: tuple[str, ...] | None = None
     if kept is not None:
         green = kept[3]
+        still = kept[4]
     if report is not None and report.own_delta is not None:
         delta = report.own_delta
     elif kept is not None:
-        delta, red, crashed, _green = kept
+        delta, red, crashed, _green, _still = kept
     rep = report or RouteRunReport()
     return RouteLedgerRow(
         kind=s.run.kind, label=s.run.label, targets=_pairs(s.run.targets),
@@ -518,6 +526,7 @@ def _row_for(
         started=started, minutes=minutes, model_calls=rep.model_calls,
         net_pass_delta=delta,
         newly_red=red, newly_crashed=crashed, newly_green=green,
+        still_red=still,
         filtered=tuple(sorted((u.file, u.fn_name, why)
                               for u, why in rep.filtered.items())),
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),
@@ -536,22 +545,17 @@ def _row_for(
         joint_repaired=rep.joint_repaired)
 
 
-def _left_tree_keys(
+def _finished_keys(
     wave: Sequence[tuple[str, bool]], yielded: Collection[str],
-    origin: Mapping[str, str], landed: set[str],
+    origin: Mapping[str, str],
 ) -> set[str]:
-    """The keys of a finished wave whose runs left the tree as it was, for
-    `release_held`: each run whose row kept nothing and whose claims did not
-    wait behind a writer (`(key, kept)` per run). A piece queued again behind
-    a writer (`origin`: piece key -> the key of the run it carries) that
-    then kept nothing adds that run's key too, when the run itself landed
-    nothing: the schedule's holds name the run, not the piece. `landed`
-    accumulates the keys that kept a body over the fill."""
-    landed.update(k for k, kept in wave if kept)
-    left = {k for k, kept in wave if not kept and k not in yielded}
-    left |= {origin[k] for k in tuple(left)
-             if k in origin and origin[k] not in landed}
-    return left
+    """The keys of a finished wave's runs, for `release_held`: each run whose
+    claims did not wait behind a writer (`(key, kept)` per run), whatever it
+    kept. A piece queued again behind a writer (`origin`: piece key -> the
+    key of the run it carries) finishing finishes that run too: the
+    schedule's holds name the run, not the piece."""
+    done = {k for k, _kept in wave if k not in yielded}
+    return done | {origin[k] for k in tuple(done) if k in origin}
 
 
 def _yield_piece(w: ScheduledRun,
@@ -570,7 +574,10 @@ def _yield_piece(w: ScheduledRun,
             run, targets=frozenset(keep),
             stubs_in_targets=run.stubs_in_targets & keep,
             target_tests=frozenset().union(*(t for _, t in tests)),
-            unit_tests=tests, parent=run.plan_key,
+            unit_tests=tests,
+            held_tests=tuple((s_, t_) for s_, t_ in run.held_tests
+                             if FnLocator(s_.file, s_.fn_name) in keep),
+            parent=run.plan_key,
             files=tuple(sorted({u.file for u in keep})),
             label=f"{run.label} [{len(keep)} waited]")
     elif run.targets <= yielded:
@@ -637,7 +644,7 @@ _OPENED_SEQ_BASE = 1000
 
 
 def _open_for_blockers(
-    ordered: list[ScheduledRun], i: int, held: Mapping[str, frozenset[FnLocator]],
+    ordered: list[ScheduledRun], i: int, held: HeldSites,
     *, parent: str, planned_held: Collection[FnLocator],
     landed: Collection[FnLocator], opened: set[FnLocator],
     asked: FillAsks, bodies_sha: Callable[[frozenset[FnLocator]], str],
@@ -674,11 +681,15 @@ def _open_for_blockers(
     each unit is opened at most once per fill, so the loop ends. The run is
     a carved run of the per-fn route (`parent`), which writes exactly the
     targets it is handed; it ranks as a never-served per-fn run and its
-    tests are the ones the ground now holds in its targets."""
+    tests are the ones the ground now holds in its targets — per body,
+    container included (`RouteRun.held_tests`), because those are the tests
+    the run is judged on (`attribution.frontier_for_run`) and a name can
+    have several bodies of which one is the stub."""
     if not held:
         return ordered
     ahead = {u for x in ordered[i:] for u in x.run.targets}
-    blockers = frozenset().union(*held.values())
+    by_unit = held_locators(held)
+    blockers = frozenset().union(*by_unit.values())
     new = sorted(
         (u for u in blockers
          if u not in ahead and u not in planned_held and u not in landed
@@ -687,8 +698,13 @@ def _open_for_blockers(
         key=lambda k: (k.file, k.fn_name))
     if not new:
         return ordered
-    tests_of = {u: frozenset(t for t, hs in held.items() if u in hs)
+    tests_of = {u: frozenset(t for t, hs in by_unit.items() if u in hs)
                 for u in new}
+    sites_of: dict[FnSite, frozenset[str]] = {}
+    for t, ss in held.items():
+        for site in ss:
+            if FnLocator(site.file, site.fn_name) in tests_of:
+                sites_of[site] = sites_of.get(site, frozenset()) | {t}
     targets = frozenset(new)
     names = tuple(f"{u.file}::{u.fn_name}" for u in new)
     run = RouteRun(
@@ -699,6 +715,7 @@ def _open_for_blockers(
         stubs_in_targets=targets,
         files=tuple(sorted({u.file for u in new})),
         unit_tests=tuple((u, tests_of[u]) for u in new),
+        held_tests=tuple(sorted(sites_of.items())),
         # Distinct per opened run: `key` carries it, and two runs of one
         # fill must not share a key.
         seq=_OPENED_SEQ_BASE + len(opened),
@@ -869,7 +886,9 @@ def _withhold_landed_wave(
     for w in wave:
         run_now, held = withhold_landed(w.run, frozen)
         if not held:
-            opened.append(w)
+            # A session opens whole, with the landed bodies frozen on it.
+            opened.append(w if run_now is None or run_now is w.run
+                          else replace(w, run=run_now))
             continue
         names = sorted(f"{u.file}::{u.fn_name}" for u in held)
         open_names = (sorted(f"{u.file}::{u.fn_name}" for u in run_now.targets)
@@ -1026,10 +1045,9 @@ def execute_fill(
     #: writer (bounded: each requeue follows a writer that has then run).
     requeued: dict[str, int] = {}
     #: A queued-again piece's key -> the key of the run whose claims it
-    #: carries (the schedule's holds name that run), and the keys whose row
-    #: kept a body: a hold ends when neither the run nor its piece landed.
+    #: carries (the schedule's holds name that run): the run has finished
+    #: when its piece has.
     yield_origin: dict[str, str] = {}
-    landed_keys: set[str] = set()
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
         if deps.ledger is not None and new_rows:
@@ -1049,8 +1067,7 @@ def execute_fill(
         for h in freed:
             deps.log(
                 f"  [phase-c/schedule] fill {deps.iteration}: {h.run.label} "
-                f"released — the run(s) its hold waited on did not open "
-                f"this fill or kept nothing on the tree "
+                f"released — the run(s) its hold waited on have finished "
                 f"({names_of(sorted(labels.get(k, k) for k in h.held_by))}); "
                 f"ranked {h.reason} again")
         deps.emit("phase_c.fill.hold_released", data={
@@ -1281,10 +1298,10 @@ def execute_fill(
         # every kept body already on disk) has no landing for the runs it
         # held to split: they are released here, at the one exit every
         # opened wave passes through.
-        _release(_left_tree_keys(
+        _release(_finished_keys(
             [(w.run.key, bool(row.kept))
              for w, row in zip(wave, rows[-len(wave):], strict=True)],
-            _yielded, yield_origin, landed_keys))
+            _yielded, yield_origin))
         # Blockers-first again, on the blockers this fill's keeps measured:
         # the runs still ahead that write one open first, and the claims
         # that yielded to them queue behind them (`_requeue_behind`).

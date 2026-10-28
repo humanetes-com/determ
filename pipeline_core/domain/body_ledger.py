@@ -889,12 +889,18 @@ class SweepView:
         own per-binary reading; a vanished test reported no verdict, so it
         holds no key for it."""
         gone = frozenset(vanished)
+        # Abort names are bare, the same way `passed` and `failed` are.
+        # An isolated binary prints `module::test`; attribution keys the
+        # leaf. The standing join meets only when both sides use the leaf.
+        # Keyed verdicts stay keyed: a same-named test in two binaries is
+        # still two tests there.
         return cls(passed=frozenset(passed),
                    failed=frozenset(t for t in failed if t not in gone),
                    intact=intact, epoch=epoch, positions=positions,
                    held=dict(held or {}),
-                   aborted=frozenset(aborted),
-                   aborted_silent=frozenset(aborted_silent),
+                   aborted=frozenset(bare_test_name(t) for t in aborted),
+                   aborted_silent=frozenset(
+                       bare_test_name(t) for t in aborted_silent),
                    verdicts=verdicts, crash_sites=tuple(crash_sites))
 
 
@@ -1042,10 +1048,16 @@ def classify(
             if outcomes.later:
                 return BodyState.ADVANCED, delta + advanced
             return BodyState.FLAT, delta
-        if (entry.kept_green is not None
-                and not (outcomes.gained & frozenset(entry.kept_green))):
-            # The convicting tests that turned green were not turned by THIS
-            # landing's keep (its own comparison recorded none of them): a
+        if entry.kept_green is None:
+            # The keep recorded no comparison (a wave a stop cut, a body
+            # that changed with no report keeping it): the tests turned
+            # green and nothing says by whose write. That is neither proof
+            # nor a try that bought nothing; FLAT would be a verdict from
+            # the missing reading, and the schedule would rank the body a
+            # flat re-buy and re-seed would drop it.
+            return BodyState.UNMEASURED, delta + advanced
+        if not (outcomes.gained & frozenset(entry.kept_green)):
+            # The keep's own comparison did not turn these tests green: a
             # sibling keep paid them. A graded try that bought nothing.
             return BodyState.FLAT, delta
         return BodyState.PROVEN, delta + advanced

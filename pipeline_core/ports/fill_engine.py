@@ -323,7 +323,7 @@ class ImplFillPath(Protocol):
         on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = ...,
         fill_premise: Mapping[str, Any] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
-        fill_held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = ...,
+        fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
     ) -> ClusterFillResult: ...
 
 
@@ -437,5 +437,5 @@ class FillPassPort(Protocol):
         on_wave_kept: Callable[[frozenset[FnLocator]], object] | None = ...,
         fill_premise: Mapping[str, PremiseEntry] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = ...,
-        fill_held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = ...,
+        fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
     ) -> ClusterFillResult: ...

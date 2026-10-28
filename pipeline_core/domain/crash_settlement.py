@@ -43,7 +43,7 @@ nothing read it.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -268,6 +268,24 @@ def refuted_crash_note(body: str, evidence: str, iteration: int,
                   evidence.strip()]
     lines.append("Do not write that body again.")
     return "\n".join(lines)
+
+
+def with_held_stub_evidence(
+    evidence: Mapping[FnLocator, str] | None,
+    held: Iterable[tuple[FnLocator, Collection[str]]],
+) -> dict[FnLocator, str]:
+    """`evidence` with the held-stub sentence (:func:`held_stub_evidence`)
+    for every stub in `held` that holds tests and has no text yet. The sweep
+    writes the sentence for the stubs it held; a run opened on a blocker the
+    fill measured carries its own ground (`RouteRun.held_tests`) and reaches
+    the per-fn passes through this, so its ask states the same fact. A text
+    already present wins, as on the sweep (`setdefault`): a crash reading is
+    stronger evidence than a count."""
+    out = dict(evidence or {})
+    for loc, tests in held:
+        if tests:
+            out.setdefault(loc, held_stub_evidence(len(tests)))
+    return out
 
 
 def held_stub_evidence(held_tests: int, refuted_body: str = "",

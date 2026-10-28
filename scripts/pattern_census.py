@@ -398,6 +398,19 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      guess; `HEALTH ‼ UNSEEN_STOP` stops the run when every owed red test is
      unseen.
 
+  P53 opened run kept untested — a body written by a run the fill opened on
+     a blocker it measured (`phase_c.fill.blocker_opened`) was kept with no
+     scoped test run: its next per-fn `phase_c.verdict` in that fill is
+     `accept` / `unmeasurable` with no evidence key, or a
+     `phase_c.u2.no_tests` event names it. The run carried the tests that
+     stop in that body, and the gate was handed none of them. Run
+     `2129106-ead996ab` (2026-10-28) fill 1: 28 of 28 opened-run keeps, each
+     row reading "none were failing", while the opener had just measured
+     125–128 failing tests stopping in them. No reaction key: since
+     2026-10-28 the per-fn route judges an opened run on
+     `attribution.frontier_for_run`, so a post-fix hit is a writer that was
+     bypassed.
+
   P51 unjudged write — a fill's gates judged from a tree no verdict left.
      Two readings. After the fill ground shipped (2026-10-22): any
      `phase_c.fill.unjudged_write` event (the lock restored bytes written
@@ -765,6 +778,7 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P38": [],
     "P39": [],
     "P51": [],
+    "P53": [],
     "P52": [
         # The unseen tests were named and no guess was dispatched at them.
         ("HEALTH ‼ UNSEEN iter", "unseen-named"),
@@ -3198,6 +3212,84 @@ def detect_p52(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [run.start_ref]}]
 
 
+_P53_EVENTS: dict[str, list[tuple[str, dict]]] | None = None
+_P53_KINDS = {
+    '"phase_c.fill.blocker_opened"': "opened",
+    '"phase_c.verdict"': "verdict",
+    '"phase_c.u2.no_tests"': "no_tests",
+    '"phase_c.tdd.iter"': "iter",
+}
+
+
+def _p53_events_by_run() -> dict[str, list[tuple[str, dict]]]:
+    """The opener, verdict, no-tests and sweep payloads by run, in file
+    order (a verdict belongs to the opener before it in the same fill)."""
+    global _P53_EVENTS
+    if _P53_EVENTS is not None:
+        return _P53_EVENTS
+    out: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    try:
+        with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                kind = next((k for tag, k in _P53_KINDS.items() if tag in line), None)
+                if kind is None:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                out[str(ev.get("run_id", ""))].append(
+                    (kind, dict(ev.get("data") or {})))
+    except OSError:
+        pass
+    _P53_EVENTS = dict(out)
+    return _P53_EVENTS
+
+
+def _p53_unit_key(unit: str) -> str:
+    """`file::fn` of a verdict's unit key (`file::fn::container`), exact."""
+    parts = unit.split("::")
+    return "::".join(parts[:2]) if len(parts) >= 2 else unit
+
+
+def p53_untested_keeps(events: list[tuple[str, dict]]) -> list[str]:
+    """Units an opened run kept with no scoped test, in order. The opener
+    names `file::fn`; a verdict counts while it is the unit's first per-fn
+    verdict after the opener and before the next sweep. A unit with two
+    bodies is counted per verdict until one of them clears it."""
+    pending: set[str] = set()
+    hits: list[str] = []
+    for kind, d in events:
+        if kind == "iter":
+            pending.clear()
+        elif kind == "opened":
+            pending |= {str(b) for b in d.get("blockers") or ()}
+        elif kind == "no_tests":
+            key = f"{d.get('file', '')}::{d.get('fn', '')}"
+            if key in pending:
+                hits.append(key)
+        elif kind == "verdict" and str(d.get("route", "")) == "per-fn":
+            key = _p53_unit_key(str(d.get("unit", "")))
+            if key not in pending:
+                continue
+            if (d.get("disposition") == "accept"
+                    and d.get("outcome") == "unmeasurable"
+                    and not d.get("evidence_keys")):
+                hits.append(key)
+    return hits
+
+
+def detect_p53(run: Run, iters: list[dict]) -> list[dict]:
+    """Opened-run bodies kept with no scoped test. One hit per run."""
+    hits = p53_untested_keeps(_p53_events_by_run().get(run.run_id, []))
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} keep(s) of runs opened on measured "
+                         "blockers with no scoped test: "
+                         + ", ".join(sorted(set(hits))[:6]),
+             "key": sorted(set(hits))[:3], "refs": [run.start_ref]}]
+
+
 def detect_p40(run: Run, iters: list[dict]) -> list[dict]:
     """Whole-file requests answered with the file: the conversation did not
     hold it whole. One hit per run, keyed by the paths asked for most."""
@@ -3599,7 +3691,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
              "P49": detect_p49, "P50": detect_p50, "P51": detect_p51,
-             "P52": detect_p52}
+             "P52": detect_p52, "P53": detect_p53}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3646,6 +3738,7 @@ CLASS_NAMES = {
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
     "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
     "P52": "unseen red test (an owed red test with no observation of it executing on the tree: no measured owner set, no recorded set of a run that started, no crate frame on any crash site, no first failure inside a crate body; pre-fix the loop guessed from the recently-filled ring, run 1947461-b4eb65c3 iters 13-14)",
+    "P53": "opened run kept untested (a body a run opened on a measured blocker wrote was kept with no scoped test: the gate was handed none of the tests the run carried; pre-fix the run was judged on the sweep's owner sets, run 2129106-ead996ab fill 1: 28 of 28)",
     "P51": "unjudged write (a fill's gates judged from a tree no verdict left: its first baseline was not the sweep's reading with no keep before it, or the fill ground restored bytes written outside every hold; pre-fix the joint ask spliced its candidate before the fill, run 4012759-5c5177c6 fill 9)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}
 

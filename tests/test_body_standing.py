@@ -91,3 +91,36 @@ def test_a_rewritten_body_is_not_the_proven_one() -> None:
 def test_negative_control_an_unbound_reading_marks_nothing() -> None:
     assert mark_unverified("src/a.rs", _FILE) == _FILE
     assert is_proven_text(B, "build(NonNull::dangling())") is None
+
+
+def test_a_unit_left_out_only_by_another_test_s_death_is_counted() -> None:
+    """The reading entry 365.4 owes: on an abort-heavy sweep the standing
+    set fell from 48 to 4 while the sweep was reconciled. A unit with a
+    passing attributed test and an attributed test whose process died is
+    left out of `proven_units` and counted by `lost_to_aborts`; one with no
+    death is proven and not counted. Control: no deaths, nothing lost."""
+    from pipeline_core.domain.body_standing import lost_to_aborts, proven_units
+    from pipeline_core.domain.models import FnLocator
+    a, b = FnLocator("src/a.rs", "a"), FnLocator("src/b.rs", "b")
+    attributed = {"t_pass": [a, b], "t_dead": [a]}
+    proven = proven_units([], attributed, passed={"t_pass"}, died={"t_dead"}, intact=True)
+    assert proven == {b}
+    assert lost_to_aborts(attributed, passed={"t_pass"}, died={"t_dead"}) == {a}
+    assert lost_to_aborts(attributed, passed={"t_pass"}, died=set()) == frozenset()
+
+
+def test_a_qualified_abort_name_meets_a_bare_attribution_key() -> None:
+    """An isolated binary prints `module::test`. Attribution keys the leaf.
+    The sweep view bares the abort name, so the standing join meets."""
+    from pipeline_core.domain.assertion_position import KeyedVerdicts
+    from pipeline_core.domain.body_ledger import SweepView
+    from pipeline_core.domain.body_standing import lost_to_aborts
+    view = SweepView.of_sweep(
+        passed=(), failed=(), vanished=(), intact=True, epoch=0,
+        positions={}, aborted=("mod::t_dead",), aborted_silent=("mod::t_quiet",),
+        verdicts=KeyedVerdicts())
+    assert view.aborted == frozenset({"t_dead"})
+    assert view.aborted_silent == frozenset({"t_quiet"})
+    a = FnLocator("src/a.rs", "a")
+    attributed = {"t_pass": [a], "t_dead": [a]}
+    assert lost_to_aborts(attributed, passed={"t_pass"}, died=view.aborted) == {a}

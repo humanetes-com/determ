@@ -29,7 +29,7 @@ from pipeline_core.domain.behaviour import (
     OutcomeKind,
     example_given,
     example_when,
-    helper_text,
+    helper_items,
     then_value_text,
 )
 from pipeline_core.domain.behaviour_book import GivenRoot
@@ -60,17 +60,22 @@ def _question(spec: BehaviourSpec) -> str:
 
 def _example_block(spec: BehaviourSpec, *, with_then: bool,
                    worlds: Mapping[str, Sequence[str]] | None = None) -> str:
+    """One example. Its helper code is not pasted here: the prompt prints
+    every helper of its examples once (:func:`_helpers_section`) and the
+    example names the ones it uses, then gives its own setup."""
     parts = [f'<EXAMPLE id="{spec.behaviour_id}">']
     only = (worlds or {}).get(spec.behaviour_id, ())
     if only:
         parts.append("BUILT ONLY IN: " + ", ".join(only))
-    # Every part of the example's given, through the one accessor: the
-    # asserting helper and the `use` block are sent with the roots because
-    # the judge was measured on this text.
     given = example_given(spec)
-    context = "\n".join(p for p in (*helper_text(spec, given.keys), given.setup) if p.strip())
-    if context:
-        parts.append("GIVEN:\n```rust\n" + context + "\n```")
+    used = [k for k, t in helper_items(spec) if k in given.keys and t.strip()]
+    if used or given.setup.strip():
+        lines = ["GIVEN:"]
+        if used:
+            lines.append("uses HELPERS: " + ", ".join(used))
+        if given.setup.strip():
+            lines.append("```rust\n" + given.setup + "\n```")
+        parts.append("\n".join(lines))
     parts.append("WHEN:\n```rust\n" + example_when(spec) + "\n```")
     parts.append("ASKED: " + _question(spec))
     if with_then and spec.then is not None:
@@ -79,6 +84,34 @@ def _example_block(spec: BehaviourSpec, *, with_then: bool,
         parts.append(f"THEN{prefix}:\n<VALUE>{value}</VALUE>")
     parts.append("</EXAMPLE>")
     return "\n".join(parts)
+
+
+def _helpers_section(examples: Sequence[BehaviourSpec]) -> str:
+    """Every helper the examples use, once, each under its key.
+
+    The rule prompt pasted each example's helper closure under its own
+    `GIVEN:`, so a chunk of 24 examples over one test file sent the file's
+    helpers 24 times: over the stored stable book at 24 examples per
+    prediction prompt, 141,309 of 279,912 chars (50.5%) was helper text
+    repeated inside its own chunk (2026-10-02). The judge reads the same code
+    once and the example says which of it it uses."""
+    seen: dict[str, str] = {}
+    for s in examples:
+        keys = example_given(s).keys
+        for k, t in helper_items(s):
+            if k in keys and t.strip() and k not in seen:
+                seen[k] = t
+    if not seen:
+        return ""
+    body = "\n\n".join(f"// HELPER {k}\n{t}" for k, t in seen.items())
+    return ("HELPERS (test code the examples below call; each printed once, "
+            "named by the key an example's GIVEN lists):\n```rust\n" + body + "\n```\n\n")
+
+
+def _examples_text(examples: Sequence[BehaviourSpec], *, with_then: bool,
+                   worlds: Mapping[str, Sequence[str]] | None = None) -> str:
+    return _helpers_section(examples) + "\n\n".join(
+        _example_block(s, with_then=with_then, worlds=worlds) for s in examples)
 
 
 def _entry_kind(g: GlossaryEntry) -> str:
@@ -114,7 +147,7 @@ def build_rule_authoring_prompt(
     item = "\n".join(f"- `{g.name}`" + (f" ({_entry_kind(g)})" if g.worlds else "")
                      + (f": {g.summary}" if g.summary else "") for g in feature_lines) \
         or f"- `{feature}`"
-    blocks = "\n\n".join(_example_block(s, with_then=True, worlds=worlds) for s in examples)
+    blocks = _examples_text(examples, with_then=True, worlds=worlds)
     return f"""You are writing the specification of the Rust crate `{crate}` from its own tests.
 
 FEATURE (the public item these examples exercise):
@@ -153,7 +186,7 @@ def build_then_prediction_prompt(
     """Ask for the Then of each example; with `rules`, the sentences the
     predictor may rely on, numbered, all at once — a rule may state part of
     an observable another rule completes."""
-    blocks = "\n\n".join(_example_block(s, with_then=False, worlds=worlds) for s in examples)
+    blocks = _examples_text(examples, with_then=False, worlds=worlds)
     numbered = "\n".join(f"{n}. {r}" for n, r in enumerate(rules, 1))
     rule_part = (f"\nRULES (hold together for the examples below; rely on them):\n{numbered}\n"
                  if rules else "")
@@ -212,7 +245,8 @@ def build_rule_probe_prompt(
     examples appear as code only, and the harness prints what the crate
     produces. The reply is the probe block shape, read by the probe parser.
     `near` are examples the rule was found wrong on."""
-    covered = "\n\n".join(_example_block(s, with_then=False) for s in shown)
+    covered = _helpers_section([*shown, *near]) + "\n\n".join(
+        _example_block(s, with_then=False) for s in shown)
     near_part = ("\nThe rule was found WRONG on these cases. Write some of your programs close to "
                  "them (the same kind of input, varied):\n\n"
                  + "\n\n".join(_example_block(s, with_then=False) for s in near) + "\n"

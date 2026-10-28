@@ -260,3 +260,51 @@ def test_a_held_out_rule_capture_is_judged_by_nobody_and_emitted_nowhere(tmp_pat
     assert out.features[1].rules[0].sentence == WRONG        # not judged: nothing was left to judge on
     assert not [p for p in w.prompts if p.startswith("Predict what")]
     assert "2 held out" in next(ln for ln in w.logs if "rule-probes:" in ln)
+
+
+def test_rule_probe_misses_are_written_beside_the_harvest_rows(tmp_path: Path) -> None:
+    """Entry 373 step 3. `run_rule_probes` kept its misses in a local list and
+    logged the count; the harvest's file (`_behaviour_misses_<world>.json`)
+    held none of them, and `record_misses` rewrites the file whole, so a write
+    of the rule rows alone would erase the harvest's. Claim: the file holds
+    the harvest rows and the rule rows, the latter marked `stage`; an earlier
+    rule-probe row is replaced, not stacked. Control: no load, no harvest row."""
+    from pipeline_core.application.tasks.task0d import RULE_PROBE_STAGE
+    e1 = BehaviourSpec("testassert::tests/t.rs::t::0", "let r = make();", "r.show()",
+                       ObservableOutcome.display("failed: a"), subkind=BehaviourSubKind.OUTCOME)
+    book = BehaviourSuite("stable", (e1,), features=(
+        Feature("show", "fn", (e1.behaviour_id,), (Rule("rule::show::0", BASE, (e1.behaviour_id,), "show"),)),),
+        glossary=(GlossaryEntry("show", "fn"),))
+    harvest = [{"unit": "h", "reason": "replay disagreed with the capture"},
+               {"unit": "old", "reason": "x", "stage": RULE_PROBE_STAGE}]
+    w = _World(probe_ok=False)
+
+    def ask(prompt: str) -> str:
+        return ('<BEHAVIOUR name="more">\n<GIVEN>\n    let r = make();\n</GIVEN>\n'
+                "<WHEN>r.show_other()</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>")
+
+    run_rule_probes(w.deps(ask=ask, RULE_PROBES_MAX=1, load_misses=lambda pd, c: list(harvest)),
+                    tmp_path, "krate", _cluster(), book, default_cluster="stable", memo={})
+    (_c, rows), = w.misses
+    assert rows[0] == harvest[0]
+    assert [r["stage"] for r in rows[1:]] == [RULE_PROBE_STAGE] * (len(rows) - 1) and len(rows) > 1
+    assert not any(r.get("unit") == "old" for r in rows)
+    bare = _World(probe_ok=False)
+    run_rule_probes(bare.deps(ask=ask, RULE_PROBES_MAX=1), tmp_path, "krate", _cluster(), book,
+                    default_cluster="stable", memo={})
+    assert all(r.get("stage") == RULE_PROBE_STAGE for r in bare.misses[0][1])
+    # A later pass that captured and missed nothing replaces the rule rows.
+    # The harvest row stays. Holding the capture out keeps emission off this
+    # pin: the write is what the claim is about.
+    clean = _World(probe_ok=True)
+
+    def ask_ok(prompt: str) -> str:
+        return ('<BEHAVIOUR name="more">\n<GIVEN>\n    let r = make();\n</GIVEN>\n'
+                "<WHEN>r.show_other()</WHEN>\n<OBSERVE>display</OBSERVE>\n</BEHAVIOUR>")
+
+    run_rule_probes(
+        clean.deps(ask=ask_ok, RULE_PROBES_MAX=1, HELD_OUT_SHARE=100,
+                   load_misses=lambda pd, c: list(rows)),
+        tmp_path, "krate", _cluster(), book, default_cluster="stable", memo={})
+    (_c2, again_rows), = clean.misses
+    assert again_rows == [harvest[0]]

@@ -25,7 +25,7 @@ from pipeline_core.application.reconstruct import fill_reading
 from pipeline_core.application.reconstruct import fill_scheduler as fs
 from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
 from pipeline_core.domain.fill_schedule import RouteKind, RouteRun, RunClock
-from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.models import FnLocator, FnSite
 
 _X = FnLocator("src/a.rs", "base")      # held at plan time; the per-fn run writes it
 _C1 = FnLocator("src/a.rs", "use_one")
@@ -52,14 +52,14 @@ class _Tree:
                     "t2": (False, _fn(_S), False)}
         return {t: (False, _fn(_X), False) for t in ("t0", "t1", "t2")}
 
-    def held(self) -> dict[str, frozenset[FnLocator]]:
-        held: dict[str, frozenset[FnLocator]] = {}
+    def held(self) -> dict[str, frozenset[FnSite]]:
+        held: dict[str, frozenset[FnSite]] = {}
         for t, (passed, site, _a) in self.premise().items():
             if passed or len(site) < 3:
                 continue
             loc = FnLocator(site[1], site[2])
             if loc in (_X, _S) and loc not in self.kept:
-                held[t] = frozenset({loc})
+                held[t] = frozenset({FnSite(loc.file, loc.fn_name, "")})
         return held
 
 

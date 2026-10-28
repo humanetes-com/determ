@@ -111,6 +111,7 @@ from pipeline_core.domain.test_report import (
     regressed_test_outputs,
 )
 from pipeline_core.domain.test_results import (
+    RegressionComparison,
     TestStateReading,
     compare_readings,
 )
@@ -184,6 +185,18 @@ class SessionPorts:
 
 
 @dataclass(frozen=True, slots=True)
+class KeptComparison:
+    """What a kept session's ledger row records about its own keep."""
+
+    delta: int
+    newly_red: tuple[str, ...]
+    newly_crashed: tuple[str, ...]
+    newly_green: tuple[str, ...]
+    #: None is "no comparison"; an empty tuple is "nothing stayed red".
+    still_failing: tuple[str, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
 class SessionOutcome:
     outcome: str                      # accepted | kept | reverted | no_change | stopped
     turns: int
@@ -240,6 +253,34 @@ class SessionOutcome:
     #: ask classified on it stored `gains_held` for a seed the peel had
     #: already removed (review of the 2026-10-22 implementation).
     held_green: frozenset[str] | None = None
+    #: The keep's comparison on the tree a peel left (opening suite against
+    #: the peel's held reading). None when nothing was peeled: the session
+    #: was kept whole, and `final` is the reading of the tree it left.
+    #: `final` is taken before the peel, so a test the peel turned red
+    #: again is in neither its newly-green nor its still-failing set; the
+    #: keep's row reads this instead (:meth:`kept_comparison`).
+    peeled_comparison: RegressionComparison | None = None
+
+    def kept_comparison(self) -> KeptComparison | None:
+        """The terms the session's keep records (`fill_reading.note_kept`),
+        read on the tree the session left. None when nothing is kept or no
+        turn was judged."""
+        if not self.kept or self.final is None:
+            return None
+        cmp = self.peeled_comparison
+        if cmp is not None:
+            return KeptComparison(
+                delta=cmp.net_pass_delta,
+                newly_red=tuple(sorted(cmp.newly_red)),
+                newly_crashed=tuple(cmp.newly_crashed),
+                newly_green=tuple(sorted(cmp.newly_green)),
+                still_failing=tuple(sorted(cmp.still_failing)))
+        return KeptComparison(
+            delta=self.final.pass_delta,
+            newly_red=tuple(sorted(self.newly_red)),
+            newly_crashed=tuple(self.final.crashed),
+            newly_green=self.final.newly_green,
+            still_failing=self.final.still_failing)
 
     @property
     def carried_body(self) -> bool:
@@ -764,6 +805,7 @@ def run_slice_session(
             crashed=tuple(cmp.newly_crashed), hung=hung,
             pass_delta=cmp.net_pass_delta,
             newly_green=tuple(sorted(cmp.newly_green)),
+            still_failing=tuple(sorted(cmp.still_failing)),
             executed_shrank=cmp.cur_executed < cmp.base_executed,
             positions=positions_now, earlier=earlier, aborted=aborted,
             aborted_green=tuple(sorted(outcomes.aborted_green)),
@@ -871,7 +913,7 @@ def run_slice_session(
                 ports.log(f"  [phase-c/session] {label}: turn {turns} carried no "
                           "change set and no request — session ends.")
                 break
-            cs = route_change_set(parsed, records)
+            cs = route_change_set(parsed, records, frozen=slice_.frozen)
             if not cs.routed:
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "rejected",
@@ -1139,6 +1181,7 @@ def run_slice_session(
     reverted: frozenset[FnSite] = frozenset()
     newly_red: tuple[str, ...] = ()
     newly_red_output: Mapping[str, str] = {}
+    peeled_cmp: RegressionComparison | None = None
     # The tree holds the best judged state (every worse turn was put back),
     # so the decision reads that state's reading, and the peel — needed only
     # when the best state itself regresses the opening suite — walks from it.
@@ -1174,6 +1217,8 @@ def run_slice_session(
                     ports, target_src_dir, slice_, records, baseline,
                     baseline_bodies, baseline_texts, changed,
                     peel_max=peel_max, label=label)
+                if kept and _peel_held is not None and baseline is not None:
+                    peeled_cmp = compare_readings(baseline, _peel_held)
                 outcome = "kept" if kept else "reverted"
                 held_green = (_green_targets_in(_peel_held, slice_.tests) if kept
                               else _green_targets_in(baseline, slice_.tests))
@@ -1192,7 +1237,7 @@ def run_slice_session(
         answered_turns=answered_turns, requests=requests,
         first_turn_minutes=first_turn_minutes,
         candidate_bodies=_candidate_bodies, seed_judged=seed_judged,
-        held_green=held_green)
+        held_green=held_green, peeled_comparison=peeled_cmp)
     ports.emit("phase_c.session.end", data={
         "cluster": cluster_name, "outcome": outcome, "turns": turns,
         "model_calls": model_calls, "compile_failures": compile_failures,

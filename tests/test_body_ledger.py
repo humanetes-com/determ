@@ -394,8 +394,10 @@ def test_a_landing_with_no_red_attributed_test_is_flat_not_proven() -> None:
     test turned green landed with every attributed test already passing.
     Nothing convicted the dispatch and the delta is empty, so the landing
     is a graded try that bought nothing. `proven` here ranked the unit as
-    paying at the next schedule. Negative control: the same landing when
-    one of those tests was red before it is `proven`, with the delta."""
+    paying at the next schedule. The same landing when one of those tests
+    was red before it is `proven` when the keep recorded that comparison.
+    A landing with no recorded comparison is not that proof, and not a try
+    that bought nothing either: `unmeasured`."""
     e = _entry(state=BodyState.LANDED)
     before, after = _views(({"test_green"}, set()), ({"test_green"}, set()))
     state, delta = classify(e, attributed={"test_green"}, before=before,
@@ -403,14 +405,19 @@ def test_a_landing_with_no_red_attributed_test_is_flat_not_proven() -> None:
     assert state is BodyState.FLAT
     assert delta == ()
     before, after = _views((set(), {"test_green"}), ({"test_green"}, set()))
-    state, delta = classify(e, attributed={"test_green"}, before=before,
+    paid = replace(e, kept_green=("test_green",))
+    state, delta = classify(paid, attributed={"test_green"}, before=before,
                             after=after, body_now_sha=e.body_sha)
     assert state is BodyState.PROVEN
+    assert delta == (("test_green", "gained"),)
+    state, delta = classify(e, attributed={"test_green"}, before=before,
+                            after=after, body_now_sha=e.body_sha)
+    assert state is BodyState.UNMEASURED
     assert delta == (("test_green", "gained"),)
 
 
 def test_a_measured_non_regression_is_proven_and_names_what_moved() -> None:
-    e = _entry(state=BodyState.LANDED)
+    e = _entry(state=BodyState.LANDED, kept_green=("test_new", "test_kept"))
     before, after = _views((set(), {"test_new", "test_kept"}),
                            ({"test_new", "test_kept"}, set()))
     state, delta = classify(e, attributed={"test_new", "test_kept"},
@@ -669,22 +676,28 @@ def test_flat_is_a_grade_and_never_a_seed() -> None:
     assert not flat.reseedable
     assert reseed_allowed(flat, file_fp="fp-original", sig_sha=flat.sig_sha,
                           oracle_fp=_ORACLE).reason == "state flat"
-    # classify now produces `flat` when convicting tests ran and all still
-    # fail (the fourth reading below). The other three readings are
-    # unchanged.
+    # classify produces `flat` when convicting tests ran and all still
+    # fail. A gain is `proven` only when the keep recorded that comparison;
+    # the same gain with no comparison is `unmeasured`, never `flat`. The
+    # other readings are unchanged.
     e = _entry(state=BodyState.LANDED)
-    cases: tuple[tuple[tuple[set[str], set[str]],
+    cases: tuple[tuple[LedgerEntry, tuple[set[str], set[str]],
                        tuple[set[str], set[str]], BodyState], ...] = (
-        ((set(), set()), ({"o"}, set()), BodyState.UNMEASURED),
-        (({"t"}, set()), (set(), {"t"}), BodyState.REFUTED),
-        ((set(), {"t"}), (set(), {"t"}), BodyState.FLAT),
-        ((set(), {"t"}), ({"t"}, set()), BodyState.PROVEN),
+        (e, (set(), set()), ({"o"}, set()), BodyState.UNMEASURED),
+        (e, ({"t"}, set()), (set(), {"t"}), BodyState.REFUTED),
+        (e, (set(), {"t"}), (set(), {"t"}), BodyState.FLAT),
+        (replace(e, kept_green=("t",)), (set(), {"t"}), ({"t"}, set()),
+         BodyState.PROVEN),
     )
-    for before, after, want in cases:
+    for entry, before, after, want in cases:
         b, a = _views(before, after)
-        state, _ = classify(e, attributed={"t"}, before=b, after=a,
+        state, _ = classify(entry, attributed={"t"}, before=b, after=a,
                             body_now_sha=e.body_sha)
         assert state is want
+    b, a = _views((set(), {"t"}), ({"t"}, set()))
+    bare, _ = classify(e, attributed={"t"}, before=b, after=a,
+                       body_now_sha=e.body_sha)
+    assert bare is BodyState.UNMEASURED
 
 
 def test_rebuy_fires_on_a_flat_prior_process_row_and_not_a_same_process_one() -> None:
@@ -1037,7 +1050,7 @@ def test_a_gain_beside_an_earlier_panic_stands() -> None:
     control: the pre-rule grade ("an earlier panic refuses whatever the
     others did") sees the same earlier move and would refute."""
     from pipeline_core.domain.assertion_position import TestKey, compare_positions
-    e = _entry(state=BodyState.LANDED)
+    e = _entry(state=BodyState.LANDED, kept_green=("test_gain",))
     k = TestKey("tests/test_x.rs", "test_early")
     before = SweepView(failed=frozenset({"test_gain", "test_early"}),
                        positions={k: 91})
@@ -1167,8 +1180,11 @@ def test_an_advanced_row_is_not_a_flat_exclusion_or_a_rebuy() -> None:
 def test_a_landing_is_credited_only_with_what_its_own_keep_turned_green() -> None:
     """A convicting test turned green between two sweeps. The landing whose
     keep recorded that test is `proven`; a landing whose keep recorded other
-    tests (or none) is a graded try that bought nothing, `flat`. Control: a
-    row with no recorded keep comparison keeps the old reading."""
+    tests (or none) is a graded try that bought nothing, `flat`. A row
+    with no recorded keep comparison is `unmeasured`: a missing comparison
+    is neither proof nor a try that bought nothing. The pre-fix grades were
+    `proven` (the absence read as proof) and then `flat` (the absence read
+    as a verdict); both are asserted against below."""
     from pipeline_core.domain.body_ledger import WaveKept, kept_green_of
 
     before, after = _views(({"t_other"}, {"t_conv"}), ({"t_other", "t_conv"}, set()))
@@ -1179,8 +1195,10 @@ def test_a_landing_is_credited_only_with_what_its_own_keep_turned_green() -> Non
                     body_now_sha="")[0] is BodyState.PROVEN
     assert classify(sibling, attributed={"t_conv"}, before=before, after=after,
                     body_now_sha="")[0] is BodyState.FLAT
-    assert classify(legacy, attributed={"t_conv"}, before=before, after=after,
-                    body_now_sha="")[0] is BodyState.PROVEN
+    legacy_grade = classify(legacy, attributed={"t_conv"}, before=before,
+                            after=after, body_now_sha="")[0]
+    assert legacy_grade is BodyState.UNMEASURED
+    assert legacy_grade not in (BodyState.PROVEN, BodyState.FLAT)
     assert LedgerEntry.from_dict(paid.to_dict()) == paid
     assert LedgerEntry.from_dict(legacy.to_dict()) == legacy
 

@@ -222,3 +222,50 @@ def test_exercises_without_grcov_returns_nothing(tmp_path: Path, monkeypatch) ->
     assert exercises_by_coverage(tmp_path, None, [_ta("testassert::tests/t.rs::x::0", "tests/t.rs::x")],
                                  [], run=lambda *a: (0, "", ""), log=logs.append) == ({}, 0)
     assert any("grcov not found" in ln for ln in logs)
+
+
+def test_site_labels_carry_the_container_of_an_extractor_record(tmp_path: Path) -> None:
+    """Production passes the extractor's `FnRecord` objects, not dicts. The
+    runner rebuilt them as a dict without `container`, so every site label
+    was a bare `file::fn` and a reach target labelled with its impl never
+    matched: run `2355041-eae39441` (2026-10-27) judged every reach probe
+    missed, and a clean replay reached 17 of 21. Claim: the site label of an
+    impl method entered by a probe names its impl. Control: the old subset
+    labels it bare."""
+    from pipeline_core.adapters import behaviour_exercises as bx
+    from pipeline_core.domain.behaviour_coverage import sites_for_hit_lines
+    from pipeline_core.domain.models import FnRecord
+
+    src = "struct S;\nimpl S {\n    pub fn get(&self) -> u8 {\n        7\n    }\n}\n"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(src, encoding="utf-8")
+    b = src.encode("utf-8")
+    sig = b.index(b"pub fn get")
+    end = b.index(b"    }\n", sig) + len(b"    }")
+    rec = FnRecord(file="src/lib.rs", fn_name="get", container="impl S",
+                   sig_byte_start=sig, body_byte_end=end)
+    debug = tmp_path / "target" / "t0d-stable" / "debug"
+
+    def fake_run(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int):
+        if cmd[:2] == ["cargo", "test"]:
+            return 0, "", ""
+        if cmd[:2] == ["cargo", "run"]:
+            Path(env["LLVM_PROFILE_FILE"].replace("%p-%m", "1-2")).write_bytes(b"p")
+            return 0, _artifact("example", cmd[-1], str(debug / "examples" / "x")), ""
+        out_json = Path(cmd[cmd.index("--output-path") + 1])
+        out_json.write_text(json.dumps({"source_files": [
+            {"name": "src/lib.rs", "coverage": [None, None, 1, 1, 1, None]}]}))
+        return 0, "", ""
+
+    spec = BehaviourSpec("probe::stable::g::0", "let s = S;", "s.get()",
+                         ObservableOutcome.display("7"), subkind=BehaviourSubKind.OUTCOME)
+    sites: dict[str, frozenset[str]] = {}
+    exercises_by_coverage(tmp_path, _cluster(), [spec], [rec], run=fake_run,
+                          grcov_bin=Path("/x/grcov"), sites_out=sites)
+    assert sites == {"probe::stable::g::0": frozenset({"src/lib.rs::get [impl S]"})}
+    # Control: the subset the runner built before drops the container.
+    old = {"file": rec.file, "fn_name": rec.fn_name, "sig_byte_start": rec.sig_byte_start,
+           "body_byte_end": rec.body_byte_end, "is_test": rec.is_test}
+    bare = sites_for_hit_lines({"src/lib.rs": [3, 4, 5]}, {"src/lib.rs": src}, [old])
+    assert bare == frozenset({"src/lib.rs::get"})
+    assert bx._record_dict(rec)["container"] == "impl S"

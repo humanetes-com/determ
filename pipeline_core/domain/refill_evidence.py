@@ -42,7 +42,7 @@ from typing import Any
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.body_ledger import BodyState, LedgerEntry, body_sha
 from pipeline_core.domain.crash_site import CrashSites
-from pipeline_core.domain.models import FnLocator, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
 from pipeline_core.domain.refill_stamp import convicting_tests_for_member
 from pipeline_core.domain.test_report import OTHER_COPY_MARK, parse_panic_location
 from pipeline_core.domain.type_production import constructs_type, is_ident_char
@@ -324,9 +324,9 @@ def collect_refill_evidence(
     `fmt` (:class:`~pipeline_core.domain.crash_site.CrashSites`)."""
     out: list[RefillEvidence] = []
     for m in block.refill_members:
-        key = FnLocator(block.file, m.fn_name)
-        tests = (tests_in_prompt(frontier, key, max_tests=max_tests,
-                                 observed_only=False)
+        tests = (tests_in_prompt(frontier, FnSite(block.file, m.fn_name,
+                                                  block.container),
+                                 max_tests=max_tests, observed_only=False)
                  if frontier is not None else ())
         homonyms = tuple(
             b.container for b in blocks
@@ -430,21 +430,32 @@ OBSERVED_HEAD = (
 
 
 def tests_in_prompt(
-    frontier: FailureFrontier | None, key: FnLocator, *,
+    frontier: FailureFrontier | None, site: FnSite, *,
     max_tests: int = 6, observed_only: bool = True,
 ) -> tuple[str, ...]:
-    """The tests a prompt for `key` prints, owed tests first, then the rest
-    alphabetically, capped at `max_tests`.
+    """The tests a prompt for the body at `site` prints, owed tests first,
+    then the rest alphabetically, capped at `max_tests`.
+
+    The pool is `FailureFrontier.tests_for_body`: when the sweep's convicting
+    map tells two bodies of one name apart, each body is shown only the tests
+    that convict it. It takes a site, not a locator, so no caller can print a
+    homonym's tests by forgetting the container. When the sweep told the
+    containers apart, an empty container is the site the caller named, which
+    the map does not, so the prompt shows nothing. Before, the per-fn refill
+    seed and the file and impl refill sections read the locator while the
+    keep gates read the body, so a compiling `fmt` was told a test of the
+    other `fmt` failed.
 
     `observed_only` drops tests held in a stub (a stub's first fill). The
     re-fill block passes False and keeps every attributed test. An empty
     owed map leaves the order alphabetical."""
     if frontier is None:
         return ()
-    pool = (frontier.observed_tests_for(key) if observed_only
-            else set(frontier.tests_for(key)))
+    pool = frontier.tests_for_body(site.file, site.fn_name, site.container)
+    if observed_only:
+        pool = {t for t in pool if t.rsplit("::", 1)[-1] not in frontier.held}
     owed_raw: set[str] = set()
-    for name in (frontier.owed.get(key) or ()):
+    for name in (frontier.owed.get(FnLocator(site.file, site.fn_name)) or ()):
         owed_raw.add(str(name))
         owed_raw.add(str(name).rsplit("::", 1)[-1])
 
@@ -456,27 +467,50 @@ def tests_in_prompt(
     return tuple((owed_tests + rest)[:max_tests])
 
 
+def tests_shown_for_name(
+    frontier: FailureFrontier | None, file: str, fn_name: str, *,
+    max_tests: int = 6,
+) -> frozenset[str]:
+    """The tests some prompt for a body of `fn_name` in `file` prints: the
+    union of :func:`tests_in_prompt` over each body the sweep told apart, or
+    the one pool when it told none apart.
+
+    For a reader keyed by name, not by body (the ask ledger's unit is
+    `file::fn`). Passing an empty container to :func:`tests_in_prompt`
+    instead asks for a body the sweep does not name, which shows nothing
+    on a name it told apart, so the audit recorded "words not shown" for
+    every homonym whose own prompt showed them."""
+    if frontier is None:
+        return frozenset()
+    bodies = frontier.bodies_told_apart(file, fn_name)
+    sites = (bodies if len(bodies) >= 2
+             else frozenset({FnSite(file, fn_name, "")}))
+    return frozenset(t for site in sites
+                     for t in tests_in_prompt(frontier, site,
+                                              max_tests=max_tests))
+
+
 def observed_stub_excerpts(
-    keys: Iterable[FnLocator], frontier: FailureFrontier | None, *,
+    sites: Iterable[FnSite], frontier: FailureFrontier | None, *,
     read_source: Callable[[str], str | None] | None = None,
     max_tests: int = 6,
 ) -> str:
-    """For each still-stubbed function in `keys`, what its failing tests that
-    are NOT held in a stub printed on the sweep (`observed_tests_for`), or ""
-    when none did. A stub's first fill otherwise shows no test's words: the
-    re-fill sections read `refill_members` only (run `39786-fd38e72f`,
-    2026-10-09, fill 3: `test_large_alignment` ran past every stub, owed the
-    stubbed `src/fmt.rs::debug`, and its `called Option::unwrap() on a None
-    value` was in none of the prompts written for it)."""
+    """For each still-stubbed body in `sites`, what its failing tests that
+    are NOT held in a stub printed on the sweep, or "" when none did. A
+    stub's first fill otherwise shows no test's words: the re-fill sections
+    read `refill_members` only (run `39786-fd38e72f`, 2026-10-09, fill 3:
+    `test_large_alignment` ran past every stub, owed the stubbed
+    `src/fmt.rs::debug`, and its `called Option::unwrap() on a None value`
+    was in none of the prompts written for it)."""
     if frontier is None:
         return ""
     lines: list[str] = []
-    for key in keys:
+    for site in sites:
         tests = list(tests_in_prompt(
-            frontier, key, max_tests=max_tests, observed_only=True))
+            frontier, site, max_tests=max_tests, observed_only=True))
         excerpts = sweep_excerpts(tests, frontier, read_source=read_source)
         if excerpts:
-            lines.append(OBSERVED_HEAD.format(fn=key.fn_name))
+            lines.append(OBSERVED_HEAD.format(fn=site.fn_name))
             lines.extend(render_test_excerpts(excerpts))
     return "\n".join(lines)
 

@@ -7,7 +7,7 @@ mapping, moved out of pipeline.py.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple
@@ -266,17 +266,26 @@ class FailureFrontier:
         A container the map does not name gets nothing — the locator fact
         does not stand for a body the sweep already told apart."""
         loc = set(self.tests_for(FnLocator(file, fn_name)))
-        if not container:
+        if len(self.bodies_told_apart(file, fn_name)) < 2:
             return loc
-        want = norm_src_rel(file)
-        distinguished = {
-            container_key(site.container)
-            for site in self.convicting
-            if site.fn_name == fn_name and norm_src_rel(site.file) == want
-            and site.container}
-        if len(distinguished) < 2:
-            return loc
+        # The caller did not name a body the sweep already told apart.
+        # The locator pool is every homonym's tests; handing it over credits
+        # one body with the other's. The site's own convicting set is what
+        # stands, and an unnamed container's is empty.
         return set(self.convicting_for_site(FnSite(file, fn_name, container)))
+
+    def bodies_told_apart(self, file: str, fn_name: str) -> frozenset[FnSite]:
+        """The bodies of this name the convicting map names by container.
+        Two or more is a name the sweep told apart: each body's tests are
+        its own (:meth:`tests_for_body`). Fewer is one body as far as the
+        sweep can say."""
+        want = norm_src_rel(file)
+        by_key: dict[str, FnSite] = {}
+        for site in self.convicting:
+            if (site.fn_name == fn_name and norm_src_rel(site.file) == want
+                    and site.container):
+                by_key.setdefault(container_key(site.container), site)
+        return frozenset(by_key.values())
 
     def convicting_for(self, key: FnLocator) -> set[str]:
         """Union of every site with this file+name — file-first U2 still
@@ -286,6 +295,38 @@ class FailureFrontier:
         for site, tests in self.convicting.items():
             if site.file == key.file and site.fn_name == key.fn_name:
                 out |= tests
+        return out
+
+    def convicting_for_body(self, file: str, fn_name: str,
+                            container: str) -> set[str]:
+        """The tests allowed to revert THIS body: the acceptance gate's set.
+
+        :meth:`convicting_for` unions every site of the name, so a test the
+        map put on one body by its container also convicts every homonym,
+        which is the over-inclusion this class's docstring calls fatal. Here
+        a site that names a DIFFERENT container is left out; an
+        empty-container site (a locator-level fact that cannot say which
+        body) still applies to every body, and a caller that cannot name
+        its body (empty ``container``) gets the union. When the sweep told
+        two or more bodies of the name apart, each body's own site is what
+        stands, the rule :meth:`tests_for_body` applies to attribution.
+
+        A run opened on a blocker the fill measured is judged on its body's
+        site (:func:`frontier_for_run`); read through the union, the tests
+        held in one `fmt` stub would have convicted every `fmt` of the
+        file."""
+        if not container:
+            return self.convicting_for(FnLocator(file, fn_name))
+        if len(self.bodies_told_apart(file, fn_name)) >= 2:
+            return self.convicting_for_site(FnSite(file, fn_name, container))
+        want = container_key(container)
+        out: set[str] = set()
+        for site, tests in self.convicting.items():
+            if site.file != file or site.fn_name != fn_name:
+                continue
+            if site.container and container_key(site.container) != want:
+                continue
+            out |= tests
         return out
 
     def convicting_for_site(self, site: FnSite) -> set[str]:
@@ -415,6 +456,50 @@ def record_site(record: Any) -> FnSite:
         str(record.get("fn_name", "")),
         str(record.get("container", "") or ""),
     ))
+
+
+def frontier_for_run(
+    sweep: FailureFrontier | None,
+    held: Iterable[tuple[FnSite, Collection[str]]],
+) -> FailureFrontier | None:
+    """The frontier a run is judged and prompted with: the sweep's, plus the
+    tests the fill's own reading put in each still-stubbed body the run was
+    opened on (`RouteRun.held_tests`), on that body's site.
+
+    The sweep's convicting map is its coverage owner sets. A test that
+    stopped in a shallower stub at the sweep never entered a deeper body,
+    so it owns nothing there; once a keep of the fill moves that test's
+    first failure into the deeper stub, the run opened on it answers for
+    the test, and every gate, prompt and verdict of that run has to read
+    it. Run `2129106-ead996ab` (2026-10-28, fill 1): three runs opened on
+    28 such bodies, holding 125–128 failing tests each wave, were judged on
+    the sweep's map, so `u2_test_gate` was handed no test and accepted all
+    28 without a scoped run, the verdict rows reading "none were failing".
+
+    Written through :meth:`FailureFrontier.build`, the one writer of the
+    convicting projection, into both projections (dispatch at the locator,
+    convicting at the site), so `build`'s intersection keeps them. A site
+    the sweep's convicting map already names keeps the sweep's measured
+    set: the sweep is the stronger reading. The other fields are carried
+    unchanged. Nothing held → the sweep's frontier itself."""
+    held = [(canon_site(site), frozenset(tests)) for site, tests in held
+            if tests]
+    if not held:
+        return sweep
+    base = sweep if sweep is not None else FailureFrontier.of_dispatch({})
+    dispatch: dict[FnLocator, set[str]] = {
+        k: set(v) for k, v in base.dispatch.items()}
+    convicting: dict[FnSite, set[str]] = {
+        k: set(v) for k, v in base.convicting.items()}
+    for site, tests in held:
+        if site in convicting:
+            continue
+        dispatch.setdefault(locator_of(site), set()).update(tests)
+        convicting[site] = set(tests)
+    return FailureFrontier.build(
+        dispatch, convicting, evidence=base.evidence, sources=base.sources,
+        pairs=base.pairs, held=base.held, unit_notes=base.unit_notes,
+        owed=base.owed)
 
 
 def locator_of(site: FnSite) -> FnLocator:

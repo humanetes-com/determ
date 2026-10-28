@@ -37,6 +37,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from pipeline_core.domain.models import FnLocator
+from pipeline_core.domain.rust_scan import is_hollow_body
 
 
 def _canon_body(text: str) -> str:
@@ -153,6 +154,59 @@ def changed_units(
     return frozenset(k for k in keys if before.get(k, ()) != after.get(k, ()))
 
 
+def written_units(
+    before: Mapping[FnLocator, tuple[str, ...]],
+    after: Mapping[FnLocator, tuple[str, ...]],
+) -> frozenset[FnLocator]:
+    """The units a body LANDED for: their body moved, and the tree does not
+    hold a stub for them now.
+
+    A unit that went back to a stub during the fill (a crash settlement put
+    a culprit back, a peel restored a stub) moved and landed nothing. Read
+    as landed, it was served with no body written, its starvation streak
+    reset, the ledger got a row grading the stub, and a unit no route
+    opened was not re-offered. Every consumer of "a body landed this fill"
+    reads this set; :func:`changed_units` stays the raw tree reading for
+    the one question that wants it (did the attempted body move at all)."""
+    return frozenset(
+        k for k in changed_units(before, after)
+        if not (after.get(k) and all(is_hollow_body(b) for b in after[k])))
+
+
+def opened_in_fill(
+    dispatched: Iterable[FnLocator] | None,
+    lost: Iterable[FnLocator],
+    fallback: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """Every unit a route of the fill opened, inside the batch or not, less
+    the answers lost after the call (a lost answer is not a turn).
+    ``dispatched`` None is an engine that reported no dispatch: the batch's
+    own reading (``fallback``) stands.
+
+    Served is a fact about the unit, not about the batch. Read through the
+    batch, a unit a schedule run wrote outside it (a session's editable set,
+    a file run's other members, a run opened on a measured blocker) kept its
+    starvation streak and its never-served rank and took a batch slot on the
+    next sweep (`HEALTH ‼ EVIDENCED_STARVED`, 4 fires on the 2026-10-22 full
+    read, 3 of them on `391506-3403a6a7`)."""
+    if dispatched is None:
+        return frozenset(fallback)
+    return frozenset(dispatched) - frozenset(lost)
+
+
+def served_units(
+    opened: Iterable[FnLocator],
+    landed: Iterable[FnLocator],
+) -> frozenset[FnLocator]:
+    """Units a route opened, plus units whose body this fill changed.
+
+    A passenger whose body changed was written. The served stamp reads this
+    set, so the unit leaves the never-served rank. The pass re-offer stays
+    on the batch's opened set: a unit the cursor has not reached is not put
+    back by a landing outside it."""
+    return frozenset(opened) | frozenset(landed)
+
+
 def unattempted_units(
     frontier: Iterable[FnLocator],
     attempted: Iterable[FnLocator],
@@ -164,8 +218,8 @@ def unattempted_units(
     targeted (a passenger of the write list). Subtracting `landed` keeps
     that unit out of the "no route attempted" set: its body moved, and
     naming it unattempted in the same audit contradicts the landed list.
-    A passenger still earns no served-at stamp — that update keys on
-    `attempted` only, which this function does not touch.
+    The served stamp is :func:`served_units`, the union of what opened and
+    what landed, not this set.
     """
     return frozenset(frontier) - frozenset(attempted) - frozenset(landed)
 

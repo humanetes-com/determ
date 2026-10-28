@@ -36,9 +36,11 @@ from pipeline_core.domain.behaviour import (
     is_probe_id,
 )
 from pipeline_core.domain.cfg import CfgSet
+from pipeline_core.domain.fn_reachability import PublicIndex
 from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.models import FnRecord
 from pipeline_core.domain.rust_idents import impl_self_type
+from pipeline_core.domain.rust_lex import code_mask
 from pipeline_core.domain.rust_scan import contains_word
 from pipeline_core.domain.text import strip_think_blocks
 
@@ -251,13 +253,202 @@ def without_turbofish(when: str) -> str:
     return "".join(out)
 
 
+_OPEN = {"(": ")", "[": "]", "{": "}"}
+# A `|` or `<` in operand position (nothing that could be a left operand in
+# front of it) opens a closure's parameter list or a qualified path; after an
+# operand it is a binary operator.
+_OPERAND_END = frozenset("([{,=;!&|+-*/%^<>:")
+
+
+def _blank_literals(expr: str) -> str:
+    """``expr`` with every string, char literal and comment blanked to spaces
+    (`rust_lex.code_mask`), positions kept, so brackets and operators inside
+    a literal are not read as code."""
+    mask = code_mask(expr)
+    return "".join(" " if m else c for c, m in zip(expr, mask, strict=True))
+
+
+def _close_of(s: str, at: int) -> int | None:
+    """Index of the bracket closing the one opened at ``at`` (any of `([{`)."""
+    depth = 0
+    for i in range(at, len(s)):
+        if s[i] in _OPEN:
+            depth += 1
+        elif s[i] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def _operand_before(s: str, i: int) -> bool:
+    prev = s[:i].rstrip()
+    return bool(prev) and prev[-1] not in _OPERAND_END and not prev.endswith("move")
+
+
+def _closure_body(inner: str) -> str | None:
+    """The body of a closure literal ``inner`` (`|x| e`, `move || { … }`,
+    `|| -> T { … }`), or None when ``inner`` is not one."""
+    s = inner.strip()
+    if s.startswith("move"):
+        s = s[4:].lstrip()
+    if not s.startswith("|"):
+        return None
+    if s.startswith("||"):
+        rest = s[2:]
+    else:
+        end = s.find("|", 1)
+        if end < 0:
+            return None
+        rest = s[end + 1:]
+    rest = rest.strip()
+    if rest.startswith("->"):
+        brace = rest.find("{")
+        if brace < 0:
+            return None
+        rest = rest[brace:]
+    return rest
+
+
+def _block_tail(block: str) -> str:
+    """The tail expression of ``{ … }`` (after the last statement), "" for a
+    block whose value is `()`."""
+    body = block[1:-1]
+    depth, last = 0, -1
+    for i, c in enumerate(body):
+        if c in _OPEN:
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == ";" and depth == 0:
+            last = i
+    return body[last + 1:].strip()
+
+
+def value_root(when: str) -> str:
+    """The sub-expression of ``when`` whose value IS the when's value, with
+    literals blanked.
+
+    Grouping parentheses are peeled. A block's value is its tail expression,
+    and an `unsafe` block's too. A call of a parenthesised closure literal is
+    that closure's body, the body's tail when it is a block. Anything else is
+    its own value: a call or a method call is the call (an operator inside an
+    argument or inside a closure that is passed, not called, is not the
+    value), and a closure that is not called is the closure."""
+    s = _blank_literals(when).strip()
+    for _ in range(64):
+        if s.startswith("unsafe") and s[6:].lstrip().startswith("{"):
+            s = s[6:].lstrip()
+        if not s:
+            return s
+        if s[0] in "({":
+            close = _close_of(s, 0)
+            if close is None:
+                return s
+            rest = s[close + 1:].strip()
+            if not rest:
+                if s[0] == "{":
+                    s = _block_tail(s)
+                    continue
+                inner = s[1:-1]
+                if not _has_top_level(inner, ","):
+                    s = inner.strip()
+                    continue
+                return s
+            if s[0] == "(" and rest.startswith("(") and _close_of(rest, 0) == len(rest) - 1:
+                callee = s[1:close].strip()
+                # Extra grouping around the callee (`((|x| e))(x)`) is still
+                # the closure. A top-level comma is a tuple, not a group.
+                for _peel in range(8):
+                    if not callee.startswith("("):
+                        break
+                    inner_close = _close_of(callee, 0)
+                    if inner_close is None or inner_close != len(callee) - 1:
+                        break
+                    inner = callee[1:-1].strip()
+                    if _has_top_level(inner, ","):
+                        break
+                    callee = inner
+                body = _closure_body(callee)
+                if body is not None:
+                    s = body
+                    continue
+        return s
+    return s
+
+
+def _has_top_level(s: str, ch: str) -> bool:
+    depth = 0
+    for c in s:
+        if c in _OPEN:
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == ch and depth == 0:
+            return True
+    return False
+
+
+def _top_level_text(root: str) -> str:
+    """``root`` with every bracketed group, every closure (from its parameter
+    list on) and every qualified path `<T as Trait>` blanked: the operators
+    left are the root's own."""
+    out: list[str] = []
+    depth = 0
+    i, n = 0, len(root)
+    while i < n:
+        c = root[i]
+        if c in _OPEN:
+            depth += 1
+            out.append(c if depth == 1 else " ")
+            i += 1
+            continue
+        if c in ")]}":
+            depth -= 1
+            out.append(c if depth == 0 else " ")
+            i += 1
+            continue
+        if depth == 0 and c == "<" and not _operand_before(root, i):
+            d, k = 0, i
+            while k < n:
+                if root[k] == "<":
+                    d += 1
+                elif root[k] == ">":
+                    d -= 1
+                    if d == 0:
+                        break
+                k += 1
+            out.append(" " * (min(k, n - 1) + 1 - i))
+            i = k + 1
+            continue
+        if depth == 0 and c == "|":
+            if not _operand_before(root, i):
+                out.append(" " * (n - i))
+                break
+            if root.startswith("||", i):
+                out.append("||")
+                i += 2
+                continue
+        out.append(c if depth == 0 else " ")
+        i += 1
+    return "".join(out)
+
+
 def value_bearing_reason(when: str) -> str | None:
     """Why this `when` may NOT be captured, or None when it may.
 
     A comparison observes `true`/`false` and throws the value away — the same
     weakness `weak_assertion_reason` refuses on the generation side, arriving
     on the capture side. Identity predicates are exempt: for them the boolean
-    IS the observable, and the type is kept in the Then's value."""
+    IS the observable, and the type is kept in the Then's value.
+
+    The operator judged is the one at the root of the value (:func:`value_root`),
+    not one anywhere in the text. A substring scan refused every when that
+    compares inside a macro argument, a call argument or a closure it then
+    unwraps (`(|| -> Result<()> { ensure!(a >= b); Ok(()) })().unwrap_err()`,
+    whose value is the error): 110 of the 634 whens task 0d proposed on the
+    record (2026-10-04 → 10-27), every one of them a false refusal, 16 of 25
+    on run `2355041-eae39441` (`scripts/value_bearing_replay.py`)."""
     w = (when or "").strip()
     if not w:
         return "empty when"
@@ -267,9 +458,9 @@ def value_bearing_reason(when: str) -> str | None:
         return "when prints; the harness prints it"
     if "assert" in w:
         return "when asserts; the harness records, it does not check"
-    bare = without_turbofish(w)
+    top = _top_level_text(without_turbofish(value_root(w)))
     for tok in _LOGIC_TOKENS:
-        if tok in bare:
+        if tok in top:
             return (
                 f"when combines two observables ({tok}) — one printed "
                 "boolean cannot say which half held; write them separately"
@@ -277,7 +468,7 @@ def value_bearing_reason(when: str) -> str | None:
     if identity_type_of(w) is not None:
         return None
     for tok in (*_COMPARISON_TOKENS, "<", ">"):
-        if tok in bare:
+        if tok in top:
             return (
                 f"when compares ({tok}) — a boolean discards the value; "
                 "write the expression whose value is the observable"
@@ -633,7 +824,7 @@ def is_public_crate_fn(
     reachable_files: frozenset[str] | None,
     type_files: Mapping[str, str] | None,
     cfg_set: CfgSet | None,
-    public_index: Mapping[str, frozenset[str]] | None = None,
+    public_index: PublicIndex | None = None,
 ) -> bool:
     """True when an example crate can call `rec`: exactly `pub`, not a test,
     not under an aux dir or a hidden/cfg-dead module, and nameable from
@@ -655,11 +846,11 @@ def is_public_crate_fn(
     if _hidden_module_path(rec.mod_path) or _cfg_excluded(rec, cfg_set):
         return False
     if public_index:
-        if rec.fn_name not in public_index.get(rec.file, frozenset()):
+        if rec.fn_name not in public_index.names_in(rec.file):
             return False
         self_ty = (impl_self_type(rec.container)
                    if rec.container.startswith("impl") else None)
-        return self_ty is None or any(self_ty in names for names in public_index.values())
+        return self_ty is None or self_ty in public_index.names()
     if reachable_files is None:
         return True
     self_ty = impl_self_type(rec.container) if rec.container.startswith("impl") else None
@@ -743,7 +934,7 @@ def probe_targets(
     reachable_files: frozenset[str] | None = None,
     type_files: Mapping[str, str] | None = None,
     cfg_set: CfgSet | None = None,
-    public_index: Mapping[str, frozenset[str]] | None = None,
+    public_index: PublicIndex | None = None,
 ) -> tuple[str, ...]:
     """The externally-callable fns NO harvested example names in its code
     (:func:`example_code` — helpers, setup, when; whole-word on the bare fn

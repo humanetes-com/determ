@@ -32,7 +32,7 @@ from pipeline_core.application.reconstruct.test_locator import (
 )
 from pipeline_core.domain.attribution import FailureFrontier
 from pipeline_core.domain.crash_site import CrashSites
-from pipeline_core.domain.models import FnLocator, ImplBlock
+from pipeline_core.domain.models import FnLocator, FnSite, ImplBlock
 from pipeline_core.domain.refill_evidence import (
     Attribution,
     RefillEvidence,
@@ -172,6 +172,27 @@ def render_prior_regression(
             lines.append(_PRIOR_OUTPUT_HEAD[attempt])
             lines.extend(shown)
     return "\n".join(lines)
+
+
+def render_sibling_regression(
+    regressed: Sequence[str], pins: str, outputs: Mapping[str, str] | None,
+    writers: Sequence[str],
+) -> str:
+    """The section a later route over some units owes the write that another
+    route made over them and reverted for reddening tests
+    (`sibling_regression`): the tests, what they assert, what they printed.
+    Rendered like :func:`render_prior_regression`, under a head that says
+    whose write it was."""
+    if not regressed:
+        return ""
+    body = render_prior_regression(regressed, pins, outputs)
+    head = _PRIOR_HEAD[RegressedAttempt.REVERTED]
+    by = ", ".join(writers) if writers else "another route"
+    return body.replace(head, (
+        f"an EARLIER write over these functions ({by}) was REVERTED because "
+        "it reddened these previously-passing test(s) — the next write must "
+        "satisfy the targets above WITHOUT breaking these (their source is "
+        "under Tests below):"), 1)
 
 
 def promote_pair_write_grades(
@@ -329,7 +350,7 @@ def assemble_block_evidence(
     # run past every stub printed. Empty for a frontier with no such test,
     # so a call without one renders exactly as before.
     observed = observed_stub_excerpts(
-        (FnLocator(b.file, m.fn_name) for b in target_blocks
+        (FnSite(b.file, m.fn_name, b.container) for b in target_blocks
          for m in b.stub_members),
         frontier, read_source=read_source)
     if observed:

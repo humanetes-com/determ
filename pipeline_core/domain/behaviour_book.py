@@ -70,6 +70,7 @@ from pipeline_core.domain.behaviour_probe import is_public_crate_fn
 from pipeline_core.domain.candidate_tiers import culprits, feature_reach
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.example_setup import IMPORTS_KEY_SUFFIX, helper_key_parts
+from pipeline_core.domain.fn_reachability import PublicIndex
 from pipeline_core.domain.models import FnRecord, TypeRecord
 from pipeline_core.domain.rust_idents import impl_self_type, impl_trait_name
 from pipeline_core.domain.rust_lex import code_mask
@@ -182,7 +183,7 @@ def glossary_entries(
     *,
     reachable_files: frozenset[str] | None = None,
     cfg_set: CfgSet | None = None,
-    public_index: Mapping[str, frozenset[str]] | None = None,
+    public_index: PublicIndex | None = None,
 ) -> tuple[GlossaryEntry, ...]:
     """The crate's public vocabulary, sorted by name.
 
@@ -206,7 +207,7 @@ def glossary_entries(
     types = [t for t in type_records
              if t.is_pub and t.is_exactly_pub and not t.external_path
              and t.kind in ("struct", "enum", "trait", "type")
-             and (t.name in public_index.get(t.file, frozenset())
+             and (t.name in public_index.names_in(t.file)
                   if public_index else
                   not t.mod_path
                   and (reachable_files is None or t.file in reachable_files))]

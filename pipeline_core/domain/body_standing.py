@@ -123,3 +123,25 @@ def proven_units(
         if tests & passing and not tests & dead:
             out.add(unit)
     return frozenset(out)
+
+
+def lost_to_aborts(
+    attributed: Mapping[str, Iterable[FnLocator]],
+    *,
+    passed: Iterable[str],
+    died: Iterable[str],
+) -> frozenset[FnLocator]:
+    """The units a passing attributed test would prove that :func:`proven_units`
+    leaves out only because another attributed test's process died. The
+    reading entry 365.4 asks for: on run `2355041-eae39441` (2026-10-27) the
+    standing set read 48, 4, 48 proven units at iterations 3, 4, 5 with the
+    sweep reconciled every time; iteration 4 was the abort-heavy sweep. This
+    count says whether the `died` clause is what emptied it."""
+    dead = frozenset(died)
+    passing = frozenset(passed)
+    by_unit: dict[FnLocator, set[str]] = {}
+    for test, units in attributed.items():
+        for u in units:
+            by_unit.setdefault(u, set()).add(test)
+    return frozenset(u for u, tests in by_unit.items()
+                     if tests & passing and tests & dead)

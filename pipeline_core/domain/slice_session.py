@@ -79,6 +79,10 @@ class SessionSlice:
     #: The tests the candidate turned green (the rest of `tests` are the
     #: ones it turned red), for the joint verdict the session's row records.
     joint_gained: tuple[str, ...] = ()
+    #: Units an earlier run of this fill already kept. They stay in view
+    #: as source and are not editable: the session may not rewrite a body
+    #: the sweep has not graded yet.
+    frozen: frozenset[FnLocator] = frozenset()
 
     @property
     def files(self) -> tuple[str, ...]:
@@ -752,6 +756,7 @@ def declares_other_fn(body: str, own_name: str) -> str | None:
 def route_change_set(
     parsed: Sequence[Mapping[str, object]],
     records: Mapping[FnSite, FnRecord],
+    frozen: Collection[FnLocator] = (),
 ) -> ChangeSet:
     """Match the reply's `<FN name block>` bodies to the slice's records.
 
@@ -762,6 +767,7 @@ def route_change_set(
     one; a name outside the slice is rejected as out of scope — the editable
     set is fixed at turn 0 and a body for a fn the session may not write is
     the one answer that must never reach the tree."""
+    frozen_locs = frozenset(frozen)
     by_name: dict[str, list[FnSite]] = {}
     for site in records:
         by_name.setdefault(site.fn_name, []).append(site)
@@ -803,6 +809,11 @@ def route_change_set(
                 f"candidates: {opts}")
             continue
         site = matched[0]
+        if locator_of(site) in frozen_locs:
+            rejected.append(
+                f"`{name}` in {site.file}: kept by an earlier run of this "
+                "fill; not rewritten")
+            continue
         if site in seen:
             rejected.append(f"`{name}` in {site.file}: given twice; first kept")
             continue
@@ -861,6 +872,11 @@ class TurnReading:
     #: Tests failing at the session's baseline and passing at this turn
     #: (`RegressionComparison.newly_green`) — whom `pass_delta` paid.
     newly_green: tuple[str, ...] = ()
+    #: Tests failing in both readings of a binary that completed on both
+    #: sides (`RegressionComparison.still_failing`). None when this turn
+    #: has no comparison: the suite was inconclusive, and a missing reading
+    #: is not a claim that nothing stayed red.
+    still_failing: tuple[str, ...] | None = None
     #: A completed binary reported fewer verdicts than at baseline — oracle
     #: corruption, never traded away at any price (the sweep's rule).
     executed_shrank: bool = False

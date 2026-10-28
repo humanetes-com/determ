@@ -167,16 +167,23 @@ _ASSERT_OUT = (
     "thread 'b' panicked at src/lib.rs:1:1:\nassertion failed: boom\n")
 
 
-def test_u2_gate_accepts_when_disabled_or_no_tests() -> None:
+def test_u2_gate_accepts_when_disabled_and_says_so_when_handed_no_tests() -> None:
+    """Gate off and no test command keep the body unmeasured (`ran` False).
+    No test handed in is its own decision: run `2129106-ead996ab`
+    (2026-10-28) recorded 28 such keeps as "none were failing"."""
     boom = _const_run_cargo(101, "test a ... FAILED")
-    assert _gate(boom, {"a"}, enabled=False).decision is U2Decision.ACCEPT
-    assert _gate(boom, set()).decision is U2Decision.ACCEPT
-    assert _gate(boom, {"a"}, test_cmd=None).decision is U2Decision.ACCEPT
+    off = _gate(boom, {"a"}, enabled=False)
+    assert off.decision is U2Decision.ACCEPT and not off.measured
+    none = _gate(boom, set())
+    assert none.decision is U2Decision.NO_TESTS and not none.measured
+    no_cmd = _gate(boom, {"a"}, test_cmd=None)
+    assert no_cmd.decision is U2Decision.ACCEPT and not no_cmd.measured
 
 
 def test_u2_gate_accepts_when_tests_pass() -> None:
     v = _gate(_const_run_cargo(0, "test a ... ok"), {"a"})
     assert v.decision is U2Decision.ACCEPT
+    assert v.measured
 
 
 def test_u2_gate_inconclusive_on_timeout() -> None:

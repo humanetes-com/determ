@@ -50,12 +50,17 @@ from pipeline_core.application.reconstruct.tree_txn import (
     restore,
 )
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
-from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.attribution import (
+    FailureFrontier,
+    frontier_for_run,
+    locator_of,
+)
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_select import IdentityMustUnit
 from pipeline_core.domain.cfg import cluster_cfg_set
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.cluster_plan import fill_invariants_section
+from pipeline_core.domain.crash_settlement import with_held_stub_evidence
 from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.dispatch import (
     impl_route_covers,
@@ -460,7 +465,7 @@ class PhaseCFillEngine:
         # the first claim after a keep that moved it (`fill_scheduler`).
         fill_premise: Mapping[str, PremiseEntry] | None = None,
         fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None,
-        fill_held_now: Callable[[], Mapping[str, frozenset[FnLocator]] | None] | None = None,
+        fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -1641,6 +1646,12 @@ class _PerFnRoute:
 
     def __init__(self, engine: PhaseCFillEngine, **kw: Any) -> None:
         self._engine = engine
+        # The sweep's frontier is held apart from the pass arguments: the
+        # plan reads it, and a run is handed only the frontier
+        # `frontier_for_run` builds for that run, so no run can be judged on
+        # the sweep's owner sets while it carries tests the fill measured.
+        self._sweep_frontier: FailureFrontier | None = kw.pop(
+            "tdd_frontier_tests")
         self._kw = kw
         self.result: ClusterFillResult | None = None
 
@@ -1661,14 +1672,14 @@ class _PerFnRoute:
         # with its own event (`phase_c.dispatch.cfg_dead_refused`): it stays
         # a reason to open the run and never a target the run may write.
         live, refills, dead = eng._per_fn_targets(
-            kw["target_src_dir"], stubs, keys, kw["tdd_frontier_tests"],
+            kw["target_src_dir"], stubs, keys, self._sweep_frontier,
             crash_blamed=kw["crash_blamed"] or frozenset(),
             is_cfg_dead=kw["is_cfg_dead"], crash_sites=kw.get("crash_sites"))
         stub_locs = frozenset(st.key for st in live)
         targets = stub_locs | frozenset(r.key for r in refills)
         if not targets and not dead:
             return []
-        frontier: FailureFrontier | None = kw["tdd_frontier_tests"]
+        frontier = self._sweep_frontier
         unit_tests = tuple(
             (loc, frozenset(str(t).rsplit("::", 1)[-1]
                             for t in (frontier.tests_for(loc)
@@ -1698,6 +1709,17 @@ class _PerFnRoute:
             # or a coverage split's attributed write and its other-file
             # extras). The passes write only what this run holds.
             kw["tdd_frontier_keys"] = set(run.targets)
+        if run.held_tests:
+            # A run opened on blockers the fill measured: the sweep held no
+            # test in them, so its crash evidence says nothing; the run's own
+            # ground states how many tests now stop in each stub.
+            kw["crash_evidence"] = with_held_stub_evidence(
+                kw["crash_evidence"],
+                ((locator_of(s), t) for s, t in run.held_tests))
+        # The frontier THIS run is judged and prompted with: the sweep's,
+        # plus the tests the fill measured in the bodies the run was opened
+        # on. Every gate, prompt and verdict of the passes reads it.
+        run_frontier = frontier_for_run(self._sweep_frontier, run.held_tests)
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])
         before_landed = frozenset(kw["landed_fn"])
@@ -1709,7 +1731,7 @@ class _PerFnRoute:
             max_passes=kw["max_passes"], leaf_name_counts=kw["leaf_name_counts"],
             fr_path=kw["fr_path"], tdd_frontier_keys=kw["tdd_frontier_keys"],
             skip_end_pass_test=kw["skip_end_pass_test"],
-            tdd_frontier_tests=kw["tdd_frontier_tests"],
+            tdd_frontier_tests=run_frontier,
             tdd_test_cmd=kw["tdd_test_cmd"], crash_evidence=kw["crash_evidence"],
             crash_blamed=kw["crash_blamed"], crash_blocked=kw["crash_blocked"],
             culprits_of=kw.get("culprits_of"),

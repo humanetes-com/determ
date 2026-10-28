@@ -19,13 +19,17 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import pytest
+
 from pipeline_core.adapters.route_ledger_store import RouteLedgerStore
 from pipeline_core.application.reconstruct import fill_reading
+from pipeline_core.application.reconstruct import fill_scheduler as fscheduler
 from pipeline_core.application.reconstruct.fill_routes import RouteRunReport
 from pipeline_core.application.reconstruct.fill_scheduler import (
     FillExecutionDeps,
     execute_fill,
 )
+from pipeline_core.domain import fill_schedule as fsched
 from pipeline_core.domain.fill_schedule import (
     RouteKind,
     RouteRun,
@@ -146,13 +150,68 @@ def test_a_pair_is_a_transaction_and_defers_whole(tmp_path: Path) -> None:
     assert run is None and held == {_A}
 
 
-def test_a_session_is_never_withheld() -> None:
+def test_a_session_is_never_withheld_and_opens_with_every_landed_body_frozen(
+) -> None:
     """A session's try is keyed by the tests it aims at, not by the units its
-    transcript touches, and its turns are judged as they land."""
+    transcript touches, so it opens whole. Every body this fill kept is
+    frozen on it, its targets' and the others': its editable set grows after
+    planning, and a kept body can enter it as a passenger."""
     session = RouteRun(kind=RouteKind.SESSION, label="session[1 test(s)]",
                        targets=frozenset({_A, _C}),
                        target_tests=frozenset({"t"}))
-    assert withhold_landed(session, {_A}) == (session, frozenset())
+    run, held = withhold_landed(session, {_A, _B})
+    assert held == frozenset()
+    assert run is not None and run.targets == session.targets
+    assert run.frozen == frozenset({_A, _B})
+    # Nothing landed, nothing to freeze: the planned run itself.
+    assert withhold_landed(session, set()) == (session, frozenset())
+
+
+def test_a_session_no_run_held_opens_with_the_file_runs_keeps_frozen(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A session that opens after an earlier run of the fill kept a body,
+    with no hold between them, opens with that body frozen on it. The
+    negative control is the pre-fix rule, a session returned unchanged: it
+    opens with nothing frozen, free to rewrite a body no sweep has
+    graded."""
+    first = RouteRun(kind=RouteKind.SESSION, label="session first",
+                     targets=frozenset({_A, _B}), target_tests=frozenset({"t1"}),
+                     files=("src/p.rs",), seq=0)
+    sess = RouteRun(kind=RouteKind.SESSION, label="session",
+                    targets=frozenset({_A, _C}), target_tests=frozenset({"t"}),
+                    files=("src/p.rs", "src/q.rs"), seq=1)
+    frozen_seen: list[frozenset[FnLocator]] = []
+
+    class _Session(_Route):
+        def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
+            frozen_seen.append(frozenset(run.frozen))
+            return super().run(run, clock)
+
+    def _open(tmp: Path) -> None:
+        fill_reading.reset_last_comparison()
+        seen: list[tuple[str, frozenset[FnLocator]]] = []
+        routes = [_Session(RouteKind.SESSION, [first, sess], seen)]
+        execute_fill(routes, hollow={}, bodies_sha=_moving_sha(),
+                     deps=_deps(tmp, [], []))
+
+    fixed = tmp_path / "fixed"
+    fixed.mkdir()
+    _open(fixed)
+    assert frozen_seen == [frozenset(), frozenset({_A, _B})]
+
+    frozen_seen.clear()
+    real = fsched.withhold_landed
+
+    def _pre_fix(run: RouteRun, landed):
+        if run.kind is RouteKind.SESSION:
+            return run, frozenset()
+        return real(run, landed)
+
+    monkeypatch.setattr(fscheduler, "withhold_landed", _pre_fix)
+    control = tmp_path / "control"
+    control.mkdir()
+    _open(control)
+    assert frozen_seen == [frozenset(), frozenset()]
 
 
 def test_a_carved_piece_of_a_carved_run_still_names_the_planned_run() -> None:

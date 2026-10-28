@@ -92,7 +92,7 @@ from pipeline_core.domain import unit_clock
 from pipeline_core.domain.fill_class import FillOutcomeClass
 from pipeline_core.domain.held_stubs import Blockers
 from pipeline_core.domain.impl_routing import norm_src_rel
-from pipeline_core.domain.models import FnLocator, FnRecord
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 
 __all__ = [
     "DEFAULT_UNPAID_GRACE",
@@ -193,12 +193,36 @@ class RouteRun:
     #: units, not the batch (:func:`carve_rebuys`). Empty means the targets
     #: are one transaction (a file, an impl block, a pair, a session).
     unit_tests: tuple[tuple[FnLocator, frozenset[str]], ...] = ()
+    #: Still-stubbed bodies among the targets, container included, with the
+    #: tests whose first failure sits in each on the ground this run was
+    #: opened on, when that ground is not the sweep's: a run opened from the
+    #: fill's own reading (`fill_scheduler._open_for_blockers`). These are
+    #: the tests the run answers for: the per-fn route judges and prompts
+    #: the run on the frontier `attribution.frontier_for_run` builds from
+    #: them. The sweep's owner sets cannot hold them, because at the sweep
+    #: those tests stopped in a shallower stub and never entered these
+    #: bodies. Empty for every planned run. Only a per-fn run carries them
+    #: (`__post_init__`): it is the one route that is handed a frontier per
+    #: run, so a held run of any other kind would be judged on the sweep's.
+    held_tests: tuple[tuple[FnSite, frozenset[str]], ...] = ()
     #: The ``key`` of the planned run this one was carved from; the route
     #: that planned that run executes this one. Empty for a planned run.
     parent: str = ""
     #: The digest of the joint candidate a joint session answers
     #: (`candidate_tiers.JointCandidate.digest`); empty for every other run.
     joint: str = ""
+    #: Units an earlier run of this fill kept that this run may not rewrite.
+    #: Set when a held session is released (`release_held`): the session
+    #: opens, and these bodies stay the ones the sweep grades.
+    frozen: frozenset[FnLocator] = frozenset()
+
+    def __post_init__(self) -> None:
+        if self.held_tests and self.kind is not RouteKind.PER_FN:
+            raise ValueError(
+                f"{self.label}: a run carrying tests the fill measured "
+                "(`held_tests`) must be a per-fn run — no other route builds "
+                "its frontier from them, so its gate would run the sweep's "
+                "owner sets, which do not hold them")
 
     @property
     def holds_jointly(self) -> bool:
@@ -252,6 +276,8 @@ class RouteRun:
             "bodies_sha": self.bodies_sha,
             **({"parent": self.parent} if self.parent else {}),
             **({"joint": self.joint} if self.joint else {}),
+            **({"frozen": sorted(f"{f}::{fn}" for f, fn in self.frozen)}
+               if self.frozen else {}),
         }
 
 
@@ -420,6 +446,11 @@ class RouteLedgerRow:
     #: 2026-09-15, and rows that opened no judged try — which is NOT the
     #: same claim as ``()`` ("kept, and paid none of its tests").
     newly_green: tuple[str, ...] | None = None
+    #: Bare names of the tests the run's keeps ran and left red (failing
+    #: before and after, in binaries complete in both readings). None is a
+    #: row that recorded no per-test reading, every row written before
+    #: 2026-10-27 included: no claim either way.
+    still_red: tuple[str, ...] | None = None
     #: The reverted units the revert did not narrow to: restored only
     #: because the transaction they rode in was restored as a whole
     #: (`FillAttempts.note_reverted(collateral=True)`). Empty on every row
@@ -507,6 +538,8 @@ class RouteLedgerRow:
             "share_minutes": self.share_minutes, "reason": self.reason,
             "newly_green": (list(self.newly_green)
                             if self.newly_green is not None else None),
+            "still_red": (list(self.still_red)
+                          if self.still_red is not None else None),
             "collateral": [list(t) for t in self.collateral],
             "joint_sets": [[list(t) for t in js] for js in self.joint_sets],
             "opened": ([list(t) for t in self.opened]
@@ -539,6 +572,7 @@ class RouteLedgerRow:
 
         share = raw.get("share_minutes")
         green = raw.get("newly_green")
+        still = raw.get("still_red")
         first = raw.get("first_turn_minutes")
         return cls(
             kind=kind, label=str(raw.get("label", "")),
@@ -560,6 +594,8 @@ class RouteLedgerRow:
             reason=str(raw.get("reason", "")),
             newly_green=(tuple(str(x) for x in green)
                          if isinstance(green, list) else None),
+            still_red=(tuple(str(x) for x in still)
+                       if isinstance(still, list) else None),
             collateral=_pairs("collateral"),
             joint_sets=tuple(
                 tuple((str(a), str(b)) for a, b in js)
@@ -1054,10 +1090,25 @@ class UnitEvidence:
     grades: Mapping[tuple[str, int, FnLocator], tuple[str, str | None]] = field(
         default_factory=dict)
     standing_flat: Mapping[FnLocator, str] = field(default_factory=dict)
+    #: The landings whose row carries their own keep's comparison
+    #: (`LedgerEntry.kept_green` set). Only for those does a ``proven``
+    #: grade say THIS keep turned a test green: with the comparison the
+    #: grade already refuses a sibling's cash (FLAT); without it ``proven``
+    #: is only the tree state (a test passes with the body on the tree), and
+    #: a keep interrupted by a stop, or a route row that recorded no
+    #: comparison, was credited for whatever turned green beside it.
+    compared: frozenset[tuple[str, int, FnLocator]] = frozenset()
 
     def grade(self, run_id: str, iteration: int,
               unit: FnLocator) -> tuple[str, str | None] | None:
         return self.grades.get((run_id, iteration, unit))
+
+    def paid(self, run_id: str, iteration: int, unit: FnLocator) -> bool:
+        """The landing's grade is a payment of its own keep: proven, and
+        judged against that keep's own comparison."""
+        g = self.grade(run_id, iteration, unit)
+        return (g is not None and g[1] in _PAYING_GRADES
+                and (run_id, iteration, unit) in self.compared)
 
     def stands_flat(self, unit: FnLocator, body_sha: str) -> bool:
         return self.standing_flat.get(unit) == body_sha
@@ -1076,6 +1127,7 @@ def unit_evidence_from(
     iteration: the last one in ledger order stands for the landing (it is
     the body the route row's keep left on the tree)."""
     landed: dict[tuple[str, int, FnLocator], str] = {}
+    compared: set[tuple[str, int, FnLocator]] = set()
     graded: dict[tuple[str, FnLocator, str], str] = {}
     for e in entries:
         if str(getattr(e, "oracle_fp", "")) != oracle_fp:
@@ -1083,13 +1135,19 @@ def unit_evidence_from(
         unit = FnLocator(e.key.file, e.key.fn_name)
         state = str(getattr(e.state, "value", e.state))
         if state == "landed":
-            landed[(e.run_id, int(e.iteration), unit)] = e.body_sha
+            k = (e.run_id, int(e.iteration), unit)
+            landed[k] = e.body_sha
+            if getattr(e, "kept_green", None) is not None:
+                compared.add(k)
+            else:
+                compared.discard(k)
         else:
             graded[(e.run_id, unit, e.body_sha)] = state
     return UnitEvidence(
         grades={k: (sha, graded.get((k[0], k[2], sha)))
                 for k, sha in landed.items()},
-        standing_flat=dict(standing_flat))
+        standing_flat=dict(standing_flat),
+        compared=frozenset(compared))
 
 
 def share_ended_session(row: RouteLedgerRow, min_turns: int) -> bool:
@@ -1411,6 +1469,8 @@ class UnitService:
             return _RANK_SERVED, None
         last = opened[here_at[-1]]
         if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
+            if aim_left_red(run, last):
+                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
         if last.outcome is RunOutcome.REVERTED:
             cls = (_RANK_SERVED if _pair_revert_owes_a_retry(run, last, grace_left)
@@ -1474,11 +1534,19 @@ class UnitService:
                 return _RANK_SERVED, None
             return _RANK_REBUY_REVERTED, self._deferrals_since(t, run, last)
         g = ev.grade(last.run_id, last.iteration, t)
-        if g is not None and g[1] in _PAYING_GRADES:
+        if ev.paid(last.run_id, last.iteration, t):
+            if aim_left_red(run, last):
+                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
+        if g is not None and g[1] in _PAYING_GRADES:
+            # Proven on the tree, but no comparison of this keep says the
+            # keep turned it: not a payment, so not a reason to buy it again.
+            return _RANK_SERVED, None
         if g is not None and ev.stands_flat(t, g[0]):
             return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
         if (g is None or g[1] is None) and _row_paid(last):
+            if aim_left_red(run, last):
+                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
         return _RANK_SERVED, None
 
@@ -1640,35 +1708,34 @@ def carve_coverage_split(run: RouteRun, attributed: Collection[FnLocator],
 
 
 def release_held(held: Sequence[ScheduledRun],
-                 left_tree: Collection[str]) -> tuple[ScheduledRun, ...]:
-    """The held runs every holder of which has nothing on the tree for them
-    to split (``left_tree``: run keys the executor deferred, and run keys
-    that opened and kept nothing — reverted, empty, or every kept body the
-    one already on disk), released: no longer deferred, ranked again with
-    the reason they had before the hold.
+                 finished: Collection[str]) -> tuple[ScheduledRun, ...]:
+    """The held runs every holder of which has finished, released: no longer
+    deferred, ranked again with the reason they had before the hold.
 
-    A hold protects one pending judgment: the holder's landing, read by the
-    next sweep without a split write beside it. A holder that landed nothing
-    leaves nothing to protect. Run `42057-641e589c` (2026-10-26, fill 6): the
-    formatter pair re-emitted its on-disk bodies after 16.3 min (`every kept
-    body was the one already on disk`), and the `src/error.rs` and
-    `src/ptr.rs` file, impl and per-fn runs and three multi-test sessions it
-    held stayed `pair_wait` for the rest of the fill while single-test
-    sessions spent the budget. Fill 5's formatter pair that REVERTED (kept
-    0) held its runs the same way.
+    ``finished`` holds the keys of the holders the executor deferred and of
+    those that opened and returned, whatever they kept. A hold orders: the
+    holder opens first. What it protected after that, the holder's landing
+    read by the next sweep with no second write beside it, is held by other
+    rules once the holder has returned. `withhold_landed` keeps every later
+    run of the fill off a body this fill kept, the premise gate refuses a
+    claim on a test that moved, and the landed row's own comparison
+    (`kept_green`) credits the landing only with the tests it turned green.
+    Run `2355041-eae39441` (2026-10-27), fill 7: the Display pair kept +2 at
+    its wave, and seven runs it and the reverted Debug pair held waited the
+    whole fill; one of them, a session that then rewrote a unit outside the
+    pair, cashed +4 in 7.4 minutes the moment it opened in fill 8.
+
+    A released session is guarded like every session, when it opens:
+    `withhold_landed` freezes on it every body this fill kept by then, so it
+    cannot rewrite the holder's landing before the sweep grades it.
 
     The schedule's pass holds a run only behind a run it OPENS, because a
-    hold on a run that never opens is a wait for nothing — no grace clock
-    can release it, a deferred run writes no graded row (run
-    `3127-6763a5c6`, 2026-09-18: fills 2-6 opened nothing). The pass cannot
-    see the executor defer that holder afterwards. Run `116341-24c76a97`
-    (2026-09-25) fill 6: both formatter pairs were deferred `premise_moved`
-    after the per-fn run's keeps, and the error.rs file and impl runs and
-    the 26-unit session they held stayed `pair_wait` behind them — the one
-    planned run that held `src/error.rs::context` beside its table fns
-    never opened. One rule for both holds (`pair_wait`, `coverage_split`);
-    a run with no recorded holder is not a hold and is never released."""
-    gone = frozenset(left_tree)
+    hold on a run that never opens is a wait for nothing (run
+    `3127-6763a5c6`, 2026-09-18: fills 2-6 opened nothing); the executor's
+    later deferral of a holder is a finish. One rule for both holds
+    (`pair_wait`, `coverage_split`); a run with no recorded holder is not a
+    hold and is never released."""
+    gone = frozenset(finished)
     return tuple(
         replace(h, deferred=False, reason=h.prior_reason or h.reason,
                 share_minutes=None)
@@ -1702,9 +1769,22 @@ def withhold_landed(run: RouteRun, landed: Collection[FnLocator],
     whole. A session is never withheld: its try is keyed by the tests it
     aims at, not by the units its transcript touches
     (:meth:`UnitService.judges_units`), and its own turns are judged by the
-    suite as they land. Its keeps still withhold them from later runs."""
-    held = frozenset(run.targets) & frozenset(landed)
-    if not held or run.kind is RouteKind.SESSION:
+    suite as they land. Its keeps still withhold them from later runs.
+
+    A session opens with EVERY body this fill kept frozen on it, not only
+    its planned targets: its editable set grows after planning (installable
+    and coupled admissions), so a kept body can enter it as a passenger.
+    The session drops the frozen units from that grown set and refuses a
+    body for one. This is the one place a session opens, held or not, so
+    the frozen set is the landed set at the moment it opens. The frozen
+    units are not reported withheld: the run opens whole."""
+    landed_set = frozenset(landed)
+    if run.kind is RouteKind.SESSION:
+        if not landed_set or landed_set <= run.frozen:
+            return run, frozenset()
+        return replace(run, frozen=run.frozen | landed_set), frozenset()
+    held = frozenset(run.targets) & landed_set
+    if not held:
         return run, frozenset()
     rest = frozenset(run.targets) - held
     if not run.unit_tests or not rest:
@@ -1807,11 +1887,33 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     return rank, reason, deferrals
 
 
+def aim_left_red(run: RouteRun, last: RouteLedgerRow) -> bool:
+    """The last try ran every test ``run`` aims at and left each red.
+
+    A cash pays for the tests it turned green; those leave the aim. What a
+    rerun then aims at is what that try ran and did not move, so the cash is
+    not evidence the rerun will pay: run `2355041-eae39441` (2026-10-27),
+    fill 8, the Display pair ranked `paying` after cashing one test, aimed at
+    the four it had left red, and re-emitted its bodies for 28.9 minutes; a
+    session cashed the one of them it could move in 7.4 by rewriting a unit
+    outside the pair. On the route ledger 11 `paying` runs had this shape: 1
+    cashed, 10 bought nothing (257 of 270 minutes). The set read is the
+    keep's own `still_red` (failing before and after, in binaries complete
+    in both readings), so an aimed test the try never measured does not
+    count as left red; a row without the reading makes no claim."""
+    if last.still_red is None or not run.target_tests:
+        return False
+    aim = {str(t).rsplit("::", 1)[-1] for t in run.target_tests}
+    return aim <= {str(t).rsplit("::", 1)[-1] for t in last.still_red}
+
+
 def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
                  grace_left: bool, starved: bool = False,
                  min_turns: int = 0) -> tuple[int, str]:
     """(rank, reason) from the latest graded row on the run's identity."""
     if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
+        if aim_left_red(run, last):
+            return _RANK_REBUY_FLAT, _REASON[_RANK_REBUY_FLAT]
         return _RANK_PAYING, _REASON[_RANK_PAYING]
     if last.outcome in (RunOutcome.STOPPED, RunOutcome.UNMEASURED):
         # Interrupted, or every reply reasoning-capped: not evidence.
@@ -2776,6 +2878,28 @@ def admit_ranked(
     return FillSchedule(tuple(ordered), tuple(waiting), float(budget_minutes))
 
 
+def _promote(s: ScheduledRun, *, blocker_writer: tuple[str, ...] = (),
+             starved_writer: tuple[str, ...] = ()) -> ScheduledRun:
+    """Open a deferred run now, at its own position, with its hold cleared.
+
+    A held run's position is after its holders (the order is topological
+    over the blocks relation, and a holder blocks the run it holds), and the
+    routes that hold (pairs, joint sessions) never share a wave, so the
+    holder has finished when the promoted run opens. ``withhold_landed``
+    then keeps it off every body the holder kept: a file, impl or per-fn run
+    is carved, a session opens with those bodies frozen. Leaving a held
+    session deferred instead waited on the executor's release, which gets
+    only the time left over and none if the fill ends first, so an owed
+    function a held session alone wrote had no opened writer
+    (`schedule_invariants`, `slice_unit_starved`)."""
+    return replace(
+        s, deferred=False, share_minutes=None, held_by=(),
+        reason=s.prior_reason or s.reason, prior_reason="",
+        weight=max(s.weight, 1),
+        blocker_writer=blocker_writer or s.blocker_writer,
+        starved_writer=starved_writer or s.starved_writer)
+
+
 def _cover_blockers(
     opened: list[ScheduledRun], deferred: list[ScheduledRun],
     blockers: Blockers,
@@ -2808,13 +2932,43 @@ def _cover_blockers(
             still.append(s)
             continue
         uncovered -= hit
-        promoted.append(replace(
-            s, deferred=False, share_minutes=None, held_by=(),
-            reason=s.prior_reason or s.reason, prior_reason="",
-            weight=max(s.weight, 1),
-            blocker_writer=tuple(sorted(
-                f"{u.file}::{u.fn_name}" for u in hit))))
+        promoted.append(_promote(s, blocker_writer=tuple(sorted(
+            f"{u.file}::{u.fn_name}" for u in hit))))
     return sorted([*opened, *promoted], key=lambda s: s.position), still
+
+
+def unrouted_units(unattempted: Collection[FnLocator] | None,
+                   cfg_inactive: Collection[FnLocator] = ()) -> frozenset[FnLocator]:
+    """The units a fill's batch held that no route attempted, from the
+    landed-change audit's own reading (`landed_change.unattempted_units`, the
+    set `unit_exit` classifies as deferred, filtered, run target or held by
+    no run). None is no reading (the audit could not scan the tree) and
+    carries nothing. A unit this cluster's cfg excludes is the cfg filter
+    working, not a miss."""
+    if unattempted is None:
+        return frozenset()
+    return frozenset(unattempted) - frozenset(cfg_inactive)
+
+
+def due_this_fill(owed: Collection[FnLocator],
+                  unrouted_last: Collection[FnLocator],
+                  batch: Collection[FnLocator]) -> frozenset[FnLocator]:
+    """The functions this fill must open a writer for (:func:`_cover_due`):
+    what the red tests owe, and every unit the previous fill's batch held
+    that no route attempted, as far as this batch still holds them.
+
+    Each hold, cap and deferral is right about its own run and none sees
+    that the unit it left out was left out last fill too. On the record
+    (2026-09 to 2026-10-27, `phase_c.charge.undispatched_spared`), 132
+    unit-iterations were a stub the batch held on two or more consecutive
+    fills with no route attempting it, 33 on run `3127-6763a5c6`; the
+    deferrals of the runs that targeted them were `pair_wait` 101,
+    `premise_moved` 65, `kind_cap` 29, `coverage_split` 21 and re-buy
+    reasons 49. One fill of waiting is the bound: on the next, the cover
+    opens the unit's first writer whatever deferred it. A unit the next
+    batch drops is not carried (the dispatch decided again)."""
+    held = frozenset(batch)
+    return (frozenset(owed) | frozenset(unrouted_last)) & held
 
 
 def _cover_due(
@@ -2853,12 +3007,8 @@ def _cover_due(
             still.append(s)
             continue
         uncovered -= hit
-        promoted.append(replace(
-            s, deferred=False, share_minutes=None, held_by=(),
-            reason=s.prior_reason or s.reason, prior_reason="",
-            weight=max(s.weight, 1),
-            starved_writer=tuple(sorted(
-                f"{u.file}::{u.fn_name}" for u in hit))))
+        promoted.append(_promote(s, starved_writer=tuple(sorted(
+            f"{u.file}::{u.fn_name}" for u in hit))))
     return sorted([*opened, *promoted], key=lambda s: s.position), still
 
 
