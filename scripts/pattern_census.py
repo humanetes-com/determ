@@ -3258,15 +3258,31 @@ def p53_untested_keeps(events: list[tuple[str, dict]]) -> list[str]:
     verdict after the opener and before the next sweep. A unit with two
     bodies is counted per verdict until one of them clears it."""
     pending: set[str] = set()
+    # The held bodies (`sites` on openers since 2026-10-28): a no-tests
+    # event is matched on the body, so a homonym another run filled in the
+    # same fill is not counted. Older openers carry names only.
+    bodies: set[tuple[str, str, str]] = set()
+    named_only: set[str] = set()
     hits: list[str] = []
     for kind, d in events:
         if kind == "iter":
             pending.clear()
+            bodies.clear()
+            named_only.clear()
         elif kind == "opened":
-            pending |= {str(b) for b in d.get("blockers") or ()}
+            names = {str(b) for b in d.get("blockers") or ()}
+            pending |= names
+            sites = d.get("sites")
+            if sites:
+                bodies |= {(str(f), str(n), " ".join(str(c).split()))
+                           for f, n, c in sites}
+            else:
+                named_only |= names
         elif kind == "no_tests":
             key = f"{d.get('file', '')}::{d.get('fn', '')}"
-            if key in pending:
+            body = (str(d.get("file", "")), str(d.get("fn", "")),
+                    " ".join(str(d.get("container", "")).split()))
+            if body in bodies or key in named_only:
                 hits.append(key)
         elif kind == "verdict" and str(d.get("route", "")) == "per-fn":
             key = _p53_unit_key(str(d.get("unit", "")))

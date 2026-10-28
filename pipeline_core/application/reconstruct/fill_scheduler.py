@@ -736,7 +736,12 @@ def _open_for_blockers(
         "cluster": deps.cluster, "iter": deps.iteration,
         "blockers": list(names),
         "tests": {n: sorted(tests_of[u]) for n, u in zip(names, new,
-                                                          strict=True)}})
+                                                          strict=True)},
+        # The bodies, container included: what the run writes and is judged
+        # on (`RouteRun.held_tests`), so a reader can tell the held body
+        # from a homonym of its name.
+        "sites": [[st.file, st.fn_name, st.container]
+                  for st, _t in sorted(sites_of.items())]})
     return [*ordered[:i], opened_run, *ordered[i:]]
 
 

@@ -63,3 +63,13 @@ def test_the_no_tests_event_on_an_opened_unit_is_a_hit() -> None:
     events = [("opened", {"blockers": ["src/a.rs::mid"]}),
               ("no_tests", {"file": "src/a.rs", "fn": "mid"})]
     assert census.p53_untested_keeps(events) == ["src/a.rs::mid"]
+
+
+def test_a_no_tests_event_on_a_homonym_of_the_held_body_is_not_a_hit() -> None:
+    events = [("opened", {"blockers": ["src/a.rs::mid"],
+                          "sites": [["src/a.rs", "mid", "impl Shape for Alpha"]]}),
+              ("no_tests", {"file": "src/a.rs", "fn": "mid",
+                            "container": "impl Shape for Beta"}),
+              ("no_tests", {"file": "src/a.rs", "fn": "mid",
+                            "container": "impl Shape  for Alpha"})]
+    assert census.p53_untested_keeps(events) == ["src/a.rs::mid"]

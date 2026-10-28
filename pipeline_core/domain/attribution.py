@@ -8,7 +8,7 @@ mapping, moved out of pipeline.py.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any, NamedTuple
 
@@ -190,6 +190,13 @@ class FailureFrontier:
     # Stub and re-fill excerpts print these before the other observed tests.
     # Empty keeps alphabetical order.
     owed: Mapping[FnLocator, frozenset[str]] = field(default_factory=dict)
+    # Convicting sites whose tests were measured inside exactly that body
+    # (`frontier_for_run`: the fill's held reading). Every other site may be
+    # a locator lifted to the empty container, which stands for any body of
+    # the name; an exact site, empty container included, is one body — a
+    # free function, or the impl method the ground named — and convicts that
+    # body only (:meth:`convicting_for_body`).
+    body_exact: frozenset[FnSite] = frozenset()
 
     @classmethod
     def build(
@@ -302,31 +309,39 @@ class FailureFrontier:
         """The tests allowed to revert THIS body: the acceptance gate's set.
 
         :meth:`convicting_for` unions every site of the name, so a test the
-        map put on one body by its container also convicts every homonym,
-        which is the over-inclusion this class's docstring calls fatal. Here
-        a site that names a DIFFERENT container is left out; an
-        empty-container site (a locator-level fact that cannot say which
-        body) still applies to every body, and a caller that cannot name
-        its body (empty ``container``) gets the union. When the sweep told
-        two or more bodies of the name apart, each body's own site is what
-        stands, the rule :meth:`tests_for_body` applies to attribution.
+        map put on one body also convicts every homonym, which is the
+        over-inclusion this class's docstring calls fatal. Per site:
+
+        - a site in :attr:`body_exact` convicts only the body it names, an
+          empty container meaning the free function, never "any body";
+        - otherwise, when the sweep told two or more bodies of the name
+          apart, a body reads only its own site (the rule
+          :meth:`tests_for_body` applies to attribution);
+        - otherwise a site naming a different container is left out, and
+          an empty-container site (a locator-level fact that cannot say
+          which body) applies to every body.
 
         A run opened on a blocker the fill measured is judged on its body's
-        site (:func:`frontier_for_run`); read through the union, the tests
-        held in one `fmt` stub would have convicted every `fmt` of the
-        file."""
-        if not container:
-            return self.convicting_for(FnLocator(file, fn_name))
-        if len(self.bodies_told_apart(file, fn_name)) >= 2:
-            return self.convicting_for_site(FnSite(file, fn_name, container))
-        want = container_key(container)
+        exact site (:func:`frontier_for_run`). Read through the union, the
+        tests held in one impl's `fmt` stub convicted the free `fmt` the
+        same pass filled, and a held free function's tests convicted every
+        method of its name (review of the first implementation,
+        2026-10-28)."""
+        want = container_key(container) if container else ""
+        told_apart = len(self.bodies_told_apart(file, fn_name)) >= 2
         out: set[str] = set()
         for site, tests in self.convicting.items():
             if site.file != file or site.fn_name != fn_name:
                 continue
-            if site.container and container_key(site.container) != want:
-                continue
-            out |= tests
+            key = container_key(site.container) if site.container else ""
+            if site in self.body_exact:
+                if key == want:
+                    out |= tests
+            elif told_apart and container:
+                if site.container and key == want:
+                    out |= tests
+            elif not container or not site.container or key == want:
+                out |= tests
         return out
 
     def convicting_for_site(self, site: FnSite) -> set[str]:
@@ -491,15 +506,18 @@ def frontier_for_run(
         k: set(v) for k, v in base.dispatch.items()}
     convicting: dict[FnSite, set[str]] = {
         k: set(v) for k, v in base.convicting.items()}
+    exact: set[FnSite] = set(base.body_exact)
     for site, tests in held:
         if site in convicting:
             continue
         dispatch.setdefault(locator_of(site), set()).update(tests)
         convicting[site] = set(tests)
-    return FailureFrontier.build(
+        exact.add(site)
+    built = FailureFrontier.build(
         dispatch, convicting, evidence=base.evidence, sources=base.sources,
         pairs=base.pairs, held=base.held, unit_notes=base.unit_notes,
         owed=base.owed)
+    return replace(built, body_exact=frozenset(exact))
 
 
 def locator_of(site: FnSite) -> FnLocator:

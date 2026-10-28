@@ -52,6 +52,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain.attribution import (
     FailureFrontier,
+    canon_site,
     frontier_for_run,
     locator_of,
 )
@@ -734,11 +735,15 @@ class PhaseCFillEngine:
         claim_release: Callable[[], None] | None = None,
         crash_sites: CrashSites | None = None,
         _landed_fn: set[FnLocator] | None = None,
+        write_sites: frozenset[FnSite] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
         the next unit; `landed_before` is what earlier runs of this fill
-        landed (the stale-refill probe's premise)."""
+        landed (the stale-refill probe's premise). `write_sites`, when set,
+        are the only bodies the passes may write, container-exact: a run
+        opened on bodies the fill measured writes those, not every body of
+        their names (`_PerFnRoute.run`)."""
         _fill_hist = FillClassHistogram()
         _last_payoff = None
         # Write sets replies named as one (`FillResult.joint_named`).
@@ -832,6 +837,20 @@ class PhaseCFillEngine:
                 target_src_dir, stubs, tdd_frontier_keys, tdd_frontier_tests,
                 crash_blamed=crash_blamed or frozenset(),
                 is_cfg_dead=_is_cfg_dead, crash_sites=crash_sites)
+            if write_sites is not None:
+                _off_site = [s for s in (*stubs, *_refill_recs)
+                             if _site_of(s) not in write_sites]
+                if _off_site:
+                    self.tel.log(
+                        f"  [phase-c/per-fn] cluster {cluster_name}: "
+                        f"{len(_off_site)} body(ies) of the opened names are "
+                        "not the bodies the fill measured, not written in "
+                        "this run: " + ", ".join(sorted(
+                            f"{s.file}::{s.fn_name} [{s.container}]"
+                            for s in _off_site)))
+                stubs = [s for s in stubs if _site_of(s) in write_sites]
+                _refill_recs = [s for s in _refill_recs
+                                if _site_of(s) in write_sites]
             if _dead_here:
                 self.tel.log(
                     f"  [phase-c/per-fn] cluster {cluster_name}: refused "
@@ -1635,6 +1654,11 @@ def _fold_per_fn_results(prev: ClusterFillResult | None,
                                    | set(new.unclaimed_fns))))
 
 
+def _site_of(stub: Stub) -> FnSite:
+    """A stub record's body, in the canonical form sites compare in."""
+    return canon_site(FnSite(stub.file, stub.fn_name, stub.container))
+
+
 class _PerFnRoute:
     """The engine's own route: the per-fn passes, as ONE run of the fill
     schedule (its levels are a compile-order barrier inside the route, not
@@ -1720,6 +1744,11 @@ class _PerFnRoute:
         # plus the tests the fill measured in the bodies the run was opened
         # on. Every gate, prompt and verdict of the passes reads it.
         run_frontier = frontier_for_run(self._sweep_frontier, run.held_tests)
+        # And it writes the bodies it was opened on, not every body of their
+        # names: a homonym no held test stops in was not measured, and its
+        # gate would read a set the ground put on another body.
+        write_sites = (frozenset(canon_site(s) for s, _t in run.held_tests)
+                       if run.held_tests else None)
         before_disp = frozenset(kw["dispatched"])
         before_rev = frozenset(kw["reverted"])
         before_landed = frozenset(kw["landed_fn"])
@@ -1743,7 +1772,7 @@ class _PerFnRoute:
             heal_file=kw["heal_file"],
             claim_refusal=clock.refusal, claim_release=clock.release,
             crash_sites=kw.get("crash_sites"),
-            _landed_fn=kw["landed_fn"])
+            _landed_fn=kw["landed_fn"], write_sites=write_sites)
         self.result = _fold_per_fn_results(self.result, res)
         disp = frozenset(kw["dispatched"]) - before_disp
         kept = frozenset(kw["landed_fn"]) - before_landed

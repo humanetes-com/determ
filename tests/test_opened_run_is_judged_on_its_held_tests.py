@@ -322,3 +322,100 @@ def test_the_gate_of_a_homonym_body_is_not_handed_the_held_tests(
     assert _run("impl Shape for Beta") == set()
     assert _run("impl Shape for Alpha") == {"t1"}
     assert frontier.convicting_for(FnLocator("lib.rs", "answer")) == {"t1"}
+
+
+# ---- the review of the first implementation (2026-10-28) --------------------
+
+def test_a_free_function_homonym_is_not_handed_a_held_methods_tests() -> None:
+    """Review: the empty-container caller read the union of every site."""
+    run_f = frontier_for_run(_sweep(), _HELD)
+    assert run_f is not None
+    assert run_f.convicting_for_body(_FILE, "mid", "") == set()
+
+
+def test_a_held_free_function_does_not_convict_the_methods_of_its_name() -> None:
+    """Review: a held free function was written on the empty-container site,
+    which every body of the name inherits while fewer than two containers
+    are told apart."""
+    free = FnSite(_FILE, "mid", "")
+    run_f = frontier_for_run(_sweep(), ((free, frozenset({"t3"})),))
+    assert run_f is not None
+    assert run_f.convicting_for_body(_FILE, "mid", "") == {"t3"}
+    assert run_f.convicting_for_body(_FILE, "mid", _MID_A.container) == set()
+
+
+def test_negative_control_a_lifted_locator_still_convicts_every_body() -> None:
+    """The sweep's empty-container sites are locator-level facts and keep
+    applying to every body; only the measured, body-exact ones narrow."""
+    sweep = FailureFrontier.build({FnLocator(_FILE, "mid"): {"t4"}},
+                                  {FnLocator(_FILE, "mid"): {"t4"}})
+    assert sweep.convicting_for_body(_FILE, "mid", _MID_A.container) == {"t4"}
+    assert sweep.convicting_for_body(_FILE, "mid", "") == {"t4"}
+
+
+class _SiteEngine(_Engine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.sites: list[frozenset[FnSite] | None] = []
+
+    def _per_fn_passes(self, **kw: Any) -> ClusterFillResult:
+        self.sites.append(kw.get("write_sites"))
+        return super()._per_fn_passes(**kw)
+
+
+def test_the_route_writes_only_the_held_bodies_of_an_opened_run() -> None:
+    engine = _SiteEngine()
+    route = _route(engine, _sweep())
+    clock = RunClock(share_minutes=None, fill_remaining=lambda: None)
+    route.run(_opened(), clock)
+    route.run(_planned(), clock)
+    assert engine.sites[0] == frozenset({fs_canon(_MID_A)})
+    assert engine.sites[1] is None
+
+
+def fs_canon(site: FnSite) -> FnSite:
+    from pipeline_core.domain.attribution import canon_site
+    return canon_site(site)
+
+
+def test_the_pass_leaves_a_homonym_stub_of_an_opened_name_alone(
+        tmp_path: Path) -> None:
+    """The per-fn pass keeps every stub record whose locator is a target;
+    with `write_sites` it keeps only the bodies the fill measured.
+    Control: without it both bodies of the name are filled."""
+    from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+    from pipeline_core.domain.enums import FillUnit
+    from tests.test_fill_engine_usecases import _engine
+
+    def _pass(write_sites: frozenset[FnSite] | None) -> tuple[list[str], int]:
+        ws = _mk_ws(tmp_path / f"w{len(list(tmp_path.iterdir()))}")
+        recs = [{"file": "lib.rs", "fn_name": "answer", "container": "",
+                 "sig_text": "pub fn answer()"},
+                {"file": "lib.rs", "fn_name": "answer",
+                 "container": "impl Shape for Alpha",
+                 "sig_text": "fn answer(&self)"}]
+        fake = FakeFill(stub_records=recs, run=(0, ""), regr=None)
+        eng = _engine(fake, FillUnit.FN)
+        eng._per_fn_passes(
+            project_dir=ws, target_src_dir=ws / "src", tests_dir_files=[],
+            module_name="m", cluster_name="t", cluster=None,
+            check_cmd="cargo check", cluster_env={}, max_passes=1,
+            leaf_name_counts=None, fr_path=None,
+            tdd_frontier_keys={FnLocator("lib.rs", "answer")},
+            skip_end_pass_test=True, tdd_frontier_tests=None,
+            tdd_test_cmd=None, crash_evidence=None, crash_blamed=None,
+            crash_blocked=None, culprits_of=None, dispatch_ranks=None,
+            behaviour_specs=(), _cfg_dead=CfgDeadSites(),
+            _is_cfg_dead=lambda _k: False, _dispatched=set(),
+            _reverted=set(), _answer_lost=set(), landed_before=lambda: 0,
+            claim=lambda *_a, **_k: True, write_sites=write_sites)
+        lines = [m for m in fake.logs if "not the bodies the fill measured" in m]
+        return lines, fake.events.count("phase_c.fn.fill.start")
+
+    held = frozenset({fs_canon(FnSite("lib.rs", "answer",
+                                      "impl Shape for Alpha"))})
+    lines, started = _pass(held)
+    assert len(lines) == 1 and "lib.rs::answer []" in lines[0]
+    assert started == 1
+    lines, started = _pass(None)
+    assert lines == [] and started == 2
