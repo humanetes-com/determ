@@ -129,6 +129,48 @@ def kind_after_sight_filter(kind: FailureKind, *, dropped: bool) -> FailureKind:
 
 
 @dataclass(frozen=True, slots=True)
+class WriteGround:
+    """The tests a write is judged on, and the subset that may revert it.
+
+    ``judged`` is what the keep gate runs and grades the keep by: the
+    dispatch projection of the written bodies, escalated tests included,
+    which is the ground the write was claimed and bought on. ``convicting``
+    is the direct-evidence subset, the only tests whose failure inside the
+    write reverts it (`FailureFrontier.convicting`'s rule: over-inclusion
+    there is fatal). A judged test that is not convicting and stays red is
+    a reading of the keep (it ran and stayed red), never a revert.
+
+    Before this type the gate took one set, the convicting one, while the
+    claim stood on the dispatch one. Run `3366333-dfeac80c` (2026-10-29,
+    fill 1): five per-fn bodies were bought on an escalated test, kept with
+    "no test is attributed to this body", and graded unreachable; the pair
+    after them was judged on its convicting test, already green, graded
+    mis-targeted, while the test it was bought for ran in neither gate.
+
+    Built only by :meth:`FailureFrontier.ground_for_body` and
+    :meth:`FailureFrontier.ground_for_units`, so a ground is always a
+    projection pair of one frontier; `tests/test_write_ground.py` refuses
+    any other constructor call in the pipeline."""
+
+    judged: frozenset[str]
+    convicting: frozenset[str]
+
+    def __post_init__(self) -> None:
+        if not self.convicting <= self.judged:
+            raise ValueError(
+                "a convicting test the keep does not run can revert nothing: "
+                f"{sorted(self.convicting - self.judged)} not in judged")
+
+    @classmethod
+    def empty(cls) -> WriteGround:
+        """No frontier: nothing to run (`U2Decision.NO_TESTS`)."""
+        return cls(frozenset(), frozenset())
+
+    def __bool__(self) -> bool:
+        return bool(self.judged)
+
+
+@dataclass(frozen=True, slots=True)
 class FailureFrontier:
     """The iteration's work list, carrying BOTH of its projections so the two
     readings can never drift apart.
@@ -327,22 +369,71 @@ class FailureFrontier:
         same pass filled, and a held free function's tests convicted every
         method of its name (review of the first implementation,
         2026-10-28)."""
-        want = container_key(container) if container else ""
-        told_apart = len(self.bodies_told_apart(file, fn_name)) >= 2
         out: set[str] = set()
+        for site, tests in self.convicting.items():
+            if self._site_is_body(site, file, fn_name, container):
+                out |= tests
+        return out
+
+    def _site_is_body(self, site: FnSite, file: str, fn_name: str,
+                      container: str) -> bool:
+        """Whether a convicting ``site`` speaks for the body ``(file,
+        fn_name, container)``: the rule :meth:`convicting_for_body` states.
+        A site of another file or name never does."""
+        if site.file != file or site.fn_name != fn_name:
+            return False
+        want = container_key(container) if container else ""
+        key = container_key(site.container) if site.container else ""
+        if site in self.body_exact:
+            return key == want
+        if container and len(self.bodies_told_apart(file, fn_name)) >= 2:
+            return bool(site.container) and key == want
+        return not container or not site.container or key == want
+
+    def ground_for_body(self, file: str, fn_name: str,
+                        container: str) -> WriteGround:
+        """The ground one body is judged on (:class:`WriteGround`).
+
+        Convicting is :meth:`convicting_for_body`. Judged is the name's
+        dispatch tests less those only another body's sites convict, by the
+        same per-site rule (:meth:`_site_is_body`): an escalated test is a
+        locator fact that put the name on the plan without saying which
+        body, so every body of the name runs it; a test measured inside a
+        homonym (an exact site, or a container the sweep told apart) is that
+        body's, and is neither run nor graded here."""
+        convicting: set[str] = set()
+        others: set[str] = set()
         for site, tests in self.convicting.items():
             if site.file != file or site.fn_name != fn_name:
                 continue
-            key = container_key(site.container) if site.container else ""
-            if site in self.body_exact:
-                if key == want:
-                    out |= tests
-            elif told_apart and container:
-                if site.container and key == want:
-                    out |= tests
-            elif not container or not site.container or key == want:
-                out |= tests
-        return out
+            if self._site_is_body(site, file, fn_name, container):
+                convicting |= tests
+            else:
+                others |= tests
+        judged = (self.tests_for(FnLocator(file, fn_name))
+                  - (others - convicting)) | convicting
+        return WriteGround(frozenset(judged), frozenset(convicting))
+
+    def ground_for_units(self, units: Iterable[FnLocator]) -> WriteGround:
+        """The ground a write of several units as one transaction is judged
+        on. Judged is every unit's dispatch tests. Convicting is the union
+        of their convicting sites (:meth:`convicting_for`), never that
+        dispatch set: an escalated test is run and graded, and a failure of
+        it inside the write is a reading, not a revert. The file, impl and
+        pair gates.
+
+        The signature takes the units only. A flag that promoted a member's
+        dispatch tests into the convicting set made those two halves one
+        set for an escalated or owner-measured member, so an in-unit failure
+        of a test the old gate did not run rejected the write. A caller
+        cannot pass that promotion: there is no parameter for it."""
+        judged: set[str] = set()
+        convicting: set[str] = set()
+        for u in units:
+            judged |= self.tests_for(u)
+            convicting |= self.convicting_for(u)
+        return WriteGround(frozenset(judged | convicting),
+                           frozenset(convicting))
 
     def convicting_for_site(self, site: FnSite) -> set[str]:
         """Tests that convict this canonical site, exactly.

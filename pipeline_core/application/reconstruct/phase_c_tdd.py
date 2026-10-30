@@ -24,6 +24,12 @@ from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, overload
 if TYPE_CHECKING:
     from pipeline_core.application.retrigger_layout import RetriggerResult
 
+from pipeline_core.application.reconstruct.assert_probe_runner import (
+    bind as bind_write_probe,
+)
+from pipeline_core.application.reconstruct.assert_probe_runner import (
+    tests_by_file,
+)
 from pipeline_core.application.reconstruct.attribution import (
     make_fn_site_locator,
     producer_escalation,
@@ -7701,16 +7707,7 @@ def run_phase_c_tdd(
                 _sweep_evidence[_t_ev] = f"{_sweep_evidence[_t_ev]}\n{_jn}"
         if (deps.assert_probe is not None and _owed_red
                 and os.getenv("ASSERT_PROBE", "1") != "0"):
-            _probe_by_file: dict[Path, list[str]] = {}
-            for _ft in sorted(_owed_red):
-                _fpath = _test_files.get(_ft) or _test_files.get(bare_test_name(_ft))
-                if not _fpath:
-                    continue
-                _fp = Path(_fpath)
-                if not _fp.is_absolute():
-                    _fp = project_dir / _fp
-                if _fp.is_file():
-                    _probe_by_file.setdefault(_fp, []).append(bare_test_name(_ft))
+            _probe_by_file = tests_by_file(_owed_red, _test_files, project_dir)
             if _probe_by_file:
                 try:
                     _observed = deps.assert_probe(
@@ -7878,6 +7875,22 @@ def run_phase_c_tdd(
         # Every route's test gate reads the settler bound here
         # (`crash_settler.bound`), so no route can judge a crash without it.
         bind_crash_settler(_crash_settler)
+
+        def _write_probe(names: Collection[str], *,
+                         _env: Any = cluster_env) -> Mapping[str, str]:
+            """The sweep's probe, asked by a regression gate about the tests
+            a write reddened while that write is still on the tree."""
+            if deps.assert_probe is None or os.getenv("ASSERT_PROBE", "1") == "0":
+                return {}
+            by_file = tests_by_file(names, _test_files, project_dir)
+            if not by_file:
+                return {}
+            return deps.assert_probe(project_dir, target_src_dir,
+                                     cluster.name, _env, by_file)
+
+        # Every regression gate reads it (`assert_probe_runner.bound`), the
+        # same way it reads the settler.
+        bind_write_probe(_write_probe)
         _ground: GroundSession | None = None
         try:
             # The fill's ground (`fill_ground_lock`): opened here, after every
@@ -8009,6 +8022,7 @@ def run_phase_c_tdd(
         finally:
             fill_phase_clock.disarm()
             bind_crash_settler(None)
+            bind_write_probe(None)
             if _ground is not None:
                 deps.log(f"  {tag} [phase-c/ground] fill {iter_n}: "
                          f"{_ground.premises} premise(s) and "

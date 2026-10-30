@@ -102,6 +102,7 @@ from pipeline_core.domain.slice_session import (
     render_capped_turn,
     render_compile_turn,
     render_rejected_only_turn,
+    render_request_over_bound,
     render_restored_note,
     render_test_turn,
     route_change_set,
@@ -115,6 +116,12 @@ from pipeline_core.domain.test_results import (
     TestStateReading,
     compare_readings,
 )
+
+#: Room a requested answer must leave in the transcript for the reply that
+#: uses it and the result turn that judges that reply: the largest later-turn
+#: message (40,340 chars) plus the 90th-percentile reply (1,729) over the 875
+#: session calls in `logs/events.jsonl` on 2026-10-29.
+_RESULT_ROOM = 42_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -745,7 +752,10 @@ def run_slice_session(
                 after = ports.measure_suite(raw, MeasureRole.JUDGMENT)
         # Whatever the settlement decided, the crash it read is what the
         # model is shown beside the verdicts (`TurnReading.crash`).
-        crash_text = crash_text_of(settlement)
+        # Scoped to the session's editable set, not this turn's change set:
+        # the next turn may write any unit of the slice.
+        crash_text = crash_text_of(settlement, frozenset(
+            FnLocator(u.file, u.fn_name) for u in slice_.units))
         if after is None or baseline is None:
             return TurnReading(targets=tuple(
                 TargetStatus(t, False, "(suite inconclusive)") for t in slice_.tests)), after
@@ -874,9 +884,24 @@ def run_slice_session(
                     baseline_bodies, target_src_dir, ports)
                 if admitted:
                     followup += render_admitted_units(admitted)
+                # An answer that would carry the transcript past its bound
+                # is not sent: sending it ends the session (`TranscriptBound`)
+                # with turns left, and the request was only retrieval.
+                _left = max_transcript_chars - conv.chars()
+                _over = (max_transcript_chars > 0
+                         and len(followup) + _RESULT_ROOM > _left)
+                if _over:
+                    ports.log(
+                        f"  [phase-c/session] {label}: requested context "
+                        f"{len(followup):,} chars would carry the transcript "
+                        f"past its bound ({conv.chars():,} of "
+                        f"{max_transcript_chars:,}) — not sent, the session "
+                        "continues")
+                    followup = render_request_over_bound(len(followup), _left)
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "request",
                     "request": requests, "charged": charged,
+                    "over_bound": _over,
                     "admitted": [site_payload(record_site(r))
                                  for r in admitted]})
                 pending = followup + "\n" + render_budget_turn(max_turns - turns)

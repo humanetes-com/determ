@@ -80,7 +80,7 @@ def test_control_another_loop_and_no_loop_retire_it_as_before() -> None:
     for scope in ("", "loop-b"):
         verdict = screen_guidance(
             rec, "", evidence=ConvictionEvidence(frozenset()), loop_scope=scope)
-        assert verdict == ("", NO_TREE_PREMISE), scope
+        assert (verdict.text, verdict.retired_by) == ("", NO_TREE_PREMISE), scope
 
 
 def test_the_loop_token_is_no_premise_for_exhaustion() -> None:

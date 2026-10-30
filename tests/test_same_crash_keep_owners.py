@@ -39,6 +39,13 @@ RESTATED: dict[tuple[str, str], str] = {
      "kept on non-regression — no newly-red self-failure"):
         "verdict reason of the file keep; `_nonregr_keep_file` is asked "
         "where it is set",
+    ("application/reconstruct/fill_one_fn.py",
+     "kept on non-regression —  attributed test(s) still fail, none was "
+     "passing at baseline; judged at the next sweep"):
+        "verdict reason of the per-fn keep; `_nonregr_failing` is set only "
+        "by the GUARD keep, after `SameCrashJudge.refuses` was asked",
+    ("application/reconstruct/fill_one_fn.py", "kept on non-regression — "):
+        "the leading literal of the same per-fn verdict reason",
 }
 
 #: The session's keep is its per-turn best-state decision, which logs no

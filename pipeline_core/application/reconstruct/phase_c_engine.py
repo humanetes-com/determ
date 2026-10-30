@@ -1088,9 +1088,13 @@ class PhaseCFillEngine:
                     # still standing on its plan; a unit in flight always
                     # completes.
                     _unit = frozenset({FnLocator(rec.file, rec.fn_name)})
-                    _own = (tdd_frontier_tests.tests_for(
-                                FnLocator(rec.file, rec.fn_name))
-                            if tdd_frontier_tests is not None else set())
+                    # The tests the keep will run for this body, not the
+                    # locator's dispatch pool. When the sweep told two
+                    # containers apart, a test measured in the other body
+                    # is not this claim's ground (`ground_for_body`).
+                    _own = (tdd_frontier_tests.ground_for_body(
+                                rec.file, rec.fn_name, rec.container).judged
+                            if tdd_frontier_tests is not None else frozenset())
                     _why = (claim_refusal(frozenset(_own), _unit)
                             if claim_refusal is not None
                             else ("" if claim(frozenset(_own), _unit)

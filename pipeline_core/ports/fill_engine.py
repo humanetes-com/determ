@@ -20,7 +20,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Protocol, runtime_checkable
 
-from pipeline_core.domain.attribution import FailureFrontier
+from pipeline_core.domain.attribution import FailureFrontier, WriteGround
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.crash_site import CrashSites
@@ -128,7 +128,7 @@ class Cargo(Protocol):
         *, include_lib: bool = ...,
     ) -> str: ...
     def u2_test_gate(
-        self, fn_tests: set[str], unit_sites: frozenset[FnSite],
+        self, ground: WriteGround, unit_sites: frozenset[FnSite],
         test_cmd: str | None,
         target_src_dir: Path, cluster_env: dict[str, str] | None,
         baseline: TestStateReading | None = ...,

@@ -111,7 +111,7 @@ def _emit(
     (tmp / "tests").mkdir(parents=True, exist_ok=True)
     # Explicit empty readings. Omitting either callable is a TypeError; these
     # are a check that ran and found nothing to withdraw.
-    kw.setdefault("failing_alone", lambda _stem, _names: ())
+    kw.setdefault("failing_alone", lambda _stem, _names, _env: ())
     kw.setdefault("settle", lambda _dest, body: body)
     dest, dropped, misses, _emitted = emit_behaviour_tests(
         tmp,
@@ -720,7 +720,7 @@ def test_a_capture_that_passes_only_beside_another_is_withdrawn(tmp_path: Path) 
     keep, leaner = _spec("keeper"), _spec("leaner")
     asked: list[tuple[str, tuple[str, ...]]] = []
 
-    def failing_alone(stem: str, names: Sequence[str]) -> Sequence[str]:
+    def failing_alone(stem: str, names: Sequence[str], _env: Mapping[str, str]) -> Sequence[str]:
         asked.append((stem, tuple(names)))
         return [n for n in names if n == replay_fn_name(leaner)]
 
@@ -779,7 +779,7 @@ def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -
     with pytest.raises(TypeError):
         emit_behaviour_tests(
             bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),
-            failing_alone=lambda _s, _n: ())
+            failing_alone=lambda _s, _n, _e: ())
     with pytest.raises(TypeError):
         emit_behaviour_tests(
             bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),

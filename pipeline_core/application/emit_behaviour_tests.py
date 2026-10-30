@@ -76,14 +76,19 @@ from pipeline_core.domain.generation import (
     parse_gen_tests_integration_filename,
 )
 from pipeline_core.domain.rust_scan import rust_delimiters_balanced
-from pipeline_core.domain.test_results import parse_binary_results, split_test_stdout_sections
+from pipeline_core.domain.test_results import (
+    parse_binary_results,
+    parse_rustc_compile_errors,
+    split_test_stdout_sections,
+)
 from pipeline_core.log import emit, log
 
 BEHAVIOUR_TEST_STEM = "behaviour"
 # (test binary stem, extra env) -> (process ok, combined stdout+stderr).
 Verify = Callable[[str, Mapping[str, str]], tuple[bool, str]]
-# (test binary stem, the names to run) -> the names that fail alone.
-FailingAlone = Callable[[str, Sequence[str]], Sequence[str]]
+# (test binary stem, the names to run, extra env over the cluster's) -> the
+# names that fail alone, each in a process of its own under that env.
+FailingAlone = Callable[[str, Sequence[str], Mapping[str, str]], Sequence[str]]
 # (the emitted file, its body) -> the gate now on it, or None when it does
 # not pass in its own world (`application.test_worlds.settle_test_gate`).
 Settle = Callable[[Path, str], str | None]
@@ -92,7 +97,9 @@ Settle = Callable[[Path, str], str | None]
 Recapture = Callable[[BehaviourSpec, Mapping[str, str]], str | None]
 # How many times the file may be re-rendered after dropping what failed. Three
 # is a termination bound, not a budget: each round drops at least one capture,
-# so the loop ends either green or empty.
+# so the loop ends either green or empty. A round that withdraws only the
+# captures a no-verdict reading located (:func:`no_verdict_culprits`) is not
+# charged to it: it strictly shrinks the file, so it terminates on its own.
 MAX_VERIFY_ROUNDS = 3
 
 
@@ -191,6 +198,78 @@ def render_behaviour_test_file(
     block = f"#[allow(unused_imports)]\nuse {crate}::*;\n\n" + "\n".join(b for b in bodies if b)
     body = as_integration_test(block, crate=crate)
     return f"#![cfg({cfg_attr})]\n{body}" if cfg_attr else body
+
+
+def capture_line_spans(body: str, specs: Sequence[BehaviourSpec]) -> dict[str, tuple[int, int]]:
+    """Each capture's test in the rendered file: fn name -> (first line, last
+    line), 1-based as rustc numbers them. A capture's span runs from its
+    attributes to the line before the next capture's; the file's shared
+    header (the gate, the crate glob) sits in no span."""
+    names = {replay_fn_name(s) for s in specs}
+    lines = body.split("\n")
+    starts: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        head = line.strip()
+        if head.startswith("pub "):
+            head = head[4:].lstrip()
+        if not head.startswith("fn "):
+            continue
+        name = head[3:].split("(", 1)[0].strip()
+        if name not in names:
+            continue
+        start = i
+        while start > 0 and lines[start - 1].strip().startswith("#["):
+            start -= 1
+        starts.append((start + 1, name))
+    spans: dict[str, tuple[int, int]] = {}
+    for k, (start, name) in enumerate(starts):
+        end = starts[k + 1][0] - 1 if k + 1 < len(starts) else len(lines)
+        spans[name] = (start, end)
+    return spans
+
+
+def no_verdict_culprits(
+    output: str,
+    keep: Sequence[BehaviourSpec],
+    body: str,
+    dest: Path,
+    executed: frozenset[str],
+    alone: Callable[[str, Sequence[str]], Sequence[str]],
+) -> list[tuple[BehaviourSpec, str]]:
+    """The captures a verify round that reported no verdict can be put on,
+    each with its reason; [] when the reading names none.
+
+    A file that does not build, or a binary that dies, used to withdraw every
+    capture in it on the ground that nothing could be attributed to one. Both
+    can be: rustc names the line of each error in the emitted file, and a test
+    binary that compiled can run each unreported test alone. Run
+    `15370-6a4cfd45` (2026-10-30) lost 24 stable and 26 nightly captures to one
+    mis-rendered assertion each (`tests/behaviour_stable_gen_1.rs:96`), run
+    `2129106-ead996ab` 52.
+
+    Located compile errors decide first: the captures whose span holds one.
+    An error outside every span (the shared header) names no capture. With no
+    compile error at all, the captures the round did not report are run alone
+    under the round's env (`alone`) and the ones that fail are the culprits.
+    A build that failed without a located error is read as naming nobody, so
+    the caller withdraws the file as before."""
+    diags = parse_rustc_compile_errors(output)
+    if diags or "could not compile" in output:
+        spans = capture_line_spans(body, keep)
+        here = [d for d in diags if Path(d.file).name == dest.name]
+        out: list[tuple[BehaviourSpec, str]] = []
+        for spec in keep:
+            lo, hi = spans.get(replay_fn_name(spec), (0, -1))
+            hit = [d for d in here if lo <= d.line <= hi]
+            if hit:
+                out.append((spec, f"replay did not compile: {hit[0].rendered()}"))
+        return out
+    unreported = [replay_fn_name(s) for s in keep if replay_fn_name(s) not in executed]
+    if not unreported:
+        return []
+    red = frozenset(alone(dest.stem, unreported))
+    return [(s, "replay binary died; red when run alone in its own process")
+            for s in keep if replay_fn_name(s) in red]
 
 
 def _clear_previous(project_dir: Path, stem: str) -> None:
@@ -446,6 +525,31 @@ def emit_behaviour_tests(
         for s in keep:
             _drop(s, f"{which} completed but did not run the emitted test — not verified")
 
+    def _drop_located(culprits: list[tuple[BehaviourSpec, str]], *, perturbed: bool) -> bool:
+        """Withdraw the located captures and say whether the rest go on to
+        another round: False when nothing was located, or nothing would be
+        left, so the caller's whole-file exit decides."""
+        nonlocal keep
+        gone = {replay_fn_name(s) for s, _why in culprits}
+        rest = [s for s in keep if replay_fn_name(s) not in gone]
+        if not gone or not rest:
+            return False
+        which = "environment-perturbed replay" if perturbed else "replay"
+        log(
+            f"  [task0d] cluster {cfg_cluster}: the {which} reported no verdict — "
+            f"{len(gone)} capture(s) located as the cause and withdrawn "
+            f"({culprits[0][1]}); {len(rest)} rendered again."
+        )
+        emit(
+            "task0d.behaviour_tests_located",
+            data={"cluster": cfg_cluster, "withdrawn": len(gone), "kept": len(rest),
+                  "perturbed": perturbed, "first": culprits[0][1][:300]},
+        )
+        for spec, why in culprits:
+            _drop(spec, why)
+        keep = rest
+        return True
+
     # The file is on disk from `write_text` onwards, and it is only correct to
     # leave one there that a verification run has been seen green. Every
     # ordinary exit below already removes it; an EXCEPTION did not, and
@@ -453,7 +557,9 @@ def emit_behaviour_tests(
     # and then saves the suite — so a raise here used to leave an unverified
     # `tests/` file in the crate AND every capture still listed as a MUST.
     try:
-        for _round in range(MAX_VERIFY_ROUNDS):
+        budget = MAX_VERIFY_ROUNDS
+        while budget > 0:
+            budget -= 1
             # One capture whose own replay text fails the check is dropped.
             # The others are rendered again, and the assembled file is checked
             # with the same function: a broken tests/ file is still not written.
@@ -491,9 +597,16 @@ def emit_behaviour_tests(
             round_failed = failed
             if not saw_verdict:
                 # No verdict at all: the file did not compile, or the binary died
-                # before libtest reported anything. Nothing can be attributed to a
-                # single capture, so none of them may stay — a tests/ file that does
-                # not build takes the whole crate's oracle with it.
+                # before libtest reported anything. The captures the reading
+                # locates go; the rest are rendered again. A reading that names
+                # none withdraws the file — a tests/ file that does not build
+                # takes the whole crate's oracle with it.
+                culprits = no_verdict_culprits(
+                    out, keep, body, dest, executed,
+                    lambda st, names: failing_alone(st, names, {}))
+                if _drop_located(culprits, perturbed=False):
+                    budget += 1
+                    continue
                 log(
                     f"  [task0d] cluster {cfg_cluster}: emitted behaviour tests produced no "
                     f"verdict (rc ok={ok}) — {len(keep)} capture(s) withdrawn. "
@@ -534,7 +647,7 @@ def emit_behaviour_tests(
             if unrun := _unexecuted(keep, executed):
                 _withdraw_unrun(unrun, perturbed=False)
                 return None, tuple(dropped), misses, ()
-            alone = frozenset(failing_alone(dest.stem, sorted(executed)))
+            alone = frozenset(failing_alone(dest.stem, sorted(executed), {}))
             if alone:
                 keep, went = _withdraw(
                     keep, alone, _drop,
@@ -560,10 +673,17 @@ def emit_behaviour_tests(
                 _ok2, out2 = verify(dest.stem, perturb_env)
                 failed2, executed2, saw2 = _verdict_of(out2)
                 if not saw2:
-                    # Same fail-closed rule as the capture-env run: no trailer
-                    # cannot rule env-dependence out, and keeping the file would
-                    # admit a capture whose value may move with the environment
-                    # as a specification of the crate.
+                    # Same rule as the capture-env run. The binary compiled for
+                    # that run, so a no-verdict here is a death: the captures it
+                    # locates alone under this env go and the file is rendered
+                    # again. Otherwise fail closed: no trailer cannot rule
+                    # env-dependence out.
+                    culprits = no_verdict_culprits(
+                        out2, keep, body, dest, executed2,
+                        lambda st, names: failing_alone(st, names, perturb_env))
+                    if _drop_located(culprits, perturbed=True):
+                        budget += 1
+                        continue
                     log(
                         f"  [task0d] cluster {cfg_cluster}: the environment-perturbed "
                         f"replay reported no verdict — {len(keep)} capture(s) withdrawn."

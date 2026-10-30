@@ -2631,15 +2631,34 @@ def regressed_attempt_of(record: Mapping[str, object], *,
 ATTEMPT_QUOTE_MARK = "in the text of the attempt that printed this"
 
 
+#: Opens every line the assertion probe renders (`assert_probe.
+#: render_observations`): the value an operand had when the assertion failed.
+OBSERVED_LINE_PREFIX = "observed at line "
+
+
+def printed_no_operands(said: str) -> bool:
+    """Whether a reddened test's printed output names no value: a boolean
+    `assert!(cond)` prints the condition and never what its operands were
+    (`assertion failed: dbg.contains("outer ctx")`), and no probe line was
+    added yet. `assert_eq!` / `assert_ne!` print `left:` / `right:`."""
+    return ("assertion failed:" in said and "left:" not in said
+            and OBSERVED_LINE_PREFIX not in said)
+
+
 def said_lines(said: str, *, max_lines: int = 8) -> list[str]:
     """The non-blank lines of one test's printed output as a prompt shows
-    them: the printed part capped at `max_lines`, then every attempt quote
-    (`ATTEMPT_QUOTE_MARK`) whole. Without the split the cap cut the quote a
-    few lines after the panic message it explains."""
+    them: the printed part capped at `max_lines`, then every probe line
+    (`OBSERVED_LINE_PREFIX`) and every attempt quote (`ATTEMPT_QUOTE_MARK`)
+    whole. Without the split the cap cut the quote a few lines after the
+    panic message it explains, and a probe value appended to a capture that
+    already filled the cap (a test that failed in two worlds prints its
+    panic twice) was cut the same way."""
     lines = [ln for ln in said.splitlines() if ln.strip()]
-    cut = next((i for i, ln in enumerate(lines) if ATTEMPT_QUOTE_MARK in ln),
-               len(lines))
-    return lines[:cut][:max_lines] + lines[cut:]
+    observed = [ln for ln in lines if ln.lstrip().startswith(OBSERVED_LINE_PREFIX)]
+    rest = [ln for ln in lines if not ln.lstrip().startswith(OBSERVED_LINE_PREFIX)]
+    cut = next((i for i, ln in enumerate(rest) if ATTEMPT_QUOTE_MARK in ln),
+               len(rest))
+    return rest[:cut][:max_lines] + observed + rest[cut:]
 
 
 def render_newly_red_outputs(

@@ -711,7 +711,6 @@ def helper_text(spec: BehaviourSpec, keys: Collection[str]) -> tuple[str, ...]:
 _RESOURCE_TOKENS = ("len(", "repeat(", "[..", "capacity")
 # ... or a COMMENT that names a limit.
 _LIMIT_WORDS = ("limit", "maximum", "max ", "bound", "capacity", "overflow", "truncat", "at most", "no more than")
-_OPTION_WHEN_MARKERS = (".is_none()", ".is_some()")
 _CFG_GATE_MARKERS = ("#[cfg(", "cfg!(", "#[rustversion", "rustversion::cfg!")
 
 
@@ -859,7 +858,8 @@ def classify_behaviour(
             return BehaviourClass.TRAIT_OBJECT_IDENTITY
         return BehaviourClass.IDENTITY
     then_value = then.value.strip() if then is not None else ""
-    if any(m in spec.when for m in _OPTION_WHEN_MARKERS) or (
+    from pipeline_core.domain.behaviour_probe import observes_presence
+    if observes_presence(spec.when) or (
         then is not None and (then_value == "None" or then_value.startswith("Some("))
     ):
         return BehaviourClass.OPTION_SEMANTICS

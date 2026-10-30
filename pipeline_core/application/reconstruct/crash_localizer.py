@@ -24,6 +24,7 @@ concrete frames), and the exhaustion gate (crash evidence voids a prior
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -44,7 +45,9 @@ from pipeline_core.domain.crash_site import (
     site_from_frames,
 )
 from pipeline_core.domain.language_driver import language_driver
+from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.oracle_immutability import is_oracle_path
+from pipeline_core.domain.rust_fn_headers import locate_all_fns
 from pipeline_core.domain.rust_scan import declared_fn_names
 from pipeline_core.domain.test_outcome import abort_readings
 from pipeline_core.domain.test_results import (
@@ -59,7 +62,7 @@ GdbLocalize = Callable[
 AsanSweep = Callable[..., "tuple[int, str] | None"]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class CrashLocalizerDeps:
     gdb_localize: GdbLocalize          # adapters.gdb_backtrace.localize_crashed_binary
     asan_sweep: AsanSweep | None       # adapters.asan_sweep.run_asan_sweep (None: unavailable)
@@ -304,6 +307,106 @@ def crash_keys(binaries: Sequence[BinaryResult]) -> frozenset[str]:
     return frozenset(crash_key(b.key, t) for b, t in native_crashes(binaries))
 
 
+def project_dir_of_tree(workspace_root: Path) -> Path:
+    """The project whose retrospectives store a tree's crashes read.
+
+    A task-2a workspace is `.skeleton-filled/<cluster>`. The store lives on
+    the project, the parent of `.skeleton-filled`. Any other workspace is
+    its own project."""
+    if workspace_root.parent.name == ".skeleton-filled":
+        return workspace_root.parent.parent
+    return workspace_root
+
+
+#: `(test name) -> the bodies that test entered the last time it produced a
+#: verdict, or None when the record does not say. An empty set is not a
+#: record: absence is ignorance, and ignorance is None.`
+ExecutedBodies = Callable[[str], frozenset[FnLocator] | None]
+
+# Sites already localized for one localizer, keyed by the crashes and the
+# body bytes those crashes' recorded executed sets named. The localizer
+# object is the lifetime: the next process builds another. A caller cannot
+# keep a result this dict does not hold, because the lookup is inside
+# `localize_crashes` and every production caller goes through it.
+_ReuseKey = tuple[
+    frozenset[tuple[str, str]],
+    frozenset[tuple[str, str, str]],
+]
+_LOCALIZED: weakref.WeakKeyDictionary[
+    CrashLocalizerDeps, dict[_ReuseKey, tuple[CrashSite, ...]],
+] = weakref.WeakKeyDictionary()
+
+
+def _crashed_test_name(binary: BinaryResult, test_filter: str | None) -> str | None:
+    """The test whose executed set this crash is.
+
+    An isolated abort names its test. A section that did not close names
+    the test that was in flight (`dangling`); under one test thread that is
+    the crashed test. Neither name means the capture did not say which test
+    died, and a repeat cannot be recognized."""
+    if test_filter:
+        return test_filter
+    return binary.dangling or None
+
+
+def _executed_fingerprint(
+    workspace_root: Path, locators: Collection[FnLocator],
+) -> frozenset[tuple[str, str, str]] | None:
+    """Every occurrence of each locator's body, as (file, fn, body text).
+
+    None when a file cannot be read or a name is not in it: a missing body
+    is not "unchanged". Every occurrence counts, so a change to any homonym
+    is a different fingerprint."""
+    texts: dict[str, str | None] = {}
+    bodies: set[tuple[str, str, str]] = set()
+    for loc in locators:
+        if loc.file not in texts:
+            try:
+                texts[loc.file] = (workspace_root / loc.file).read_text(
+                    encoding="utf-8")
+            except OSError:
+                texts[loc.file] = None
+        text = texts[loc.file]
+        if text is None:
+            return None
+        found = locate_all_fns(text, loc.fn_name)
+        if not found:
+            return None
+        for _sig, _start, body_at, body_end in found:
+            bodies.add((loc.file, loc.fn_name, text[body_at:body_end]))
+    return frozenset(bodies)
+
+
+def _reuse_key(
+    workspace_root: Path,
+    considered: Sequence[tuple[BinaryResult, str | None]],
+    executed: ExecutedBodies | None,
+) -> _ReuseKey | None:
+    """The key of a localization that may be reused, or None when it may not.
+
+    None unless every considered crash names a test, that test's executed
+    set is a non-empty record, and every body in those sets can be read.
+    A missing set is not stored and not reused: the next call runs the
+    debugger and the sanitizer."""
+    if executed is None or not considered:
+        return None
+    ids: set[tuple[str, str]] = set()
+    locs: set[FnLocator] = set()
+    for binary, test_filter in considered:
+        name = _crashed_test_name(binary, test_filter)
+        if not name:
+            return None
+        bodies = executed(name)
+        if not bodies:
+            return None
+        ids.add((crash_key(binary.key, test_filter), name))
+        locs.update(bodies)
+    fingerprint = _executed_fingerprint(workspace_root, locs)
+    if fingerprint is None:
+        return None
+    return (frozenset(ids), fingerprint)
+
+
 #: The env a re-run of a crash takes, by the world it ran in (`BinaryResult
 #: .world`; "" for a one-world reading); None for a world this run has no
 #: env for. Composition binds it to `cargo_runner.WorldChecks.env_of`.
@@ -319,6 +422,7 @@ def localize_crashes(
     *,
     max_binaries: int = 3,
     exclude: Collection[str] = (),
+    executed: ExecutedBodies | None = None,
 ) -> tuple[CrashSite, ...]:
     """Localize every crashed binary visible in ``sweep_output`` (capped).
 
@@ -350,7 +454,15 @@ def localize_crashes(
 
     ``exclude`` holds :func:`crash_key` of the native crashes the caller
     already saw before the change it is judging; they are not re-run, so the
-    binary cap is spent on the crashes the change could have caused."""
+    binary cap is spent on the crashes the change could have caused.
+
+    ``executed`` is the recorded bodies a crashed test entered the last time
+    it produced a verdict, or None when that test has no such record. A
+    repeat on this same localizer, whose every crashed test has a non-empty
+    record and whose current source of every one of those bodies is
+    unchanged, returns the sites the previous call stored and does not
+    re-run the debugger or the sanitizer. A missing record, an empty
+    record, or a body that cannot be read is not reused and not stored."""
     # `native_crashes` is the one definition of what a crash is; an isolated
     # abort names its test exactly, so gdb re-runs that one test
     # (`test_filter`) instead of the whole binary.
@@ -359,6 +471,22 @@ def localize_crashes(
     if not crashed:
         return ()
     considered = crashed[:max_binaries]
+    reuse_key = _reuse_key(workspace_root, considered, executed)
+    if reuse_key is not None:
+        hit = _LOCALIZED.get(deps, {}).get(reuse_key)
+        if hit is not None:
+            deps.log("  [phase-c/crash-localizer] reusing the sites already "
+                     "localized for these crashes: the bodies each crashed "
+                     "test recorded as executed are unchanged.")
+            return hit
+
+    def _finish(found: tuple[CrashSite, ...]) -> tuple[CrashSite, ...]:
+        # An empty localization is "unlocalized", not a site to reuse: the
+        # next call runs again. A stored site is what a repeat returns
+        # before the debugger and the sanitizer.
+        if reuse_key is not None and found:
+            _LOCALIZED.setdefault(deps, {})[reuse_key] = found
+        return found
     # What each isolated test's own process announced when it aborted: the
     # debugger's signal names how the process died, not why (a stack
     # overflow is a SIGSEGV to gdb), and the site's fault class reads this
@@ -414,7 +542,7 @@ def localize_crashes(
         if site.frames:
             sites.append(site)
     if deps.asan_sweep is None:
-        return tuple(sites)
+        return _finish(tuple(sites))
     # Escalate whenever a sanitized origin could change the blame. A binary
     # gdb could not reproduce needs the sanitizer because that is the only
     # report. An invalid-memory fault needs it even when the debugger
@@ -447,7 +575,7 @@ def localize_crashes(
                  + (f" in cfg world `{world}`." if world else "."))
         asan.extend(_asan_sites(deps, test_cmd, workspace_root, env, world))
     if not asan:
-        return tuple(sites)
+        return _finish(tuple(sites))
     # Each test binary is its own process and its own heap. A sanitized site
     # supersedes the gdb site of the SAME binary: it carries the free or the
     # allocation the debugger cannot see, or, for a SEGV, the source-side
@@ -479,4 +607,4 @@ def localize_crashes(
         deps.log(f"  [phase-c/crash-localizer] {len(stood)} sanitized "
                  "report(s) printed no origin stack; the traced site of "
                  "that binary stands.")
-    return (*kept_asan, *kept)
+    return _finish((*kept_asan, *kept))

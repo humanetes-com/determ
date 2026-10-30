@@ -387,19 +387,19 @@ def identity_subject_from_when(when: str) -> str:
 
 
 def identity_call_name(when: str) -> str:
-    """The method an identity ``when`` is asked through: the call carrying
-    the type argument (``err.downcast::<T>()`` -> ``downcast``,
-    ``Error::msg("x").is::<&str>()`` -> ``is``), else the last method call,
-    else ``""``."""
+    """The method an identity ``when`` is asked through: the root call
+    carrying the type argument (``err.downcast::<T>()`` -> ``downcast``,
+    ``Error::msg("x").is::<&str>()`` -> ``is``), looking through a presence
+    test over it (``e.downcast_ref::<T>().is_some()`` -> ``downcast_ref``),
+    else the root's own method, else the last method call, else ``""``.
+
+    Read at the root (`behaviour_probe.root_call`), like the identity
+    itself: the first `::<` anywhere named a call inside an argument."""
+    from pipeline_core.domain.behaviour_probe import presence_target, root_call
     from pipeline_core.domain.language_driver import _called_idents
-    i = when.find("::<")
-    while i != -1:
-        j = i
-        while j > 0 and (when[j - 1].isalnum() or when[j - 1] == "_"):
-            j -= 1
-        if j < i and j > 0 and when[j - 1] == ".":
-            return when[j:i]
-        i = when.find("::<", i + 3)
+    rc = presence_target(root_call(when))
+    if rc is not None and (rc.turbofish or rc.method):
+        return rc.name
     calls = _called_idents(when)
     return calls[-1] if calls else ""
 

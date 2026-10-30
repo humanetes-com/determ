@@ -612,9 +612,15 @@ def prescription_sacrifices_tests(
 # injected for. That question has two inputs — the guidance text and the
 # pins of the tests the unit answers for — and both are in hand at write
 # time (the same pins string the retrospective prompt carried) and at
-# prompt-build; the stamp records the write-time answer, and `screen_guidance`
-# re-judges live when a caller passes `pins`, so a record stored before the
-# stamp existed is screened too.
+# prompt-build; the stamp records the write-time answer as the convicted
+# SENTENCES, and `screen_guidance` re-judges live when a caller passes `pins`,
+# so a record stored before the stamp existed is screened too. The verdict is
+# per sentence: the convicted ones are withheld and the rest is injected,
+# because one convicted sentence of a diagnosis says nothing about the others
+# (run `3808231-81b847f7`, 2026-10-29: the payable first sentence of a pair
+# diagnosis left the prompt with the one sentence the rule convicted). A
+# stored boolean `True`, written before the stamp named its sentences,
+# convicts nothing.
 CONTRADICTS_TARGET = "contradicts_target"
 # `GuidanceScreening.retired_by` when `layout_safe_guidance` emptied the
 # text. Run `106897-f7b6fb77` fill 8 retired a pair crash diagnosis this
@@ -672,6 +678,18 @@ def _named_ident(span: str) -> str:
     """The item a code span names: `crate::a::b!(x)` -> `b`."""
     head = span.split("(", 1)[0].split("<", 1)[0].strip().rstrip("!").strip()
     return head.rsplit("::", 1)[-1].strip()
+
+
+def denied_sentences(guidance: str, names: Iterable[str]) -> tuple[str, ...]:
+    """The sentences of ``guidance`` (`guidance_sentences`) that call a name
+    in ``names`` nonexistent — the sentences :func:`denied_defined_names`
+    reads its names from."""
+    defined = frozenset(names)
+    return tuple(
+        s for s in guidance_sentences(guidance)
+        if any(m in s.lower() for m in _DENIAL_MARKERS)
+        and any(_named_ident(span) in defined
+                for span in _CODE_SPAN.findall(s)))
 
 
 def denied_defined_names(guidance: str, names: Iterable[str]) -> tuple[str, ...]:
@@ -769,10 +787,55 @@ _RUNTIME_OBJECT_NOUN = frozenset({
 _SENTENCE_BREAK = re.compile(r"(?<!\be\.g)(?<!\bi\.e)[.;](?=\s|$)|\n+")
 
 
+def _sentence_breaks(text: str) -> list[re.Match[str]]:
+    """The `_SENTENCE_BREAK` matches of ``text`` outside inline code: a `;`
+    or `.` inside a backtick span is the code's, not a sentence end.
+    `unsafe { Self::error(this) }; return f(err)` written in one span is one
+    instruction; split there, a withheld half would leave the other half an
+    unclosed span in the prompt."""
+    out: list[re.Match[str]] = []
+    for m in _SENTENCE_BREAK.finditer(text):
+        if "\n" not in m.group(0) and text.count("`", 0, m.start()) % 2:
+            continue
+        out.append(m)
+    return out
+
+
+def _sentence_pieces(text: str) -> list[tuple[str, str]]:
+    """(sentence, the sentence with the boundary that ended it) per piece of
+    ``text``, in order, blank pieces included."""
+    pieces: list[tuple[str, str]] = []
+    pos = 0
+    for m in _sentence_breaks(text):
+        pieces.append((text[pos:m.start()], text[pos:m.end()]))
+        pos = m.end()
+    pieces.append((text[pos:], text[pos:]))
+    return pieces
+
+
 def guidance_sentences(text: str) -> list[str]:
-    """`text` split at sentence boundaries (`_SENTENCE_BREAK`), each piece
-    stripped, empty pieces dropped."""
-    return [s.strip() for s in _SENTENCE_BREAK.split(text or "") if s.strip()]
+    """`text` split at sentence boundaries (`_SENTENCE_BREAK`, outside inline
+    code), each piece stripped, empty pieces dropped."""
+    return [b.strip() for b, _ in _sentence_pieces(text or "") if b.strip()]
+
+
+def without_sentences(text: str, drop: Iterable[str]) -> str:
+    """``text`` with the sentences in ``drop`` (as `guidance_sentences`
+    returns them) cut out, each with the boundary that ended it; every kept
+    sentence keeps its own boundary, so a code span split at `;` is put
+    back as written. Stripped."""
+    gone = frozenset(drop)
+    if not gone:
+        return (text or "").strip()
+    kept: list[str] = []
+    for body, whole in _sentence_pieces(text or ""):
+        if body.strip() and body.strip() in gone:
+            continue
+        kept.append(whole)
+    out = "".join(kept).strip()
+    # The cut sentence took the end of the text with it: the last kept one
+    # ends on its `;`, not on a full stop.
+    return f"{out[:-1]}." if out.endswith(";") else out
 
 
 def pinned_words(pins: str) -> frozenset[str]:
@@ -827,11 +890,60 @@ def _removal_object_hits_pin(span: str, words: frozenset[str]) -> bool:
     return False
 
 
-def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
-    """Whether ``guidance`` instructs the next attempt to remove an
-    observable that ``pins`` names: some sentence of it carries a removal
-    marker (`_REMOVAL_MARKER`) AND, as a whole word, a word of one of the
-    pinned literals (`pinned_words`) sits in the removal's object.
+# A removal verb an earlier word of its own clause negates is a
+# preservation: "so the first cause is not dropped", "must not be removed",
+# "don't drop the block". Run `3808231-81b847f7` (2026-10-29, fill 3): a
+# pair diagnosis whose fourth sentence read "... so the first cause is not
+# dropped and the “Caused by” output contains ... “outer ctx”, “level 2”"
+# was read as removing those pinned words, and the whole record, whose first
+# sentence named the payable fix, was withheld. The negator ends before the
+# marker, in the same clause, with at most two words between; markers that
+# carry their own negation (`must not emit`, `never print`, `no longer`)
+# are the removal and are not read this way.
+_NEGATOR_TAIL = re.compile(
+    r"(?:\bnot|n[’']t|\bnever|\bno\s+longer)(?!\s+only\b)"
+    r"(?:\s+[A-Za-z]+){0,2}\s*$",
+    re.IGNORECASE)
+_CLAUSE_START = re.compile(
+    r"[,:()—–]|\b(?:and|but|or|so|then|while|whereas|because|that|which)\b",
+    re.IGNORECASE)
+
+
+def _negated_marker(sentence: str, start: int) -> bool:
+    """Whether the removal marker at ``start`` is negated inside its own
+    clause (`_NEGATOR_TAIL`)."""
+    head = sentence[:start]
+    bounds = [m.end() for m in _CLAUSE_START.finditer(head)]
+    clause = head[bounds[-1]:] if bounds else head
+    return bool(_NEGATOR_TAIL.search(clause))
+
+
+def _sentence_removes_pinned(sentence: str, words: frozenset[str]) -> bool:
+    """One sentence of guidance against the pinned words (see
+    :func:`contradicting_sentences`)."""
+    if not _REMOVAL_MARKER.search(sentence):
+        return False
+    if _EMIT_REMOVAL.search(sentence):
+        return not words.isdisjoint(w.lower() for w in _WORD.findall(sentence))
+    for m in _REMOVAL_MARKER.finditer(sentence):
+        if _negated_marker(sentence, m.start()):
+            continue
+        span = sentence[m.end():]
+        cut = _RELATIVE_CLAUSE.search(span)
+        if cut:
+            span = span[:cut.start()]
+        if _removal_object_hits_pin(span, words):
+            return True
+    return False
+
+
+def contradicting_sentences(guidance: str, pins: str) -> tuple[str, ...]:
+    """The sentences of ``guidance`` (`guidance_sentences`) that instruct the
+    next attempt to remove an observable that ``pins`` names: the sentence
+    carries a removal marker (`_REMOVAL_MARKER`) AND, as a whole word, a
+    word of one of the pinned literals (`pinned_words`) sits in the
+    removal's object. A marker its own clause negates (`_negated_marker`)
+    has no object: "is not dropped" keeps what it names.
 
     Sentence-scoped on purpose — "Remove the unused import. Then write
     `Stack backtrace:` before the frames" is a removal and a mention that
@@ -844,33 +956,25 @@ def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
     is not read as forbidding that field; a pin word that then remains
     as a modifier of a runtime object (pointer, address, handle) is
     still the corrupted value, not the emission. Empty ``guidance`` or
-    empty ``pins`` is False: nothing to judge, or nothing to judge
+    empty ``pins`` convicts nothing: nothing to judge, or nothing to judge
     against.
 
     Pure text against text: no record, no unit, no test name. The same
     predicate fires for any crate whose retrospective prescribes away a
     string its own tests assert."""
     if not guidance or not pins:
-        return False
+        return ()
     words = pinned_words(pins)
     if not words:
-        return False
-    for sentence in guidance_sentences(guidance):
-        m = _REMOVAL_MARKER.search(sentence)
-        if not m:
-            continue
-        if _EMIT_REMOVAL.search(sentence):
-            span = sentence
-            if not words.isdisjoint(w.lower() for w in _WORD.findall(span)):
-                return True
-            continue
-        span = sentence[m.end():]
-        cut = _RELATIVE_CLAUSE.search(span)
-        if cut:
-            span = span[:cut.start()]
-        if _removal_object_hits_pin(span, words):
-            return True
-    return False
+        return ()
+    return tuple(s for s in guidance_sentences(guidance)
+                 if _sentence_removes_pinned(s, words))
+
+
+def prescription_removes_pinned_observable(guidance: str, pins: str) -> bool:
+    """Whether some sentence of ``guidance`` prescribes removing an observable
+    ``pins`` names (:func:`contradicting_sentences`)."""
+    return bool(contradicting_sentences(guidance, pins))
 
 
 # Set on a record whose lesson was written from a test outcome that hollow
@@ -1037,9 +1141,15 @@ def conviction_standing(
 class GuidanceScreening(NamedTuple):
     """What `screen_guidance` decided: the text a prompt may carry (``""`` when
     nothing may), and the rule that retired it (``""`` when honoured or when
-    there was nothing to judge)."""
+    there was nothing to judge).
+
+    ``withheld`` is the (rule, sentence) pairs a sentence-scoped rule took
+    out of an honoured record (`CONTRADICTS_TARGET`, `DENIES_DEFINED_NAME`):
+    the rest of the record is ``text``. Empty when the whole record was
+    honoured or the whole record was retired."""
     text: str
     retired_by: str
+    withheld: tuple[tuple[str, str], ...] = ()
 
 
 TEST_SACRIFICING_PRESCRIPTION = "test_sacrificing_prescription"
@@ -1248,7 +1358,12 @@ def screen_guidance(
     ``pins`` empty. The two are joined (`pins_for_contradiction_guard`)
     before the live re-judgment, so a record stored before
     `CONTRADICTS_TARGET` was stamped at write is screened too; both empty,
-    only the stamp decides.
+    only the stamp's sentences decide.
+
+    Both sentence-scoped rules (`CONTRADICTS_TARGET`, `DENIES_DEFINED_NAME`)
+    withhold the sentences they convict and let the rest through
+    (`GuidanceScreening.withheld`, with a closing line saying how many and
+    why); they retire the record only when they convict every sentence.
 
     ``cfg_dead`` names the fns of ``file_text`` whose every stub occurrence
     is gated out of the cluster's build. They are textually `unimplemented!()`
@@ -1295,7 +1410,17 @@ def screen_guidance(
         return GuidanceScreening("", "")
     if rec.get(GUIDANCE_FROM_HOLLOW_TREE):
         return GuidanceScreening("", "hollow_tree")
-    if _crate_names and denied_defined_names(guidance, _crate_names):
+    # The two sentence-scoped rules convict sentences, not the record: a
+    # record whose one sentence denies a defined name, or prescribes removing
+    # a pinned observable, still carries the rest. Run `3808231-81b847f7`
+    # (2026-10-29, fill 3): one convicted sentence took the payable first
+    # sentence of the same diagnosis out of the pair prompt. The whole-record
+    # rules below still judge the record as stored; when every sentence is
+    # convicted the record is retired as before.
+    _sentences = guidance_sentences(guidance)
+    _denied = (denied_sentences(guidance, _crate_names) if _crate_names
+               else ())
+    if _denied and frozenset(_sentences) <= frozenset(_denied):
         return GuidanceScreening("", DENIES_DEFINED_NAME)
     # The same class by a different record: the lesson explains a crash or
     # abort the tree's holes decided (`CRASH_STUB_SITES`), and `blocked_on`
@@ -1334,10 +1459,24 @@ def screen_guidance(
     # premise rules on a live `convictor_entry`, and steered the next reply
     # into the same ten-sibling regression. The stamp is the write-time
     # answer; `pins` re-asks it against the target of THIS prompt-build.
-    if rec.get(CONTRADICTS_TARGET) or (
-            (guard_pins := pins_for_contradiction_guard(pins, observables))
-            and prescription_removes_pinned_observable(guidance, guard_pins)):
-        return GuidanceScreening("", CONTRADICTS_TARGET)
+    # The live re-ask decides when this build has pins; otherwise the
+    # sentences the write-time stamp convicted. A boolean stamp from before
+    # the stamp named its sentences is no verdict: it would veto every
+    # sentence, the payable ones included, until the record is rewritten.
+    _guard_pins = pins_for_contradiction_guard(pins, observables)
+    if _guard_pins:
+        _contra = contradicting_sentences(guidance, _guard_pins)
+    else:
+        _stamped = rec.get(CONTRADICTS_TARGET)
+        _stored = (frozenset(str(x) for x in _stamped)
+                   if isinstance(_stamped, list) else frozenset())
+        _contra = tuple(x for x in _sentences if x in _stored)
+    _withheld = tuple(
+        (CONTRADICTS_TARGET if x in _contra else DENIES_DEFINED_NAME, x)
+        for x in _sentences if x in _contra or x in _denied)
+    if _withheld and len(_withheld) == len(_sentences):
+        return GuidanceScreening("", CONTRADICTS_TARGET if _contra
+                                 else DENIES_DEFINED_NAME)
     # The fifth way: the futility escalation measured that rewrites of this
     # unit change nothing for the tests it answers for — the exact question
     # the guidance advises on. Scoped to the cluster the futility was
@@ -1442,8 +1581,32 @@ def screen_guidance(
         return GuidanceScreening("", CONVICTOR_ENTRY_MOVED)
     if int(rec.get("error_count") or 0) == 0 and not evidence.still_supports(rec):
         return GuidanceScreening("", "stale_evidence")
-    text = layout_safe_guidance(guidance, file_text, anchor_types=anchor_types)
-    return GuidanceScreening(text, "" if text else LAYOUT_CONTRADICTED)
+    remainder = without_sentences(guidance, (x for _, x in _withheld))
+    text = layout_safe_guidance(remainder, file_text, anchor_types=anchor_types)
+    if not text:
+        return GuidanceScreening("", LAYOUT_CONTRADICTED)
+    if _withheld:
+        text = f"{text}\n{withheld_sentences_note(_withheld)}"
+    return GuidanceScreening(text, "", _withheld)
+
+
+#: Why a sentence-scoped rule withheld a sentence, as the prompt says it.
+_WITHHELD_WHY = {
+    CONTRADICTS_TARGET: ("prescribed removing output the tests this code "
+                         "answers for assert"),
+    DENIES_DEFINED_NAME: "called a name the crate defines nonexistent",
+}
+
+
+def withheld_sentences_note(withheld: Iterable[tuple[str, str]]) -> str:
+    """The line an honoured remainder ends with: how many sentences of the
+    stored lesson were left out and why. The sentences themselves are not
+    quoted — they are the instruction being withheld."""
+    pairs = list(withheld)
+    why = "; ".join(dict.fromkeys(
+        _WITHHELD_WHY.get(rule, rule) for rule, _ in pairs))
+    return (f"({len(pairs)} sentence(s) of this lesson were left out because "
+            f"they {why}.)")
 
 
 def retired_guidance_line(
@@ -1458,6 +1621,15 @@ def retired_guidance_line(
     retirements keep their existing silence (the per-batch tally counts
     them)."""
     rec = record or {}
+    if verdict.text and verdict.withheld:
+        rules = ", ".join(dict.fromkeys(r for r, _ in verdict.withheld))
+        head = " ".join(verdict.withheld[0][1].split())[:140]
+        total = len(guidance_sentences(str(rec.get("guidance") or "")))
+        return (f"[phase-c/retro-withheld] {unit_key}: "
+                f"category={rec.get('category') or '?'} "
+                f"rounds={rec.get('retrospective_count') or 0} "
+                f"{len(verdict.withheld)} of {total} sentence(s) withheld "
+                f"({rules}), the rest injected: {head}")
     if verdict.retired_by == COMPILER_REJECTED:
         head = " ".join(str(rec.get("guidance") or "").split())[:140]
         return (f"[phase-c/retro-retired] {unit_key}: "
@@ -1690,7 +1862,9 @@ def stamp_conviction(
     tests this unit answers for pin:". Non-empty, the record's guidance is
     judged against it (`prescription_removes_pinned_observable`) and a
     lesson that prescribes removing a pinned observable is stamped
-    `contradicts_target: True`; otherwise the key is ABSENT — removed, not
+    `contradicts_target: [the convicted sentences]` (the screen withholds
+    those and injects the rest when the prompt-build has no pins to re-ask
+    with); otherwise the key is ABSENT — removed, not
     left, because a record is re-stamped with new guidance every round and
     a stamp from a previous round's text would withhold a lesson that no
     longer contradicts anything. Empty `pins` (every caller before the
@@ -1732,9 +1906,10 @@ def stamp_conviction(
             stamped["fully_exhausted"] = False
     else:
         stamped.pop(CRASH_STUB_SITES, None)
-    if pins and prescription_removes_pinned_observable(
-            str(stamped.get("guidance") or ""), pins):
-        stamped[CONTRADICTS_TARGET] = True
+    _contra = (contradicting_sentences(str(stamped.get("guidance") or ""),
+                                       pins) if pins else ())
+    if _contra:
+        stamped[CONTRADICTS_TARGET] = list(_contra)
     else:
         stamped.pop(CONTRADICTS_TARGET, None)
     # Behavioural records (learned from test outcomes, `error_count` 0) get

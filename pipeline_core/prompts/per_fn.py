@@ -79,6 +79,7 @@ def build_per_fn_prompt(
                 "origin stack. This is runtime evidence from the actual "
                 "crash, stronger than any failing-test guess:\n"))
     observed_block = tag_block("OBSERVED", sections.observed)
+    regression_block = tag_block("PRIOR_REGRESSION", sections.prior_regression)
     # Concrete RIGHT usage examples harvested from the real
     # lib's doc-tests/examples — teaches the API SHAPE by example. After notes,
     # before the file context (same slot the archetype prescribes).
@@ -151,7 +152,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{observed_block}{coupled_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
+{crash_block}{observed_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -268,6 +269,7 @@ def build_per_fn_fix_prompt(
         prefix=("A test binary CRASHED and this fn is on the faulting or "
                 "origin stack. This is runtime evidence from the actual "
                 "crash, stronger than any failing-test guess:\n"))
+    regression_block = tag_block("PRIOR_REGRESSION", sections.prior_regression)
     usage_block = tag_block(
         "USAGE_EXAMPLES", sections.usage_examples,
         prefix="Real, working uses of this crate's public API (harvested from "
@@ -403,7 +405,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
+{crash_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 {_file_head}
 {file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}

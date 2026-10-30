@@ -55,6 +55,10 @@ class PerFnSections:
     # this still-stubbed fn (`refill_evidence.observed_stub_excerpts`). ""
     # for a re-fill (its seed excerpt carries them) or when no such test.
     observed: str = ""
+    # What a reverted write by any route over this fn broke and what those
+    # tests printed (`block_evidence.render_sibling_regression`). "" when no
+    # reverted write stamped this fn's record.
+    prior_regression: str = ""
 
 
 @dataclass(frozen=True, slots=True)

@@ -33,6 +33,7 @@ from pipeline_core.domain import coverage_annotation as _cov_ann
 from pipeline_core.domain import generation as _gen_dom
 from pipeline_core.domain import llm_output as _llm_out
 from pipeline_core.domain import text as _text_dom
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.generation import (
     has_gen_tests_mod_decl,
     is_gen_tests_decl_only_src,
@@ -123,14 +124,15 @@ def test_u2_test_gate_shim_routes_and_blocks(monkeypatch, tmp_path) -> None:
                                 "assertion failed\n")
     monkeypatch.setattr(pipeline, "_run_cargo", fake)
     monkeypatch.setattr(pipeline, "SETTINGS", _with_gate(True))
-    v = pipeline._APP.u2_test_gate({"b"}, frozenset(), "cargo test", tmp_path, {})
+    b = WriteGround(frozenset({"b"}), frozenset({"b"}))
+    v = pipeline._APP.u2_test_gate(b, frozenset(), "cargo test", tmp_path, {})
     assert v.decision is U2Decision.REJECT
     assert v.self_failures == frozenset({"b"}) and "still FAIL" in v.detail
     assert fake.calls  # routed through the patchable seam
     # gate disabled → accept regardless
     monkeypatch.setattr(pipeline, "SETTINGS", _with_gate(False))
     assert pipeline._APP.u2_test_gate(
-        {"b"}, frozenset(), "cargo test", tmp_path, {}).decision is U2Decision.ACCEPT
+        b, frozenset(), "cargo test", tmp_path, {}).decision is U2Decision.ACCEPT
 
 
 def test_extract_self_note_shim(monkeypatch) -> None:

@@ -107,6 +107,7 @@ from pipeline_core.application.reconstruct.unit_conversation import (
     UnitConversation,
 )
 from pipeline_core.domain import unit_clock
+from pipeline_core.domain.assertion_position import SuiteDelta
 from pipeline_core.domain.attempt_loss import (
     AttemptLoss,
     escalation_refusal_note,
@@ -329,6 +330,7 @@ from pipeline_core.domain.slice_session import (
     SessionSlice,
     SliceCosts,
     expand_locator_sites,
+    fit_turn0,
     locator_only_expansions,
     plan_slices,
     slice_plan_gaps,
@@ -430,6 +432,22 @@ def escalated_followup_think(grade_on: object) -> bool:
     no off switch, so a cold launch stamped that into `code_id`. Accessor
     and stub calls stay on today's no-think followup either way."""
     return bool(grade_on) and followup_think_env_on()
+
+
+def suite_bank(joint: JointImprovement | None, gate_refused: object | None,
+               test_cmd: str | None) -> RegressionComparison | None:
+    """The suite comparison a joint write banks on (`JointImprovement.
+    banks_on`), or None. Asked by the file, impl and pair keeps after their
+    regression gate passed (`gate_refused` None) and only for a write the
+    aimed-set rule did not keep: the abort partition then reads this
+    write's own suite gain and loss instead of an aimed test turned green.
+    The comparison is the one that gate just measured (`last_comparison`)."""
+    if joint is None or gate_refused is not None or not test_cmd:
+        return None
+    cmp = last_comparison()
+    if cmp is None or not joint.banks_on(SuiteDelta.of(cmp)):
+        return None
+    return cmp
 
 
 def _with_crash(excerpt: str, crash: str) -> str:
@@ -2722,12 +2740,11 @@ def prepare_impl_fill(
                     # Conviction-scoped, NOT the dispatch set: a test with no
                     # observed link to this file can never be fixed here, so
                     # letting it reject would revert every attempt forever.
-                    _file_tests: set[str] = set()
-                    for _key in _unit_fns:
-                        if _key in escalated_keys or _key in measured_owner_keys:
-                            _file_tests |= _frontier_tests.tests_for(_key)
-                        else:
-                            _file_tests |= _frontier_tests.convicting_for(_key)
+                    # The gate RUNS every written unit's dispatch tests (the
+                    # ground the file was bought on, `WriteGround`); only the
+                    # convicting subset may revert.
+                    _file_ground = _frontier_tests.ground_for_units(_unit_fns)
+                    _file_tests = set(_file_ground.convicting)
                     # Container-qualified sites so a panic in a same-named
                     # sibling (another impl's fn) is not charged to this file.
                     _unit_sites = frozenset(
@@ -2736,7 +2753,7 @@ def prepare_impl_fill(
                         for m in (*b.stub_members, *b.refill_members)
                     ) | frozenset(FnSite(file_rel, b.fn_name, b.container)
                                   for b in _landed)
-                    _u2_file = _u2_test_gate(_file_tests, _unit_sites, tdd_test_cmd,
+                    _u2_file = _u2_test_gate(_file_ground, _unit_sites, tdd_test_cmd,
                                              target_src_dir, cluster_env)
                 # ACCEPT_EXTERNAL_ONLY (all failures blocked by another file's
                 # stub) is NOT a revert — keep the fill and defer to the outer
@@ -2797,6 +2814,18 @@ def prepare_impl_fill(
                          "every aimed test is still a native crash and the "
                          "crash's culprit(s) it wrote still are.")
                     _nonregr_keep_file = False
+                # A write the aimed-set rule did not keep may still bank on
+                # its own suite reading (`suite_bank`), which exists only
+                # after the regression gate below. The ignored-input
+                # decline runs only once a keep stands: an aimed or
+                # non-regression keep already does, and a suite keep does
+                # only after this reading banks. A refusal therefore
+                # restores the whole reply and leaves no decline mark.
+                _suite_try_f = (rc == 0 and _u2_reject and _bank is None
+                                and not _nonregr_keep_file
+                                and _joint is not None
+                                and _joint.may_bank_on_suite)
+                _suite_f: RegressionComparison | None = None
                 if _nonregr_keep_file:
                     _log(f"  [phase-c/file] GUARD {glabel}: re-fill KEPT on "
                          "non-regression — no self-failure is newly red "
@@ -2830,6 +2859,7 @@ def prepare_impl_fill(
                              "pre-attempt file.")
                     _crash_keep_file = False
                     _nonregr_keep_file = False
+                    _suite_try_f = False
                 # A body that ignores a declared input is kept only when a
                 # test attributed to that body turned green in this keep;
                 # without that it is a decline (`domain/ignored_inputs`). Run
@@ -2837,13 +2867,104 @@ def prepare_impl_fill(
                 # on "compiles, no attributed test observed passing" and did
                 # not aim the unit again for four fills. A sibling's test
                 # turning green in the same reply vouches only the sibling.
-                # The decliners go back to their pre-image, the rest are
-                # re-spliced and judged by the regression gate below, and the
-                # decliners take the text-refusal retry with the reason as
-                # their error.
-                if (rc == 0 and not _peel_refuse_keep
-                        and (not _u2_reject or _bank is not None
-                             or _crash_keep_file or _nonregr_keep_file)):
+                # The decliners go back to their pre-image and the rest are
+                # re-spliced. The mark is written only when the keep stands:
+                # an aimed or non-regression keep already does, so its
+                # remainder is what the gate below measures; a suite keep
+                # declines only after its reading has banked, and a
+                # remainder is measured again. A refusal restores the
+                # pre-attempt file and writes no decline mark.
+                _pending_decline: dict[str, tuple[str, ...]] = {}
+
+                def _record_file_decline(
+                    spliced_now: int,
+                    _landed: list[LandedBody],
+                    *,
+                    _pending_decline: dict[str, tuple[str, ...]] = _pending_decline,
+                    _text_refused: dict[str, str] = _text_refused,
+                    _attempt: int = _attempt,
+                ) -> str | None:
+                    # spliced_now and _landed are arguments: the decline
+                    # replaces both before this runs, so a default taken at
+                    # definition would mark the pre-decline list. The other
+                    # names are this attempt's, bound here.
+                    nonlocal prior_error, _file_kind, _revert_cls
+                    nonlocal _retry_names, _retry_note, _pre, snapshot
+                    if not _pending_decline:
+                        return None
+                    _note_reverted(file_rel, tuple(
+                        identity_name(n) for n in sorted(_pending_decline)))
+                    for _n, _ign in sorted(_pending_decline.items()):
+                        _shown = identity_name(_n)
+                        _text_refused[_n] = ignored_inputs_feedback(
+                            _shown, _ign)
+                        _cls(FillOutcomeClass.DECLINED,
+                             f"{file_rel}::{_shown}", "file")
+                        _verdict_row(
+                            f"{file_rel}::{_shown}", Disposition.REVERT,
+                            "declined — ignores its input(s) "
+                            + ", ".join(_ign)
+                            + " and no attributed test was observed passing",
+                            outcome=GateOutcome.NEGATIVE,
+                            attempt=_attempt,
+                            validity=ValidityVector(binary_completed=True),
+                            model_calls=_attempt, route="file")
+                    _log(f"  [phase-c/declined] file {glabel}: "
+                         f"{len(_pending_decline)} body(ies) ignore declared "
+                         "input(s) with no attributed test observed "
+                         "passing — not kept: "
+                         + ", ".join(
+                             f"{identity_name(n)} ({', '.join(i)})"
+                             for n, i in sorted(_pending_decline.items()))
+                         + (f"; {spliced_now} other body(ies) re-spliced"
+                            if spliced_now else ""))
+                    _emit("phase_c.fill.declined", data={
+                        "cluster": cluster_name, "unit": glabel,
+                        "route": "file", "reason": "ignored_inputs",
+                        "names": sorted(
+                            identity_name(n) for n in _pending_decline),
+                        "ignored": {identity_name(n): list(i) for n, i
+                                    in sorted(_pending_decline.items())}})
+                    if _landed:
+                        return None
+                    # Nothing of the reply stands: the same outcome as a
+                    # reply refused for its text before it was spliced,
+                    # and the same retry.
+                    prior_error = "\n\n".join(
+                        _text_refused[n] for n in sorted(_pending_decline))
+                    _file_kind = LastErrorKind.COMPILE
+                    if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
+                        _revert_cls = None
+                        _retry_names = frozenset(
+                            identity_name(n) for n in _pending_decline)
+                        _retry_note = (
+                            "No body from your last reply was kept. "
+                            "The bodies for "
+                            + ", ".join(f"`{n}`"
+                                        for n in sorted(_pending_decline))
+                            + " ignore inputs their signature "
+                            "declares; the error below says which. "
+                            "Rewrite only those.")
+                        _pre = capture(file_path, None)
+                        snapshot = _pre.text("replace")
+                        return "retry"
+                    _log(f"  [phase-c/file] {glabel}: every body "
+                         "declined on the last attempt; falling back "
+                         "to per-block fills.")
+                    return "stop"
+
+                def _decline_unvouched(
+                    *,
+                    note: bool,
+                    _pending_decline: dict[str, tuple[str, ...]] = _pending_decline,
+                    _baseline_test: Any = _baseline_test,
+                    _u2_file: U2Verdict | None = _u2_file,
+                    _pre: PreImage = _pre,
+                ) -> str:
+                    nonlocal _landed, spliced_now
+                    _pending_decline.clear()
+                    if not _landed:
+                        return "none"
                     _vouched_f = vouched_for_keep(
                         {(b.fn_name, b.container): _frontier_tests.tests_for_body(
                             file_rel, b.fn_name, b.container) for b in _landed},
@@ -2852,88 +2973,92 @@ def prepare_impl_fill(
                         ((b.fn_name, b.sig_text, b.body, b.container)
                          for b in _landed),
                         vouched=_vouched_f)
-                    if _ignoring_f:
-                        _keep_f = [b for b in _landed
-                                   if not is_declined(
-                                       b.fn_name, b.container, _ignoring_f)]
-                        restore(_pre)
-                        for b in _keep_f:
-                            if not _splice_fn_with_where(
-                                    file_path, b.container, b.fn_name, b.body,
-                                    b.where_clause,
-                                    allow_nonstub=b.overwrite_authorized,
-                                    sig_text=b.sig_text).ok:
-                                restore(_pre)
-                                _keep_f = []
-                                break
-                        _landed = _keep_f
-                        spliced_now = len(_landed)
-                        _note_reverted(file_rel, tuple(
-                            identity_name(n) for n in sorted(_ignoring_f)))
-                        for _n, _ign in sorted(_ignoring_f.items()):
-                            _shown = identity_name(_n)
-                            _text_refused[_n] = ignored_inputs_feedback(
-                                _shown, _ign)
-                            _cls(FillOutcomeClass.DECLINED,
-                                 f"{file_rel}::{_shown}", "file")
-                            _verdict_row(
-                                f"{file_rel}::{_shown}", Disposition.REVERT,
-                                "declined — ignores its input(s) "
-                                + ", ".join(_ign)
-                                + " and no attributed test was observed passing",
-                                outcome=GateOutcome.NEGATIVE,
-                                attempt=_attempt,
-                                validity=ValidityVector(binary_completed=True),
-                                model_calls=_attempt, route="file")
-                        _log(f"  [phase-c/declined] file {glabel}: "
-                             f"{len(_ignoring_f)} body(ies) ignore declared "
-                             "input(s) with no attributed test observed "
-                             "passing — not kept: "
-                             + ", ".join(
-                                 f"{identity_name(n)} ({', '.join(i)})"
-                                 for n, i in sorted(_ignoring_f.items()))
-                             + (f"; {spliced_now} other body(ies) re-spliced"
-                                if spliced_now else ""))
-                        _emit("phase_c.fill.declined", data={
-                            "cluster": cluster_name, "unit": glabel,
-                            "route": "file", "reason": "ignored_inputs",
-                            "names": sorted(
-                                identity_name(n) for n in _ignoring_f),
-                            "ignored": {identity_name(n): list(i) for n, i
-                                        in sorted(_ignoring_f.items())}})
-                        if not _landed:
-                            # Nothing of the reply stands: the same outcome
-                            # as a reply refused for its text before it was
-                            # spliced, and the same retry.
-                            prior_error = "\n\n".join(
-                                _text_refused[n] for n in sorted(_ignoring_f))
-                            _file_kind = LastErrorKind.COMPILE
-                            if _attempt < _FILE_FIRST_MAX_ATTEMPTS:
-                                _revert_cls = None
-                                _retry_names = frozenset(
-                                    identity_name(n) for n in _ignoring_f)
-                                _retry_note = (
-                                    "No body from your last reply was kept. "
-                                    "The bodies for "
-                                    + ", ".join(f"`{n}`"
-                                                for n in sorted(_ignoring_f))
-                                    + " ignore inputs their signature "
-                                    "declares; the error below says which. "
-                                    "Rewrite only those.")
-                                _pre = capture(file_path, None)
-                                snapshot = _pre.text("replace")
+                    if not _ignoring_f:
+                        return "none"
+                    _pending_decline.update(_ignoring_f)
+                    _keep_f = [b for b in _landed
+                               if not is_declined(
+                                   b.fn_name, b.container, _ignoring_f)]
+                    restore(_pre)
+                    for b in _keep_f:
+                        if not _splice_fn_with_where(
+                                file_path, b.container, b.fn_name, b.body,
+                                b.where_clause,
+                                allow_nonstub=b.overwrite_authorized,
+                                sig_text=b.sig_text).ok:
+                            restore(_pre)
+                            _keep_f = []
+                            break
+                    _landed = _keep_f
+                    spliced_now = len(_landed)
+                    if not note:
+                        return "empty" if not _landed else "remainder"
+                    _recorded = _record_file_decline(spliced_now, _landed)
+                    return _recorded if _recorded is not None else "remainder"
+
+                if (rc == 0 and not _peel_refuse_keep
+                        and (not _u2_reject or _bank is not None
+                             or _crash_keep_file or _nonregr_keep_file)):
+                    _drop_f = _decline_unvouched(note=True)
+                    if _drop_f == "retry":
+                        continue
+                    if _drop_f == "stop":
+                        return
+
+                def _measure_file(
+                    _landed: list[LandedBody],
+                    *,
+                    _baseline_test: Any = _baseline_test,
+                    _peel_reverted: tuple[str, ...] = _peel_reverted,
+                    _crash_peeled: tuple[str, ...] = _crash_peeled,
+                    _hollow_before: int = _hollow_before,
+                    rc: int = rc,
+                ) -> tuple[RegressionComparison, str] | None:
+                    return (_test_regression_gate(
+                        tdd_test_cmd, target_src_dir, cluster_env,
+                        _baseline_test,
+                        stub_free=stub_free,
+                        introduced_stubs=bool(_peel_reverted or _crash_peeled),
+                        hollow_before=_hollow_before,
+                        written=[FnLocator(file_rel, b.fn_name)
+                                 for b in _landed])
+                        if rc == 0 else None)
+
+                _regr_file = _measure_file(_landed)
+                if _suite_try_f and _landed:
+                    _suite_f = suite_bank(_joint, _regr_file, tdd_test_cmd)
+                    if _suite_f is not None:
+                        _drop_f = _decline_unvouched(note=False)
+                        _keep_suite = False
+                        if _drop_f == "none":
+                            _keep_suite = True
+                        elif _drop_f == "empty":
+                            _recorded_f = _record_file_decline(
+                                spliced_now, _landed)
+                            _suite_f = None
+                            if _recorded_f == "retry":
                                 continue
-                            _log(f"  [phase-c/file] {glabel}: every body "
-                                 "declined on the last attempt; falling back "
-                                 "to per-block fills.")
-                            return
-                _regr_file = (_test_regression_gate(
-                    tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
-                    stub_free=stub_free,
-                    introduced_stubs=bool(_peel_reverted or _crash_peeled),
-                    hollow_before=_hollow_before,
-                    written=[FnLocator(file_rel, b.fn_name) for b in _landed])
-                    if rc == 0 else None)
+                            if _recorded_f == "stop":
+                                return
+                        else:
+                            _regr_file = _measure_file(_landed)
+                            _again_f = suite_bank(
+                                _joint, _regr_file, tdd_test_cmd)
+                            if _again_f is not None:
+                                _record_file_decline(spliced_now, _landed)
+                                _suite_f = _again_f
+                                _keep_suite = True
+                            else:
+                                restore(_pre)
+                                _pending_decline.clear()
+                                _suite_f = None
+                        if _keep_suite and _suite_f is not None:
+                            _bank = _joint
+                            _log(f"  [phase-c/file] GUARD {glabel}: re-fill "
+                                 "KEPT on its suite reading (net "
+                                 f"{_suite_f.net_pass_delta:+d}, nothing "
+                                 "newly red or crashed; aborts only of "
+                                 "already-red tests at a crate frame).")
                 if (rc == 0 and not _peel_refuse_keep
                         and (not _u2_reject or _bank is not None
                              or _crash_keep_file or _nonregr_keep_file)
@@ -2958,7 +3083,10 @@ def prepare_impl_fill(
                         for m in (*b.stub_members, *b.refill_members))
                     _log(f"  [phase-c/file] {glabel}: FILE FILLED "
                          f"{spliced_now} fn(s) in one pass"
-                         + (f" — banked improvement: {_bank.summary}."
+                         + (f" — kept on its suite reading (net "
+                            f"{_suite_f.net_pass_delta:+d})."
+                            if _suite_f is not None
+                            else f" — banked improvement: {_bank.summary}."
                             if _bank is not None else "."))
                     # Trust-but-verify: a splice can report ok while the fn
                     # stays a stub on disk (observed: "FILE FILLED 5" with one
@@ -2997,10 +3125,8 @@ def prepare_impl_fill(
                     _passed_f = (frozenset(_bank.resolved) if _bank is not None
                                  else (_u2_file.self_passed
                                        if _u2_file is not None else frozenset()))
-                    _attr_f = (
-                        (_u2_file.self_passed | _u2_file.self_failures
-                         | _u2_file.aborted)
-                        if _u2_file is not None else frozenset())
+                    _attr_f = (_u2_file.reported if _u2_file is not None
+                               else frozenset())
                     # A non-regression keep's tests RAN (its GUARD line says
                     # so): it is judged here like any keep, and deferred
                     # only in the verdict row below.
@@ -3050,6 +3176,9 @@ def prepare_impl_fill(
                          "observed passing" if _paid_f
                          else f"kept — {len(_passed_f)} attributed test(s) "
                          "pass and none moved with this keep" if _passed_f
+                         else "kept on its suite reading — net "
+                         f"{_suite_f.net_pass_delta:+d}, nothing newly red or "
+                         "crashed" if _suite_f is not None
                          else unmeasured_keep_reason(_u2_file)),
                         outcome=(GateOutcome.POSITIVE
                                  if _paid_f and not _deferred_f
@@ -3165,6 +3294,16 @@ def prepare_impl_fill(
                     _revert_reason = f"regressed sibling test(s): {_regr_file[0].summary}"
                     prior_error = _regr_file[1]
                     _file_kind = regression_detail_kind(_regr_file[0])
+                    # What the reverted write broke and what each reddened
+                    # test printed, on every unit it wrote, for the next
+                    # route over them: the retry above reads the detail,
+                    # the next fill reads only the store.
+                    _stamp_sibling_reddened(
+                        [_retro_key(file_rel, b.fn_name, b.container)
+                         for b in _landed],
+                        tests=_regr_file[0].newly_red,
+                        outputs=_regr_file[0].newly_red_output,
+                        by=f"file {file_rel}")
                 elif _peel_refuse_keep:
                     _revert_reason = (
                         "peel restored stub(s) and this file's hollow set "
@@ -3584,6 +3723,19 @@ def prepare_impl_fill(
         test_blocks = list(_block_ev.test_blocks)
         _pins = _block_ev.pins
         _refill_evidence_text = _block_ev.refill_evidence
+        # What a reverted write by any route over this block broke, and what
+        # those tests printed (`sibling_regression`), less what the block's
+        # own record already renders. The file and session prompts read it;
+        # the impl prompt read only its own record, so a reverted impl or
+        # file write left the next impl prompt with names and no values.
+        _sib_impl = _sibling_regression_for(
+            [_retro_key(block.file, "*impl*", block.container),
+             *(_retro_key(block.file, m.fn_name, block.container)
+               for m in (*block.stub_members, *block.refill_members))],
+            _pins, skip=[str(n) for n in (_retro_rec.get("regressed") or [])])
+        if _sib_impl:
+            _refill_evidence_text = "\n".join(
+                x for x in (_refill_evidence_text, _sib_impl) if x)
         # Types in scope: union over all stub signatures in this block,
         # plus the impl header and its where clause — the self-type
         # (e.g. `impl Display for BoxedError`) appears in no member sig,
@@ -4163,13 +4315,13 @@ def prepare_impl_fill(
                     # members' own tests pass too — not just compile.
                     # Conviction-scoped (see the file-first gate above): only
                     # tests with direct evidence at a member may revert the block.
-                    _block_tests: set[str] = set()
-                    for _bm in (*block.stub_members, *block.refill_members):
-                        _lk = FnLocator(block.file, _bm.fn_name)
-                        if _lk in escalated_keys or _lk in measured_owner_keys:
-                            _block_tests |= _frontier_tests.tests_for(_lk)
-                        else:
-                            _block_tests |= _frontier_tests.convicting_for(_lk)
+                    # Runs the members' dispatch tests; the convicting
+                    # subset reverts (`WriteGround`).
+                    _block_locs = [FnLocator(block.file, _bm.fn_name)
+                                   for _bm in (*block.stub_members,
+                                               *block.refill_members)]
+                    _block_ground = _frontier_tests.ground_for_units(_block_locs)
+                    _block_tests = set(_block_ground.convicting)
                     # Container-qualified sites: this block's members share
                     # block.container, so a same-named method in ANOTHER impl
                     # (e.g. a different `From` variant's `from`, the free `not`
@@ -4178,7 +4330,7 @@ def prepare_impl_fill(
                     _block_sites = frozenset(
                         FnSite(block.file, _bm.fn_name, block.container)
                         for _bm in (*block.stub_members, *block.refill_members))
-                    _u2_impl = _u2_test_gate(_block_tests, _block_sites,
+                    _u2_impl = _u2_test_gate(_block_ground, _block_sites,
                                              tdd_test_cmd, target_src_dir,
                                              cluster_env)
                 # Only a REAL self-failure reverts. ACCEPT_EXTERNAL_ONLY (every
@@ -4220,6 +4372,16 @@ def prepare_impl_fill(
                     _cmp, _regr_detail = _regr
                     restore(_block_pre)
                     _last_regr_reverted[0] = True
+                    # The measured half of the revert, on the block's record
+                    # and its written units', for the next route over them
+                    # (`sibling_regression`): the retry reads the detail, the
+                    # next fill only the store.
+                    _stamp_sibling_reddened(
+                        [_retro_key(block.file, "*impl*", block.container),
+                         *(_retro_key(block.file, n, block.container)
+                           for n in _impl_spliced)],
+                        tests=_cmp.newly_red, outputs=_cmp.newly_red_output,
+                        by=f"impl {block.file}::{block.container}")
                     _note_reverted(block.file, _impl_spliced, collateral=True)
                     _log(f"  [phase-c/impl] {block_id}: REVERTED {spliced_now} "
                          f"fn(s) — regressed sibling test(s): "
@@ -4315,6 +4477,19 @@ def prepare_impl_fill(
                          "— every aimed test is still a native crash and the "
                          "crash's culprit(s) it wrote still are.")
                     _crash_keep = False
+                # The write's own suite reading, when the aimed-set rule did
+                # not keep it (`suite_bank`); a bank like the aimed one.
+                _suite_i: RegressionComparison | None = None
+                if (rc == 0 and _u2_impl_reject and _bank_impl is None
+                        and not _crash_keep):
+                    _suite_i = suite_bank(_joint_impl, _regr, tdd_test_cmd)
+                    if _suite_i is not None:
+                        _bank_impl = _joint_impl
+                        _log(f"  [phase-c/impl] GUARD {block_id}: re-fill KEPT "
+                             f"on its suite reading (net "
+                             f"{_suite_i.net_pass_delta:+d}, nothing newly red "
+                             "or crashed; aborts only of already-red tests at "
+                             "a crate frame).")
                 if _crash_keep and _u2_impl is not None:
                     _log(f"  [phase-c/impl] GUARD {block_id}: re-fill KEPT on "
                          "non-regression "
@@ -4401,17 +4576,18 @@ def prepare_impl_fill(
                     _log(f"  [phase-c/impl] {block_id}: "
                          f"FILLED {spliced_now} fn(s) "
                          f"(attempt {fix_attempt})"
-                         + (f" — banked improvement: {_bank_impl.summary}."
+                         + (f" — kept on its suite reading (net "
+                            f"{_suite_i.net_pass_delta:+d})."
+                            if _suite_i is not None
+                            else f" — banked improvement: {_bank_impl.summary}."
                             if _bank_impl is not None else "."))
                     _passed_i = (frozenset(_bank_impl.resolved)
                                  if _bank_impl is not None
                                  else (_u2_impl.self_passed
                                        if _u2_impl is not None else frozenset()))
                     _kept_i = _u2_external_only or _crash_keep
-                    _attr_i = (
-                        (_u2_impl.self_passed | _u2_impl.self_failures
-                         | _u2_impl.aborted)
-                        if _u2_impl is not None else _block_answers.tests)
+                    _attr_i = (_u2_impl.reported if _u2_impl is not None
+                               else _block_answers.tests)
                     _cls(class_for_kept(reading=keep_reading(
                                             net_delta=(
                                                 _cmp_i.net_pass_delta
@@ -4437,6 +4613,9 @@ def prepare_impl_fill(
                          "crash-evidenced" if _kept_i
                          else f"accepted — {len(_passed_i)} attributed test(s) "
                          "observed passing" if _passed_i
+                         else "kept on its suite reading — net "
+                         f"{_suite_i.net_pass_delta:+d}, nothing newly red or "
+                         "crashed" if _suite_i is not None
                          else unmeasured_keep_reason(_u2_impl)),
                         outcome=(GateOutcome.POSITIVE
                                  if _passed_i and not _kept_i
@@ -5292,9 +5471,10 @@ def prepare_impl_fill(
             for b in halves)
         _pair_locs = pd.member_locators()
         _pair_extra = tuple(pd.extra_blocks)
-        _pair_tests: set[str] = set()
-        for _loc in _pair_locs:
-            _pair_tests |= _frontier_tests.convicting_for(_loc)
+        # Judged on both endpoints' dispatch tests, reverted only by their
+        # convicting ones (`WriteGround`).
+        _pair_ground = _frontier_tests.ground_for_units(_pair_locs)
+        _pair_tests = set(_pair_ground.convicting)
         # The pair's durable memory: one retro-store record keyed on BOTH
         # endpoints. Its `regressed` stamp is the previous joint write's
         # newly-red set (a measurement the next prompt renders as evidence),
@@ -5481,7 +5661,7 @@ def prepare_impl_fill(
             # The pair's later call is asked like every other unit's: the
             # compile retry falls through to here, and a pair whose leftover
             # tests another keep already moved has nothing left to judge it.
-            _unit_end = (unit_clock.ended(frozenset(_pair_tests))
+            _unit_end = (unit_clock.ended(_pair_ground.judged)
                          if _attempt > 1 else "")
             if _unit_end:
                 if unit_clock.note_once():
@@ -5914,7 +6094,7 @@ def prepare_impl_fill(
                     FnSite(b.file, m.fn_name, b.container)
                     for b in (*halves, *_pair_extra)
                     for m in (*b.stub_members, *b.refill_members))
-                _pair_u2 = _u2_test_gate(_pair_tests, _pair_sites, tdd_test_cmd,
+                _pair_u2 = _u2_test_gate(_pair_ground, _pair_sites, tdd_test_cmd,
                                          target_src_dir, cluster_env)
                 _pair_regr = _test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
@@ -5975,6 +6155,16 @@ def prepare_impl_fill(
                          "REVERTED — every aimed test is still a native crash "
                          "and the crash's culprit(s) it wrote still are.")
                     _pair_nonregr = False
+                # The write's own suite reading, when the aimed-set rule did
+                # not keep it (`suite_bank`).
+                _pair_suite = (None if _pair_nonregr else suite_bank(
+                    _pair_joint, _pair_regr, tdd_test_cmd))
+                if _pair_suite is not None:
+                    _log(f"  [phase-c/pair] GUARD {pair_id}: joint re-fill "
+                         f"KEPT on its suite reading (net "
+                         f"{_pair_suite.net_pass_delta:+d}, nothing newly red "
+                         "or crashed; aborts only of already-red tests at a "
+                         "crate frame).")
                 if _pair_nonregr and _pair_u2 is not None:
                     # The same bar as the file and impl routes: convicting
                     # tests still failing, none newly red — KEPT, deferred
@@ -5987,7 +6177,7 @@ def prepare_impl_fill(
                          "next sweep.")
                 if (_pair_u2 is not None
                         and _pair_u2.decision is U2Decision.REJECT
-                        and not _pair_nonregr):
+                        and not _pair_nonregr and _pair_suite is None):
                     _revert_pair()
                     _log(f"  [phase-c/pair] {pair_id}: REVERTED both halves — "
                          f"{len(_pair_u2.self_failures)} convicting test(s) "
@@ -6097,10 +6287,8 @@ def prepare_impl_fill(
                     and _pair_u2.decision is U2Decision.ACCEPT_EXTERNAL_ONLY)
                 _pair_deferred = _pair_external_only or (
                     _pair_u2 is not None and _pair_nonregr)
-                _attr_p = (
-                    (_pair_u2.self_passed | _pair_u2.self_failures
-                     | _pair_u2.aborted)
-                    if _pair_u2 is not None else frozenset())
+                _attr_p = (_pair_u2.reported if _pair_u2 is not None
+                           else frozenset())
                 _cls(class_for_kept(reading=keep_reading(
                                         net_delta=(_cmp_p.net_pass_delta
                                                    if _cmp_p is not None else 0),
@@ -6434,6 +6622,7 @@ def prepare_impl_fill(
                 # sibling sharing a hub unit must open on the tree as it
                 # now stands, not on the records enumerated at plan time.
                 _all_recs = _tree_sites()
+            _planned_sl = _sl
             _records = _resolve(_sl.units, _all_recs)
             _missing = [u for u in _sl.units if u not in _records]
             if _missing:
@@ -6572,26 +6761,67 @@ def prepare_impl_fill(
                     | frozenset(tok for r in _records.values()
                                 for tok in _container_names(r.container)),
                     cap=6000)
-            _turn0 = build_slice_session_prompt(
-                module_name=module_name, cluster_name=cluster_name,
-                slice_=_sl, records=_records,
-                all_records=list(_all_recs.values()),
-                file_texts=_file_texts, target_evidence=_evidence,
-                test_blocks=_tblocks,
-                types_section="\n\n".join(_types_parts),
-                bound_methods="\n\n".join(_bound_parts),
-                invariants=invariants_section, macros=macros_section,
-                notes=_prior_notes, prior_regression=_prior_regr,
-                kind=kind_from_record(_srec),
-                blueprint=_bp, fr_path=fr_path,
-                max_turns=_max_turns, executed=_executed_all,
-                file_chars=_sl.file_chars or SESSION_FILE_CHARS,
-                installable=_installable_sites,
-                crash_evidence=crash_evidence_for_units(
-                    crash_evidence or {}, _sl.units, crash_sites),
-                behaviour_must=_behaviour_must(*_records.values()),
-                unit_notes=unit_notes_text(
-                    (locator_of(u) for u in _sl.units), _frontier_tests))
+            def _build_turn0(file_chars: int) -> str:
+                return build_slice_session_prompt(
+                    module_name=module_name, cluster_name=cluster_name,
+                    slice_=_sl, records=_records,
+                    all_records=list(_all_recs.values()),
+                    file_texts=_file_texts, target_evidence=_evidence,
+                    test_blocks=_tblocks,
+                    types_section="\n\n".join(_types_parts),
+                    bound_methods="\n\n".join(_bound_parts),
+                    invariants=invariants_section, macros=macros_section,
+                    notes=_prior_notes, prior_regression=_prior_regr,
+                    kind=kind_from_record(_srec),
+                    blueprint=_bp, fr_path=fr_path,
+                    max_turns=_max_turns, executed=_executed_all,
+                    file_chars=file_chars,
+                    installable=_installable_sites,
+                    crash_evidence=crash_evidence_for_units(
+                        crash_evidence or {}, _sl.units, crash_sites),
+                    behaviour_must=_behaviour_must(*_records.values()),
+                    unit_notes=unit_notes_text(
+                        (locator_of(u) for u in _sl.units), _frontier_tests))
+
+            _cap = _costs.max_chars if _costs is not None else 0
+            _fitted = fit_turn0(
+                _build_turn0, _sl.file_chars or SESSION_FILE_CHARS,
+                _SESSION_FILE_THRESHOLDS, _cap)
+            if _fitted is None:
+                # The narrowest rendering is still over capacity. There is
+                # no prompt to send, so the session does not open.
+                _charged = (0 if _costs is None else _costs.chars(
+                    _planned_sl.tests, _planned_sl.units,
+                    file_chars=_planned_sl.file_chars or None))
+                _log(f"  [phase-c/session] {_sl.label()}: turn 0 at the "
+                     f"narrowest rendering is over capacity {_cap:,} "
+                     f"(charged {_charged:,} on the planned slice) — "
+                     "the session is not opened")
+                _emit("phase_c.session.turn0", data={
+                    "cluster": cluster_name, "tests": list(_sl.tests),
+                    "sent": 0, "charged": _charged, "capacity": _cap,
+                    "file_chars": 0, "over": True,
+                    "planned_file_chars": (_planned_sl.file_chars
+                                           or SESSION_FILE_CHARS),
+                    "units_planned": len(_planned_sl.units),
+                    "units_opened": len(_sl.units)})
+                return RouteRunReport(empty=True)
+            _turn0, _t0_chars = _fitted
+            if _costs is not None:
+                _charged = _costs.chars(_planned_sl.tests, _planned_sl.units,
+                                        file_chars=_planned_sl.file_chars or None)
+                _log(f"  [phase-c/session] {_sl.label()}: turn 0 "
+                     f"{len(_turn0):,} chars at file threshold {_t0_chars:,} "
+                     f"(charged {_charged:,} on the planned slice, capacity "
+                     f"{_costs.max_chars:,})")
+                _emit("phase_c.session.turn0", data={
+                    "cluster": cluster_name, "tests": list(_sl.tests),
+                    "sent": len(_turn0), "charged": _charged,
+                    "capacity": _costs.max_chars, "file_chars": _t0_chars,
+                    "planned_file_chars": (_planned_sl.file_chars
+                                           or SESSION_FILE_CHARS),
+                    "units_planned": len(_planned_sl.units),
+                    "units_opened": len(_sl.units)})
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:

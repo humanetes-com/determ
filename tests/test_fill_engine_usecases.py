@@ -1074,6 +1074,14 @@ def test_crash_evidence_refill_is_kept_on_non_regression(
         "a crash-evidence re-fill whose self-failures were all failing at "
         "baseline regressed nothing — kept, judged at the next sweep")
     assert any("crash-evidence re-fill KEPT" in m for m in fake.logs)
+    # The row says what the keep was and names the tests still failing; it
+    # used to read `accept` with no evidence, the row of a body no test ran
+    # against (run `4112620-8a89f05c`, 2026-10-29).
+    rows = _verdicts(fake)
+    assert rows[-1]["disposition"] == "keep_deferred"
+    assert rows[-1]["outcome"] == "unmeasurable"
+    assert "kept on non-regression" in rows[-1]["reason"]
+    assert rows[-1]["evidence_keys"] == ["t_latent"]
 
 
 def test_the_same_rejection_without_evidence_still_reverts(
@@ -1398,6 +1406,21 @@ def _run_bound(fake: RecordingFill, ws: Path, ctx: PerFnPassCtx,
         bind(None)
 
 
+def _convictions(saved: list[Any]) -> list[Any]:
+    """The saved records less the measured stamp a reverted write leaves on
+    the units it wrote (`sibling_regression`): what is left is a lesson or
+    a conviction."""
+    from pipeline_core.domain.sibling_regression import SIBLING_REDDENED
+    return [rec for _ws, store in saved for rec in store.values()
+            if set(rec) - {SIBLING_REDDENED}]
+
+
+def _stamped_tests(saved: list[Any]) -> list[str]:
+    from pipeline_core.domain.sibling_regression import SIBLING_REDDENED
+    return [t for _ws, store in saved for rec in store.values()
+            for t in (rec.get(SIBLING_REDDENED) or {}).get("tests", [])]
+
+
 def test_an_unreached_unit_whose_body_regresses_a_sibling_stops_after_one_call(
         tmp_path: Path) -> None:
     ws = _mk_ws(tmp_path)
@@ -1406,8 +1429,12 @@ def test_an_unreached_unit_whose_body_regresses_a_sibling_stops_after_one_call(
     res = _run_bound(fake, ws, _cov_ctx(ws), entered=False)
     assert not res.filled
     assert fake.ask_calls == 1, "no re-prompt after the sibling regression"
-    assert fake.diagnose_calls == 0 and not fake.saved, (
+    assert fake.diagnose_calls == 0 and not _convictions(fake.saved), (
         "no retrospective and no conviction for a unit the test never enters")
+    # What the reverted write broke is measured, and kept for the next route
+    # over the unit (run `3808231-81b847f7`, 2026-10-29: per-fn reverts kept
+    # nothing a later fill could read).
+    assert _stamped_tests(fake.saved) == ["test_x"]
     assert "phase_c.fn.unpayable_stop" in fake.events
     assert fake.s.get("reverts"), "the regressing body is reverted"
     assert res.fill_class == "mis"
@@ -1421,7 +1448,8 @@ def test_a_sibling_blocked_unit_whose_body_regresses_a_sibling_stops_too(
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
                               ctx=_hub_ctx(ws))
     assert not res.filled
-    assert fake.ask_calls == 1 and fake.diagnose_calls == 0 and not fake.saved
+    assert (fake.ask_calls == 1 and fake.diagnose_calls == 0
+            and not _convictions(fake.saved))
     assert "phase_c.fn.unpayable_stop" in fake.events
 
 
@@ -1620,7 +1648,7 @@ def test_a_fill_with_no_test_observed_passing_is_not_a_positive_verdict(
     assert rows[0]["outcome"] == "unmeasurable"
     # The row names what the gate did, never "none were failing": this
     # fake's gate never ran (the accept of a gate that is off).
-    assert "did not happen or did not finish" in rows[0]["reason"]
+    assert "no attributed test reported a verdict" in rows[0]["reason"]
     assert "none were failing" not in rows[0]["reason"]
     assert rows[0]["evidence_keys"] == []
     # Handed no test, the gate says so (run `2129106-ead996ab`, 2026-10-28:

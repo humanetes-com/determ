@@ -199,7 +199,7 @@ class _Recorder(FakeFill):
         self.handed: list[set[str]] = []
 
     def u2_test_gate(self, *a: Any) -> Any:
-        self.handed.append(set(a[0]))
+        self.handed.append(set(a[0].judged))
         return super().u2_test_gate(*a)
 
     def find_tests_for_fn(self, _files: Any, name: str, **_k: Any

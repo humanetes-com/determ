@@ -688,8 +688,8 @@ def _emit_captures(
         suite.specs,
         crate=module_name,
         verify=lambda stem, extra: deps.verify_tests(project_dir, cluster, module_name, stem, extra),
-        failing_alone=lambda stem, names: alone_check(
-            project_dir, cluster, module_name, stem, names),
+        failing_alone=lambda stem, names, extra: alone_check(
+            project_dir, cluster, module_name, stem, names, extra),
         settle=lambda dest, body: settle_gate(
             project_dir, module_name, dest, body, cluster),
         perturb_env=deps.perturb_env(cluster),

@@ -13,6 +13,7 @@ from pipeline_core.application.reconstruct.cargo_runner import (
     run_scoped_tests,
     u2_test_gate,
 )
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.models import FnSite
 from pipeline_core.domain.test_report import U2Decision
 
@@ -141,8 +142,9 @@ class _FakeStructure:
 def _gate(run_cargo_fn, fn_tests, unit_fns=frozenset(), test_cmd="cargo test",
           enabled=True, guard=None, structure=None, src_dir=Path("."),
           baseline=None):
+    tests = frozenset(fn_tests)
     return u2_test_gate(
-        run_cargo_fn, fn_tests, unit_fns, test_cmd, src_dir, {},
+        run_cargo_fn, WriteGround(tests, tests), unit_fns, test_cmd, src_dir, {},
         structure=structure or _FakeStructure(),
         enabled=enabled, timeout=120, err_cap=500,
         guard=guard or (lambda *_: None), baseline=baseline)
@@ -184,6 +186,25 @@ def test_u2_gate_accepts_when_tests_pass() -> None:
     v = _gate(_const_run_cargo(0, "test a ... ok"), {"a"})
     assert v.decision is U2Decision.ACCEPT
     assert v.measured
+
+
+def test_an_accept_whose_handed_tests_reported_nothing_is_not_measured() -> None:
+    """An empty failure list after a scoped build that failed, or a binary
+    that died with nothing charged, keeps the body on compile alone; the
+    verdict must not read as tests that ran (review of 2026-10-29). Control:
+    the same gate with the handed test reported is measured."""
+    broke = _gate(_const_run_cargo(
+        101, "error[E0425]: cannot find value `x` in this scope\n"
+             "error: could not compile `crate` (test \"t\") due to 1 "
+             "previous error\n"), {"a"})
+    assert broke.decision is U2Decision.ACCEPT and not broke.measured
+    died = _gate(_const_run_cargo(
+        101, "running 1 test\nerror: test failed, to rerun pass `--test t`\n"
+             "Caused by:\n  process didn't exit successfully: `t` "
+             "(signal: 11, SIGSEGV: invalid memory reference)\n"), {"a"})
+    assert died.decision is U2Decision.ACCEPT and not died.measured
+    ok = _gate(_const_run_cargo(0, "test tests::a ... ok"), {"a"})
+    assert ok.measured
 
 
 def test_u2_gate_inconclusive_on_timeout() -> None:
@@ -933,6 +954,9 @@ _HUNG_AFTER = ("    Running unittests src/lib.rs (t/lib-1)\n"
                "test test_error_context_display ... FAILED\n"
                "test test_error_debug_chain ... \n"
                "\nTIMEOUT after 120s")
+_HUNG_GROUND = WriteGround(frozenset({"test_error_debug_chain"}),
+                           frozenset({"test_error_debug_chain"}))
+
 
 
 def _two_binary_baseline() -> object:
@@ -1031,7 +1055,7 @@ def test_u2_gate_rejects_a_scoped_run_that_hangs_inside_its_own_test() -> None:
     from pipeline_core.domain.test_report import U2Decision
     seen: list[tuple[str, str]] = []
     v = u2_test_gate(
-        _const_run_cargo(-1, _HUNG_AFTER), {"test_error_debug_chain"},
+        _const_run_cargo(-1, _HUNG_AFTER), _HUNG_GROUND,
         frozenset(), "cargo test", Path("."), {}, structure=None, enabled=True,
         timeout=120, err_cap=4000, guard=lambda k, m: seen.append((k, m)))
     assert v.decision is U2Decision.REJECT
@@ -1043,7 +1067,7 @@ def test_u2_gate_rejects_a_scoped_run_that_hangs_inside_its_own_test() -> None:
     assert not scoped.passed and scoped.failed == {"test_error_debug_chain"}
     assert "HANG" in scoped.detail
     build_cut = u2_test_gate(
-        _const_run_cargo(-1, "   Compiling anyhow v1\n"), {"test_error_debug_chain"},
+        _const_run_cargo(-1, "   Compiling anyhow v1\n"), _HUNG_GROUND,
         frozenset(), "cargo test", Path("."), {}, structure=None, enabled=True,
         timeout=120, err_cap=4000, guard=lambda *_: None)
     assert build_cut.decision is U2Decision.ACCEPT
@@ -1229,13 +1253,14 @@ def test_regression_gate_detail_carries_the_settlements_crash() -> None:
 
     class _Unsettled:
         def settle(self, capture, written, baseline, *, tag=""):
-            return Settlement(SettlementOutcome.UNSETTLED, sites=(site,))
+            return Settlement(SettlementOutcome.UNSETTLED, sites=(site,),
+                              written=frozenset(written))
 
     def _run() -> str:
         res = test_regression_gate(
             _const_run_cargo(101, cur_out), "cargo test", Path("."), {},
             base, enabled=True, timeout=120, guard=lambda *_a: None,
-            written=[FnLocator("src/lib.rs", "mine")])
+            written=[FnLocator("src/lib.rs", "drop_rest")])
         assert res is not None
         return res[1]
 
@@ -1248,15 +1273,23 @@ def test_regression_gate_detail_carries_the_settlements_crash() -> None:
     assert "src/lib.rs:9" not in _run()
     # The comparison carries the same text, for a reader that stores the
     # revert (the pair's record).
-    crash_settler.bind(_Unsettled())  # type: ignore[arg-type]
-    try:
-        res = test_regression_gate(
-            _const_run_cargo(101, cur_out), "cargo test", Path("."), {},
-            base, enabled=True, timeout=120, guard=lambda *_a: None,
-            written=[FnLocator("src/lib.rs", "mine")])
-    finally:
-        crash_settler.bind(None)
-    assert res is not None and "src/lib.rs:9" in res[0].crash_reading
+    def _reading(write: str) -> str:
+        crash_settler.bind(_Unsettled())  # type: ignore[arg-type]
+        try:
+            res = test_regression_gate(
+                _const_run_cargo(101, cur_out), "cargo test", Path("."), {},
+                base, enabled=True, timeout=120, guard=lambda *_a: None,
+                written=[FnLocator("src/lib.rs", write)])
+        finally:
+            crash_settler.bind(None)
+        assert res is not None
+        return res[0].crash_reading
+
+    assert "src/lib.rs:9" in _reading("drop_rest")
+    # A crash whose stack holds no body of the write is not this write's
+    # failure: run `3808231-81b847f7` (2026-10-29) quoted a use-after-free in
+    # a body outside the pair as the pair's own, with a MUST to fix it.
+    assert _reading("mine") == ""
 
 
 def test_u2_gate_locates_a_silent_death_beside_a_panic_without_settling() -> None:

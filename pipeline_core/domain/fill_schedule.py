@@ -215,6 +215,14 @@ class RouteRun:
     #: Set when a held session is released (`release_held`): the session
     #: opens, and these bodies stay the ones the sweep grades.
     frozen: frozenset[FnLocator] = frozenset()
+    #: Per target, the tests the last measured try on this route aimed at,
+    #: ran and left red (`UnitService.left_red`). Set by the schedule on a
+    #: run it ranked as a new try (served or paying), and read by the fill's
+    #: premise gate: once a keep of this fill moves part of the ground a
+    #: claim was planned on, a claim whose remaining ground is all left red
+    #: by that try is the flat re-buy the rank would have said had it seen
+    #: the move (`fill_scheduler._GroundGate`). Empty for every other run.
+    left_red: tuple[tuple[FnLocator, frozenset[str]], ...] = ()
 
     def __post_init__(self) -> None:
         if self.held_tests and self.kind is not RouteKind.PER_FN:
@@ -278,6 +286,9 @@ class RouteRun:
             **({"joint": self.joint} if self.joint else {}),
             **({"frozen": sorted(f"{f}::{fn}" for f, fn in self.frozen)}
                if self.frozen else {}),
+            **({"left_red": {f"{u.file}::{u.fn_name}": sorted(ts)
+                             for u, ts in self.left_red}}
+               if self.left_red else {}),
         }
 
 
@@ -1447,10 +1458,70 @@ class UnitService:
                 wrote |= {FnLocator(f, fn) for f, fn in js}
         return any(not js <= wrote for js in named)
 
+    def last_measured_try(self, t: FnLocator, run: RouteRun
+                          ) -> RouteLedgerRow | None:
+        """The latest try on ``run``'s route that opened ``t`` and read its
+        aim, when nothing since voids it; None otherwise.
+
+        A try is a row that OPENED the unit (`RouteLedgerRow.opened`; a row
+        written before that field, one that kept or reverted it), landed or
+        not: an unchanged re-emit lands nothing and still asked the question.
+        Rows without a per-test reading are skipped, since they make no claim.
+        A revert is the revert rules' (its grace, `_pair_revert_owes_a_retry`)
+        and ends the walk. So does a later row that paid on the unit
+        (`try_premise_moved`) or a share cut (:meth:`cut_by_share`), the
+        resets that make the next try new. A session's try is keyed by its
+        tests (:meth:`session_rebuy`), not here."""
+        if run.kind is RouteKind.SESSION:
+            return None
+        opened = self._opened.get(t, [])
+        for i in range(len(opened) - 1, -1, -1):
+            r = opened[i]
+            if not self._same_route(r, run) or not _tried(r, t):
+                continue
+            if r.outcome is RunOutcome.REVERTED:
+                return None
+            if r.still_red is None:
+                continue
+            if (self.cut_by_share(r)
+                    or try_premise_moved(opened[i + 1:], (t,))):
+                return None
+            return r
+        return None
+
+    def left_red(self, run: RouteRun) -> tuple[tuple[FnLocator, frozenset[str]], ...]:
+        """Per target of ``run``, the tests its last measured try on this
+        route aimed at, ran and left red (:meth:`last_measured_try`,
+        :func:`left_red_by`). A target whose run carries a partner the last
+        try wrote without (:meth:`_joint_untried`) is a new try and has
+        none. What the fill's premise gate reads when a claim's planned
+        ground partly moves (`RouteRun.left_red`)."""
+        out: list[tuple[FnLocator, frozenset[str]]] = []
+        for t in sorted(run.targets, key=lambda u: (u.file, u.fn_name)):
+            last = self.last_measured_try(t, run)
+            # A try that opened other files, or that did not open every unit
+            # this run writes, asked a different question. Its leftover is
+            # not this run's (:func:`same_question`).
+            if last is None or not same_question(run, last):
+                continue
+            left = left_red_by(last)
+            if left and not self._joint_untried(t, run):
+                out.append((t, left))
+        return tuple(out)
+
     def _target_class(self, t: FnLocator, run: RouteRun, *,
                       grace_left: bool) -> tuple[int, int | None]:
         if not self.served(t):
             return _RANK_NEVER_SERVED, None
+        # Asked before every served and paying return: the last measured
+        # try on this route left the whole aim red, so this run is that try
+        # again. On the paying returns only, a served unit was never asked:
+        # run `3366333-dfeac80c` (2026-10-29) opened the Display pair on an
+        # aim its previous pair try had run and left red, ranked `served`
+        # because the pair's units were graded proven, 14.0 min flat.
+        tried = self.last_measured_try(t, run)
+        if tried is not None and aim_left_red(run, tried):
+            return _RANK_REBUY_FLAT, self._deferrals_since(t, run, tried)
         if self.judges_units(run):
             return self._landing_class(t, run, grace_left=grace_left)
         opened = self._opened[t]
@@ -1469,8 +1540,6 @@ class UnitService:
             return _RANK_SERVED, None
         last = opened[here_at[-1]]
         if last.outcome is RunOutcome.CASHED or last.net_pass_delta > 0:
-            if aim_left_red(run, last):
-                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
         if last.outcome is RunOutcome.REVERTED:
             cls = (_RANK_SERVED if _pair_revert_owes_a_retry(run, last, grace_left)
@@ -1497,6 +1566,10 @@ class UnitService:
     def _landing_class(self, t: FnLocator, run: RouteRun, *,
                        grace_left: bool) -> tuple[int, int | None]:
         """The unit's class from its own latest landing on this route.
+
+        Asked only after `_target_class` found no measured try on this route
+        that left the run's whole aim red (that is the flat re-buy, whatever
+        the landing's grade).
 
         - no row on this route KEPT or REVERTED the unit (a target the run
           never claimed is not a try): served;
@@ -1535,8 +1608,6 @@ class UnitService:
             return _RANK_REBUY_REVERTED, self._deferrals_since(t, run, last)
         g = ev.grade(last.run_id, last.iteration, t)
         if ev.paid(last.run_id, last.iteration, t):
-            if aim_left_red(run, last):
-                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
         if g is not None and g[1] in _PAYING_GRADES:
             # Proven on the tree, but no comparison of this keep says the
@@ -1545,8 +1616,6 @@ class UnitService:
         if g is not None and ev.stands_flat(t, g[0]):
             return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
         if (g is None or g[1] is None) and _row_paid(last):
-            if aim_left_red(run, last):
-                return _RANK_REBUY_FLAT, self._deferrals_since(t, run, last)
             return _RANK_PAYING, None
         return _RANK_SERVED, None
 
@@ -1570,6 +1639,14 @@ def _locs(pairs: Iterable[tuple[str, str]]) -> frozenset[FnLocator]:
 
 def _landed(row: RouteLedgerRow, t: FnLocator) -> bool:
     return t in _locs(row.kept) or t in _locs(row.reverted)
+
+
+def _tried(row: RouteLedgerRow, t: FnLocator) -> bool:
+    """`row`'s run opened `t` (`RouteLedgerRow.opened`); on a row written
+    before that field, it kept or reverted it."""
+    if row.opened is None:
+        return _landed(row, t)
+    return t in _locs(row.opened)
 
 
 def joint_sets_of(rows: Iterable[RouteLedgerRow], oracle_fp: str
@@ -1887,8 +1964,55 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     return rank, reason, deferrals
 
 
+def left_red_by(row: RouteLedgerRow) -> frozenset[str] | None:
+    """Bare names of the tests `row`'s try AIMED at, ran, and left red: its
+    own aim (``target_tests``) intersected with its keeps' ``still_red``.
+    None when the row recorded no per-test reading.
+
+    ``still_red`` alone is the suite's still-failing set, not the try's:
+    every test failing before and after in a completed binary, aimed or
+    not. On the route ledger of 2026-10-28/29 a per-fn keep's set held
+    127–129 names, so any later aim sat inside it whatever that try had
+    aimed at; the intersection is the try's own answer."""
+    if row.still_red is None:
+        return None
+    aimed = {str(t).rsplit("::", 1)[-1] for t in row.target_tests}
+    return frozenset(
+        n for n in (str(t).rsplit("::", 1)[-1] for t in row.still_red)
+        if n in aimed)
+
+
+def question_units(row: RouteLedgerRow) -> frozenset[FnLocator]:
+    """The units a try asked: the ones it opened, or its targets when the
+    row was written before ``opened`` was stored. ``opened`` of ``()`` is
+    a try that opened nothing, not a missing field."""
+    pairs = row.opened if row.opened is not None else row.targets
+    return frozenset(FnLocator(f, fn) for f, fn in pairs)
+
+
+def same_question(run: RouteRun, last: RouteLedgerRow) -> bool:
+    """Whether ``run`` asks the question ``last`` asked.
+
+    ``run``'s units are among the units that try opened, and the two write
+    the same files. A try that also opened units in other files asked those
+    files' tests; its leftover then contains a later one-file aim without
+    that aim having been the question (a per-fn keep on 2026-10-28 left 128
+    of an aim of 145, and later runs of other files sat inside it). A run
+    that writes a unit the try did not open is a different question even
+    when both stay in one file: on 2026-10-29 a file run of eight units
+    shared two with the file try before it, and the counts (8 against 9)
+    were not inclusion.
+    """
+    asked = question_units(last)
+    if not run.targets <= asked:
+        return False
+    return {u.file for u in run.targets} == {u.file for u in asked}
+
+
 def aim_left_red(run: RouteRun, last: RouteLedgerRow) -> bool:
-    """The last try ran every test ``run`` aims at and left each red.
+    """``run`` asks the question ``last`` asked (:func:`same_question`), and
+    that try aimed at every test ``run`` aims at, ran each, and left each
+    red (:func:`left_red_by`).
 
     A cash pays for the tests it turned green; those leave the aim. What a
     rerun then aims at is what that try ran and did not move, so the cash is
@@ -1897,14 +2021,16 @@ def aim_left_red(run: RouteRun, last: RouteLedgerRow) -> bool:
     the four it had left red, and re-emitted its bodies for 28.9 minutes; a
     session cashed the one of them it could move in 7.4 by rewriting a unit
     outside the pair. On the route ledger 11 `paying` runs had this shape: 1
-    cashed, 10 bought nothing (257 of 270 minutes). The set read is the
-    keep's own `still_red` (failing before and after, in binaries complete
-    in both readings), so an aimed test the try never measured does not
-    count as left red; a row without the reading makes no claim."""
-    if last.still_red is None or not run.target_tests:
+    cashed, 10 bought nothing (257 of 270 minutes). An aimed test the try
+    never aimed at, or never measured, does not count as left red; a row
+    without the reading makes no claim. A later run that writes other files,
+    or a unit the try did not open, is not that claim either."""
+    if not same_question(run, last):
         return False
-    aim = {str(t).rsplit("::", 1)[-1] for t in run.target_tests}
-    return aim <= {str(t).rsplit("::", 1)[-1] for t in last.still_red}
+    left = left_red_by(last)
+    if left is None or not run.target_tests:
+        return False
+    return {str(t).rsplit("::", 1)[-1] for t in run.target_tests} <= left
 
 
 def _ledger_rank(run: RouteRun, last: RouteLedgerRow, *,
@@ -2570,6 +2696,8 @@ def schedule(
             # src/context.rs` deferred `rebuy_flat` with the standing-FLAT
             # set empty and the unit rank `served`, replayed 2026-10-17).
             rank, reason = _RANK_REBUY_FLAT, "unmeasurable"
+        if rank in (_RANK_SERVED, _RANK_PAYING):
+            run = replace(run, left_red=units.left_red(run))
         ranked.append((run, rank, reason, _level(run, blockers)))
 
     return admit_ranked(

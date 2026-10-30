@@ -38,6 +38,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
+from pipeline_core.domain.test_results import OBSERVED_LINE_PREFIX
+
 PROBE_TAG = "<<PROBE"
 _ASSERT_MACROS = ("assert_eq!", "assert_ne!", "assert!")
 _IDENT_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
@@ -608,7 +610,7 @@ def render_observations(obs: Iterable[Observation]) -> str:
     A helper's line says where it is: the panic names the test's call site,
     not the helper's line."""
     lines = [
-        f"observed at line {o.line}"
+        f"{OBSERVED_LINE_PREFIX}{o.line}"
         + (f" (in `{o.helper}`, which this test calls)" if o.helper else "")
         + f": {o.expr} = {o.value}"
         for o in obs]

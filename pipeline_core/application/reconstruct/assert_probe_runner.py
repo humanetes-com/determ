@@ -25,7 +25,7 @@ import re
 import shlex
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from pipeline_core.domain.assert_probe import (
     rewrite_tests_for_probe,
     without_probe_points,
 )
+from pipeline_core.domain.oracle_ledger import bare_test_name
 
 RunCargo = Callable[..., "tuple[int, str]"]
 
@@ -177,3 +178,40 @@ def run_assert_probes(
 def _blamed_lines(output: str, stem: str) -> set[int]:
     return {int(m.group(2)) for m in _ERR_LINE.finditer(output)
             if m.group(1) == stem}
+
+
+def tests_by_file(names: Collection[str], test_files: Mapping[str, str],
+                  project_dir: Path) -> dict[Path, list[str]]:
+    """``names`` grouped under the oracle file that declares each (``test_files``:
+    test name → file, as the oracle inventory indexed it), bare names, files
+    that exist only. A name the index does not hold is left out."""
+    out: dict[Path, list[str]] = {}
+    for name in sorted(names):
+        rel = test_files.get(name) or test_files.get(bare_test_name(name))
+        if not rel:
+            continue
+        path = Path(rel)
+        if not path.is_absolute():
+            path = project_dir / path
+        if path.is_file():
+            out.setdefault(path, []).append(bare_test_name(name))
+    return out
+
+
+#: Observes the named tests' assertion operands on the cluster tree as it
+#: stands, rendered per test (`ProbeResult.rendered`): bound by the TDD loop
+#: for the fill, read by every regression gate (`cargo_runner.
+#: test_regression_gate`) while a write it is about to revert is still on
+#: the tree.
+WriteProbe = Callable[[Collection[str]], Mapping[str, str]]
+_bound: WriteProbe | None = None
+
+
+def bind(probe: WriteProbe | None) -> None:
+    """Bind (or, with ``None``, clear) the fill's write probe."""
+    global _bound
+    _bound = probe
+
+
+def bound() -> WriteProbe | None:
+    return _bound

@@ -444,7 +444,10 @@ def test_a_bare_body_for_a_free_fn_routes_to_the_free_fn_not_the_target() -> Non
     got = {rb.fn_data["fn_name"]: (rb.container, rb.sig_text) for rb in r.routed}
     assert got["round_up"] == ("", "fn round_up(x: u32) -> u32")
     assert got["open"] == ("impl Till", "pub fn open() -> Till")
-    assert got["total"] == ("impl Till", "")
+    # `total` is declared twice in the file, so the bare body goes to the
+    # target. The signature it carries is that container's own declaration,
+    # not the free fn's and not empty.
+    assert got["total"] == ("impl Till", "pub fn total(&self) -> u32")
     # negative control: without the member table, the pre-fix behaviour
     no_mems = route_fn_bodies([_fn("round_up", "")], target="impl Till",
                               related=[""])
@@ -639,6 +642,46 @@ def test_member_tier_is_off_by_default() -> None:
     r = route_fn_bodies([_fn("construct", "// free function")],
                         target="impl Error", related=[])
     assert r.dropped_names == ("construct",)
+
+
+def test_a_resolved_header_carries_that_declarations_signature() -> None:
+    # A body tagged with the impl it answers used to route and arrive with
+    # an empty signature. The splice can narrow by container alone; the
+    # ignored-input decline cannot, and it reads this field.
+    kind = "fn kind (& self , flag : u32) -> u32"
+    blocks = [_member_block("impl Foo", (("kind", kind),))]
+    mems = members_in_file(blocks, "src/error.rs")
+    named = route_fn_bodies(
+        [_fn("kind", "impl Foo")], target="impl Foo", related=[], members=mems)
+    assert named.routed[0].sig_text == kind
+    assert named.routed[0].via_member_name is False
+    bare = route_fn_bodies(
+        [_fn("kind", "impl Foo")], target="impl Foo", related=[])
+    assert bare.routed[0].container == "impl Foo"
+    assert bare.routed[0].sig_text == ""
+    twins = members_in_file([
+        _member_block("impl Foo", (
+            ("kind", kind),
+            ("kind", "fn kind (& self , other : u32) -> u32"),
+        )),
+    ], "src/error.rs")
+    amb = route_fn_bodies(
+        [_fn("kind", "impl Foo")], target="impl Foo", related=[], members=twins)
+    assert amb.routed[0].container == "impl Foo"
+    assert amb.routed[0].sig_text == ""
+
+
+def test_a_trait_default_route_carries_the_declaration_signature() -> None:
+    sig = "fn anyhow_kind(&self) -> u8"
+    blocks = [_member_block("trait AdhocKind", (("anyhow_kind", sig),))]
+    hosts = trait_default_hosts(blocks, "src/error.rs")
+    mems = members_in_file(blocks, "src/error.rs")
+    r = route_fn_bodies(
+        [_fn("anyhow_kind", "impl<T> AdhocKind for &T")],
+        target="impl Adhoc", related=[], trait_defaults=hosts, members=mems)
+    assert r.routed[0].container == "trait AdhocKind"
+    assert r.routed[0].via_trait_default is True
+    assert r.routed[0].sig_text == sig
 
 
 def test_a_resolvable_header_still_outranks_the_member_tier() -> None:
@@ -880,6 +923,7 @@ def test_an_empty_block_routes_to_the_one_free_declaration_of_a_shared_name() ->
     out = route_fn_bodies(parsed, target="impl Error for MyError", related=[],
                           members=(method, free))
     assert [r.container for r in out.routed] == ["impl Error for MyError", ""]
+    assert out.routed[0].sig_text == method.sig_text
     assert out.routed[1].sig_text == free.sig_text
     two_methods = (method, FileMember("provide", "impl Error for Other", "fn provide"))
     ctrl = route_fn_bodies(parsed[1:], target="impl Error for MyError",

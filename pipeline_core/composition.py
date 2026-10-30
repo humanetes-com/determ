@@ -512,6 +512,7 @@ from pipeline_core.application.reconstruct.cargo_runner import (
 )
 from pipeline_core.application.reconstruct.crash_localizer import (
     CrashLocalizerDeps,
+    project_dir_of_tree,
 )
 from pipeline_core.application.reconstruct.crash_localizer import (
     localize_crashes as _app_localize_crashes,
@@ -740,6 +741,7 @@ from pipeline_core.composition_layout import (
     build_retrigger_layout,
 )
 from pipeline_core.domain import graceful_stop as _graceful_stop
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.behaviour_probe import perturbed_env
 from pipeline_core.domain.best_tree_mark import BestTreeMark
 from pipeline_core.domain.cargo_toml import (
@@ -847,7 +849,7 @@ from pipeline_core.domain.llm_output import (
 from pipeline_core.domain.llm_output import (
     split_api_surface_by_file as _split_api_surface_by_file,
 )
-from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.pin_gaps import gaps_left as _gaps_left
 from pipeline_core.domain.pin_gaps import (
     gaps_still_unimplemented as _gaps_still_unimplemented,
@@ -1635,7 +1637,7 @@ def build_app(
     collect_test_files = functools.partial(
         _disc_collect_test_files, is_gen_tests_decl_only=_gen_is_decl_only_src)
 
-    def u2_test_gate(fn_tests: set[str], unit_fns: Any, test_cmd: str | None,
+    def u2_test_gate(ground: WriteGround, unit_fns: Any, test_cmd: str | None,
                      target_src_dir: Path, cluster_env: dict[str, str] | None,
                      baseline: Any = None) -> Any:
         """Test-acceptance gate. run_cargo late-binds the pipeline seam via
@@ -1643,7 +1645,7 @@ def build_app(
         wins; structure resolves through the LIVE app (fake readers win)."""
         caps = helpers.settings_now().fix_caps
         return _cargo_runner_u2_gate(
-            helpers.run_cargo, fn_tests, unit_fns, test_cmd, target_src_dir,
+            helpers.run_cargo, ground, unit_fns, test_cmd, target_src_dir,
             cluster_env, structure=_live().structure,
             enabled=caps.unified_fill_loop, timeout=caps.u2_test_timeout,
             err_cap=cfg.fix_err_cap, guard=ports.guard, baseline=baseline)
@@ -2025,8 +2027,8 @@ def build_app(
         verify_tests=_verify_behaviour_tests,
         settle_test_gate=lambda pd, crate, f, body, cl: _settle_test_gate(
             Path(pd), crate, Path(f), body, cl),
-        tests_failing_alone=lambda pd, cl, crate, stem, names: failing_alone(
-            Path(pd), crate, stem, names, env=probe_env(cl, pd),
+        tests_failing_alone=lambda pd, cl, crate, stem, names, extra=None: failing_alone(
+            Path(pd), crate, stem, names, env={**probe_env(cl, pd), **dict(extra or {})},
             timeout=cfg.test_timeout),
         perturb_env=lambda c: perturbed_env(probe_env(c)),
         cluster_cfg_attr=cluster_cfg_attr,
@@ -3036,9 +3038,17 @@ def build_app(
             if _worlds is None:
                 return dict(env)
             return _worlds.env_of(world, workspace_root, env)
+        project = project_dir_of_tree(workspace_root)
+        cache: dict[str, frozenset[FnLocator] | None] = {}
+
+        def executed(name: str) -> frozenset[FnLocator] | None:
+            if name not in cache:
+                cache[name] = _recorded_entry_sets_for(project, [name]).get(name)
+            return cache[name]
+
         return _app_localize_crashes(
             _crash_localizer_deps, sweep_output, test_cmd, workspace_root,
-            _world_env, exclude=exclude)
+            _world_env, exclude=exclude, executed=executed)
 
     # Every compile check of a cluster tree also builds the other worlds
     # (`cargo_runner.WorldChecks`). `PHASE_C_ALL_WORLDS_CHECK=0` checks the

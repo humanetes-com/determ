@@ -26,7 +26,7 @@ that does not exist yet.
 """
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -253,6 +253,35 @@ def _merge_pending(
         if merged_into is None:
             groups.append(([test], set(units)))
     return groups
+
+
+def fit_turn0(build: Callable[[int], str], start: int,
+              thresholds: Sequence[int], capacity: int,
+              ) -> tuple[str, int] | None:
+    """The turn-0 prompt a session may send, and the file rendering
+    threshold it was built at. None when a positive ``capacity`` rejects
+    even the narrowest rendering: there is no prompt to send.
+
+    The planner's charge (:class:`SliceCosts`) prices the slice it packed;
+    the session opens on that slice grown by its write set (installable and
+    coupled bodies) and carrying sections the charge does not price (notes,
+    prior regression, blueprint, probe readings). So the prompt is measured
+    as built: over ``capacity`` it is rebuilt at each narrower threshold in
+    ``thresholds``, the planner's own lever, until one fits. When none
+    fits the session is not opened. Run `3366333-dfeac80c` (2026-10-29):
+    charged 131,982 against 132,000 and sent 166,299 at the planned
+    threshold, because the narrowest rendering was still sent; the session
+    then ended on its transcript bound after 2 judged turns of 8.
+    ``capacity`` 0 is no capacity: built once at ``start`` and returned
+    even when that text is long."""
+    text = build(start)
+    if capacity <= 0 or len(text) <= capacity:
+        return text, start
+    for t in sorted((x for x in thresholds if x < start), reverse=True):
+        text = build(t)
+        if len(text) <= capacity:
+            return text, t
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1389,6 +1418,24 @@ def expand_locator_sites(
             members.update(by_name.get((norm_src_rel(u.file), u.fn_name)) or (u,))
         out[test] = frozenset(members)
     return out
+
+
+def render_request_over_bound(answer_chars: int, left_chars: int) -> str:
+    """The answer the harness writes back in place of a requested context
+    that would carry the transcript past its bound.
+
+    Sent, such an answer ended the session with no further turn: run
+    `3366333-dfeac80c` (2026-10-29) asked for two whole files after its
+    first result turn, the next turn would have been 257,194 chars against a
+    244,224 bound, and the session ended at 2 judged turns of 8. A request
+    is retrieval, not an attempt; refusing this one costs one answer and
+    keeps the turns the session has room for."""
+    return ("RESULT: the context you requested is "
+            f"{answer_chars:,} characters; the conversation has "
+            f"{max(0, left_chars):,} left before its bound, so it was not "
+            "sent. Work from the files as they are shown above, or request "
+            "one smaller artifact (a single test's source, a type, the full "
+            "error) instead.")
 
 
 def render_budget_turn(turns_left: int) -> str:

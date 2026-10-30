@@ -51,6 +51,7 @@ from pipeline_core.adapters.coverage_owner import ProbeWorld
 from pipeline_core.adapters.extractor import CliExtractor
 from pipeline_core.adapters.structure import CliStructureReader
 from pipeline_core.application.reconstruct.cargo_runner import run_cargo
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.measurement import (
     cargo_target_of,
     failing_binaries_by_name,
@@ -231,7 +232,8 @@ def _gate(root: Path, baseline):
     def _run(cmd: str, cwd: Path, env_: dict[str, str], timeout: int = 600):
         return run_cargo(CargoCli(), cmd, cwd, env_, timeout=timeout)
     return u2_test_gate(
-        _run, {"t", "g"}, frozenset(), _CMD, root, _env(),
+        _run, WriteGround(frozenset({"t", "g"}), frozenset({"t", "g"})),
+        frozenset(), _CMD, root, _env(),
         structure=_NoRecords(), enabled=True, timeout=600, err_cap=2000,
         guard=lambda *_: None, baseline=baseline)
 

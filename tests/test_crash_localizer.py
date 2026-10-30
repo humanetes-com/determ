@@ -10,6 +10,7 @@ from pathlib import Path
 from pipeline_core.application.reconstruct.crash_localizer import (
     CrashLocalizerDeps,
     localize_crashes,
+    project_dir_of_tree,
 )
 from pipeline_core.domain.models import FnLocator
 
@@ -646,6 +647,119 @@ def test_a_gdb_site_for_a_binary_the_sanitizer_did_not_report_is_kept(tmp_path: 
     kept = by_label["tests/test_context.rs"]
     assert not kept.origin_capable and kept.signal == "SIGABRT"
     assert kept.blamed_locator == FnLocator("src/error.rs", "context_drop_rest")
+
+
+# A repeat of the same crashes reuses the sites when every crashed test has
+# a recorded executed set and those bodies are unchanged. The shapes are
+# invented: `test_io_source` is the in-flight test of the fixture capture.
+
+_ENTERED_SRC = "fn fabricate() {\n    made\n}\n\nfn borrow() {\n    read\n}\n"
+_ENTERED = frozenset({
+    FnLocator("src/made.rs", "fabricate"),
+    FnLocator("src/made.rs", "borrow"),
+})
+
+
+def _entered_tree(tmp_path: Path, text: str = _ENTERED_SRC) -> None:
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "made.rs").write_text(text)
+
+
+def _entered(mapping: dict[str, frozenset | None]):
+    def executed(name: str):
+        return mapping.get(name)
+    return executed
+
+
+def test_a_repeat_on_unchanged_executed_bodies_skips_the_sanitizer(
+        tmp_path: Path) -> None:
+    _entered_tree(tmp_path)
+    deps, calls = _deps(gdb_result=None, asan_result=(101, _ASAN_OUT))
+    executed = _entered({"test_io_source": _ENTERED})
+    first = localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert calls["asan"] == ["cargo test"]
+    assert calls["gdb"]
+    second = localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert second is first
+    assert calls["asan"] == ["cargo test"]
+    assert len(calls["gdb"]) == 1
+
+
+def test_control_a_changed_executed_body_runs_the_sanitizer_again(
+        tmp_path: Path) -> None:
+    text = (
+        "fn fabricate() {\n    made\n}\n\n"
+        "fn borrow() {\n    read\n}\n\nfn borrow() {\n    other\n}\n"
+    )
+    _entered_tree(tmp_path, text)
+    deps, calls = _deps(gdb_result=None, asan_result=(101, _ASAN_OUT))
+    executed = _entered({"test_io_source": _ENTERED})
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    path = tmp_path / "src" / "made.rs"
+    path.write_text(text.replace("other", "other2"))
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert len(calls["asan"]) == 2
+
+
+def test_control_a_missing_executed_set_runs_the_sanitizer_again(
+        tmp_path: Path) -> None:
+    _entered_tree(tmp_path)
+    deps, calls = _deps(gdb_result=None, asan_result=(101, _ASAN_OUT))
+    executed = _entered({})
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert len(calls["asan"]) == 2
+
+
+def test_control_an_empty_executed_set_runs_the_sanitizer_again(
+        tmp_path: Path) -> None:
+    _entered_tree(tmp_path)
+    deps, calls = _deps(gdb_result=None, asan_result=(101, _ASAN_OUT))
+    executed = _entered({"test_io_source": frozenset()})
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert len(calls["asan"]) == 2
+
+
+def test_a_change_outside_the_executed_set_reuses_the_sites(
+        tmp_path: Path) -> None:
+    _entered_tree(tmp_path)
+    (tmp_path / "src" / "side.rs").write_text("fn side() {\n    a\n}\n")
+    deps, calls = _deps(gdb_result=None, asan_result=(101, _ASAN_OUT))
+    executed = _entered({"test_io_source": _ENTERED})
+    first = localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    (tmp_path / "src" / "side.rs").write_text("fn side() {\n    b\n}\n")
+    second = localize_crashes(
+        deps, _SWEEP_WITH_CRASH, "cargo test", tmp_path, lambda _w: {},
+        executed=executed)
+    assert second is first
+    assert calls["asan"] == ["cargo test"]
+
+
+def test_a_filled_cluster_tree_reads_the_project_store(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    tree = project / ".skeleton-filled" / "stable"
+    tree.mkdir(parents=True)
+    assert project_dir_of_tree(tree) == project
+    assert project_dir_of_tree(project) == project
 
 
 def test_the_arc_double_drop_stays_nobody_with_the_test_source_on_disk(tmp_path: Path) -> None:

@@ -524,3 +524,232 @@ def test_an_unlocatable_culprit_is_carried_and_the_others_go_back(
     assert got.stubbed_locators == (MAKE_B,)
     text = path.read_text()
     assert "bad_b" not in text and "bad_a" in text and "other" in text
+
+
+# ---- a stub's cost is bought once per culprit body and baseline ----
+#
+# Run `1643490-850cf640` (2026-10-29): 21 settlements on one culprit body, each
+# a stub and a suite run that cost the same baseline passes and were given
+# back. The shapes stay invented: `make_a` is the kept culprit, `other` the
+# baseline pass it holds.
+
+_STUB_LOST = _PASS.replace("test other ... ok", "test other ... FAILED")
+
+
+class _CountingSettler:
+    def __init__(self, root: Path, sites: list) -> None:
+        self.suite_runs = 0
+        self.events: list = []
+        self._sites = sites
+
+        def _suite() -> str:
+            self.suite_runs += 1
+            return _STUB_LOST
+        self.settler = CrashSettler(CrashSettlerDeps(
+            localize=lambda _c, _e: next(self._round, []),
+            run_suite=_suite, is_proven=_never, src_dir=root,
+            record_settled=lambda _l, _s: None, log=lambda _m: None,
+            emit=lambda e, d: self.events.append((e, dict(d)))))
+        self._round = iter(())
+
+    def settle(self, capture: str, baseline: TestStateReading):
+        # Each settlement localizes the culprit, then (if it stubs) no crash.
+        self._round = iter([list(self._sites), []])
+        return self.settler.settle(capture, {READ}, baseline)
+
+
+def test_a_stub_that_cost_the_baseline_is_not_bought_again(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    first = s.settle(_PASS, _baseline())
+    assert first.outcome is SettlementOutcome.UNSETTLED
+    assert s.suite_runs == 1
+    second = s.settle(_PASS, _baseline())
+    assert second.outcome is SettlementOutcome.UNSETTLED
+    assert "other" in second.reason
+    assert s.suite_runs == 1, "the same stub was measured twice"
+    assert second.sites, "the crash text is this capture's own sites"
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+    assert [d["reused"] for e, d in s.events
+            if e == "phase_c.crash.settle"] == [False, True]
+
+
+def test_control_a_changed_culprit_body_is_measured_again(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s.settle(_PASS, _baseline())
+    path = root / "src" / "lib.rs"
+    path.write_text(path.read_text().replace("bad_a", "bad_a2"))
+    s.settle(_PASS, _baseline())
+    assert s.suite_runs == 2
+
+
+def test_control_a_moved_baseline_is_measured_again(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s.settle(_PASS, _baseline())
+    moved = TestStateReading(parse_binary_results(
+        _PASS.replace("test t1 ... FAILED", "test t1 ... ok")))
+    s.settle(_PASS, moved)
+    assert s.suite_runs == 2
+
+
+def test_control_a_write_that_regressed_on_its_own_teaches_nothing(
+        tmp_path: Path) -> None:
+    """The write's own reading already lost `other`: the stub's reading
+    losing it too is the write's cost, not the culprit's, so nothing is
+    remembered and the next write's settlement runs."""
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s.settle(_STUB_LOST, _baseline())
+    s.settle(_PASS, _baseline())
+    assert s.suite_runs == 2
+
+
+def test_control_a_new_settler_measures_again(tmp_path: Path) -> None:
+    """The memory is the bound settler's, one per fill: the next fill's
+    settler measures the stub again."""
+    root = _tree(tmp_path)
+    s1 = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s1.settle(_PASS, _baseline())
+    s2 = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s2.settle(_PASS, _baseline())
+    assert s1.suite_runs == 1 and s2.suite_runs == 1
+
+
+# A capture scoped to the written unit never runs `other`. The full suite
+# after the stub does, and judges it failed. That loss is the stub's.
+_SCOPED = ("     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 1 test\n"
+           "test t1 ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed\n")
+
+# `other` printed FAILED and the binary never closed: an abort, not a
+# judged failure. The name is not the stub's cost.
+_ABORTED = ("     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 2 tests\n"
+            "test other ... FAILED\n")
+
+
+def test_a_scoped_capture_that_never_ran_the_lost_test_still_teaches(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    first = s.settle(_SCOPED, _baseline())
+    assert first.outcome is SettlementOutcome.UNSETTLED
+    assert s.suite_runs == 1
+    second = s.settle(_SCOPED, _baseline())
+    assert second.outcome is SettlementOutcome.UNSETTLED
+    assert "other" in second.reason
+    assert s.suite_runs == 1
+    assert [d["reused"] for _e, d in s.events
+            if _e == "phase_c.crash.settle"] == [False, True]
+
+
+def test_control_an_aborted_binary_teaches_nothing(tmp_path: Path) -> None:
+    """The name is missing because its binary did not finish, not because
+    a completed binary judged it failed. Nothing is remembered, and the
+    next settlement measures."""
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+
+    def _suite() -> str:
+        s.suite_runs += 1
+        return _ABORTED
+    s.settler.deps = _deps_with_suite(s, _suite)
+    s.settle(_PASS, _baseline())
+    s.settle(_PASS, _baseline())
+    assert s.suite_runs == 2
+    assert (root / "src" / "lib.rs").read_text() == _LIB
+
+
+def _deps_with_suite(counter: _CountingSettler, suite):
+    return CrashSettlerDeps(
+        localize=counter.settler.deps.localize,
+        run_suite=suite, is_proven=_never, src_dir=counter.settler.deps.src_dir,
+        record_settled=lambda _l, _s: None, log=lambda _m: None,
+        emit=counter.settler.deps.emit)
+
+
+def test_a_carried_crash_does_not_rebuy_a_known_stub(tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s.settle(_PASS, _baseline())
+    assert s.suite_runs == 1
+    s._sites = [_nobody(), _site("t1", "make_a", 6)]
+    second = s.settle(_PASS, _baseline())
+    assert second.outcome is SettlementOutcome.UNSETTLED
+    assert "other" in second.reason
+    assert s.suite_runs == 1
+
+
+def test_a_second_culprit_still_remembers_the_body_measured_alone(
+        tmp_path: Path) -> None:
+    """The first stub's reading already lost the baseline pass. A later
+    settlement of that body alone, and one of both bodies together, does
+    not buy either set again."""
+    root = _tree(tmp_path)
+    script = [
+        [_site("t1", "make_a", 6)],
+        [_site("t2", "make_b", 10)],
+        [],
+        [_site("t1", "make_a", 6)],
+        [_site("t1", "make_a", 6), _site("t2", "make_b", 10)],
+    ]
+    runs = {"n": 0}
+
+    def _suite() -> str:
+        runs["n"] += 1
+        return _STUB_LOST
+    settler = CrashSettler(CrashSettlerDeps(
+        localize=lambda _c, _e: script.pop(0) if script else [],
+        run_suite=_suite, is_proven=_never, src_dir=root,
+        record_settled=lambda _l, _s: None, log=lambda _m: None))
+    first = settler.settle(_PASS, {READ}, _baseline())
+    assert first.outcome is SettlementOutcome.UNSETTLED
+    assert runs["n"] == 2
+    second = settler.settle(_PASS, {READ}, _baseline())
+    assert second.outcome is SettlementOutcome.UNSETTLED
+    assert "other" in second.reason
+    both = settler.settle(_PASS, {READ}, _baseline())
+    assert both.outcome is SettlementOutcome.UNSETTLED
+    assert runs["n"] == 2
+
+
+def test_crash_text_is_the_writes_own_crash_only() -> None:
+    """Run `3808231-81b847f7` (2026-10-29, fill 3): a pair over a Debug
+    dispatcher and its implementer was shown, as its previous attempt's
+    failure, a layout-dependent use-after-free produced in a downcast body
+    outside its write, with a MUST to fix that body. The crash text now
+    holds only sites whose faulting or origin stack ran through a body of
+    the write (or of the caller's wider scope). Negative control: the same
+    settlement with the origin body in the write renders it."""
+    from pipeline_core.application.reconstruct.crash_settler import (
+        Settlement,
+        crash_text_of,
+    )
+    from pipeline_core.domain.crash_settlement import SettlementOutcome
+    from pipeline_core.domain.crash_site import CrashFrame, CrashSite
+    from pipeline_core.domain.models import FnLocator
+
+    origin = CrashFrame("src/store.rs", 41, "take_out", "take_out")
+    site = CrashSite("tests/t.rs", "t_take", "SIGSEGV",
+                     frames=(CrashFrame("tests/t.rs", 19, "t_take", "t_take"),),
+                     origin_frames=(origin,))
+    nobody = CrashSite("tests/t.rs", "t_other", "SIGSEGV", frames=())
+    pair = frozenset({FnLocator("src/show.rs", "fmt"),
+                      FnLocator("src/show.rs", "render")})
+    foreign = Settlement(SettlementOutcome.UNSETTLED, sites=(site, nobody),
+                         written=pair)
+    assert crash_text_of(foreign) == ""
+    # The caller's wider scope (a session's editable set) admits it.
+    assert "src/store.rs:41" in crash_text_of(
+        foreign, pair | {FnLocator("src/store.rs", "take_out")})
+    own = Settlement(SettlementOutcome.UNSETTLED, sites=(site,),
+                     written=pair | {FnLocator("src/store.rs", "take_out")})
+    assert "src/store.rs:41" in crash_text_of(own)
+    # A settlement that changed the tree still names the bodies it stubbed.
+    stubbed = Settlement(SettlementOutcome.SETTLED, sites=(site,),
+                         stubbed=(origin,), written=pair)
+    text = crash_text_of(stubbed)
+    assert "src/store.rs:41" not in text.split("Before the verdicts")[0]
+    assert "src/store.rs::take_out" in text

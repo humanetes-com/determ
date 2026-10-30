@@ -19,11 +19,12 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pipeline_core.domain.assertion_position import (
     KeyedVerdicts,
     PositionMove,
+    SuiteDelta,
     TestKey,
     TestOutcomes,
     TestSource,
@@ -45,6 +46,9 @@ from pipeline_core.domain.test_results import (
     strip_libtest_qualifier,
     world_failure_line,
 )
+
+if TYPE_CHECKING:
+    from pipeline_core.domain.attribution import WriteGround
 
 
 class FailureKind(Enum):
@@ -911,10 +915,26 @@ class U2Verdict:
     # Those sites as the settlement rendered them (`crash_text_of`), for a
     # caller that stores the reject for a later prompt.
     crash_reading: str = ""
-    # Whether a scoped test run produced this verdict. False for the
-    # accepts that never asked (gate off, no test command, a runner
-    # exception, a build that did not finish) and for NO_TESTS.
+    # Whether a scoped test run produced this verdict: a handed test
+    # reported one. False for the accepts that never asked (gate off, no
+    # test command, a runner exception, a build that did not finish), for an
+    # accept whose handed tests reported nothing (the scoped build failed,
+    # or the binary died with nothing charged), and for NO_TESTS.
     ran: bool = True
+    # Judged tests that are not convicting (`WriteGround`), ran into this
+    # write and stayed red: an ACCEPT's reading of what the keep left red.
+    # Empty on every other verdict.
+    judged_red: frozenset[str] = frozenset()
+
+    @property
+    def reported(self) -> frozenset[str]:
+        """Every test of the gate's ground the scoped run reported on: passed,
+        failed (convicting or only judged), or killed by this write. What a
+        keep is graded against (`fill_class.class_for_kept`'s
+        ``attributed``); the file, impl and pair routes read it here, so a
+        judged test that stayed red cannot drop out of one of them."""
+        return (self.self_passed | self.self_failures | self.aborted
+                | self.judged_red)
 
     @property
     def measured(self) -> bool:
@@ -929,7 +949,8 @@ class U2Verdict:
 
     @classmethod
     def accept(cls, self_passed: frozenset[str] = frozenset(), *,
-               ran: bool = False) -> U2Verdict:
+               ran: bool = False,
+               judged_red: frozenset[str] = frozenset()) -> U2Verdict:
         """ACCEPT covers three different states — the unit's tests PASSED, the
         gate was off or had no tests to run, and the run was inconclusive
         (timeout, exception, fail-safe). They are one decision (keep the
@@ -946,7 +967,8 @@ class U2Verdict:
 
         ``ran`` is True only for the accept read off a completed scoped
         run; the three that never asked leave it False (:attr:`measured`)."""
-        return cls(U2Decision.ACCEPT, self_passed=self_passed, ran=ran)
+        return cls(U2Decision.ACCEPT, self_passed=self_passed, ran=ran,
+                   judged_red=judged_red)
 
     @classmethod
     def accept_external_only(
@@ -1003,9 +1025,9 @@ def unmeasured_keep_reason(verdict: U2Verdict | None) -> str:
         return ("kept — compiles; no test is attributed to this body, so "
                 "no scoped test ran")
     if not verdict.ran:
-        return ("kept — compiles; the scoped test run did not happen or "
-                "did not finish (gate off, no test command, or "
-                "inconclusive)")
+        return ("kept — compiles; no attributed test reported a verdict "
+                "(gate off, no test command, a run that did not finish, a "
+                "scoped build that failed, or a binary that died)")
     return ("kept — compiles; its attributed tests ran and none was "
             "observed passing")
 
@@ -1077,6 +1099,22 @@ class JointImprovement:
         """A joint rewrite that shrank its own failing set and is still a
         non-regression; the file and impl routes accept when this is true."""
         return bool(self.resolved) and self.non_regression
+
+    def banks_on(self, suite: SuiteDelta) -> bool:
+        """Banks on the write's own suite reading (:class:`assertion_position
+        .SuiteDelta`): a strict suite gain and nothing the rule refuses on
+        it. The file, impl and pair keeps ask this once their suite
+        comparison exists; the aimed-set :attr:`banks` stays the first
+        question."""
+        return suite.gained and not self.outcomes.refuses_on(suite)
+
+    @property
+    def may_bank_on_suite(self) -> bool:
+        """Whether a suite reading could still bank this write: the scoped
+        run alone refuses nothing a strict suite gain with nothing lost
+        would forgive. False keeps a route from measuring the suite for a
+        write the scoped run has already refused."""
+        return not self.outcomes.refuses_on(SuiteDelta(net=1, lost=False))
 
     @property
     def non_regression(self) -> bool:
@@ -1300,13 +1338,14 @@ class FailureExcerpt:
 
 class U2TestGate(Protocol):
     """The composition-bound U2 acceptance gate a fill loop calls once its unit
-    compiles: run the unit's own tests, partition blame, return a typed verdict.
+    compiles: run the tests the write is judged on (`WriteGround.judged`),
+    partition blame, revert only on a convicting one, return a typed verdict.
     `unit_sites` is what the unit owns as container-qualified :class:`FnSite`
     identities — used to subtract same-file/same-name SIBLING stub-panics that a
     name-only key would wrongly charge to this unit."""
 
     def __call__(
-        self, fn_tests: set[str], unit_sites: frozenset[FnSite],
+        self, ground: WriteGround, unit_sites: frozenset[FnSite],
         test_cmd: str | None, target_src_dir: Path,
         cluster_env: dict[str, str] | None,
     ) -> U2Verdict: ...

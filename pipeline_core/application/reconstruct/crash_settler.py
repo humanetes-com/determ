@@ -29,6 +29,27 @@ own comparison: a settlement that loses a test that passed before the write
 is given back byte for byte (`TreeTxn.rollback`), as is every outcome but
 SETTLED. A settlement that holds is committed: the write stands, its tests now
 stop in the stubs, and those stubs are the next held units dispatch offers.
+
+A stub that costs the baseline is a fact about the culprit's body and the
+baseline, not about the write that exposed the crash. Run
+`1643490-850cf640` (2026-10-29) put the same `downcast` body back 21 times
+across two fills, one per write the crash surfaced under, and every time
+the stub cost the same baseline tests and was given back; each round paid
+a suite run to relearn it. The settler keeps that outcome for the fill it
+is bound to (`_cost_of_stub`), keyed on the culprits' body bytes and the
+baseline's verdicts. A test is that cost when it passed at the baseline, a
+completed binary judged it failed after the stub, and the write's own
+capture had not already judged it failed (`_stub_own_cost`). A scoped
+capture that never ran the test still teaches it. A name only missing
+because its binary aborted was not judged, and a capture that already
+failed the name teaches nothing about the culprit. Any later stub step on
+the same key — a later round, a crash carried beside the culprit — ends
+UNSETTLED without stubbing or running the suite. The bodies a multi-round
+settlement measured are remembered as the set on the tree for that
+reading, and only when the settlement is given back. A changed culprit
+body, or a baseline whose verdicts moved, is a different key and runs.
+The reuse decides only UNSETTLED, the outcome that leaves the tree as the
+write left it, and the crash text is this capture's own sites.
 """
 from __future__ import annotations
 
@@ -130,6 +151,9 @@ class Settlement:
     #: The sites whose culprit is a body of the write, from the rounds that
     #: withdrew it: what a retry of the withdrawn bodies is shown first.
     own_sites: tuple[CrashSite, ...] = ()
+    #: The bodies the write put on the tree (`settle`'s ``written``): what a
+    #: crash has to have run through to be shown as the write's own.
+    written: frozenset[FnLocator] = frozenset()
 
     @property
     def settled(self) -> bool:
@@ -144,29 +168,100 @@ class Settlement:
     def stubbed_locators(self) -> tuple[FnLocator, ...]:
         return tuple(dict.fromkeys(frame_locator(f) for f in self.stubbed))
 
-    def render(self) -> str:
+    def ran_through(self, site: CrashSite,
+                    scope: Collection[FnLocator] | None = None) -> bool:
+        """Whether ``site``'s stack — the faulting frames or the frames that
+        created the memory — holds a body of ``scope`` (the write when
+        ``None``)."""
+        within = frozenset(self.written if scope is None else scope)
+        return any(frame_locator(f) in within
+                   for f in (*site.frames, *site.origin_frames))
+
+    def render(self, scope: Collection[FnLocator] | None = None) -> str:
         """The crashes as the localizer read them, for whatever the caller
         shows the model next — the fault-class renderer's text
         (`CrashSite.render_evidence`), never a class sentence of the
         caller's own. The write's own sites first when a round withdrew a
-        body of it, else the first reading's, two at most. A settlement
-        that changed the tree also names the bodies it put back to stubs:
-        the verdicts the caller reads next describe that tree.
+        body of it, else the first reading's sites whose stack ran through
+        a body of the write, two at most. ``scope`` widens "the write" to
+        what the caller's next attempt may write, when that is more than
+        this attempt wrote (a session's editable set). A settlement that changed the
+        tree also names the bodies it put back to stubs: the verdicts the
+        caller reads next describe that tree.
+
+        A crash whose stack holds no body of the write is not this write's
+        failure, whatever the settlement decided: the write cannot change
+        the body it names, and the crash localizer's frontier carries it to
+        the routes that can. Run `3808231-81b847f7` (2026-10-29, fill 3):
+        a pair over a Debug dispatcher and its implementer was shown, as its
+        previous attempt's failure, a layout-dependent use-after-free in a
+        downcast body outside its write ("native re-run showed no fault"),
+        with a MUST to fix that body. A site that blames nobody and runs no
+        body of the write is left out by the same rule.
 
         The ONE writer of crash text for every route (the per-fn gate, the
         session turn, the file and impl retries, the regression gate's
-        detail). Empty only when nothing was localized."""
-        shown = (self.own_sites or self.sites)[:2]
-        if not shown:
-            return ""
-        text = "\n\n".join(s.render_evidence() for s in shown)
+        detail). Empty when no localized crash ran through the write and no
+        body went back to a stub."""
+        shown = (self.own_sites or tuple(
+            s for s in self.sites if self.ran_through(s, scope)))[:2]
+        parts = [s.render_evidence() for s in shown]
         if self.changed_tree and self.stubbed:
-            text += (
-                "\n\nBefore the verdicts were read, the crash settlement put "
+            parts.append(
+                "Before the verdicts were read, the crash settlement put "
                 "these unproven bodies the crash ran through back to stubs: "
                 + ", ".join(f"{u.file}::{u.fn_name}"
                             for u in self.stubbed_locators) + ".")
-        return text
+        return "\n\n".join(parts)
+
+
+@dataclass(frozen=True, slots=True)
+class _StubCostKey:
+    """What a stub's cost to the baseline depends on: the culprit bodies put
+    back, as (file, fn, body text), and the verdicts `_holds` compares
+    against, as (world, binary, passing tests, failing tests) per binary."""
+
+    bodies: frozenset[tuple[str, str, str]]
+    baseline: frozenset[tuple[str, str, frozenset[str], frozenset[str]]]
+
+
+def _baseline_verdicts(
+    baseline: TestStateReading,
+) -> frozenset[tuple[str, str, frozenset[str], frozenset[str]]]:
+    return frozenset((b.world, b.label, frozenset(b.passed), frozenset(b.failed))
+                     for b in baseline.binaries)
+
+
+def _judged_failed(reading: TestStateReading) -> frozenset[str]:
+    """Tests a completed binary judged failed.
+
+    A name only absent because its binary aborted, or failed inside a
+    binary that did not finish, is not a judged loss. Which tests print
+    before a signal varies, and an abort is not the stub's verdict on the
+    ones that never received one."""
+    out: set[str] = set()
+    for binary in reading.binaries:
+        if binary.completed:
+            out |= binary.failed
+    return frozenset(out)
+
+
+def _stub_own_cost(capture: str, stubbed_reading: str,
+                   baseline: TestStateReading) -> list[str]:
+    """The baseline passes the stub itself lost.
+
+    A test counts when it passed at the baseline, a completed binary of the
+    stubbed reading judged it failed, and a completed binary of the write's
+    own capture had not already judged it failed. The capture not having run
+    the test is not the write's regression: a scoped capture never sees the
+    tests the full suite loses. A name merely missing after the stub, because
+    its binary aborted, was not judged failed and is not the stub's cost.
+    What the capture already failed is the write's own regression."""
+    capture_failed = _judged_failed(
+        TestStateReading(parse_binary_results(capture)))
+    after_failed = _judged_failed(
+        TestStateReading(parse_binary_results(stubbed_reading)))
+    return sorted((baseline.passed_names & after_failed) - capture_failed)
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +290,9 @@ class CrashSettler:
         # (file, fn, occurrence) of every body `_stub` put back, so the
         # committed ones can be journalled as kept edits.
         self._stubbed_at: list[tuple[str, str, int]] = []
+        # Why stubbing these culprit bodies against this baseline was given
+        # back, by `_StubCostKey` (module docstring).
+        self._cost_of_stub: dict[_StubCostKey, str] = {}
 
     def localize(self, capture: str,
                  baseline: TestStateReading | None) -> tuple[CrashSite, ...]:
@@ -235,6 +333,13 @@ class CrashSettler:
         outcome = SettlementOutcome.UNSETTLED
         reason = ""
         rounds = 0
+        # Each stub round's bodies, keyed before they go back, with the
+        # suite reading those bodies produced. Remembered only when the
+        # settlement is given back.
+        pending: list[tuple[_StubCostKey, str]] = []
+        cumulative: _StubCostKey | None = None
+        reused = False
+        decided_hold = False
         try:
             while rounds < MAX_ROUNDS:
                 rounds += 1
@@ -290,11 +395,42 @@ class CrashSettler:
                 # used to sink every other culprit of the step with it.
                 lost = [f for f in fresh if not self._locatable(txn, f)]
                 fresh = [f for f in fresh if f not in lost]
+                # The key is the bodies this step would put back, read
+                # before they go back. A crash carried beside them, or a
+                # body this step cannot locate, does not make a known
+                # costly stub worth buying again.
+                fresh_key = (self._stub_cost_key(txn, fresh, baseline)
+                             if fresh and baseline is not None else None)
+                if fresh_key is not None:
+                    known = self._cost_of_stub.get(fresh_key)
+                    if known is not None:
+                        outcome = SettlementOutcome.UNSETTLED
+                        reason = known
+                        reused = True
+                        d.log(f"  {tag}[phase-c/crash-settle] the crash under "
+                              "the write was produced by unproven "
+                              + ", ".join(f"{f.file_rel}::{f.fn_name} "
+                                          f"(line {f.line})" for f in fresh)
+                              + " — not put back: this fill already put the "
+                              "same body back against the same baseline and "
+                              f"gave it back ({known}); the write is judged "
+                              "as before.")
+                        break
                 if not fresh or not self._stub(txn, fresh):
                     outcome = SettlementOutcome.UNSETTLED
                     reason = reason or "the culprit's body could not be put back"
                     break
                 stubbed.extend(fresh)
+                if fresh_key is None:
+                    # This round's body is on the tree and cannot be named.
+                    # A later reading's key would blame the earlier bodies
+                    # for a loss this body may have caused.
+                    cumulative = None
+                else:
+                    cumulative = (fresh_key if cumulative is None
+                                  else _StubCostKey(
+                                      cumulative.bodies | fresh_key.bodies,
+                                      fresh_key.baseline))
                 _carried = [c.reason for c in step.carried] + [
                     f"{f.file_rel}::{f.fn_name}: its body could not be located"
                     for f in lost]
@@ -314,11 +450,14 @@ class CrashSettler:
                     reason = "the suite did not run after the stubs went in"
                     break
                 reading = got
+                if cumulative is not None:
+                    pending.append((cumulative, reading))
             else:
                 outcome = SettlementOutcome.UNSETTLED
                 reason = f"still crashing after {MAX_ROUNDS} reading(s)"
             if outcome is SettlementOutcome.NO_CRASH and stubbed:
                 outcome, reason = self._holds(reading, baseline)
+                decided_hold = outcome is SettlementOutcome.SETTLED
             elif outcome is SettlementOutcome.NO_CRASH and withdrawn_at:
                 # Only the write's own bodies went back: nothing outside it
                 # changed, so no baseline test can be lost by the settlement;
@@ -384,10 +523,16 @@ class CrashSettler:
                       "write is judged as before.")
         if not outcome_changes_tree(outcome):
             withdrawn = []
+        # A hold that then failed to record is not a stub that cost the
+        # baseline: `decided_hold` stays set, so that flip stores nothing.
+        if (outcome is SettlementOutcome.UNSETTLED and not decided_hold
+                and baseline is not None):
+            self._remember_stub_cost(capture, baseline, pending)
         result = Settlement(outcome=outcome, stubbed=tuple(stubbed),
                             sites=first_sites, rounds=rounds, reason=reason,
                             withdrawn=tuple(withdrawn), own=own,
-                            own_sites=(tuple(own_sites) if withdrawn else ()))
+                            own_sites=(tuple(own_sites) if withdrawn else ()),
+                            written=written_locs)
         d.emit("phase_c.crash.settle", {
             "outcome": str(outcome), "rounds": rounds, "reason": reason,
             "written": sorted(f"{u.file}::{u.fn_name}" for u in written_locs),
@@ -397,8 +542,28 @@ class CrashSettler:
                           for f in withdrawn],
             "own": [f"{f.file_rel}::{f.fn_name}:{f.line}" for f in own],
             "blame": [s.blame_label for s in first_sites],
+            "reused": reused,
         })
         return result
+
+    def _remember_stub_cost(
+        self, capture: str, baseline: TestStateReading,
+        pending: Sequence[tuple[_StubCostKey, str]],
+    ) -> None:
+        """Store each measured set of bodies whose reading lost a baseline
+        pass the capture had not already lost. A round whose reading still
+        had an earlier stub on the tree is stored under that whole set, so
+        the new body is not blamed for the earlier stub's losses. A body
+        measured alone (the first stub, or the only one) is stored under
+        itself, and a later settlement of that body does not buy it again."""
+        for key, stub_reading in pending:
+            if key in self._cost_of_stub:
+                continue
+            own_cost = _stub_own_cost(capture, stub_reading, baseline)
+            if own_cost:
+                self._cost_of_stub[key] = (
+                    "the stub costs baseline tests that pass with "
+                    f"the body: {own_cost}")
 
     def _holds(self, reading: str,
                baseline: TestStateReading | None,
@@ -488,6 +653,27 @@ class CrashSettler:
         return True
 
     @staticmethod
+    def _stub_cost_key(txn: TreeTxn, frames: Sequence[CrashFrame],
+                       baseline: TestStateReading) -> _StubCostKey | None:
+        """The key of putting back the one occurrence of each frame's body
+        the stack ran, read before it goes back; None when one cannot be
+        read or located (nothing is remembered or reused for it)."""
+        bodies: set[tuple[str, str, str]] = set()
+        for f in frames:
+            try:
+                text = txn.read(f.file_rel)
+            except OSError:
+                return None
+            locs = locate_all_fns(text, f.fn_name)
+            i = occurrence_of_frame([(s, e) for _sig, s, _b, e in locs],
+                                    text, f.line)
+            if i is None:
+                return None
+            _sig, _s, b, e = locs[i]
+            bodies.add((f.file_rel, f.fn_name, text[b:e]))
+        return _StubCostKey(frozenset(bodies), _baseline_verdicts(baseline))
+
+    @staticmethod
     def _locatable(txn: TreeTxn, f: CrashFrame) -> bool:
         """Whether `_stub` can find the one occurrence the frame ran."""
         try:
@@ -525,13 +711,16 @@ class CrashSettler:
         return True
 
 
-def crash_text_of(settlement: Settlement | None) -> str:
+def crash_text_of(settlement: Settlement | None,
+                  scope: Collection[FnLocator] | None = None) -> str:
     """The crash a caller shows the model next: the settlement's own
     rendering (`Settlement.render`) whenever it read a crash, whatever it
-    decided. Empty when no settlement ran or it found no crash left."""
+    decided — scoped there to crashes whose stack ran through a body of the
+    write, or to ``scope`` when the caller's next attempt may write more.
+    Empty when no settlement ran or it found no crash left."""
     if settlement is None or settlement.outcome is SettlementOutcome.NO_CRASH:
         return ""
-    return settlement.render()
+    return settlement.render(scope)
 
 
 def withdraw_crashing_bodies(

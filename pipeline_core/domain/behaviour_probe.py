@@ -197,27 +197,140 @@ class CapturedProbe:
     observe: str
 
 
-def identity_type_of(when: str) -> str | None:
-    """The `T` of an identity predicate `x.is::<T>()` / `x.downcast_ref::<T>()`,
-    else None. `TYPE_IDENTITY` stores T as its value — `DOWNCAST_OK` carries a
-    bool and NOT which type, which is why it was retired on 2026-08-26."""
-    for call in _IDENTITY_CALLS:
-        at = when.find(call)
-        if at < 0:
-            continue
-        start = at + len(call)
-        depth = 1
-        i = start
-        while i < len(when):
-            if when[i] == "<":
-                depth += 1
-            elif when[i] == ">":
-                depth -= 1
-                if depth == 0:
-                    inner = when[start:i].strip()
-                    return inner or None
-            i += 1
+_IDENTITY_METHOD_NAMES = frozenset(c[1:-3] for c in _IDENTITY_CALLS)
+# A presence test over an identity call is still that identity
+# (`e.downcast_ref::<T>().is_some()` prints whether the type held).
+_IDENTITY_PRESENCE = frozenset({"is_some", "is_ok"})
+_OPTION_PRESENCE = frozenset({"is_some", "is_none"})
+# Characters that, at the top level of the text in front of a call, make an
+# operator (not the call) the root of the value.
+_ROOT_OPERATOR_CHARS = frozenset("=!<>+-*/%^|&")
+
+
+@dataclass(frozen=True, slots=True)
+class RootCall:
+    """The outermost call of a when's value (:func:`value_root`), literals
+    blanked: ``receiver.name::<turbofish>(…)``, ``path::name(…)`` or
+    ``name!(…)``. ``receiver`` is "" unless ``method``; ``turbofish`` is the
+    call's own type argument, "" when it has none."""
+
+    receiver: str
+    name: str
+    turbofish: str
+    method: bool
+    macro: bool
+
+
+def _open_before(s: str, close: int) -> int | None:
+    """Index of the bracket opening the one that closes at ``close``."""
+    depth = 0
+    for i in range(close, -1, -1):
+        if s[i] in ")]}":
+            depth += 1
+        elif s[i] in _OPEN:
+            depth -= 1
+            if depth == 0:
+                return i
     return None
+
+
+def _turbofish_open(callee: str) -> int | None:
+    """Index of the `<` matching the `>` that ends ``callee`` (a `->` inside
+    the type is not a bracket)."""
+    depth = 0
+    for i in range(len(callee) - 1, -1, -1):
+        c = callee[i]
+        if c == ">" and not (i > 0 and callee[i - 1] == "-"):
+            depth += 1
+        elif c == "<":
+            depth -= 1
+            if depth == 0:
+                return i
+    return None
+
+
+def root_call(when: str) -> RootCall | None:
+    """The call whose value IS the when's value, or None when the root is not
+    a call (an operator, a literal, a field, a closure).
+
+    Every decision about what a when observes reads this, not a token found
+    anywhere in the text. A token scan classified
+    `format!("{:?}", err.downcast_mut::<String>())` as a type identity because
+    a downcast sat inside the format's argument; the replay then asserted a
+    String as a bool, the emitted file did not compile, and every capture in
+    it was withdrawn (run `15370-6a4cfd45`, 2026-10-30: 24 stable and 26
+    nightly captures; run `2129106-ead996ab`, 52)."""
+    s = value_root(when).strip()
+    if not s.endswith(")"):
+        return None
+    open_ = _open_before(s, len(s) - 1)
+    if open_ is None or s[open_] != "(":
+        return None
+    callee = s[:open_].rstrip()
+    turbofish = ""
+    if callee.endswith(">"):
+        lt = _turbofish_open(callee)
+        if lt is None or not callee[:lt].endswith("::"):
+            return None
+        turbofish = callee[lt + 1:-1].strip()
+        callee = callee[:lt - 2].rstrip()
+    macro = callee.endswith("!")
+    if macro:
+        callee = callee[:-1].rstrip()
+    j = len(callee)
+    while j > 0 and (callee[j - 1].isalnum() or callee[j - 1] == "_"):
+        j -= 1
+    name = callee[j:]
+    if not name:
+        return None
+    before = callee[:j].rstrip()
+    # The call is the root only when nothing in front of it is an operator
+    # of the root: `a == Some(3)` ends in a call and is a comparison,
+    # `!e.is::<T>()` is a negation, `&x.f()` a reference.
+    top = _top_level_text(without_turbofish(before))
+    if any(c in top for c in _ROOT_OPERATOR_CHARS) or " as " in f" {top} ":
+        return None
+    method = not macro and before.endswith(".")
+    receiver = before[:-1].rstrip() if method else ""
+    return RootCall(receiver=receiver, name=name, turbofish=turbofish,
+                    method=method, macro=macro)
+
+
+def identity_type_of(when: str) -> str | None:
+    """The `T` of an identity predicate, else None: the when's root call is
+    `x.is::<T>()` / `x.downcast_ref::<T>()` / `downcast_mut` / `downcast`,
+    or `.is_some()` / `.is_ok()` over such a call. `TYPE_IDENTITY` stores T
+    as its value — `DOWNCAST_OK` carries a bool and NOT which type, which is
+    why it was retired on 2026-08-26.
+
+    Only the root decides (:func:`root_call`): a downcast inside a format, a
+    comparison or a combinator's closure is an argument of the value, not
+    the value, and its when observes something else."""
+    rc = presence_target(root_call(when))
+    if rc is None or not rc.method or rc.name not in _IDENTITY_METHOD_NAMES:
+        return None
+    return rc.turbofish or None
+
+
+def presence_target(rc: RootCall | None) -> RootCall | None:
+    """``rc``, or for `.is_some()` / `.is_ok()` the root call of its receiver
+    (repeated), so an identity read through a presence test is the identity
+    call itself."""
+    while (rc is not None and rc.method and not rc.turbofish
+           and rc.name in _IDENTITY_PRESENCE and rc.receiver):
+        inner = root_call(rc.receiver)
+        if inner is None:
+            return rc
+        rc = inner
+    return rc
+
+
+def observes_presence(when: str) -> bool:
+    """True when the when's value is an `Option`'s presence: its root call is
+    `.is_some()` or `.is_none()`. Read at the root for the same reason as
+    :func:`identity_type_of`."""
+    rc = root_call(when)
+    return rc is not None and rc.method and rc.name in _OPTION_PRESENCE
 
 
 def without_turbofish(when: str) -> str:
@@ -238,7 +351,7 @@ def without_turbofish(when: str) -> str:
             while j < len(when):
                 if when[j] == "<":
                     depth += 1
-                elif when[j] == ">":
+                elif when[j] == ">" and when[j - 1] != "-":  # `->` is not a bracket
                     depth -= 1
                     if depth == 0:
                         break
@@ -775,8 +888,7 @@ def fills_non_format_class(probe: CapturedProbe) -> bool:
         return True
     if has_resource_boundary(probe.given):
         return True
-    when = probe.when
-    return ".is_none()" in when or ".is_some()" in when
+    return observes_presence(probe.when)
 
 
 def exact_format_ask_rejects(probe: CapturedProbe) -> str | None:

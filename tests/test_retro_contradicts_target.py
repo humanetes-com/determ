@@ -274,7 +274,9 @@ fn test_debug_with_captured_backtrace_and_cause() {
 
 
 def test_removal_sentence_is_the_prescription_not_the_premise() -> None:
-    assert removal_sentence(SIBLING_GUIDANCE).startswith("Ok(())` and remove")
+    # One sentence: the `;` that ends `?` sits inside the code span.
+    assert removal_sentence(SIBLING_GUIDANCE).startswith("in the `else` arm")
+    assert "and remove the `while let" in removal_sentence(SIBLING_GUIDANCE)
     assert removal_sentence(KEEPS_THE_OBSERVABLE) == ""
     assert removal_sentence("") == ""
 
@@ -287,14 +289,17 @@ def test_stamp_marks_a_lesson_that_removes_a_pinned_observable() -> None:
     rec = stamp_conviction(_pair_record(), prov, CONVICTING,
                            BlockedOnStubs(frozenset()),
                            regressed=REGRESSED, pins=PINS)
-    assert rec[CONTRADICTS_TARGET] is True
+    # The stamp names the convicted sentences: here, both of the record's.
+    assert rec[CONTRADICTS_TARGET] == guidance_sentences(PAIR_GUIDANCE)
     # The rest of the stamp is unchanged by the new argument.
     assert rec["convicted_by"] == sorted(CONVICTING.tests)
     assert rec["regressed"] == sorted(REGRESSED)
     assert rec["blocked_on"] == []
     sibling = stamp_conviction(_pair_record(SIBLING_GUIDANCE), prov,
                                CONVICTING, regressed=REGRESSED, pins=PINS)
-    assert sibling[CONTRADICTS_TARGET] is True
+    # Only the last of the sibling record's three sentences removes a pinned
+    # observable; the stamp names that one.
+    assert sibling[CONTRADICTS_TARGET] == guidance_sentences(SIBLING_GUIDANCE)[-1:]
 
 
 def test_stamp_leaves_the_key_absent_for_a_causal_tail_crash_diagnosis() -> None:
@@ -419,10 +424,16 @@ def test_the_rule_is_judged_right_after_hollow_tree() -> None:
     # A per-half read of the same record (no member set) would retire it as
     # `regression_scoped`; with the stamp, the contradiction is named first.
     stamped = _pair_record()
-    stamped[CONTRADICTS_TARGET] = True
+    stamped[CONTRADICTS_TARGET] = guidance_sentences(PAIR_GUIDANCE)
     per_half = screen_guidance(stamped, LAYOUT, evidence=CONVICTING,
                                cluster="stable")
     assert per_half.retired_by == CONTRADICTS_TARGET
+    # A boolean stamp, written before the stamp named its sentences, is no
+    # verdict on any sentence: the next rule decides.
+    legacy = _pair_record()
+    legacy[CONTRADICTS_TARGET] = True
+    assert screen_guidance(legacy, LAYOUT, evidence=CONVICTING,
+                           cluster="stable").retired_by == "regression_scoped"
     unstamped = screen_guidance(_pair_record(), LAYOUT, evidence=CONVICTING,
                                 cluster="stable")
     assert unstamped.retired_by == "regression_scoped"
@@ -576,13 +587,23 @@ def test_guidance_that_drops_a_typechecked_conversion_is_retired() -> None:
 
 
 def test_retired_line_names_the_class_and_quotes_the_removal_sentence() -> None:
-    rec = _pair_record(SIBLING_GUIDANCE)
-    rec[CONTRADICTS_TARGET] = True
+    rec = _pair_record(PAIR_GUIDANCE)
+    rec[CONTRADICTS_TARGET] = guidance_sentences(PAIR_GUIDANCE)
     verdict = _same_transaction_read(rec)
     line = retired_guidance_line("src/fmt.rs::*impl*::ErrorImpl", rec, verdict)
     assert line.startswith("[phase-c/retro-retired] src/fmt.rs::*impl*::ErrorImpl:")
     assert CONTRADICTS_TARGET in line
     assert "test_debug_with_captured_backtrace_and_cause" in line
     # The sentence that removes, not the record's opening premise.
-    assert "and remove the `while let Some(e) = source`" in line
-    assert "Keep the Debug delegation only" not in line
+    assert "drop the manual" in line
+
+
+def test_withheld_line_names_the_class_and_quotes_the_withheld_sentence() -> None:
+    # The sibling record convicts one of its three sentences: the line says
+    # the rest was injected and quotes the one that was not.
+    rec = _pair_record(SIBLING_GUIDANCE)
+    verdict = _same_transaction_read(rec, pins=PINS)
+    line = retired_guidance_line("src/fmt.rs::*impl*::ErrorImpl", rec, verdict)
+    assert line.startswith("[phase-c/retro-withheld] src/fmt.rs::*impl*::ErrorImpl:")
+    assert "1 of 3 sentence(s) withheld (contradicts_target)" in line
+    assert "in the `else` arm obtain `err` once" in line

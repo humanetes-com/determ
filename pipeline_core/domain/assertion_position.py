@@ -47,6 +47,7 @@ from pipeline_core.domain.abort_verdict import AbortPartition, located_tests
 from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.generation import parse_gen_tests_filename
 from pipeline_core.domain.test_results import (
+    RegressionComparison,
     binary_key,
     binary_output_sections,
     world_sections,
@@ -420,6 +421,34 @@ def compare_positions(
 # --- the decided rule ---------------------------------------------------------
 
 @dataclass(frozen=True, slots=True)
+class SuiteDelta:
+    """A joint write's own suite reading, as the abort partition reads it:
+    the gain is a net pass change above zero, the loss is any test newly red
+    or any binary newly crashed (`RegressionComparison`). The regression
+    gate accepts a positive net beside a newly red test, so a positive net
+    alone is not "nothing lost"; both halves come from this one reading.
+
+    The file, impl and pair routes judged the gain on their aimed tests
+    only, and a write deep in a chain gains tests no sweep attributed to it:
+    run `4112620-8a89f05c` (2026-10-29) reverted `src/error.rs` file writes
+    reading +4, +20 and +15 with nothing newly red or crashed, because the
+    only aborts (already red, at a crate frame) were refused beside no
+    aimed gain. The session already judged on the suite."""
+
+    net: int
+    lost: bool
+
+    @classmethod
+    def of(cls, cmp: RegressionComparison) -> SuiteDelta:
+        return cls(net=cmp.net_pass_delta,
+                   lost=bool(cmp.newly_red or cmp.newly_crashed))
+
+    @property
+    def gained(self) -> bool:
+        return self.net > 0
+
+
+@dataclass(frozen=True, slots=True)
 class TestOutcomes:
     """Typed per-test outcomes of one attempt over its attributed tests.
 
@@ -482,6 +511,16 @@ class TestOutcomes:
     @property
     def refuses(self) -> bool:
         return self.refuses_with(strict_gain=bool(self.gained))
+
+    def refuses_on(self, suite: SuiteDelta) -> bool:
+        """The decided rule for a joint write judged on its own suite
+        reading: the aborts are partitioned with the suite's gain and the
+        suite's loss beside the aimed set's; an aimed test lost still
+        refuses, and the earlier-panic clause stays on the aimed set."""
+        lost = bool(self.lost) or suite.lost
+        return (lost
+                or self.abort.refuses(strict_gain=suite.gained, lost=lost)
+                or (bool(self.earlier) and not self.gained))
 
     @property
     def earlier_tests(self) -> tuple[str, ...]:

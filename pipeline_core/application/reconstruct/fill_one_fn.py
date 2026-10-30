@@ -15,12 +15,15 @@ from __future__ import annotations
 import os
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.fix_loop import FixOutcome, drive_fix_loop
+from pipeline_core.application.reconstruct.block_evidence import (
+    render_sibling_regression,
+)
 from pipeline_core.application.reconstruct.cargo_errors import (
     ecodes_in_text,
 )
@@ -61,7 +64,12 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
 from pipeline_core.application.reconstruct.test_locator import attributed_test_blocks
 from pipeline_core.application.reconstruct.unit_conversation import TranscriptBound
 from pipeline_core.domain import unit_clock
-from pipeline_core.domain.attribution import canon_site, record_site, site_label
+from pipeline_core.domain.attribution import (
+    WriteGround,
+    canon_site,
+    record_site,
+    site_label,
+)
 from pipeline_core.domain.behaviour_select import IdentityMustUnit, select_usage_examples
 from pipeline_core.domain.blamed_type_api import with_blamed_type_api
 from pipeline_core.domain.cfg import filter_cfg_inactive_branches
@@ -141,6 +149,8 @@ from pipeline_core.domain.retro_gate import (
     stamp_conviction,
     tree_premise_absent,
 )
+from pipeline_core.domain.sibling_regression import stamped as sibling_stamped
+from pipeline_core.domain.sibling_regression import union_of as sibling_union
 from pipeline_core.domain.splice_feedback import reply_refusal_feedback
 from pipeline_core.domain.std_api_sigs import std_api_def
 from pipeline_core.domain.test_report import (
@@ -328,6 +338,25 @@ class FillOneFn:
         return replace(res, joint=tuple(joint.kept),
                        joint_named=tuple(dict.fromkeys(joint.named)))
 
+    def _stamp_reddened(self, ctx: PerFnPassCtx,
+                        sites: Iterable[tuple[str, str, str]], *,
+                        tests: Iterable[str], outputs: Mapping[str, str],
+                        by: str) -> None:
+        """What a reverted per-fn write broke and what each reddened test
+        printed, on every unit it wrote (`sibling_regression`), so the next
+        route over them reads it: the in-call retry reads the gate's detail,
+        a later fill only the store. Measured; no model call."""
+        names = sorted({str(t) for t in tests})
+        if not names:
+            return
+        retros = self.retros.load(ctx.project_dir)
+        for file_rel, fn, container in sites:
+            key = self.retros.retro_key(file_rel, fn, container)
+            retros[key] = sibling_stamped(retros.get(key), tests=names,
+                                          outputs=outputs, by=by)
+            ctx.retros_cache[key] = retros[key]
+        self.retros.save(ctx.project_dir, retros)
+
     def _revert_extras(self, root: Path, joint: _JointState,
                        ctx: PerFnPassCtx) -> bool:
         """Restore every extra the attempt in flight spliced, last first,
@@ -397,6 +426,12 @@ class FillOneFn:
         # (`U2Verdict.measured`) is what the class and the verdict row read.
         # None until a compiling attempt asked the gate.
         _observed_verdict: list[U2Verdict | None] = [None]
+        # The attributed tests that still failed under a body kept on
+        # non-regression (the GUARD keep below): the verdict row's evidence.
+        # Empty for every other keep. Run `4112620-8a89f05c` (2026-10-29):
+        # two such keeps were rowed `accept` with no evidence key, the same
+        # row a body no test ran against gets.
+        _nonregr_failing: list[frozenset[str]] = [frozenset()]
         # Non-empty iff the latest revert was a crash-only regression blamed
         # wholly outside this unit — holds the crash-block mark to persist.
         _crash_blocked_mark: list[str] = []
@@ -498,6 +533,11 @@ class FillOneFn:
             frozenset(ctx.tdd_frontier_tests.tests_for_body(
                 rel_file, fn_name, container))
             if ctx.tdd_frontier_tests is not None else frozenset())
+        # What the keep gate runs and grades on, and the subset that may
+        # revert (`WriteGround`): the ground this body was claimed on.
+        _ground = (ctx.tdd_frontier_tests.ground_for_body(
+            rel_file, fn_name, container)
+            if ctx.tdd_frontier_tests is not None else WriteGround.empty())
         _poisoned_retro = ctx.retro_gate.record(judge_guidance(
             _retro_rec.get("guidance", ""), snapshot,
             anchor_types=_anchor_types)) is RetroGateVerdict.RETIRED
@@ -746,6 +786,17 @@ class FillOneFn:
                 unit=screening_unit(rel_file, fn_name),
                 pins=_fn_pins, observables=_fn_observables,
                 loop_scope=_loop_scope)
+        def _prior_regression() -> str:
+            """What a reverted write by any route over this fn broke and what
+            those tests printed (`sibling_regression`), from the store as it
+            stands. The file, impl, pair and session reverts stamp it; the
+            per-fn prompt is where this unit's next write reads it."""
+            rec_ = ctx.retros_cache.get(
+                self.retros.retro_key(rel_file, fn_name, container), {}) or {}
+            tests_, outputs_, writers_ = sibling_union((rec_,))
+            return render_sibling_regression(tests_, _fn_pins, outputs_,
+                                             writers_)
+
         # Crate idioms ranked by THIS fn's signature tokens.
         crate_idioms_section = self.prompt.extract_crate_idioms(
             ctx.idiom_blocks, rel_file, target_sig_text=sig_text,
@@ -950,7 +1001,8 @@ class FillOneFn:
                                 read_source=reconstruction_file_reader(
                                     ctx.target_src_dir, ctx.project_dir)),
                             unit_notes_text((_unit_loc,),
-                                            ctx.tdd_frontier_tests)) if x)),
+                                            ctx.tdd_frontier_tests)) if x),
+                        prior_regression=_prior_regression()),
                     fr_path=ctx.fr_path,
                     joint_output=_joint_on,
                 )
@@ -1035,7 +1087,8 @@ class FillOneFn:
                         behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,
                             units=(IdentityMustUnit(
-                                fn_name, container, sig_text, rel_file),))),
+                                fn_name, container, sig_text, rel_file),)),
+                        prior_regression=_prior_regression()),
                     # Open the sig-change escape hatch after multiple
                     # compile failures. The model can return an additional
                     # <SIGNATURE> block; we splice it only when fn is non-pub.
@@ -1311,7 +1364,7 @@ class FillOneFn:
                 # A joint write answers for its extras too: a panic inside
                 # one of them is this unit's failure, not a sibling's.
                 _v = self.cargo.u2_test_gate(
-                    set(_evidence.tests),
+                    _ground,
                     frozenset({FnSite(rel_file, fn_name, container),
                                *(FnSite(u.file, u.fn_name, u.container)
                                  for u, _pre in joint.live)}),
@@ -1320,12 +1373,13 @@ class FillOneFn:
                 _u2_passed = _v.self_passed
                 _observed_passed[0] = _v.self_passed
                 _observed_verdict[0] = _v
+                _nonregr_failing[0] = frozenset()
                 if _v.decision is U2Decision.NO_TESTS:
                     self.tel.emit("phase_c.u2.no_tests", data={
                         "cluster": ctx.cluster_name, "pass_n": ctx.pass_n,
                         "file": rel_file, "fn": fn_name,
                         "container": container,
-                        "answers": len(_answers.tests),
+                        "answers": len(_ground.judged),
                     })
                 if _v.decision is U2Decision.REJECT:
                     # A real self-failure (assertion/behavior). Route through the
@@ -1394,6 +1448,7 @@ class FillOneFn:
                                 f"({len(_v.self_failures)} self-failure(s), none "
                                 "passing at baseline) — judged for real at the "
                                 "next sweep, in the joint tree.")
+                            _nonregr_failing[0] = frozenset(_v.self_failures)
                             _u2_fail_sig = None
                     # Sibling-blocked pre-check, BEFORE the fix loop spends a
                     # call: when every failing attributed test also needs a
@@ -1530,6 +1585,12 @@ class FillOneFn:
                     _cmp, _regr_detail = _regr
                     _u2_fail_sig = _cmp.signature
                     cargo_out = _regr_detail
+                    self._stamp_reddened(
+                        ctx, [(rel_file, fn_name, container), *(
+                            (u.file, u.fn_name, u.container)
+                            for u, _pre in joint.live)],
+                        tests=_cmp.newly_red, outputs=_cmp.newly_red_output,
+                        by=f"per-fn {rel_file}::{fn_name}")
                     if _cmp.newly_crashed:
                         _last_crash_sites[0] = _cmp.crash_stub_sites
                     self.tel.log(
@@ -1619,20 +1680,29 @@ class FillOneFn:
                     **VerdictRecord(
                         unit=str(_unit_key), route="per-fn",
                         attempt=fix_attempt,
-                        disposition=(Disposition.KEEP_DEFERRED if _blocked_by
+                        disposition=(Disposition.KEEP_DEFERRED
+                                     if _blocked_by or _nonregr_failing[0]
                                      else Disposition.ACCEPT),
                         reason=("kept — every attributed test blocked by a "
                                 "still-stubbed sibling" if _blocked_by
+                                else "kept on non-regression — "
+                                f"{len(_nonregr_failing[0])} attributed "
+                                "test(s) still fail, none was passing at "
+                                "baseline; judged at the next sweep"
+                                if _nonregr_failing[0]
                                 else f"accepted — {len(_u2_passed)} attributed "
                                 "test(s) observed passing" if _u2_passed
                                 else unmeasured_keep_reason(
                                     _observed_verdict[0])),
                         outcome=(GateOutcome.POSITIVE
-                                 if _u2_passed and not _blocked_by
+                                 if (_u2_passed and not _blocked_by
+                                     and not _nonregr_failing[0])
                                  else GateOutcome.UNMEASURABLE),
                         evidence_keys=(
                             tuple(f"{s.file}::{s.fn_name}" for s in _blocked_by)
                             if _blocked_by
+                            else tuple(sorted(_nonregr_failing[0]))
+                            if _nonregr_failing[0]
                             else tuple(sorted(_u2_passed))),
                         validity=ValidityVector(binary_completed=True),
                         model_calls=fix_attempt).to_json_dict(),
@@ -2451,10 +2521,10 @@ class FillOneFn:
             reading=keep_reading(
                 net_delta=_cmp_u.net_pass_delta if _cmp_u is not None else 0,
                 newly_green=_cmp_u.newly_green if _cmp_u is not None else (),
-                attributed=_answers.tests),
+                attributed=_ground.judged),
             passed=_observed_passed[0],
             unreachable=tests_could_not_run(blocked_sibling=bool(_blocked_by)),
-            attributed=_answers.tests,
+            attributed=_ground.judged,
             # Measured only when a scoped run produced the verdict: a body
             # the gate was handed no test for (or that ran inconclusively)
             # is not WRONG_BODY because its attributed tests are red.

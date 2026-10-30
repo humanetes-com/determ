@@ -727,7 +727,8 @@ def test_an_unsettled_crash_reaches_the_next_turn_with_its_frames(tmp_path):
     class _Unsettled:
         def settle(self, capture, written, base, *, tag=""):
             return Settlement(SettlementOutcome.UNSETTLED, sites=(site,),
-                              reason="the stubs cost the baseline a test")
+                              reason="the stubs cost the baseline a test",
+                              written=frozenset(written))
 
     def ask(m: object) -> str:
         asked.append(str(m))

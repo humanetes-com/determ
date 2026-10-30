@@ -46,10 +46,15 @@ class RoutedBody:
     though the container it splices into is not itself a trait impl.
 
     `via_member_name` records that no header resolved the body and the file's
-    own declaration of that fn name did; `sig_text` then carries that
-    declaration's verbatim signature, which is the only disambiguator a FREE
-    fn has (its container is the empty string, so container narrowing cannot
-    separate it from a same-named impl method)."""
+    own declaration of that fn name did.
+
+    `sig_text` is that declaration's verbatim signature whenever the chosen
+    container declares the name once. A free fn's container is the empty
+    string, so the signature is the only disambiguator the splice has; an
+    impl method's container already narrows, and the signature is what the
+    ignored-input decline reads. Empty when the container declares the name
+    more than once, or the caller passed no member table: an empty signature
+    is not a guess among homonyms."""
 
     fn_data: dict[str, Any]
     container: str
@@ -225,6 +230,48 @@ def named_container(
     return None, tuple(near.values())
 
 
+def _declaration_signature(
+    members: Sequence[FileMember], fn_name: str, container: str,
+) -> str:
+    """The verbatim signature of the one declaration of `fn_name` in
+    `container`. Empty when that container declares the name zero times or
+    more than once.
+
+    Identity is :func:`canon_container`, the same identity a header was
+    matched on. A free fn's container is `""` on both sides, and that empty
+    string is the identity — it is not passed through `canon_container`."""
+    want = canon_container(container) if container else ""
+    hits = [
+        m for m in members
+        if m.fn_name == fn_name
+        and ((canon_container(m.container) if m.container else "") == want)
+    ]
+    if len(hits) == 1:
+        return hits[0].sig_text
+    return ""
+
+
+def _route_body(
+    fn_data: dict[str, Any], container: str,
+    members: Sequence[FileMember], *,
+    via_trait_default: bool = False,
+    via_member_name: bool = False,
+) -> RoutedBody:
+    """The only constructor `route_fn_bodies` uses.
+
+    The signature is looked up here, from the container the tier already
+    chose. A tier that built `RoutedBody` itself left `sig_text` empty on
+    every path except the empty-block pick and the member-identity tier, and
+    the ignored-input decline reads that field: a method tagged with its impl
+    header declared no inputs, so a body that ignored one was kept."""
+    return RoutedBody(
+        fn_data, container,
+        via_trait_default=via_trait_default,
+        via_member_name=via_member_name,
+        sig_text=_declaration_signature(
+            members, str(fn_data.get("fn_name", "")), container))
+
+
 def route_fn_bodies(
     parsed: list[dict[str, Any]], *, target: str, related: list[str],
     trait_defaults: Sequence[TraitDefaultHost] = (),
@@ -340,14 +387,13 @@ def route_fn_bodies(
                                      in named_elsewhere)
                     else None)
             if pick is not None:
-                routed.append(RoutedBody(
-                    fn_data, pick.container, sig_text=pick.sig_text))
+                routed.append(_route_body(fn_data, pick.container, members))
             else:
-                routed.append(RoutedBody(fn_data, target))
+                routed.append(_route_body(fn_data, target, members))
             continue
         named, ambiguous = named_container(block_attr, idents)
         if named is not None:
-            routed.append(RoutedBody(fn_data, named))
+            routed.append(_route_body(fn_data, named, members))
             continue
         attr_canon = canon_container(block_attr)
         if ambiguous:
@@ -363,12 +409,12 @@ def route_fn_bodies(
         repaired = repair_truncated_generics(attr_canon)
         if repaired != attr_canon:
             if repaired == target_canon:
-                routed.append(RoutedBody(fn_data, target))
+                routed.append(_route_body(fn_data, target, members))
                 continue
             canonical = next(
                 (c for c, cc in related_canon if repaired == cc), None)
             if canonical is not None:
-                routed.append(RoutedBody(fn_data, canonical))
+                routed.append(_route_body(fn_data, canonical, members))
                 continue
         fn_name = str(fn_data.get("fn_name", ""))
         trait = impl_trait_name(block_attr) or impl_head_name(block_attr)
@@ -376,7 +422,8 @@ def route_fn_bodies(
                      if h.trait_name == trait and fn_name in h.member_names),
                     None) if trait else None
         if host is not None:
-            routed.append(RoutedBody(fn_data, host.container, via_trait_default=True))
+            routed.append(_route_body(
+                fn_data, host.container, members, via_trait_default=True))
             continue
         # An INHERENT impl header (`impl Ty`, no `for`, not a `trait`) that
         # resolved to nothing is not a claim a free fn can contradict; a TRAIT
@@ -384,9 +431,8 @@ def route_fn_bodies(
         # implements one.
         decls = [m for m in members if m.fn_name == fn_name]
         if _member_identity_admits(block_attr, decls):
-            routed.append(RoutedBody(
-                fn_data, decls[0].container,
-                via_member_name=True, sig_text=decls[0].sig_text))
+            routed.append(_route_body(
+                fn_data, decls[0].container, members, via_member_name=True))
             continue
         dropped.append(DroppedBody(
             fn_name=fn_name,

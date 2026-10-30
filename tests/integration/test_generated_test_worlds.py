@@ -417,3 +417,103 @@ def test_an_emitted_doc_example_is_red_on_a_tree_that_lost_the_behaviour(
     (root / "src" / "lib.rs").write_text(_DOC_LIB.replace("    1\n}\n\n/// Only", "    2\n}\n\n/// Only"))
     rc, ran = _tests_run(root, base, shared)
     assert rc != 0 and ran == 1
+
+
+# --- The behaviour emitter's no-verdict round, over real cargo -------------
+#
+# Run `15370-6a4cfd45` (2026-10-30): one capture per world whose replay did
+# not compile, and the no-verdict branch withdrew every capture in the file
+# (24 + 26). The fix reads rustc's `--> tests/<stem>.rs:LINE:COL` against the
+# rendered capture spans, and, for a binary that compiled and died, runs the
+# unreported tests alone through the real alone runner. Both rest on tool
+# behaviour pinned below: rustc locates an error inside a test fn on a line of
+# that fn's span, and a test binary that aborts under `--test-threads=1`
+# reports the tests before it and no trailer.
+
+def _emit_specs(names_whens: list[tuple[str, str]]) -> list:  # noqa: ANN001
+    from pipeline_core.domain.behaviour_probe import CapturedProbe, captured_spec
+    return [captured_spec(cfg_cluster="base",
+                          probe=CapturedProbe(name=n, given="", when=w, observe="display"),
+                          n=0, stdout="1", default_cluster="base")
+            for n, w in names_whens]
+
+
+def _emitter_run(root: Path, cluster: BuildCluster, specs: list):  # noqa: ANN001,ANN202
+    from pipeline_core.adapters.test_worlds import failing_alone
+    from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
+
+    def env_for(extra: dict[str, str]) -> dict[str, str]:
+        env = cluster_cargo_env(cluster)
+        env["CARGO_TARGET_DIR"] = str(_TARGET / root.parent.name / cluster.name)
+        env.update(extra)
+        return env
+
+    def verify(stem: str, extra) -> tuple[bool, str]:  # noqa: ANN001
+        # The production verify's shape (`composition._verify_behaviour_tests`):
+        # a plain process, no isolation re-run, so a death stays a death.
+        import subprocess
+        run = subprocess.run(["cargo", "test", "--offline", "--test", stem, "--", "--test-threads=1"],
+                             cwd=root, env=env_for(dict(extra)), capture_output=True,
+                             text=True, timeout=600, check=False)
+        return run.returncode == 0, (run.stdout or "") + "\n" + (run.stderr or "")
+
+    return emit_behaviour_tests(
+        root, "base", specs, crate="gadgets", verify=verify,
+        failing_alone=lambda stem, names, extra: failing_alone(
+            root, "gadgets", stem, names, env=env_for(dict(extra)), timeout=600),
+        settle=lambda _d, body: body)
+
+
+def test_premise_rustc_locates_an_error_inside_a_test_on_that_tests_lines(
+        tmp_path: Path) -> None:
+    from pipeline_core.application.emit_behaviour_tests import (
+        capture_line_spans,
+        render_behaviour_test_file,
+        replay_fn_name,
+    )
+    from pipeline_core.domain.test_results import parse_rustc_compile_errors
+    root = _crate(tmp_path)
+    base, _alt = _clusters()
+    specs = _emit_specs([("ok_a", "gadgets::size()"), ("broken", "gadgets::nope()"),
+                         ("ok_c", "gadgets::size()")])
+    body = render_behaviour_test_file(specs, crate="gadgets")
+    (root / "tests" / "behaviour_base_gen_1.rs").write_text(body)
+    rc, out = _file_run(root, base, "behaviour_base_gen_1")
+    diags = [d for d in parse_rustc_compile_errors(out)
+             if Path(d.file).name == "behaviour_base_gen_1.rs"]
+    assert rc != 0 and diags, out[-800:]
+    lo, hi = capture_line_spans(body, specs)[replay_fn_name(specs[1])]
+    assert all(lo <= d.line <= hi for d in diags)
+
+
+def test_a_capture_that_does_not_compile_is_withdrawn_alone(tmp_path: Path) -> None:
+    root = _crate(tmp_path)
+    base, _alt = _clusters()
+    specs = _emit_specs([("ok_a", "gadgets::size()"), ("broken", "gadgets::nope()"),
+                         ("ok_c", "gadgets::size()")])
+    dest, dropped, misses, emitted = _emitter_run(root, base, specs)
+    assert dest is not None and dropped == (specs[1].behaviour_id,)
+    assert misses[0]["reason"].startswith("replay did not compile: ")
+    assert {s.behaviour_id for s in emitted} == {specs[0].behaviour_id, specs[2].behaviour_id}
+
+
+def test_a_capture_whose_test_aborts_is_withdrawn_alone(tmp_path: Path) -> None:
+    root = _crate(tmp_path)
+    base, _alt = _clusters()
+    specs = _emit_specs([("a_ok", "gadgets::size()"),
+                         ("b_dies", "{ std::process::abort(); #[allow(unreachable_code)] 1u8 }"),
+                         ("c_ok", "gadgets::size()")])
+    dest, dropped, misses, _emitted = _emitter_run(root, base, specs)
+    assert dest is not None and dropped == (specs[1].behaviour_id,)
+    assert misses[0]["reason"].startswith("replay binary died")
+
+
+def test_negative_control_without_attribution_the_file_goes_whole(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import pipeline_core.application.emit_behaviour_tests as ebt
+    monkeypatch.setattr(ebt, "no_verdict_culprits", lambda *_a, **_k: [])
+    root = _crate(tmp_path)
+    base, _alt = _clusters()
+    specs = _emit_specs([("ok_a", "gadgets::size()"), ("broken", "gadgets::nope()")])
+    dest, dropped, _misses, _emitted = _emitter_run(root, base, specs)
+    assert dest is None and set(dropped) == {s.behaviour_id for s in specs}

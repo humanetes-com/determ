@@ -37,6 +37,7 @@ import pytest
 
 from pipeline_core.adapters.cargo import CargoCli
 from pipeline_core.application.reconstruct.cargo_runner import run_cargo
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.test_results import (
     TestStateReading,
     compare_readings,
@@ -449,7 +450,8 @@ def _scoped(root: Path, monkeypatch: pytest.MonkeyPatch, tag: str,
     def _run(cmd: str, cwd: Path, env_: dict[str, str], timeout: int = 600):
         return run_cargo(CargoCli(), cmd, cwd, env_, timeout=timeout)
     return u2_test_gate(
-        _run, {"builds"}, frozenset(), _CMD, root, env,
+        _run, WriteGround(frozenset({"builds"}), frozenset({"builds"})),
+        frozenset(), _CMD, root, env,
         structure=_NoRecords(), enabled=True, timeout=600, err_cap=2000,
         guard=lambda *_: None, baseline=baseline)
 
@@ -711,7 +713,8 @@ def _settle_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
     crash_settler.bind(settler if bind_settler else None)
     try:
         verdict = u2_test_gate(
-            _run, {"a_made", "a_good"},
+            _run, WriteGround(frozenset({"a_made", "a_good"}),
+                              frozenset({"a_made", "a_good"})),
             frozenset({FnSite("src/lib.rs", "read", "")}), _CMD, root, env,
             structure=CliStructureReader(CliExtractor(_EXTRACTOR)),
             enabled=True, timeout=600, err_cap=4000,

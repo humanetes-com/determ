@@ -28,6 +28,7 @@ from typing import Any
 from pipeline_core.application.reconstruct.fill_ground_lock import (
     note_failed_revert,
 )
+from pipeline_core.domain.attribution import WriteGround
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.fill_ground import MeasureRole
 from pipeline_core.domain.models import (
@@ -238,12 +239,12 @@ class CargoFillAdapter:
                         *, include_lib: bool = False) -> str:
         return self.build_test_cmd_fn(test_stems, cluster, include_lib=include_lib)
 
-    def u2_test_gate(self, fn_tests: set[str], unit_sites: frozenset[FnSite],
+    def u2_test_gate(self, ground: WriteGround, unit_sites: frozenset[FnSite],
                      test_cmd: str | None,
                      target_src_dir: Path, cluster_env: dict[str, str] | None,
                      baseline: TestStateReading | None = None
                      ) -> U2Verdict:
-        return self.u2_test_gate_fn(fn_tests, unit_sites, test_cmd,
+        return self.u2_test_gate_fn(ground, unit_sites, test_cmd,
                                     target_src_dir, cluster_env,
                                     baseline=baseline)
 

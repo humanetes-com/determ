@@ -11,6 +11,7 @@ from pipeline_core.domain.retro_gate import (
     ConvictionEvidence,
     bind_crate_names,
     denied_defined_names,
+    denied_sentences,
     screen_guidance,
 )
 
@@ -32,7 +33,9 @@ def test_the_live_lesson_denies_a_defined_macro() -> None:
 
 
 def test_screening_retires_it_only_while_names_are_bound() -> None:
-    record = {"guidance": _GUIDANCE, "category": "API_HALLUCINATION",
+    # The denial is one sentence of the record; alone, it retires it.
+    denial = _GUIDANCE.split(";")[0] + "."
+    record = {"guidance": denial, "category": "API_HALLUCINATION",
               "error_count": 1, "retrospective_count": 1}
     ev = ConvictionEvidence(frozenset())
     try:
@@ -43,3 +46,21 @@ def test_screening_retires_it_only_while_names_are_bound() -> None:
         bind_crate_names(())
     after = screen_guidance(record, "", evidence=ev)
     assert after.retired_by != DENIES_DEFINED_NAME
+
+
+def test_the_denial_withholds_its_sentence_not_the_record() -> None:
+    # The live record's second sentence ("use the `backtrace` parameter
+    # already in scope") denies nothing: the record goes on to the rules
+    # that judge it whole, and the denying sentence is the one withheld
+    # (run `3808231-81b847f7`, 2026-10-29: one convicted sentence used to
+    # take the rest of a lesson with it).
+    assert denied_sentences(_GUIDANCE, {"backtrace_if_absent"}) == (
+        _GUIDANCE.split(";")[0],)
+    record = {"guidance": _GUIDANCE, "category": "API_HALLUCINATION",
+              "error_count": 1, "retrospective_count": 1}
+    try:
+        bind_crate_names({"backtrace_if_absent"})
+        got = screen_guidance(record, "", evidence=ConvictionEvidence(frozenset()))
+    finally:
+        bind_crate_names(())
+    assert got.retired_by != DENIES_DEFINED_NAME

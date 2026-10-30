@@ -40,6 +40,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("domain/reference_floor.py", "pairs_of"): "incomplete labels of the pristine reference",
     ("application/reconstruct/cargo_runner.py", "isolate_aborted_binaries"): "selects the binaries to isolate",
     ("application/reconstruct/crash_localizer.py", "_asan_sites"): "the sanitized sweep is not isolated",
+    ("application/reconstruct/crash_settler.py", "_judged_failed"): "verdict bookkeeping (failed in completed binaries, the passed_names rule), not a crash decision",
     ("application/reconstruct/phase_c_tdd.py", "run_phase_c_tdd._reconcile"): "oracle accounting count",
     ("application/emit_behaviour_tests.py", "_verdict_of"): "behaviour-test emission, not the loop",
     ("adapters/coverage_owner.py", "_in_flight_test"): "coverage run of one test",

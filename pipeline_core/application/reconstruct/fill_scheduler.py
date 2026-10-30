@@ -292,10 +292,36 @@ class _GroundGate:
 
     def __call__(self, scope: frozenset[str] | None,
                  units: frozenset[FnLocator]) -> bool:
+        """The gate for a run with no left-red reading (:meth:`for_run`)."""
+        return self._decide(scope, units, {})
+
+    def for_run(self, left_red: Mapping[FnLocator, frozenset[str]]
+                ) -> Callable[[frozenset[str] | None, frozenset[FnLocator]], bool]:
+        """The gate one run's clock asks: this gate, with the tests the last
+        measured try on the run's route left red per target
+        (`RouteRun.left_red`)."""
+        held = dict(left_red)
+
+        def _gate(scope: frozenset[str] | None,
+                  units: frozenset[FnLocator]) -> bool:
+            return self._decide(scope, units, held)
+        return _gate
+
+    def _decide(self, scope: frozenset[str] | None,
+                units: frozenset[FnLocator],
+                left_red: Mapping[FnLocator, frozenset[str]]) -> bool:
         """True when the claim is refused: its WHOLE planned ground moved
         (`test_outcome.ground_left` is empty) and the ground now holds none
         of its planned tests inside ``units``. A claim some of whose planned
-        tests still read as the plan read them stands on those."""
+        tests still read as the plan read them stands on those, unless every
+        one of them is a test the last measured try on this route left red
+        for a unit the claim writes (``left_red``): the claim is then that
+        try again on the same ground, the flat re-buy the schedule's rank
+        reads (`fill_schedule.aim_left_red`) on a run it planned before this
+        fill's keep moved the rest. Run `3366333-dfeac80c` (2026-10-29): the
+        rank asks the whole aim at plan time, a keep of the fill then moves
+        the part the last try never left red, and the claim stood on the
+        remainder."""
         if not self.armed:
             return False
         with self._lock:
@@ -307,6 +333,21 @@ class _GroundGate:
             assert self._premise is not None
             left = ground_left(self.moved, scope, self._premise.keys())
             if left:
+                bare = {str(t).rsplit("::", 1)[-1] for t in left}
+                rebuy = sorted(
+                    (u for u in units
+                     if u in left_red and bare <= left_red[u]),
+                    key=lambda k: (k.file, k.fn_name))
+                if rebuy and not (frozenset(units) & self._spared):
+                    self.refused += 1
+                    self._log(
+                        f"  [phase-c/schedule] fill {self._iteration}: "
+                        f"claim on partly moved ground refused — the "
+                        f"{len(left)} planned test(s) still standing "
+                        f"({names_of(sorted(left))}) are the ones the last "
+                        "try on this route left red for "
+                        f"{names_of([f'{u.file}::{u.fn_name}' for u in rebuy])}")
+                    return True
                 key = frozenset(scope or ())
                 if key not in self._partial:
                     self._partial.add(key)
@@ -1179,7 +1220,7 @@ def execute_fill(
             shares[w.run.key] = share
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
-                now=deps.now, ground_moved=gate,
+                now=deps.now, ground_moved=gate.for_run(dict(w.run.left_red)),
                 scope=w.run.target_tests or None, units=w.run.targets,
                 unit_multiple=deps.unit_share_multiple,
                 call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp),
@@ -1366,7 +1407,8 @@ def execute_fill(
             rest = [w for w in ordered[i:]
                     if not gate.yields_to(w.run.target_tests or None,
                                           w.run.targets)
-                    and gate(w.run.target_tests or None, w.run.targets)]
+                    and gate.for_run(dict(w.run.left_red))(
+                        w.run.target_tests or None, w.run.targets)]
             if not rest:
                 break
             deps.log(
