@@ -187,8 +187,9 @@ def test_each_layer_a_keep_measures_is_written_in_the_same_fill(
 
 def test_negative_control_without_the_opener_the_measured_layer_waits(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fs, "_open_for_blockers",
-                        lambda ordered, *_a, **_k: ordered)
+    # No opener: the one predicate both the boundary and the claim gate read
+    # names no holder, so nothing is opened and no claim waits for one.
+    monkeypatch.setattr(fs, "unwritten_holders", lambda *_a, **_k: [])
     calls, events = _fill(tmp_path, _planned, hollow=_HOLLOW)
     assert calls == ["top", "file src/c.rs"]
     assert "phase_c.fill.blocker_opened" not in events
