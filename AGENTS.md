@@ -1341,6 +1341,38 @@ repo root, which holds the user-owned launchers (`continue.sh`, `pre_run.sh`,
 pre-run gate for no reason; `scripts/` is outside it). One-off working files
 still go to the session scratchpad, not `scripts/`.
 
+**Reusable by default: the scratchpad holds outputs, not tools.** Any check,
+measurement or experiment the assistant writes is a durable tool in the repo
+unless it is genuinely throwaway. The test is whether the same question could
+be asked again: by the next session, on another run, on another crate, or
+after a toolchain update. If it could, the code that answers it goes in the
+repo, written to be re-run, with its arguments rather than this session's
+paths and ids hard-coded. Where it goes is decided by what it is:
+
+- an analysis or measurement over runs, logs, events, trees or stores:
+  `scripts/`, with the header above;
+- a premise about an external tool (cargo, rustc, libtest, std, the
+  extractor, a model's wire format) checked on an invented shape: a
+  `test_premise_*` in the `tests/integration/` module that drives that tool
+  (section "An integration test is written only when the defect lives in how
+  the pipeline reads an external tool"), so the gate re-checks it on every
+  toolchain;
+- shell sourced by the launchers: `lib/`;
+- a helper the pipeline itself executes: `tools/`, accepting the stamp move.
+
+The scratchpad keeps what a tool PRODUCED for this session (captures, dumps,
+intermediate JSON) and code that only makes sense once. A check left in the
+scratchpad is lost at the end of the session and re-derived by the next one,
+which is the recurring-finding ritual one layer down.
+
+The instance, 2026-10-31: reviewing a plan to give each environment world its
+own test binary, the session checked, in a scratchpad crate, whether a
+backtrace render captured in a probe binary and in a test binary agrees
+through the library's own frames (it does, line and column included). That
+check is a premise about std and libtest that every later change to
+world-pinned captures rests on. It belonged in `tests/integration/` as a
+premise test, not in a directory that disappears with the session.
+
 Each script opens with a header comment that answers, in this order: WHY the
 script exists (the measured fact or defect that motivated it, with run ids);
 USAGE (arguments, env knobs, preconditions — especially GPU/vLLM ownership

@@ -63,9 +63,9 @@ def _emit(tmp: Path, specs: list[BehaviourSpec], verify, **kw):  # type: ignore[
     (tmp / "tests").mkdir(parents=True, exist_ok=True)
     kw.setdefault("failing_alone", lambda _s, _n, _e: ())
     kw.setdefault("settle", lambda _d, body: body)
-    dest, dropped, misses, _emitted = emit_behaviour_tests(
+    paths, dropped, misses, _emitted = emit_behaviour_tests(
         tmp, "stable", specs, crate="anyhow", verify=verify, **kw)
-    return dest, dropped, misses
+    return (paths[0] if paths else None), dropped, misses
 
 
 def _compile_error_in(tmp: Path, stem: str, culprit: str) -> str:

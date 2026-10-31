@@ -23,7 +23,7 @@ from pathlib import Path
 
 from pipeline_core.adapters.cargo import cluster_cargo_env
 from pipeline_core.adapters.process import run_bounded
-from pipeline_core.domain.behaviour_probe import ProbeResult
+from pipeline_core.domain.behaviour_probe import ProbeBuild, ProbeResult
 from pipeline_core.domain.enums import ProcessFailure
 from pipeline_core.domain.models import BuildCluster
 
@@ -79,6 +79,18 @@ def probe_env(cluster: BuildCluster | None, project_dir: Path | None = None) -> 
     return env
 
 
+def without_symbols_env(project_dir: Path, cluster: BuildCluster | None) -> dict[str, str]:
+    """The env that builds the probe with no symbol table and no debug info
+    (:attr:`ProbeBuild.WITHOUT_SYMBOLS`): the dev profile, which `cargo run`
+    uses, stripped, in `target/t0d-<world>-without-symbols`."""
+    target = t0d_target_dir(project_dir, cluster)
+    return {
+        "CARGO_PROFILE_DEV_STRIP": "symbols",
+        "CARGO_PROFILE_DEV_DEBUG": "0",
+        "CARGO_TARGET_DIR": str(target.with_name(f"{target.name}-without-symbols")),
+    }
+
+
 @contextmanager
 def materialized_probe(project_dir: Path, program: str, name: str) -> Iterator[str]:
     """Write `program` as the example `__behaviour_probe_<name>` under
@@ -111,15 +123,23 @@ def run_probe(
     timeout: int = 180,
     run: Runner | None = None,
     extra_env: Mapping[str, str] | None = None,
+    build: ProbeBuild = ProbeBuild.AS_BUILT,
 ) -> ProbeResult:
     """Build + run `program` as a cargo example of the crate at `project_dir`
     under `cluster`'s env; `ok` iff the process exited 0. stdout is returned
     raw — the domain's `normalize_stdout` is applied where the Then is
-    recorded, so the raw text stays available for the log."""
+    recorded, so the raw text stays available for the log.
+
+    `build` WITHOUT_SYMBOLS strips the binary through cargo's profile
+    variables, not RUSTFLAGS: the cluster's flags and the crate's own config
+    stay as they are. It builds into a target directory of its own, so the
+    as-built cache is not rebuilt after it."""
     runner = run or subprocess_runner
     env = probe_env(cluster, project_dir)
     if extra_env:
         env.update(extra_env)
+    if build is ProbeBuild.WITHOUT_SYMBOLS:
+        env.update(without_symbols_env(project_dir, cluster))
     with materialized_probe(project_dir, program, name) as target:
         rc, out, err = runner(["cargo", "run", "--quiet", "--example", target], Path(project_dir), env, timeout)
     return ProbeResult(ok=(rc == 0), stdout=out, stderr=err)

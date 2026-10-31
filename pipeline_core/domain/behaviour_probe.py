@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from enum import Enum
 from pathlib import Path
 
 from pipeline_core.domain.behaviour import (
@@ -59,6 +60,26 @@ class ProbeResult:
     ok: bool
     stdout: str
     stderr: str
+
+
+class ProbeBuild(Enum):
+    """How the original crate is built for one run of a probe program.
+
+    AS_BUILT is the crate's own profile. WITHOUT_SYMBOLS is the same source
+    with no symbol table and no debug info in the binary, so nothing a
+    runtime prints by symbolizing the running binary (function names, source
+    paths, lines and columns of a captured backtrace) survives. A render's
+    agreement across the two builds is what the crate prints whatever its
+    build; the rest is what the build owns, and a reconstruction with other
+    private fns or other line numbers renders it differently. Measured
+    2026-10-31 on an invented crate: a probe binary and a test binary agree
+    on a captured backtrace through the crate's own frames at their line and
+    column (`tests/integration/test_generated_test_worlds.py`); the
+    no-symbols build agrees with the as-built one up to the first frame's
+    number."""
+
+    AS_BUILT = "as_built"
+    WITHOUT_SYMBOLS = "without_symbols"
 
 
 def normalize_stdout(text: str) -> str:
@@ -847,12 +868,18 @@ def split_env_worlds(
     `330242-0be2c3e1` (2026-09-03) emitted the twin as the whole perturbed
     render, and both clusters' only Debug probe came back
     `replay disagreed with the capture` and was withdrawn — the emitter
-    working as designed on a Then that was never replayable. Taking the
-    agreement of two independent captures keeps the crate's own output (the
-    message, the chain, the header that says a tail follows) and drops
-    exactly the bytes the process contributed. It names no environment
-    variable, no trait and no crate symbol: any render with a
-    process-dependent tail splits the same way.
+    working as designed on a Then that was never replayable.
+
+    WHY two runs of the same build are not enough. Two runs of one probe
+    binary print the same frames, so their agreement is the whole render,
+    and the replay's narrowing then cuts it where the probe binary and the
+    test binary part: after the crate's own frames, with the original's
+    private fn names, lines and columns in the Then. The original passes
+    that and no reconstruction with other line numbers can. The caller
+    passes one recapture per :class:`ProbeBuild`, so the agreement drops what
+    the build owns and keeps the crate's output (the message, the chain, the
+    header that says a tail follows). It names no environment variable, no
+    trait, no crate symbol and no runtime's format.
 
     A single recapture (a `str`, or one element) has nothing to agree with,
     so it keeps today's exact Then — the caller that wants the prefix

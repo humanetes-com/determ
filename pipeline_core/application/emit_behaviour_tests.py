@@ -47,6 +47,19 @@ nothing downstream would catch it. Each cluster writes its own
 a crate-level `#![cfg(...)]`, and the file is rewritten in place on a re-entry
 rather than accumulating a second copy of the same tests under a new number.
 
+WHY ONE TEST BINARY PER ENVIRONMENT WORLD. std reads the backtrace
+environment once per process, on the first capture, and caches the answer,
+so a test's own `set_var` holds only when no test in the same process
+captured first. With every capture of a cluster in one file, a pinned
+capture's verdict was decided by test order: run `1878910-be648607`
+(2026-10-31) rendered `disabled` for every `::env` twin, and run
+`2426367-f566edfc` read the same eight originals green in one emission and
+red in the next. Each distinct `required_env` therefore gets a file of its
+own (`world_files`), every test of which sets that env first, so whichever
+thread captures first has already set it, whatever env the harness started
+the binary under. The sweep, task 3 and coverage run those files as they
+run any other.
+
 WHY NOT COEXISTENCE BY FILENAME. `read_all_gen_tests` is stem-scoped, so a
 capture filed under any stem is invisible to another file's `already_pinned`
 and t0c would still demand the pin. The split lives at t0c's listing site
@@ -56,19 +69,22 @@ instead; the dedicated stem only keeps the two writers off each other's
 
 from __future__ import annotations
 
+import hashlib
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_probe import (
+    ProbeBuild,
     capture_moved,
     is_probe_spec,
     narrow_then_to_agreement,
     observed_values,
     render_replay_test,
     split_env_worlds,
-    unperturbed_env,
 )
 from pipeline_core.domain.generation import (
     as_integration_test,
@@ -93,17 +109,10 @@ FailingAlone = Callable[[str, Sequence[str], Mapping[str, str]], Sequence[str]]
 # (the emitted file, its body) -> the gate now on it, or None when it does
 # not pass in its own world (`application.test_worlds.settle_test_gate`).
 Settle = Callable[[Path, str], str | None]
-# Recapture Then under an extra env: raw stdout, or None if the program
-# failed to run. Injected so the emitter does not own cargo.
-Recapture = Callable[[BehaviourSpec, Mapping[str, str]], str | None]
-# Why a pinned capture that is red in a run of another world leaves. The
-# observable env is read once per test process, so a capture's own `set_var`
-# does not hold once a sibling in the same binary has read it: run
-# `1878910-be648607` (2026-10-31) rendered `disabled` for every `::env` twin
-# in the capture-env binary. A red there says nothing about the crate, so the
-# row is not stamped as that round's verdict.
-WORLD_NOT_HELD = ("not verified: red in a test binary whose environment is "
-                  "not the world this capture pins")
+# Recapture Then under an extra env and one build of the original: raw
+# stdout, or None if the program failed to run. Injected so the emitter does
+# not own cargo.
+Recapture = Callable[[BehaviourSpec, Mapping[str, str], ProbeBuild], str | None]
 
 
 def verify_progress(keep: Sequence[BehaviourSpec]) -> tuple[int, int, int]:
@@ -124,19 +133,57 @@ def verify_progress(keep: Sequence[BehaviourSpec]) -> tuple[int, int, int]:
                 if s.then is not None and s.then.value))
 
 
-def out_of_world(spec: BehaviourSpec, run_world: Mapping[str, str] | None) -> bool:
-    """True when `spec` pins a world and the run that read it red was started
-    in another one (`run_world`; None when the run's world is not known)."""
-    return (bool(spec.required_env) and run_world is not None
-            and dict(spec.required_env) != dict(run_world))
-
-
 def behaviour_test_stem(cfg_cluster: str) -> str:
     """`behaviour_<cluster>` — the per-cluster stem. Two clusters harvesting
     into one `tests/` must not write the same file, and must not each write a
     numbered copy of the other's tests either."""
     safe = "".join(c if (c.isalnum() or c == "_") else "_" for c in cfg_cluster)
     return f"{BEHAVIOUR_TEST_STEM}_{safe}" if safe else BEHAVIOUR_TEST_STEM
+
+
+_WORLD = "_world_"
+
+
+def world_stem(cfg_cluster: str, required_env: Iterable[tuple[str, str]]) -> str:
+    """The test binary a capture pinned to `required_env` replays in:
+    `behaviour_<cluster>` when it pins nothing, else
+    `behaviour_<cluster>_world_<key>_<value>…_<digest>`, keys sorted.
+
+    One binary holds one world because the observable env is read once per
+    process (module docstring). The digest is of the pairs themselves, so two
+    worlds whose readable parts sanitize alike still get two binaries, and
+    the same world gets the same name on every emission."""
+    base = behaviour_test_stem(cfg_cluster)
+    pairs = sorted(dict(required_env).items())
+    if not pairs:
+        return base
+    readable = "".join(c if c.isalnum() else "_"
+                       for c in "_".join(f"{k}_{v}" for k, v in pairs).lower())
+    while "__" in readable:
+        readable = readable.replace("__", "_")
+    digest = hashlib.sha256(repr(pairs).encode("utf-8")).hexdigest()[:8]
+    return f"{base}{_WORLD}{readable.strip('_')}_{digest}"
+
+
+def is_world_stem_of(stem: str, cfg_cluster: str) -> bool:
+    """True when `stem` is one of `cfg_cluster`'s behaviour binaries: its base
+    stem or a :func:`world_stem`. The shape is matched whole, so the base
+    stem of a cluster whose name merely starts with `<cluster>_world_` is
+    not taken for one of this cluster's worlds."""
+    base = behaviour_test_stem(cfg_cluster)
+    return stem == base or re.fullmatch(
+        re.escape(base + _WORLD) + r"[a-z0-9_]*[a-z0-9]_[0-9a-f]{8}", stem) is not None
+
+
+def world_files(keep: Sequence[BehaviourSpec], cfg_cluster: str) -> dict[str, list[BehaviourSpec]]:
+    """Stem -> the captures replayed in that binary, stems sorted (the base
+    stem first). The one place a capture is given a test binary: every
+    render of the emitter goes through it, so a pinned capture cannot land
+    beside a capture of another world."""
+    out: dict[str, list[BehaviourSpec]] = {}
+    for spec in keep:
+        out.setdefault(world_stem(cfg_cluster, spec.required_env), []).append(spec)
+    return dict(sorted(out.items()))
 
 
 def replay_fn_name(spec: BehaviourSpec) -> str:
@@ -300,17 +347,19 @@ def no_verdict_culprits(
             for s in keep if replay_fn_name(s) in red]
 
 
-def _clear_previous(project_dir: Path, stem: str) -> None:
-    """Delete this cluster's previously emitted files so a re-entry rewrites
-    rather than accumulates. Only files carrying the writer's origin marker are
-    touched — an authored `tests/<stem>_gen_<N>.rs` is the crate's oracle and
-    is never ours to remove."""
+def _clear_previous(project_dir: Path, cfg_cluster: str) -> None:
+    """Delete this cluster's previously emitted files, its base file and
+    every world file, so a re-entry rewrites rather than accumulates and a
+    world that no capture pins any more leaves no binary behind. Only files
+    carrying the writer's origin marker are touched — an authored
+    `tests/<stem>_gen_<N>.rs` is the crate's oracle and is never ours to
+    remove."""
     tests = Path(project_dir) / "tests"
     if not tests.is_dir():
         return
     for f in sorted(tests.iterdir()):
         parsed = parse_gen_tests_integration_filename(f.name)
-        if not parsed or parsed[0] != stem:
+        if not parsed or not is_world_stem_of(parsed[0], cfg_cluster):
             continue
         try:
             text = f.read_text(encoding="utf-8")
@@ -442,6 +491,33 @@ def _unexecuted(keep: Sequence[BehaviourSpec], executed: frozenset[str]) -> list
     return [s for s in keep if replay_fn_name(s) not in executed]
 
 
+
+
+@dataclass(frozen=True)
+class _Reading:
+    """One test binary's verify run: process ok, the output, the names
+    libtest failed and executed, and whether it reported a verdict."""
+
+    ok: bool
+    out: str
+    failed: frozenset[str]
+    executed: frozenset[str]
+    saw: bool
+
+
+def _read(run: tuple[bool, str]) -> _Reading:
+    ok, out = run
+    failed, executed, saw = _verdict_of(out)
+    return _Reading(ok, out, failed, executed, saw)
+
+
+def _union(sets: Iterable[Iterable[str]]) -> frozenset[str]:
+    out: set[str] = set()
+    for names in sets:
+        out |= set(names)
+    return frozenset(out)
+
+
 def emit_behaviour_tests(
     project_dir: Path,
     cfg_cluster: str,
@@ -455,53 +531,56 @@ def emit_behaviour_tests(
     cfg_attr: str = "",
     balanced: Callable[[str], bool] = rust_delimiters_balanced,
     recapture: Recapture | None = None,
-) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
-    """Write the replayable captures as one `tests/<stem>_gen_1.rs`, verified.
+) -> tuple[tuple[Path, ...], tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
+    """Write the replayable captures as one `tests/<stem>_gen_1.rs` per
+    environment world (`world_files`), verified.
 
-    Returns `(path or None, dropped behaviour ids, misses, emitted specs)`.
-    The caller removes the dropped ids from the suite, upserts the emitted
-    specs (capture-world originals with `required_env` set, plus perturb-world
-    twins), and writes the misses to the sidecar.
+    Returns `(paths, dropped behaviour ids, misses, emitted specs)`; `paths`
+    is empty when nothing was emitted. The caller removes the dropped ids
+    from the suite, upserts the emitted specs (capture-world originals with
+    `required_env` set, plus perturb-world twins), and writes the misses to
+    the sidecar.
 
-    A capture whose replay disagrees with it at the capture env is not a
-    specification. A capture whose value moves under `perturb_env` is
-    recaptured in that world (`recapture`) and kept as two tests; without a
-    recapture that prints a different Then it is withdrawn — the contract
-    that shipped as drop-the-mover, now the fallback when the other world
-    cannot be read. Leaving a mover in the suite as a single Then would
-    hand t1.5 a MUST that no tree can satisfy.
+    A capture whose replay disagrees with it in its own world's binary is
+    not a specification. A capture whose value moves under `perturb_env` is
+    recaptured in that world under every :class:`ProbeBuild` of the original
+    (`recapture`), and kept as two tests in two binaries, the twin pinning
+    only what the builds agreed on; without a recapture under every build
+    that prints a different Then it is withdrawn. Leaving a mover in the
+    suite as a single Then would hand t1.5 a MUST that no tree can satisfy.
 
-    ``failing_alone(stem, names)`` names the tests of the green file that do
-    not pass alone in a process of their own (`adapters.test_worlds`); their
-    captures are withdrawn like a replay disagreement. Both callables are
-    required: a default that skipped them admitted the file as written. A
-    test that passes
-    only beside another test's side effect on process state is not a
-    specification of the crate (run `801510-bb22799f`, 2026-10-20: a t0c test
-    passed only after a sibling's `set_var`, and task 3 read it red or green
-    by scheduling).
+    ``failing_alone(stem, names, extra)`` names the tests of a green binary
+    that do not pass alone in a process of their own
+    (`adapters.test_worlds`); their captures are withdrawn like a replay
+    disagreement. Both callables are required: a default that skipped them
+    admitted the file as written. A test that passes only beside another
+    test's side effect on process state is not a specification of the crate
+    (run `801510-bb22799f`, 2026-10-20: a t0c test passed only after a
+    sibling's `set_var`, and task 3 read it red or green by scheduling).
 
-    ``settle(dest, body)`` measures the verified file's build worlds and
+    ``settle(dest, body)`` measures each verified file's build worlds and
     rewrites its gate to them (`test_worlds.settle_test_gate`, the reading
-    task 0c's blocks and the doc examples take). Before it, the file stayed
-    gated to the world it was captured in, so a capture that also replays in
-    another world checked nothing there. None from it means the file does
-    not pass where it was written, and nothing is kept.
+    task 0c's blocks and the doc examples take). None from it means that
+    file does not pass where it was written, and its captures go; the other
+    files are separate binaries and stay.
 
-    None with no drops is the expected state for a suite whose captures are all
-    legacy free-form blobs. A delimiter-unbalanced render is refused rather
-    than written: a broken file in `tests/` does not fail one test, it stops
-    the whole crate compiling and every verdict with it."""
+    A file that reports no verdict, a red verdict naming none of its
+    captures, or a run that did not execute its tests withdraws that file's
+    captures, never another file's: each binary is built and run on its own.
+
+    None with no drops is the expected state for a suite whose captures are
+    all legacy free-form blobs. A delimiter-unbalanced render is refused
+    rather than written: a broken file in `tests/` does not fail one test,
+    it stops the whole crate compiling and every verdict with it."""
     if not callable(failing_alone) or not callable(settle):
         raise TypeError(
             "emit_behaviour_tests requires the alone check and the world settle")
-    stem = behaviour_test_stem(cfg_cluster)
-    _clear_previous(project_dir, stem)
+    _clear_previous(project_dir, cfg_cluster)
     keep = replayable(specs)
     misses: list[dict[str, str]] = []
     dropped: list[str] = []
     if not keep:
-        return None, (), misses, ()
+        return (), (), misses, ()
 
     # The verify output of the round a drop is charged to. A verdict drop
     # can name a capture that round passed (the "naming no capture" exits
@@ -522,89 +601,132 @@ def emit_behaviour_tests(
         dropped.append(spec.behaviour_id)
         misses.append(row)
 
-    # The world each verify run starts in. The capture-env run is the world
-    # the captures were taken in (`unperturbed_env` of the flip); without a
-    # flip no capture is split here and the world is not known.
-    capture_world = unperturbed_env(perturb_env) if perturb_env else None
-    world_went: list[BehaviourSpec] = []
-
-    def _drop_red(run_world: Mapping[str, str] | None) -> Callable[[BehaviourSpec, str], None]:
-        """The drop for a capture a red verdict names: that round's verdict,
-        unless the capture pins another world than the run's
-        (:data:`WORLD_NOT_HELD`)."""
-        def drop(spec: BehaviourSpec, reason: str) -> None:
-            if out_of_world(spec, run_world):
-                world_went.append(spec)
-                _drop(spec, WORLD_NOT_HELD)
-            else:
-                _drop(spec, reason, verdict=True)
-        return drop
-
-    def _log_world_went() -> None:
-        if world_went:
-            log(
-                f"  [task0d] cluster {cfg_cluster}: {len(world_went)} world-pinned "
-                "capture(s) were red in a test binary of the other world and "
-                "were withdrawn unverified (the binary does not hold a pinned "
-                "environment)."
-            )
-            world_went.clear()
-
     (Path(project_dir) / "tests").mkdir(parents=True, exist_ok=True)
-    dest = _free_dest(project_dir, stem)
+    dests: dict[str, Path] = {}
 
-    def _withdraw_unrun(missing: list[BehaviourSpec], *, perturbed: bool) -> None:
-        """Fail closed on a completed run that did not execute the emitted
-        tests. Nothing was verified, so nothing may be admitted — and it is
-        withdrawn under its own reason rather than the build failure's, because
-        the file compiled fine and the fix is a cfg/env one."""
-        which = "environment-perturbed replay" if perturbed else "replay"
-        log(
-            f"  [task0d] cluster {cfg_cluster}: the {which} completed without running "
-            f"{len(missing)} of {len(keep)} emitted test(s) — the file's cfg does not hold "
-            f"under the verification env; {len(keep)} capture(s) withdrawn."
-        )
-        emit(
-            "task0d.behaviour_tests_not_executed",
-            data={
-                "cluster": cfg_cluster,
-                "captures": len(keep),
-                "not_executed": len(missing),
-                "perturbed": perturbed,
-            },
-        )
-        with suppress(OSError):
-            dest.unlink()
-        for s in keep:
-            _drop(s, f"{which} completed but did not run the emitted test — not verified")
+    def _dest(stem: str) -> Path:
+        if stem not in dests:
+            dests[stem] = _free_dest(project_dir, stem)
+        return dests[stem]
 
-    def _drop_located(culprits: list[tuple[BehaviourSpec, str]], *, perturbed: bool) -> bool:
-        """Withdraw the located captures and say whether the rest go on to
-        another round: False when nothing was located, or nothing would be
-        left, so the caller's whole-file exit decides."""
+    def _unlink(stem: str) -> None:
+        path = dests.pop(stem, None)
+        if path is not None:
+            with suppress(OSError):
+                path.unlink()
+
+    def _unlink_all() -> None:
+        for stem in list(dests):
+            _unlink(stem)
+
+    def _withdraw_file(stem: str, files: Mapping[str, list[BehaviourSpec]],
+                       reason: str, *, verdict: bool = False) -> None:
+        """Every capture of one binary goes and its file is removed."""
         nonlocal keep
-        gone = {replay_fn_name(s) for s, _why in culprits}
-        rest = [s for s in keep if replay_fn_name(s) not in gone]
-        if not gone or not rest:
-            return False
-        which = "environment-perturbed replay" if perturbed else "replay"
-        log(
-            f"  [task0d] cluster {cfg_cluster}: the {which} reported no verdict — "
-            f"{len(gone)} capture(s) located as the cause and withdrawn "
-            f"({culprits[0][1]}); {len(rest)} rendered again."
-        )
-        emit(
-            "task0d.behaviour_tests_located",
-            data={"cluster": cfg_cluster, "withdrawn": len(gone), "kept": len(rest),
-                  "perturbed": perturbed, "first": culprits[0][1][:300]},
-        )
-        for spec, why in culprits:
-            _drop(spec, why)
-        keep = rest
-        return True
+        gone = {replay_fn_name(s) for s in files[stem]}
+        for s in files[stem]:
+            _drop(s, reason, verdict=verdict)
+        keep = [s for s in keep if replay_fn_name(s) not in gone]
+        _unlink(stem)
 
-    # The file is on disk from `write_text` onwards, and it is only correct to
-    # leave one there that a verification run has been seen green. Every
+    def _which(perturbed: bool) -> str:
+        return "environment-perturbed replay" if perturbed else "replay"
+
+    def _no_verdict(readings: Mapping[str, _Reading], files: Mapping[str, list[BehaviourSpec]],
+                    bodies: Mapping[str, str], extra: Mapping[str, str], *, perturbed: bool) -> bool:
+        """Settle the binaries that reported no verdict; False when none did.
+
+        The binary did not build, or died before libtest reported. The
+        captures the reading locates in that file go and the rest are
+        rendered again (`no_verdict_culprits`). A reading that names none
+        withdraws that file: a `tests/` file that does not build takes the
+        whole crate's oracle with it, and a perturbed run without a trailer
+        cannot rule environment-dependence out."""
+        nonlocal keep
+        silent = [stem for stem, r in readings.items() if not r.saw]
+        for stem in silent:
+            r = readings[stem]
+            culprits = no_verdict_culprits(
+                r.out, files[stem], bodies[stem], dests[stem], r.executed,
+                lambda st, names: failing_alone(st, names, extra))
+            if culprits:
+                gone = {replay_fn_name(s) for s, _why in culprits}
+                log(
+                    f"  [task0d] cluster {cfg_cluster}: the {_which(perturbed)} of "
+                    f"{dests[stem].name} reported no verdict — {len(gone)} capture(s) "
+                    f"located as the cause and withdrawn ({culprits[0][1]}); "
+                    f"{len(files[stem]) - len(gone)} rendered again."
+                )
+                emit(
+                    "task0d.behaviour_tests_located",
+                    data={"cluster": cfg_cluster, "file": dests[stem].name,
+                          "withdrawn": len(gone), "kept": len(files[stem]) - len(gone),
+                          "perturbed": perturbed, "first": culprits[0][1][:300]},
+                )
+                for spec, why in culprits:
+                    _drop(spec, why)
+                keep = [s for s in keep if replay_fn_name(s) not in gone]
+                continue
+            log(
+                f"  [task0d] cluster {cfg_cluster}: the {_which(perturbed)} of "
+                f"{dests[stem].name} reported no verdict (rc ok={r.ok}) — "
+                f"{len(files[stem])} capture(s) withdrawn. {r.out.strip()[-400:]}"
+            )
+            emit("task0d.behaviour_tests_unverifiable",
+                 data={"cluster": cfg_cluster, "file": dests[stem].name,
+                       "captures": len(files[stem]), "perturbed": perturbed})
+            _withdraw_file(
+                stem, files,
+                "perturbed replay reported no verdict — environment-dependence not ruled out"
+                if perturbed else "replay did not build or reported no verdict")
+        return bool(silent)
+
+    def _unrun(readings: Mapping[str, _Reading], files: Mapping[str, list[BehaviourSpec]],
+               *, perturbed: bool) -> bool:
+        """Fail closed on a completed run that did not execute a file's
+        tests; False when every file ran all of its own. Nothing in that
+        file was verified, so nothing of it may be admitted — and it goes
+        under its own reason rather than the build failure's, because the
+        file compiled fine and the fix is a cfg/env one."""
+        hit = False
+        for stem, r in readings.items():
+            missing = _unexecuted(files[stem], r.executed)
+            if not missing:
+                continue
+            hit = True
+            log(
+                f"  [task0d] cluster {cfg_cluster}: the {_which(perturbed)} of "
+                f"{dests[stem].name} completed without running {len(missing)} of "
+                f"{len(files[stem])} emitted test(s) — the file's cfg does not hold "
+                f"under the verification env; {len(files[stem])} capture(s) withdrawn."
+            )
+            emit(
+                "task0d.behaviour_tests_not_executed",
+                data={"cluster": cfg_cluster, "file": dests[stem].name,
+                      "captures": len(files[stem]), "not_executed": len(missing),
+                      "perturbed": perturbed},
+            )
+            _withdraw_file(stem, files,
+                           f"{_which(perturbed)} completed but did not run the emitted test — not verified")
+        return hit
+
+    def _nameless(readings: Mapping[str, _Reading], files: Mapping[str, list[BehaviourSpec]],
+                  failed: frozenset[str]) -> list[str]:
+        """The binaries whose red verdict names none of their own captures —
+        which cannot be made green by dropping anything, so the file goes."""
+        out = []
+        for stem, r in readings.items():
+            mine = {replay_fn_name(s) for s in files[stem]}
+            if r.failed & failed and not (r.failed & mine):
+                out.append(stem)
+        return out
+
+    def _none_left() -> tuple[tuple[Path, ...], tuple[str, ...], list[dict[str, str]], tuple[BehaviourSpec, ...]]:
+        _unlink_all()
+        return (), tuple(dropped), misses, ()
+
+    # Every file is on disk from `write_text` onwards, and it is only correct
+    # to leave one there that a verification run has been seen green. Every
     # ordinary exit below already removes it; an EXCEPTION did not, and
     # `run_task0d` catches whatever this raises, logs `non-fatal, suite kept`
     # and then saves the suite — so a raise here used to leave an unverified
@@ -616,6 +738,8 @@ def emit_behaviour_tests(
             # A round re-renders only after the one before it made progress.
             # A branch that continues without it is a defect of that branch:
             # loud, bounded, and nothing stamped red without a reading.
+            if not keep:
+                return _none_left()
             now = verify_progress(keep)
             if progress is not None and not now < progress:
                 log(
@@ -627,15 +751,14 @@ def emit_behaviour_tests(
                 emit("task0d.behaviour_verify_no_progress",
                      data={"cluster": cfg_cluster, "branch": last_round,
                            "captures": len(keep)})
-                with suppress(OSError):
-                    dest.unlink()
                 for s in keep:
                     _drop(s, "not verified: the round made no progress")
-                return None, tuple(dropped), misses, ()
+                return _none_left()
             progress = now
             # One capture whose own replay text fails the check is dropped.
-            # The others are rendered again, and the assembled file is checked
-            # with the same function: a broken tests/ file is still not written.
+            # The others are rendered again, and each assembled file is
+            # checked with the same function: a broken tests/ file is still
+            # not written.
             good, bad = _balanced_replay_blocks(keep, balanced)
             for s in bad:
                 _drop(s, "replay refused: delimiters unbalanced")
@@ -647,52 +770,37 @@ def emit_behaviour_tests(
                     "text failed the check."
                 )
                 emit("task0d.behaviour_tests_refused", data={"cluster": cfg_cluster, "captures": len(bad)})
-                with suppress(OSError):
-                    dest.unlink()
-                return None, tuple(dropped), misses, ()
-            body = render_behaviour_test_file(keep, crate=crate, cfg_attr=cfg_attr)
-            if not balanced(body):
-                log(
-                    f"  [task0d] cluster {cfg_cluster}: behaviour test file REFUSED "
-                    f"(delimiters unbalanced) — {len(keep)} capture(s) not emitted."
-                )
-                emit("task0d.behaviour_tests_refused", data={"cluster": cfg_cluster, "captures": len(keep)})
-                with suppress(OSError):
-                    dest.unlink()
-                for s in keep:
-                    _drop(s, "replay refused: delimiters unbalanced")
-                return None, tuple(dropped), misses, ()
-            dest.write_text(body, encoding="utf-8")
+                return _none_left()
+            files = world_files(keep, cfg_cluster)
+            for stale in [st for st in dests if st not in files]:
+                _unlink(stale)
+            bodies = {st: render_behaviour_test_file(fs, crate=crate, cfg_attr=cfg_attr)
+                      for st, fs in files.items()}
+            refused = [st for st, b in bodies.items() if not balanced(b)]
+            if refused:
+                for st in refused:
+                    log(
+                        f"  [task0d] cluster {cfg_cluster}: behaviour test file REFUSED "
+                        f"(delimiters unbalanced) — {len(files[st])} capture(s) of "
+                        f"{st} not emitted."
+                    )
+                    emit("task0d.behaviour_tests_refused",
+                         data={"cluster": cfg_cluster, "captures": len(files[st]), "stem": st})
+                    _withdraw_file(st, files, "replay refused: delimiters unbalanced")
+                last_round = "refused"
+                continue
+            for st, body in bodies.items():
+                _dest(st).write_text(body, encoding="utf-8")
 
-            ok, out = verify(dest.stem, {})
-            failed, executed, saw_verdict = _verdict_of(out)
-            round_out = out
+            readings = {st: _read(verify(dests[st].stem, {})) for st in files}
+            round_out = "\n".join(r.out for r in readings.values())
+            failed = _union(r.failed for r in readings.values())
             round_failed = failed
-            if not saw_verdict:
-                # No verdict at all: the file did not compile, or the binary died
-                # before libtest reported anything. The captures the reading
-                # locates go; the rest are rendered again. A reading that names
-                # none withdraws the file — a tests/ file that does not build
-                # takes the whole crate's oracle with it.
-                culprits = no_verdict_culprits(
-                    out, keep, body, dest, executed,
-                    lambda st, names: failing_alone(st, names, {}))
-                if _drop_located(culprits, perturbed=False):
-                    last_round = "located no-verdict"
-                    continue
-                log(
-                    f"  [task0d] cluster {cfg_cluster}: emitted behaviour tests produced no "
-                    f"verdict (rc ok={ok}) — {len(keep)} capture(s) withdrawn. "
-                    f"{out.strip()[-400:]}"
-                )
-                emit("task0d.behaviour_tests_unverifiable", data={"cluster": cfg_cluster, "captures": len(keep)})
-                with suppress(OSError):
-                    dest.unlink()
-                for s in keep:
-                    _drop(s, "replay did not build or reported no verdict")
-                return None, tuple(dropped), misses, ()
+            if _no_verdict(readings, files, bodies, {}, perturbed=False):
+                last_round = "no-verdict"
+                continue
             if failed:
-                keep, _narrowed = _narrow_world_pinned(keep, failed, out)
+                keep, _narrowed = _narrow_world_pinned(keep, failed, round_out)
                 if _narrowed:
                     log(
                         f"  [task0d] cluster {cfg_cluster}: narrowed "
@@ -702,30 +810,22 @@ def emit_behaviour_tests(
                     )
                     last_round = "narrow"
                     continue
-                keep, went = _withdraw(keep, failed, _drop_red(capture_world),
+                keep, went = _withdraw(keep, failed, lambda s, why: _drop(s, why, verdict=True),
                                        "replay disagreed with the capture")
-                n_world = len(world_went)
                 log(
-                    f"  [task0d] cluster {cfg_cluster}: {len(went) - n_world} capture(s) did not "
+                    f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
                     f"reproduce as a test against the original and were withdrawn."
                 )
-                _log_world_went()
-                if keep and went:
-                    last_round = "withdraw"
-                    continue
-                # Nothing left, or a red verdict that names no capture in this file
-                # — which cannot be made green by dropping anything. Either way the
-                # file does not stay.
-                if keep:
-                    for s in keep:
-                        _drop(s, "replay red on a verdict naming no capture in the file", verdict=True)
-                with suppress(OSError):
-                    dest.unlink()
-                return None, tuple(dropped), misses, ()
-            if unrun := _unexecuted(keep, executed):
-                _withdraw_unrun(unrun, perturbed=False)
-                return None, tuple(dropped), misses, ()
-            alone = frozenset(failing_alone(dest.stem, sorted(executed), {}))
+                for st in _nameless(readings, files, failed):
+                    _withdraw_file(st, files, "replay red on a verdict naming no capture in the file",
+                                   verdict=True)
+                last_round = "withdraw"
+                continue
+            if _unrun(readings, files, perturbed=False):
+                last_round = "unrun"
+                continue
+            alone = _union(failing_alone(dests[st].stem, sorted(r.executed), {})
+                           for st, r in readings.items())
             if alone:
                 keep, went = _withdraw(
                     keep, alone, _drop,
@@ -735,52 +835,29 @@ def emit_behaviour_tests(
                     f"  [task0d] cluster {cfg_cluster}: {len(went)} "
                     "capture(s) pass only beside the file's other tests "
                     "and were withdrawn.")
-                if keep and went:
-                    last_round = "alone"
-                    continue
-                with suppress(OSError):
-                    dest.unlink()
-                for s in keep:
-                    _drop(s, "replay red alone on a test naming no capture")
-                return None, tuple(dropped), misses, ()
-
-            # Green under the capture env. Now the axis run-twice cannot see: the
-            # same binary under a different environment. A capture whose value
-            # moves with `RUST_BACKTRACE` is stable on every run and still not a
-            # specification of the CRATE.
-            if perturb_env:
-                _ok2, out2 = verify(dest.stem, perturb_env)
-                failed2, executed2, saw2 = _verdict_of(out2)
-                if not saw2:
-                    # Same rule as the capture-env run. The binary compiled for
-                    # that run, so a no-verdict here is a death: the captures it
-                    # locates alone under this env go and the file is rendered
-                    # again. Otherwise fail closed: no trailer cannot rule
-                    # env-dependence out.
-                    culprits = no_verdict_culprits(
-                        out2, keep, body, dest, executed2,
-                        lambda st, names: failing_alone(st, names, perturb_env))
-                    if _drop_located(culprits, perturbed=True):
-                        last_round = "located perturbed no-verdict"
-                        continue
-                    log(
-                        f"  [task0d] cluster {cfg_cluster}: the environment-perturbed "
-                        f"replay reported no verdict — {len(keep)} capture(s) withdrawn."
-                    )
-                    emit(
-                        "task0d.behaviour_tests_unverifiable",
-                        data={"cluster": cfg_cluster, "captures": len(keep), "perturbed": True},
-                    )
-                    with suppress(OSError):
-                        dest.unlink()
+                if not went:
                     for s in keep:
-                        _drop(s, "perturbed replay reported no verdict — environment-dependence not ruled out")
-                    return None, tuple(dropped), misses, ()
+                        _drop(s, "replay red alone on a test naming no capture")
+                    return _none_left()
+                last_round = "alone"
+                continue
+
+            # Green under the capture env. Now the axis run-twice cannot see:
+            # the same binaries under a different environment. A capture whose
+            # value moves with `RUST_BACKTRACE` is stable on every run and
+            # still not a specification of the CRATE.
+            if perturb_env:
+                readings2 = {st: _read(verify(dests[st].stem, perturb_env)) for st in files}
+                if _no_verdict(readings2, files, bodies, perturb_env, perturbed=True):
+                    last_round = "perturbed no-verdict"
+                    continue
+                failed2 = _union(r.failed for r in readings2.values())
                 if failed2:
-                    round_out = out2
+                    round_out = "\n".join(r.out for r in readings2.values())
                     round_failed = failed2
                     still: list[BehaviourSpec] = []
                     env_went: list[BehaviourSpec] = []
+                    not_held: list[str] = []
                     split = False
                     env_reason = f"environment-dependent: the observed value moves under {dict(perturb_env)}"
                     for spec in keep:
@@ -788,35 +865,33 @@ def emit_behaviour_tests(
                             still.append(spec)
                             continue
                         if spec.required_env:
-                            # Already pinned to one world. A red under this
-                            # extra is a replay disagreement in that world
-                            # when the extra IS that world. Otherwise it is
-                            # the binary not holding the pin, and it goes on
-                            # its own name: keeping it sent the file to the
-                            # "naming no capture" exit below with a verdict
-                            # that named it.
-                            if out_of_world(spec, perturb_env):
-                                _drop_red(perturb_env)(spec, "")
-                            else:
-                                env_went.append(spec)
-                                _drop(spec, "replay disagreed with the capture", verdict=True)
+                            # Its binary sets its world before anything reads
+                            # it, so the harness env cannot reach it and this
+                            # red is against the model, not a world. Loud,
+                            # then judged in its own world.
+                            not_held.append(
+                                f"{world_stem(cfg_cluster, spec.required_env)}::{replay_fn_name(spec)}")
+                            _drop(spec, "replay disagreed with the capture", verdict=True)
                             continue
-                        # TWICE, deliberately: the twin's Then may only pin
-                        # what two independent processes printed. A render
-                        # whose tail names the rendering process (a captured
-                        # backtrace's frames) agrees on its head and nothing
-                        # else, and `split_env_worlds` writes that head as a
-                        # prefix Then instead of an `assert_eq!` that is red
-                        # by construction in the test binary (run
-                        # `330242-0be2c3e1`, 2026-09-03: the only Debug probe
-                        # of each cluster withdrawn as "replay disagreed with
-                        # the capture").
-                        outs = [recapture(spec, perturb_env)
-                                for _ in range(2)] if recapture is not None else []
-                        stdouts = [o for o in outs if o is not None]
-                        if not stdouts or not capture_moved(spec, stdouts[0]):
+                        # Once per build of the original, deliberately: the
+                        # twin's Then may only pin what the crate printed
+                        # whatever its build. Two runs of one build agree on
+                        # the frames of a captured backtrace, and the twin
+                        # then narrows to the original's private fns at their
+                        # lines (`ProbeBuild`).
+                        outs = ([recapture(spec, perturb_env, build) for build in ProbeBuild]
+                                if recapture is not None else [])
+                        if not outs or outs[0] is None or not capture_moved(spec, outs[0]):
                             env_went.append(spec)
                             _drop(spec, env_reason, verdict=True)
+                            continue
+                        stdouts = [o for o in outs if o is not None]
+                        if len(stdouts) < len(outs):
+                            env_went.append(spec)
+                            _drop(spec, f"{env_reason}; the perturbed world did not run under "
+                                        "every build of the original, so what the build "
+                                        "printed cannot be told from what the crate did",
+                                  verdict=True)
                             continue
                         worlds = split_env_worlds(spec, stdouts, perturb_env)
                         if worlds is None:
@@ -830,6 +905,15 @@ def emit_behaviour_tests(
                         still.append(twin)
                         split = True
                     keep = still
+                    if not_held:
+                        log(
+                            f"  [task0d] cluster {cfg_cluster}: HEALTH ‼ "
+                            f"BEHAVIOUR_WORLD_NOT_HELD — {len(not_held)} pinned "
+                            "capture(s) changed verdict with the harness env in a "
+                            "binary that sets their world: " + ", ".join(not_held)
+                        )
+                        emit("task0d.behaviour_world_not_held",
+                             data={"cluster": cfg_cluster, "tests": not_held})
                     if split:
                         log(
                             f"  [task0d] cluster {cfg_cluster}: recaptured "
@@ -841,41 +925,35 @@ def emit_behaviour_tests(
                             f"  [task0d] cluster {cfg_cluster}: {len(env_went)} capture(s) are "
                             "environment-dependent and were withdrawn."
                         )
-                    world_moved = bool(world_went)
-                    _log_world_went()
-                    if keep and (split or env_went or world_moved):
-                        last_round = "perturbed"
-                        continue
-                    if keep:
-                        for s in keep:
-                            _drop(s, "perturbed replay red on a verdict naming no capture in the file",
-                                  verdict=True)
-                    with suppress(OSError):
-                        dest.unlink()
-                    return None, tuple(dropped), misses, ()
-                if unrun := _unexecuted(keep, executed2):
-                    _withdraw_unrun(unrun, perturbed=True)
-                    return None, tuple(dropped), misses, ()
+                    for st in _nameless(readings2, files, failed2):
+                        _withdraw_file(st, files,
+                                       "perturbed replay red on a verdict naming no capture in the file",
+                                       verdict=True)
+                    last_round = "perturbed"
+                    continue
+                if _unrun(readings2, files, perturbed=True):
+                    last_round = "perturbed unrun"
+                    continue
 
-            if settle(dest, body) is None:
-                with suppress(OSError):
-                    dest.unlink()
-                for s in keep:
-                    _drop(s, "does not pass in the world it was captured in "
-                          "when run by the world settle")
-                return None, tuple(dropped), misses, ()
+            for st in list(files):
+                if settle(dests[st], bodies[st]) is None:
+                    _withdraw_file(st, files, "does not pass in the world it was captured in "
+                                   "when run by the world settle")
+            if not dests:
+                return _none_left()
+            names = [dests[st].name for st in sorted(dests)]
             log(
                 f"  [task0d] cluster {cfg_cluster}: {len(keep)} captured behaviour(s) "
-                f"emitted as {dest.name}, verified against the original"
+                f"emitted as {', '.join(names)}, verified against the original"
                 f"{' and under a perturbed environment' if perturb_env else ''} — "
                 f"observed values, not guessed ones."
             )
             emit(
                 "task0d.behaviour_tests_emitted",
-                data={"cluster": cfg_cluster, "captures": len(keep), "file": dest.name, "withdrawn": len(dropped)},
+                data={"cluster": cfg_cluster, "captures": len(keep), "file": names[0],
+                      "files": names, "withdrawn": len(dropped)},
             )
-            return dest, tuple(dropped), misses, tuple(keep)
+            return tuple(dests[st] for st in sorted(dests)), tuple(dropped), misses, tuple(keep)
     except BaseException:
-        with suppress(OSError):
-            dest.unlink()
+        _unlink_all()
         raise

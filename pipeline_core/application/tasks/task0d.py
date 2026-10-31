@@ -51,7 +51,7 @@ from pipeline_core.domain.behaviour_coverage import is_test_assertion_spec
 from pipeline_core.domain.behaviour_probe import (
     PROBE_BATCH_SIZE,
     CapturedProbe,
-    ProbeResult,
+    ProbeBuild,
     batches,
     captured_spec,
     class_prompts,
@@ -101,6 +101,7 @@ from pipeline_core.domain.workspace_layout import (
 )
 from pipeline_core.domain.world_book import project_book, union_glossary, union_worlds
 from pipeline_core.phases import phase_scope, phase_skipped
+from pipeline_core.ports.behaviour_probe import RunProbe
 from pipeline_core.prompts.behaviour_rules import (
     build_probe_repair_prompt,
     build_rule_probe_prompt,
@@ -126,7 +127,7 @@ class EmitTests(Protocol):
         failing_alone: FailingAlone, settle: Settle,
         perturb_env: Mapping[str, str] = ..., cfg_attr: str = ...,
         recapture: Recapture | None = ...,
-    ) -> tuple[Path | None, tuple[str, ...], list[dict[str, str]],
+    ) -> tuple[tuple[Path, ...], tuple[str, ...], list[dict[str, str]],
                tuple[BehaviourSpec, ...]]: ...
 
 
@@ -156,7 +157,7 @@ class Task0dDeps:
     # `mod error;` is, because `Error` is declared at the root).
     enumerate_mods: Callable[[Path], list[ModRecord] | None]
     enumerate_types: Callable[[Path], list[TypeRecord] | None]
-    run_probe: Callable[..., ProbeResult]
+    run_probe: RunProbe
     exercises_by_coverage: Callable[..., object]
     # The uncapturable record. A probe that fails to compile, fails to run,
     # times out, prints nothing, is refused as not value-bearing, or does not
@@ -169,10 +170,11 @@ class Task0dDeps:
     # What `record_misses` wrote, so a later stage of the same pass adds its
     # rows instead of rewriting the file without the harvest's.
     load_misses: Callable[[Path, str], list[dict[str, str]]] = lambda _p, _c: []
-    # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`,
-    # after compiling and running them against the original.
+    # Writes the replayable captures as `tests/behaviour_<cluster>_gen_1.rs`
+    # plus one `tests/behaviour_<cluster>_world_…_gen_1.rs` per pinned
+    # environment, after compiling and running them against the original.
     emit_tests: EmitTests = (
-        lambda *_a, **_k: (None, (), [], ())
+        lambda *_a, **_k: ((), (), [], ())
     )
     # Compiles and runs ONE emitted test binary under this cluster's env plus
     # any extra: (project_dir, cluster, stem, extra_env) -> (ok, output). The
@@ -670,9 +672,10 @@ def _emit_captures(
     be replayed is not a specification, and leaving it listed would hand
     t1.5 a MUST no tree can meet."""
 
-    def _recapture(spec: BehaviourSpec, extra: Mapping[str, str]) -> str | None:
+    def _recapture(spec: BehaviourSpec, extra: Mapping[str, str], build: ProbeBuild) -> str | None:
         program = program_for(spec, crate=module_name)
-        result = deps.run_probe(project_dir, cluster, program, f"{cluster.name}_env", extra_env=dict(extra))
+        result = deps.run_probe(project_dir, cluster, program, f"{cluster.name}_env",
+                                extra_env=dict(extra), build=build)
         if result.ok and result.stdout.strip():
             return result.stdout
         return None
@@ -682,7 +685,7 @@ def _emit_captures(
     if alone_check is None or settle_gate is None:
         raise TypeError(
             "behaviour emission requires the alone check and the world settle")
-    _dest, withdrawn, misses, emitted = deps.emit_tests(
+    _paths, withdrawn, misses, emitted = deps.emit_tests(
         project_dir,
         cluster.name,
         suite.specs,

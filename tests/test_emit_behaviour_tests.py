@@ -30,15 +30,18 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.application.emit_behaviour_tests import (
-    WORLD_NOT_HELD,
     behaviour_test_stem,
     emit_behaviour_tests,
+    is_world_stem_of,
     replay_fn_name,
     verify_progress,
+    world_files,
+    world_stem,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_probe import (
     CapturedProbe,
+    ProbeBuild,
     captured_spec,
     probe_spec,
 )
@@ -115,7 +118,7 @@ def _emit(
     # are a check that ran and found nothing to withdraw.
     kw.setdefault("failing_alone", lambda _stem, _names, _env: ())
     kw.setdefault("settle", lambda _dest, body: body)
-    dest, dropped, misses, _emitted = emit_behaviour_tests(
+    paths, dropped, misses, _emitted = emit_behaviour_tests(
         tmp,
         "stable",
         specs,
@@ -123,7 +126,14 @@ def _emit(
         verify=verify,
         **kw,  # type: ignore[arg-type]
     )
-    return dest, dropped, misses
+    return (paths[0] if paths else None), dropped, misses
+
+
+def _emitted_text(tmp: Path) -> str:
+    """Every emitted file of the cluster, base first: a pinned capture lives
+    in its world's binary, not beside the unpinned ones."""
+    files = sorted((tmp / "tests").glob(f"{_STEM}*_gen_*.rs"))
+    return "\n".join(f.read_text(encoding="utf-8") for f in files)
 
 
 def test_a_capture_whose_replay_disagrees_with_it_is_withdrawn(tmp_path: Path) -> None:
@@ -173,8 +183,8 @@ def test_an_environment_dependent_capture_is_withdrawn(tmp_path: Path) -> None:
 
 def test_an_environment_dependent_capture_is_emitted_as_two_worlds(tmp_path: Path) -> None:
     """A recapture that prints a different Then is TWO tests, each pinning
-    its world with set_var, not a withdrawal. The original id stays; the
-    twin is `::env`."""
+    its world with set_var, not a withdrawal, and each in the binary of its
+    world. The original id stays; the twin is `::env`."""
     from dataclasses import replace as dc_replace
 
     from pipeline_core.domain.behaviour_probe import env_twin_id
@@ -183,7 +193,7 @@ def test_an_environment_dependent_capture_is_emitted_as_two_worlds(tmp_path: Pat
     env_red = frozenset({replay_fn_name(moving)})
     perturb = {"RUST_BACKTRACE": "1"}
 
-    def recapture(spec: BehaviourSpec, extra: Mapping[str, str]) -> str | None:
+    def recapture(spec: BehaviourSpec, extra: Mapping[str, str], _build: ProbeBuild) -> str | None:
         assert extra == perturb
         if spec.behaviour_id == moving.behaviour_id:
             return "captured frames\n"
@@ -197,15 +207,15 @@ def test_an_environment_dependent_capture_is_emitted_as_two_worlds(tmp_path: Pat
         recapture=recapture,
     )
     assert dropped == () and misses == []
-    assert dest is not None
-    body = dest.read_text(encoding="utf-8")
+    assert dest is not None and dest.name == f"{_STEM}_gen_1.rs"
     twin_fn = replay_fn_name(dc_replace(moving, behaviour_id=env_twin_id(moving.behaviour_id)))
-    assert replay_fn_name(moving) in body
-    assert twin_fn in body
-    orig_at = body.index(f"fn {replay_fn_name(moving)}()")
-    twin_at = body.index(f"fn {twin_fn}()")
-    orig_chunk = body[orig_at:twin_at] if orig_at < twin_at else body[orig_at:]
-    twin_chunk = body[twin_at:] if twin_at > orig_at else body[twin_at:orig_at]
+    base = dest.read_text(encoding="utf-8")
+    assert replay_fn_name(fixed) in base and "set_var" not in base
+    tests = tmp_path / "tests"
+    orig_chunk = (tests / f"{world_stem('stable', [('RUST_BACKTRACE', '0')])}_gen_1.rs").read_text(encoding="utf-8")
+    twin_chunk = (tests / f"{world_stem('stable', [('RUST_BACKTRACE', '1')])}_gen_1.rs").read_text(encoding="utf-8")
+    assert f"fn {replay_fn_name(moving)}()" in orig_chunk and twin_fn not in orig_chunk
+    assert f"fn {twin_fn}()" in twin_chunk
     assert 'set_var("RUST_BACKTRACE", "0")' in orig_chunk
     assert 'set_var("RUST_BACKTRACE", "1")' in twin_chunk
     assert orig_chunk.index("set_var") < orig_chunk.index("let e = anyhow")
@@ -671,12 +681,12 @@ def test_a_world_pinned_capture_is_narrowed_to_what_the_replay_shares(
 
     dest, dropped, misses = _emit(
         tmp_path, [fixed, moving], verify, perturb_env=perturb,
-        recapture=lambda s, _e: (probe_render
-                                 if s.behaviour_id == moving.behaviour_id
-                                 else None))
+        recapture=lambda s, _e, _b: (probe_render
+                                     if s.behaviour_id == moving.behaviour_id
+                                     else None))
     assert dropped == () and misses == []
     assert dest is not None
-    body = dest.read_text(encoding="utf-8")
+    body = _emitted_text(tmp_path)
     twin_chunk = body[body.index(f"fn {twin_fn}()"):]
     assert '.starts_with("shared head\\nat 0x")' in twin_chunk
     assert "actual.len() > " in twin_chunk
@@ -687,8 +697,7 @@ def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
         tmp_path: Path) -> None:
     """Narrowing is not a licence to keep everything: a replay that shares no
     leading text with the capture pins nothing, and the capture goes. It is
-    red in the capture-env binary, which is not the world it pins, so the row
-    says it was not verified rather than stamping that run's verdict on it."""
+    red in the binary of its own world, so the row is that run's verdict."""
     from dataclasses import replace as dc_replace
 
     from pipeline_core.domain.behaviour_probe import env_twin_id
@@ -702,15 +711,16 @@ def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
 
     dest, dropped, misses = _emit(
         tmp_path, [fixed, moving], verify, perturb_env={"SOME_KNOB": "1"},
-        recapture=lambda s, _e: ("probe side only"
-                                 if s.behaviour_id == moving.behaviour_id
-                                 else None))
+        recapture=lambda s, _e, _b: ("probe side only"
+                                     if s.behaviour_id == moving.behaviour_id
+                                     else None))
     # The TWIN goes; the capture-world original, which reproduces, stays.
     from pipeline_core.domain.behaviour_probe import env_twin_id as _tid
     assert dropped == (_tid(moving.behaviour_id),)
-    assert misses[0]["reason"] == WORLD_NOT_HELD and "replay_failed" not in misses[0]
+    assert misses[0]["reason"] == "replay disagreed with the capture"
+    assert misses[0]["replay_failed"] == "yes"
     assert dest is not None
-    body = dest.read_text(encoding="utf-8")
+    body = _emitted_text(tmp_path)
     assert twin_fn not in body and replay_fn_name(moving) in body
 
 
@@ -796,22 +806,36 @@ def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -
 
 
 def _process_world_verifier(tmp: Path, renders: Mapping[str, str],
-                            env_renders: Mapping[str, str]) -> Verify:
-    """A `verify` with the physics run `1878910-be648607` recorded: the
-    observable env is read once per test PROCESS, so every test of a run
-    renders the world that run was started in and a test's own `set_var`
-    does not hold (the `::env` twins rendered `disabled` in the capture-env
-    binary). `renders` is the capture world, `env_renders` the perturbed one;
-    a fn with no entry passes. Failures carry the emitted marker."""
+                            env_renders: Mapping[str, str],
+                            env_key: str = "RUST_BACKTRACE") -> Verify:
+    """A `verify` with std's physics: the observable env is read once per test
+    PROCESS, by the first test that reads it, and every later test of that
+    process renders the same world. Under `--test-threads=1` tests run in
+    name order; the first one's world is its own `set_var` when it pins one,
+    else the env cargo was given. Run `1878910-be648607` recorded the shared
+    binary's half of this (the `::env` twins rendered `disabled`), and run
+    `2426367-f566edfc` the order half (the same originals green in one
+    emission, red in the next). `renders` is the capture world, `env_renders`
+    the perturbed one; a fn with no entry passes. Failures carry the emitted
+    marker."""
 
     def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
         body = (tmp / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
-        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
-        world = env_renders if extra else renders
-        passed, failed, marks = [], [], []
+        present = sorted(re.findall(r"fn (behaviour_\w+)\(\)", body))
+        chunks = {}
         for fn in present:
             chunk = body[body.index(f"fn {fn}()"):]
-            chunk = chunk[:chunk.index("\n}\n") + 1]
+            chunks[fn] = chunk[:chunk.index("\n}\n") + 1]
+        first = chunks[present[0]] if present else ""
+        if f'set_var("{env_key}", "1")' in first:
+            world = env_renders
+        elif f'set_var("{env_key}", "0")' in first:
+            world = renders
+        else:
+            world = env_renders if extra else renders
+        passed, failed, marks = [], [], []
+        for fn in present:
+            chunk = chunks[fn]
             base = fn[:-len("_env")] if fn.endswith("_env") else fn
             actual = world.get(base)
             q = r'"((?:[^"\\]|\\.)*)"'
@@ -833,40 +857,208 @@ def _process_world_verifier(tmp: Path, renders: Mapping[str, str],
     return verify
 
 
-def test_world_pinned_captures_a_shared_binary_cannot_hold_leave_by_name(
-        tmp_path: Path) -> None:
-    """The recorded shape of `1878910-be648607`'s harvest, both worlds: the
-    perturbed replay is red on the movers, which split into two pinned
-    worlds; the capture-env binary renders the twins in the capture world,
-    so they leave; the perturbed binary then renders the pinned originals in
-    the perturbed world. Claim: those originals leave on their own names,
-    unverified, and the captures that never moved are emitted. No row says
-    the verdict named no capture, and none is stamped red by a round count.
+def test_world_pinned_captures_hold_in_the_binary_of_their_world(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recorded shape of `1878910-be648607` and `2426367-f566edfc`, both
+    worlds: the perturbed replay is red on the movers, which split into two
+    pinned worlds. Claim: every capture is emitted, the fixed ones in the
+    base binary and each pinned one in the binary of its world, and nothing
+    is withdrawn, under the once-per-process physics that withdrew them.
 
-    Negative control (run against the code before this change): the third
-    round's perturbed branch kept the originals ("set_var should have
-    isolated it"), found no split and no withdrawal, and withdrew the whole
-    file as `perturbed replay red on a verdict naming no capture in the
-    file`, the fixed captures with it."""
+    Negative control: the same captures rendered into one binary (the
+    grouping patched to a single stem) lose pinned captures to the process's
+    first reader, which is today's rows."""
+    import pipeline_core.application.emit_behaviour_tests as ebt
+
     fixed = [_spec(f"fixed{i}") for i in range(3)]
     movers = [_spec(f"mover{i}", when="e.backtrace()") for i in range(2)]
     perturb = {"RUST_BACKTRACE": "1"}
     capture = {replay_fn_name(m): "boom" for m in movers}
     trace = {replay_fn_name(m): "Stack backtrace: 0x1" for m in movers}
-    verify = _process_world_verifier(tmp_path, capture, trace)
     moved = {m.behaviour_id for m in movers}
 
-    dest, dropped, misses = _emit(
-        tmp_path, fixed + movers, verify, perturb_env=perturb,
-        recapture=lambda s, _e: ("Stack backtrace: 0x1"
-                                 if s.behaviour_id in moved else None))
-    assert dest is not None
-    body = dest.read_text(encoding="utf-8")
-    assert all(replay_fn_name(f) in body for f in fixed)
-    assert all(replay_fn_name(m) not in body for m in movers)
-    assert len(dropped) == 4  # two originals and their two twins
-    assert {m["reason"] for m in misses} == {WORLD_NOT_HELD}
-    assert all("replay_failed" not in m for m in misses)
+    def recapture(s: BehaviourSpec, _e: Mapping[str, str], _b: ProbeBuild) -> str | None:
+        return "Stack backtrace: 0x1" if s.behaviour_id in moved else None
+
+    world = tmp_path / "world"
+    paths, dropped, misses, emitted = emit_behaviour_tests(
+        world, "stable", fixed + movers, crate="anyhow",
+        verify=_process_world_verifier(world, capture, trace),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env=perturb, recapture=recapture)
+    assert dropped == () and misses == []
+    assert len(paths) == 3 and len(emitted) == 7
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        envs = set(re.findall(r'set_var\("RUST_BACKTRACE", "(\d)"\)', text))
+        assert len(envs) <= 1
+        if not envs:
+            assert all(replay_fn_name(f) in text for f in fixed)
+
+    shared = tmp_path / "shared"
+    base = behaviour_test_stem("stable")
+    monkeypatch.setattr(ebt, "world_files", lambda keep, _c: {base: list(keep)})
+    _p2, dropped2, misses2, _e2 = emit_behaviour_tests(
+        shared, "stable", fixed + movers, crate="anyhow",
+        verify=_process_world_verifier(shared, capture, trace),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env=perturb, recapture=recapture)
+    assert dropped2 and {m["reason"] for m in misses2} >= {"replay disagreed with the capture"}
+
+
+def test_world_files_group_by_pinned_env_with_stable_stems() -> None:
+    """One binary per `required_env` value, the unpinned captures in the base
+    binary; the stems are the same on every call, and a stem is recognised as
+    this cluster's and not as another cluster's whose name extends it."""
+    from dataclasses import replace as dc_replace
+
+    a, b, c, d = (_spec(n) for n in "abcd")
+    b = dc_replace(b, required_env=(("RUST_BACKTRACE", "0"),))
+    c = dc_replace(c, required_env=(("RUST_BACKTRACE", "1"),))
+    d = dc_replace(d, required_env=(("RUST_BACKTRACE", "1"),))
+    files = world_files([a, b, c, d], "stable")
+    assert list(files) == sorted(files) and list(files)[0] == _STEM
+    assert [len(v) for v in files.values()] == [1, 1, 2]
+    assert list(files) == list(world_files([d, c, b, a], "stable"))
+    one = world_stem("stable", (("RUST_BACKTRACE", "1"), ("RUST_LIB_BACKTRACE", "1")))
+    assert one == world_stem("stable", (("RUST_LIB_BACKTRACE", "1"), ("RUST_BACKTRACE", "1")))
+    assert world_stem("stable", (("A_B", "1"),)) != world_stem("stable", (("A", "B_1"),))
+    assert all(is_world_stem_of(st, "stable") for st in files)
+    assert not is_world_stem_of(behaviour_test_stem("stable_world_x"), "stable")
+    assert not is_world_stem_of(one, "nightly")
+
+
+def test_a_split_moves_the_original_and_the_twin_into_their_world_files(
+        tmp_path: Path) -> None:
+    """The round that splits a mover renders the next round as three files:
+    the base keeps the unpinned capture, and the original and the twin are
+    each in the binary of the world they pin. A previous emission's world
+    file that no capture pins any more is removed at the next entry, and an
+    authored file and another cluster's file are left alone."""
+    fixed, moving = _spec("fixed"), _spec("moving", when="e.backtrace()")
+    env_red = frozenset({replay_fn_name(moving)})
+    tests = tmp_path / "tests"
+    tests.mkdir(parents=True)
+    stale = tests / f"{world_stem('stable', [('GONE', '1')])}_gen_1.rs"
+    from pipeline_core.domain.generation import as_integration_test
+    stale.write_text(as_integration_test("#[test]\nfn old() {}\n", crate="anyhow"), encoding="utf-8")
+    other = tests / f"{world_stem('nightly', [('RUST_BACKTRACE', '1')])}_gen_1.rs"
+    other.write_text(as_integration_test("#[test]\nfn theirs() {}\n", crate="anyhow"), encoding="utf-8")
+    authored = tests / f"{world_stem('stable', [('RUST_BACKTRACE', '1')])}_gen_1.rs"
+    authored.write_text("#[test]\nfn authored() {}\n", encoding="utf-8")
+
+    paths, dropped, _m, _e = emit_behaviour_tests(
+        tmp_path, "stable", [fixed, moving], crate="anyhow",
+        verify=_verifier(tmp_path, red_under_env=env_red),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env={"RUST_BACKTRACE": "1"},
+        recapture=lambda s, _e, _b: "frames" if s.behaviour_id == moving.behaviour_id else None)
+    assert dropped == () and len(paths) == 3
+    assert not stale.exists() and other.exists()
+    assert authored.read_text(encoding="utf-8") == "#[test]\nfn authored() {}\n"
+    assert all(p != authored for p in paths)
+
+
+def test_a_located_compile_error_in_a_world_file_withdraws_only_its_capture(
+        tmp_path: Path) -> None:
+    """Each binary is built on its own: a world file that does not compile,
+    with the error located on one capture's lines, withdraws that capture and
+    no capture of another file; an exception unlinks the whole set."""
+    from dataclasses import replace as dc_replace
+
+    fixed = _spec("fixed")
+    pinned = dc_replace(_spec("pinned"), required_env=(("RUST_BACKTRACE", "1"),))
+    broken_stem = world_stem("stable", pinned.required_env)
+
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        if stem.startswith(broken_stem):
+            body = (tmp_path / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+            line = body.split("\n").index(f"fn {replay_fn_name(pinned)}() {{") + 2
+            return False, (f"error[E0425]: cannot find value `nope` in this scope\n"
+                           f"  --> tests/{stem}.rs:{line}:5\n"
+                           f"error: could not compile `anyhow` (test \"{stem}\")\n")
+        return _verifier(tmp_path)(stem, extra)
+
+    paths, dropped, misses, _e = emit_behaviour_tests(
+        tmp_path, "stable", [fixed, pinned], crate="anyhow", verify=verify,
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body)
+    assert dropped == (pinned.behaviour_id,)
+    assert misses[0]["reason"].startswith("replay did not compile")
+    assert [p.name for p in paths] == [f"{_STEM}_gen_1.rs"]
+
+    def boom(stem: str, _extra: Mapping[str, str]) -> tuple[bool, str]:
+        raise RuntimeError("cargo runner blew up")
+
+    raised = tmp_path / "raised"
+    with pytest.raises(RuntimeError):
+        emit_behaviour_tests(
+            raised, "stable", [fixed, pinned], crate="anyhow", verify=boom,
+            failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body)
+    assert list((raised / "tests").iterdir()) == []
+
+
+def test_a_twin_pins_only_what_every_build_of_the_original_agreed_on(
+        tmp_path: Path) -> None:
+    """The recapture is asked once per build of the original, and the twin's
+    Then is what the builds agree on: the head before the first frame, not
+    the frames. Negative control, the pre-fix call shape: two recaptures of
+    the same build agree on the frames, and the twin pins them."""
+    from dataclasses import replace as dc_replace
+
+    from pipeline_core.domain.behaviour_probe import env_twin_id
+
+    fixed, moving = _spec("fixed"), _spec("moving", when="e.backtrace()")
+    env_red = frozenset({replay_fn_name(moving)})
+    twin_fn = replay_fn_name(dc_replace(moving, behaviour_id=env_twin_id(moving.behaviour_id)))
+    as_built = "trace:\n   0: crate::private_fn\n at ./src/lib.rs:14:44\n"
+    stripped = "trace:\n   0: <unknown>\n"
+    asked: list[ProbeBuild] = []
+
+    def recapture(s: BehaviourSpec, _e: Mapping[str, str], build: ProbeBuild) -> str | None:
+        if s.behaviour_id != moving.behaviour_id:
+            return None
+        asked.append(build)
+        return stripped if build is ProbeBuild.WITHOUT_SYMBOLS else as_built
+
+    _p, dropped, _m, _e = emit_behaviour_tests(
+        tmp_path, "stable", [fixed, moving], crate="anyhow",
+        verify=_verifier(tmp_path, red_under_env=env_red),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env={"RUST_BACKTRACE": "1"}, recapture=recapture)
+    assert dropped == () and asked == list(ProbeBuild)
+    twin = _emitted_text(tmp_path)
+    twin = twin[twin.index(f"fn {twin_fn}()"):]
+    assert 'starts_with("trace:\\n   0: ")' in twin
+    assert "src/lib.rs" not in twin and "private_fn" not in twin
+
+    ctrl = tmp_path / "ctrl"
+    emit_behaviour_tests(
+        ctrl, "stable", [fixed, moving], crate="anyhow",
+        verify=_verifier(ctrl, red_under_env=env_red),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env={"RUST_BACKTRACE": "1"},
+        recapture=lambda s, _e, _b: as_built if s.behaviour_id == moving.behaviour_id else None)
+    ctrl_twin = _emitted_text(ctrl)
+    assert "src/lib.rs:14:44" in ctrl_twin[ctrl_twin.index(f"fn {twin_fn}()"):]
+
+
+def test_a_twin_whose_stripped_build_did_not_run_is_withdrawn(tmp_path: Path) -> None:
+    """Without the no-symbols recapture the build's bytes cannot be told from
+    the crate's, so the mover is not pinned: it leaves as environment-
+    dependent, and the capture that did not move is emitted."""
+    fixed, moving = _spec("fixed"), _spec("moving", when="e.backtrace()")
+    env_red = frozenset({replay_fn_name(moving)})
+    _p, dropped, misses, emitted = emit_behaviour_tests(
+        tmp_path, "stable", [fixed, moving], crate="anyhow",
+        verify=_verifier(tmp_path, red_under_env=env_red),
+        failing_alone=lambda _s, _n, _e: (), settle=lambda _d, body: body,
+        perturb_env={"RUST_BACKTRACE": "1"},
+        recapture=lambda s, _e, b: ("frames" if s.behaviour_id == moving.behaviour_id
+                                    and b is ProbeBuild.AS_BUILT else None))
+    assert dropped == (moving.behaviour_id,)
+    assert misses[0]["reason"].startswith("environment-dependent")
+    assert "every build of the original" in misses[0]["reason"]
+    assert [s.behaviour_id for s in emitted] == [fixed.behaviour_id]
 
 
 def test_a_round_that_continues_without_progress_is_a_loud_bounded_exit(

@@ -30,6 +30,7 @@ from __future__ import annotations
 import functools
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -491,8 +492,8 @@ def test_a_capture_that_does_not_compile_is_withdrawn_alone(tmp_path: Path) -> N
     base, _alt = _clusters()
     specs = _emit_specs([("ok_a", "gadgets::size()"), ("broken", "gadgets::nope()"),
                          ("ok_c", "gadgets::size()")])
-    dest, dropped, misses, emitted = _emitter_run(root, base, specs)
-    assert dest is not None and dropped == (specs[1].behaviour_id,)
+    paths, dropped, misses, emitted = _emitter_run(root, base, specs)
+    assert paths and dropped == (specs[1].behaviour_id,)
     assert misses[0]["reason"].startswith("replay did not compile: ")
     assert {s.behaviour_id for s in emitted} == {specs[0].behaviour_id, specs[2].behaviour_id}
 
@@ -503,8 +504,8 @@ def test_a_capture_whose_test_aborts_is_withdrawn_alone(tmp_path: Path) -> None:
     specs = _emit_specs([("a_ok", "gadgets::size()"),
                          ("b_dies", "{ std::process::abort(); #[allow(unreachable_code)] 1u8 }"),
                          ("c_ok", "gadgets::size()")])
-    dest, dropped, misses, _emitted = _emitter_run(root, base, specs)
-    assert dest is not None and dropped == (specs[1].behaviour_id,)
+    paths, dropped, misses, _emitted = _emitter_run(root, base, specs)
+    assert paths and dropped == (specs[1].behaviour_id,)
     assert misses[0]["reason"].startswith("replay binary died")
 
 
@@ -515,5 +516,269 @@ def test_negative_control_without_attribution_the_file_goes_whole(
     root = _crate(tmp_path)
     base, _alt = _clusters()
     specs = _emit_specs([("ok_a", "gadgets::size()"), ("broken", "gadgets::nope()")])
-    dest, dropped, _misses, _emitted = _emitter_run(root, base, specs)
-    assert dest is None and set(dropped) == {s.behaviour_id for s in specs}
+    paths, dropped, _misses, _emitted = _emitter_run(root, base, specs)
+    assert paths == () and set(dropped) == {s.behaviour_id for s in specs}
+
+
+# A world-pinned capture's Then is narrowed to the text the probe binary's
+# render and the test binary's render share (`narrow_then_to_agreement`). For
+# a render that embeds a captured std backtrace, what the two binaries share
+# is decided by std's backtrace printer, not by the crate: the frames below
+# the capture site are the crate's own functions, printed with their source
+# file, line and column, and the two renders part only at the caller's frame.
+# Reviewed 2026-10-31 against the plan to give each environment world its own
+# test binary: in today's shared binary the replay renders the backtrace
+# disabled and the prefix stops at the message, so the frames never reached a
+# Then; once a world binary holds its environment they would.
+
+_BT_LIB = """use std::backtrace::Backtrace;
+
+pub struct Report {
+    msg: String,
+    bt: Backtrace,
+}
+
+impl Report {
+    pub fn new(msg: &str) -> Report {
+        Report::build(msg)
+    }
+
+    fn build(msg: &str) -> Report {
+        Report { msg: msg.to_string(), bt: Backtrace::capture() }
+    }
+}
+
+impl std::fmt::Debug for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}\\n\\ntrace:\\n{}", self.msg, self.bt)
+    }
+}
+"""
+_BT_PROBE = """fn main() {
+    println!("<<<{:?}>>>", reporter::Report::new("went wrong"));
+}
+"""
+_BT_TEST = """#[test]
+fn renders() {
+    println!("<<<{:?}>>>", reporter::Report::new("went wrong"));
+}
+"""
+
+
+def _bt_crate(tmp_path: Path, lib: str) -> Path:
+    root = tmp_path / "reporter"
+    for d in ("src", "examples", "tests"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / "Cargo.toml").write_text(
+        '[package]\nname = "reporter"\nversion = "0.1.0"\nedition = "2021"\n')
+    (root / "src" / "lib.rs").write_text(lib)
+    (root / "examples" / "probe.rs").write_text(_BT_PROBE)
+    (root / "tests" / "replay.rs").write_text(_BT_TEST)
+    return root
+
+
+def _bt_render(root: Path, *args: str) -> str:
+    import subprocess
+    env = dict(os.environ, RUST_BACKTRACE="1", RUST_LIB_BACKTRACE="1",
+               CARGO_TARGET_DIR=str(_TARGET / "backtrace-frames"))
+    run = subprocess.run(["cargo", *args], cwd=root, env=env, capture_output=True,
+                         text=True, timeout=600, check=False)
+    out = run.stdout or ""
+    assert run.returncode == 0 and "<<<" in out, (run.stdout or "") + (run.stderr or "")
+    return out.split("<<<", 1)[1].split(">>>", 1)[0]
+
+
+def test_premise_a_backtrace_render_agrees_across_binaries_through_the_crates_source_lines(
+        tmp_path: Path) -> None:
+    """The probe binary and the test binary agree on a backtrace render up to
+    the caller's frame, and that agreed text names the crate's private fns at
+    their source line and column. A crate with the same behaviour and one
+    more line above them renders text that does not start with it. If this
+    stops holding (std prints no locations, or the binaries part earlier), a
+    narrowed world-pinned Then no longer depends on the crate's layout."""
+    from pipeline_core.domain.behaviour_probe import agreed_prefix
+    root = _bt_crate(tmp_path, _BT_LIB)
+    probe = _bt_render(root, "run", "--offline", "-q", "--example", "probe")
+    replay = _bt_render(root, "test", "--offline", "-q", "--test", "replay",
+                        "--", "--nocapture")
+    shared = agreed_prefix([probe, replay])
+    assert shared != probe and shared != replay, "the binaries' own frames should differ"
+    assert "Report::build" in shared and "src/lib.rs:" in shared, shared
+    (root / "src" / "lib.rs").write_text("// one more line\n" + _BT_LIB)
+    shifted = _bt_render(root, "run", "--offline", "-q", "--example", "probe")
+    assert shifted.startswith("went wrong\n\ntrace:\n")
+    assert not shifted.startswith(shared), (
+        "the same behaviour one line lower should not satisfy a Then cut at "
+        "the binaries' agreement")
+
+
+# One test binary per environment world. std reads the backtrace environment
+# once per process, on the first capture, so a test's own `set_var` holds only
+# when no test of the same process captured first (run `1878910-be648607`,
+# 2026-10-31: every `::env` twin rendered `disabled` in the shared binary; run
+# `2426367-f566edfc`: the same originals green in one emission and red in the
+# next). The emitter puts each pinned world in a binary of its own.
+
+_STATUS_LIB = _BT_LIB + """
+pub fn status() -> String {
+    format!("{:?}", Backtrace::capture().status())
+}
+"""
+_PIN_1 = (("RUST_BACKTRACE", "1"), ("RUST_LIB_BACKTRACE", "1"))
+_PIN_0 = (("RUST_BACKTRACE", "0"), ("RUST_LIB_BACKTRACE", "0"))
+
+
+def test_premise_std_reads_the_backtrace_env_once_per_process(tmp_path: Path) -> None:
+    """A test that pins the backtrace env with `set_var` does not hold it
+    after another test of the same process captured first. If std starts
+    re-reading the env per capture, one binary per world is no longer what
+    makes a pinned capture's verdict independent of test order."""
+    root = _bt_crate(tmp_path, _STATUS_LIB)
+    (root / "tests" / "order.rs").write_text("""#[test]
+fn a_reads() {
+    let _ = reporter::status();
+}
+
+#[test]
+fn b_pins() {
+    std::env::set_var("RUST_BACKTRACE", "1");
+    std::env::set_var("RUST_LIB_BACKTRACE", "1");
+    assert_eq!(reporter::status(), "Captured");
+}
+""")
+    import subprocess
+    env = dict(os.environ, RUST_BACKTRACE="0", RUST_LIB_BACKTRACE="0",
+               CARGO_TARGET_DIR=str(_TARGET / "backtrace-once"))
+    run = subprocess.run(["cargo", "test", "--offline", "--test", "order", "--",
+                          "--test-threads=1"], cwd=root, env=env,
+                         capture_output=True, text=True, timeout=600, check=False)
+    out = (run.stdout or "") + (run.stderr or "")
+    assert run.returncode != 0 and parse_test_counts(out)[:2] == (1, 1), out[-800:]
+    alone = subprocess.run(["cargo", "test", "--offline", "--test", "order", "--",
+                            "--exact", "b_pins"], cwd=root, env=env,
+                           capture_output=True, text=True, timeout=600, check=False)
+    assert alone.returncode == 0, (alone.stdout or "") + (alone.stderr or "")
+
+
+def _status_specs() -> list:  # noqa: ANN202
+    from dataclasses import replace
+
+    from pipeline_core.domain.behaviour_probe import CapturedProbe, captured_spec
+
+    def spec(name: str, when: str, stdout: str, env: tuple = ()):  # noqa: ANN001,ANN202
+        s = captured_spec(cfg_cluster="base",
+                          probe=CapturedProbe(name=name, given="", when=when, observe="display"),
+                          n=0, stdout=stdout, default_cluster="base")
+        return replace(s, required_env=env)
+
+    # Named so a single binary runs the world-1 capture first.
+    return [spec("a_captured", "reporter::status()", "Captured", _PIN_1),
+            spec("b_disabled", "reporter::status()", "Disabled", _PIN_0),
+            spec("c_plain", "reporter::Report::new(\"x\").is_some()", "true")]
+
+
+def _reporter_emit(root: Path, specs: list, **kw):  # noqa: ANN001,ANN003,ANN202
+    import subprocess
+
+    from pipeline_core.adapters.test_worlds import failing_alone
+    from pipeline_core.application.emit_behaviour_tests import emit_behaviour_tests
+
+    base, _alt = _clusters()
+
+    def env_for(extra: dict[str, str]) -> dict[str, str]:
+        env = cluster_cargo_env(base)
+        env["CARGO_TARGET_DIR"] = str(_TARGET / root.parent.name / "reporter")
+        env.update(_PIN_0)   # the capture world, whatever the host sets
+        env.update(extra)
+        return env
+
+    def verify(stem: str, extra) -> tuple[bool, str]:  # noqa: ANN001
+        run = subprocess.run(["cargo", "test", "--offline", "--test", stem, "--", "--test-threads=1"],
+                             cwd=root, env=env_for(dict(extra)), capture_output=True,
+                             text=True, timeout=600, check=False)
+        return run.returncode == 0, (run.stdout or "") + "\n" + (run.stderr or "")
+
+    return emit_behaviour_tests(
+        root, "base", specs, crate="reporter", verify=verify,
+        failing_alone=lambda stem, names, extra: failing_alone(
+            root, "reporter", stem, names, env=env_for(dict(extra)), timeout=600),
+        settle=lambda _d, body: body, **kw)
+
+
+def test_each_pinned_world_holds_in_a_binary_of_its_own(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Three captures, unpinned, pinned to `0` and pinned to `1`, over real
+    cargo: the base file and two world files, every capture emitted, and the
+    same again on a second emission of what the first emitted (task 0d's
+    rule-probe pass re-verifies the whole suite). Negative control: the same
+    captures in one binary lose the world-0 capture to the world-1 test that
+    captured first."""
+    import pipeline_core.application.emit_behaviour_tests as ebt
+
+    root = _bt_crate(tmp_path, _STATUS_LIB.replace(
+        "impl Report {", "impl Report {\n    pub fn is_some(&self) -> bool { !self.msg.is_empty() }\n"))
+    specs = _status_specs()
+    paths, dropped, misses, emitted = _reporter_emit(root, specs)
+    assert dropped == () and misses == [], misses
+    assert len(paths) == 3 and len(emitted) == 3
+    paths2, dropped2, _m2, _e2 = _reporter_emit(root, list(emitted))
+    assert dropped2 == () and [p.name for p in paths2] == [p.name for p in paths]
+
+    single = tmp_path / "single"
+    root2 = _bt_crate(single, _STATUS_LIB.replace(
+        "impl Report {", "impl Report {\n    pub fn is_some(&self) -> bool { !self.msg.is_empty() }\n"))
+    stem = ebt.behaviour_test_stem("base")
+    monkeypatch.setattr(ebt, "world_files", lambda keep, _c: {stem: list(keep)})
+    _p3, dropped3, misses3, _e3 = _reporter_emit(root2, specs)
+    assert dropped3 == (specs[1].behaviour_id,), misses3
+    assert misses3[0]["reason"] == "replay disagreed with the capture"
+
+
+def test_a_twin_of_a_backtrace_render_pins_no_frame_of_the_crate(tmp_path: Path) -> None:
+    """A Debug render that embeds a captured backtrace moves under the
+    perturbed env. Over real cargo and real probe builds, the twin's Then is
+    what the as-built and the no-symbols builds of the original agreed on:
+    the head before the first frame, with no source path and no private fn,
+    and it is green in its world's binary. Negative control, the pre-fix
+    call shape (both recaptures as built): the twin pins the crate's own
+    frame at its line."""
+    from pipeline_core.adapters.behaviour_probe import run_probe
+    from pipeline_core.domain.behaviour_probe import (
+        CapturedProbe,
+        ProbeBuild,
+        captured_spec,
+        program_for,
+    )
+
+    base, _alt = _clusters()
+    given = 'let r = reporter::Report::new("went wrong");'
+
+    def emit_with(root: Path, builds: Callable[[ProbeBuild], ProbeBuild]):  # noqa: ANN202
+        probe = CapturedProbe(name="render", given=given, when="r", observe="debug")
+        first = run_probe(root, base, program_for(captured_spec(
+            cfg_cluster="base", probe=probe, n=0, stdout="x", default_cluster="base"),
+            crate="reporter"), "capture", extra_env=dict(_PIN_0), timeout=600)
+        assert first.ok, first.stderr[-800:]
+        spec = captured_spec(cfg_cluster="base", probe=probe, n=0, stdout=first.stdout,
+                             default_cluster="base")
+
+        def recapture(s, extra, build):  # noqa: ANN001,ANN202
+            res = run_probe(root, base, program_for(s, crate="reporter"), "recapture",
+                            extra_env=dict(extra), build=builds(build), timeout=600)
+            return res.stdout if res.ok and res.stdout.strip() else None
+
+        return _reporter_emit(root, [spec], perturb_env=dict(_PIN_1), recapture=recapture)
+
+    root = _bt_crate(tmp_path / "fixed", _BT_LIB)
+    paths, dropped, misses, emitted = emit_with(root, lambda b: b)
+    assert dropped == () and misses == [], misses
+    twin = next(s for s in emitted if s.behaviour_id.endswith("::env"))
+    assert twin.then is not None and twin.then.prefix
+    assert twin.then.value.startswith("went wrong\n\ntrace:\n")
+    assert "src/" not in twin.then.value and "Report::build" not in twin.then.value
+    assert any("_world_" in p.name for p in paths)
+
+    ctrl = _bt_crate(tmp_path / "ctrl", _BT_LIB)
+    _p, _d, _m, emitted2 = emit_with(ctrl, lambda _b: ProbeBuild.AS_BUILT)
+    twin2 = next(s for s in emitted2 if s.behaviour_id.endswith("::env"))
+    assert twin2.then is not None and "src/lib.rs:" in twin2.then.value

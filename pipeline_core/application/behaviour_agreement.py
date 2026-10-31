@@ -28,6 +28,7 @@ from pipeline_core.application.run_behaviour_oracle import run_behaviour_oracle
 from pipeline_core.domain.behaviour import BehaviourSpec, BehaviourSuite, BehaviourVerdict, then_value_text
 from pipeline_core.domain.behaviour_probe import ProbeResult, capture_moved, printed_value, program_for
 from pipeline_core.domain.held_out import Agreement, AgreementReading, AgreementRow, reading_of
+from pipeline_core.ports.behaviour_probe import RunProbe
 
 _OUTCOME = {BehaviourVerdict.HOLD: Agreement.AGREES, BehaviourVerdict.MISMATCH: Agreement.DIFFERS,
             BehaviourVerdict.NOT_RUN: Agreement.NOT_RUN}
@@ -38,7 +39,7 @@ class AgreementDeps:
     load_held_out: Callable[[Path, str], BehaviourSuite]
     scratch_tree: Callable[[Path], AbstractContextManager[Path]]
     # (crate dir, cluster, program, name, extra_env=…) -> ProbeResult
-    run_probe: Callable[..., ProbeResult]
+    run_probe: RunProbe
     record_rows: Callable[[str, str, str, Sequence[AgreementRow]], object]
     log: Callable[[str], None]
     emit: Callable[..., object]

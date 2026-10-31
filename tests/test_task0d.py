@@ -328,6 +328,38 @@ def test_pin_env_debug_on_passes_recapture(tmp_path: Path) -> None:
     assert callable(seen["recapture"])
 
 
+def test_the_recapture_builds_the_original_the_way_it_is_asked(tmp_path: Path) -> None:
+    """The emitter asks for one recapture per build of the original; the
+    closure task 0d hands it passes that build and the perturbed env to the
+    probe runner, so the no-symbols build is the one that runs."""
+    import dataclasses
+
+    from pipeline_core.domain.behaviour_probe import CapturedProbe, ProbeBuild, captured_spec
+
+    seen: dict[str, object] = {}
+    runs: list[tuple[object, object]] = []
+
+    def emit_tests(*_a: object, **kw: object) -> tuple[object, tuple[str, ...], list[dict[str, str]], tuple[object, ...]]:
+        seen.update(kw)
+        return (), (), [], ()
+
+    def run_probe(pd: Path, cl: object, program: str, name: str, **kw: object) -> ProbeResult:
+        runs.append((kw.get("build"), kw.get("extra_env")))
+        return ProbeResult(True, "printed 42\n", "")
+
+    w = _World(reply=_REPLY)
+    deps = dataclasses.replace(w.deps(emit_tests=emit_tests), run_probe=run_probe)
+    run_task0d(deps, tmp_path, "anyhow", [_cluster()], tmp_path / "src")
+    recapture = seen["recapture"]
+    assert callable(recapture)
+    one = captured_spec(cfg_cluster="stable", probe=CapturedProbe(
+        name="p", given="", when="anyhow::Error::msg(\"x\")", observe="debug"),
+        n=0, stdout="x", default_cluster="stable")
+    runs.clear()
+    assert recapture(one, {"RUST_BACKTRACE": "1"}, ProbeBuild.WITHOUT_SYMBOLS) == "printed 42\n"
+    assert runs == [(ProbeBuild.WITHOUT_SYMBOLS, {"RUST_BACKTRACE": "1"})]
+
+
 def test_two_worlds_share_one_probe_ask_and_each_runs_its_own_cargo(tmp_path: Path) -> None:
     """One synthesis prompt over both worlds. Cargo, and the stamp on the
     suite, stay that world's. Identical surface text is not marked."""

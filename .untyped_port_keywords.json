@@ -283,9 +283,6 @@
     "strategy",
     "unit"
   ],
-  "run_probe": [
-    "extra_env"
-  ],
   "save_red_ledger": [
     "close_kind",
     "run_id"

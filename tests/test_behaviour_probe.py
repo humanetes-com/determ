@@ -230,6 +230,34 @@ def test_run_probe_merges_extra_env_over_the_cluster_env(tmp_path: Path) -> None
     assert env["RUSTUP_TOOLCHAIN"] == "nightly"  # cluster env still present
 
 
+def test_run_probe_without_symbols_strips_through_the_profile_and_keeps_the_cluster_flags(
+        tmp_path: Path) -> None:
+    """The no-symbols build of the original is the as-built env plus cargo's
+    dev-profile strip, in a target directory of its own. The cluster's
+    RUSTFLAGS (the nightly `--cfg`) are untouched. Negative control: the
+    default build carries no profile override and the shared directory."""
+    from pipeline_core.domain.behaviour_probe import ProbeBuild
+
+    seen: list[dict[str, str]] = []
+
+    def fake_run(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int):
+        seen.append(env)
+        return 0, "ok\n", ""
+
+    run_probe(tmp_path, _cluster(), "fn main() {}", "e", run=fake_run,
+              extra_env={"RUST_BACKTRACE": "1"}, build=ProbeBuild.WITHOUT_SYMBOLS)
+    run_probe(tmp_path, _cluster(), "fn main() {}", "e", run=fake_run,
+              extra_env={"RUST_BACKTRACE": "1"})
+    stripped, as_built = seen
+    assert stripped["CARGO_PROFILE_DEV_STRIP"] == "symbols"
+    assert stripped["CARGO_PROFILE_DEV_DEBUG"] == "0"
+    assert stripped["RUSTFLAGS"] == as_built["RUSTFLAGS"] and "--cfg x" in stripped["RUSTFLAGS"]
+    assert stripped["RUST_BACKTRACE"] == "1"
+    assert stripped["CARGO_TARGET_DIR"] == str(tmp_path / "target" / "t0d-nightly-without-symbols")
+    assert "CARGO_PROFILE_DEV_STRIP" not in as_built
+    assert as_built["CARGO_TARGET_DIR"] == str(tmp_path / "target" / "t0d-nightly")
+
+
 def test_run_probe_keeps_a_preexisting_examples_dir_and_reports_failure(tmp_path: Path) -> None:
     (tmp_path / "examples").mkdir()
     (tmp_path / "examples" / "real.rs").write_text("fn main() {}", encoding="utf-8")
