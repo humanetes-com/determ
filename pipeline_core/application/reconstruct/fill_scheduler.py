@@ -45,6 +45,8 @@ from pipeline_core.domain.fill_schedule import (
     CrashBlame,
     FillBudget,
     FillSchedule,
+    HolderAdmission,
+    HolderQueue,
     RouteKind,
     RouteLedgerRow,
     RouteRun,
@@ -74,6 +76,7 @@ from pipeline_core.domain.test_outcome import (
     names_of,
     premise_moved,
     standing_in,
+    test_leaf,
 )
 
 __all__ = ["FillExecution", "FillExecutionDeps", "execute_fill"]
@@ -176,7 +179,7 @@ class FillExecutionDeps:
     #: (bare name), the still-stubbed bodies its first failure is inside,
     #: container included (`test_outcome.HeldSites`, the reading the sweep's
     #: `hollow` is). With it, blockers-first is applied again inside the
-    #: fill to the blockers its own keeps measured (`_GroundGate.yields_to`)
+    #: fill to the blockers its own keeps measured (`_GroundGate._claim`)
     #: and a run is opened on a blocker no run writes, carrying the tests
     #: per body; None keeps the plan-time blockers only.
     held_now: Callable[[], HeldSites | None] | None = None
@@ -190,6 +193,38 @@ class FillExecution:
     #: The tests whose ground moved in this fill (empty when no keep moved
     #: one). Runs and units planned on them were refused.
     premise_moved: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _Cursor:
+    """The executor's side of the claim gate: what the gate reads of the
+    runs still ahead and what it may do to them. Every reaction to a keep's
+    measurement goes through these, called by the gate at a claim; nothing
+    else in the executor reads the held view (`_GroundGate.held`).
+
+    ``unwritten`` is None when the fill cannot open a run (no per-fn route,
+    an unscheduled fill, or no held view): no holder is then taken."""
+    #: Each unit a run still ahead of the cursor writes -> the first such run.
+    ahead: Callable[[], Mapping[FnLocator, ScheduledRun]]
+    #: Runs still ahead that write a measured blocker go to the cursor, in
+    #: plan order (the plan-time blockers-first rule, on the ground now).
+    promote: Callable[[frozenset[FnLocator]], None]
+    #: The asking run's claims wait behind ``writer``: queued right after it.
+    #: False when they cannot (the writer is not ahead, or this run's claims
+    #: already waited behind it once): the claim then proceeds.
+    queue_behind: Callable[[RouteRun, frozenset[FnLocator], ScheduledRun], bool]
+    #: The holders the fill would open a run on (:func:`unwritten_holders`),
+    #: for an asking run that takes holders into its own queue (its own
+    #: targets are not "ahead") or for anyone else (None).
+    unwritten: Callable[[HeldSites, RouteRun | None, Collection[str]],
+                        Collection[FnLocator]] | None = None
+    #: Open a per-fn run on these holders at the cursor.
+    open_run: Callable[[Sequence[FnLocator], HeldSites], None] | None = None
+    #: Hand these holders to the asking run's queue.
+    admit: Callable[[Sequence[FnLocator], HeldSites, RouteRun, HolderQueue],
+                    None] | None = None
+    #: The first run ahead the fill opened on holders, not yet run.
+    opened_ahead: Callable[[], ScheduledRun | None] = lambda: None
 
 
 class _GroundGate:
@@ -251,15 +286,16 @@ class _GroundGate:
         self.admitted = 0
         self._held_read = deps.held_now
         #: The held view of the ground last read (`FillExecutionDeps.held_now`).
+        #: Read only here, at a claim; the executor acts on it through
+        #: :class:`_Cursor`.
         self.held: HeldSites = {}
-        #: The units runs still ahead of the cursor write (bound by the
-        #: executor): what a claim can yield to.
-        self._ahead: Callable[[], Mapping[FnLocator, str]] = dict
+        #: The executor's runs ahead and what a claim may do to them (bound
+        #: by the executor); None reacts to no measurement.
+        self._cursor: _Cursor | None = None
+        #: The kept mark the writers ahead were last promoted on.
+        self._promoted_seen: object = None
         self._yields_logged: set[tuple[frozenset[FnLocator], str]] = set()
         self.yields = 0
-        #: The holders the executor would open a run on (`bind_unwritten`);
-        #: None while the fill cannot open one (no per-fn route).
-        self._unwritten: Callable[[HeldSites], Collection[FnLocator]] | None = None
 
     @property
     def armed(self) -> bool:
@@ -336,10 +372,11 @@ class _GroundGate:
             assert self._premise is not None
             left = ground_left(self.moved, scope, self._premise.keys())
             if left:
-                bare = {str(t).rsplit("::", 1)[-1] for t in left}
+                bare = {test_leaf(str(t)) for t in left}
                 rebuy = sorted(
                     (u for u in units
-                     if u in left_red and bare <= left_red[u]),
+                     if u in left_red
+                     and bare <= {test_leaf(r) for r in left_red[u]}),
                     key=lambda k: (k.file, k.fn_name))
                 if rebuy and not (frozenset(units) & self._spared):
                     self.refused += 1
@@ -388,35 +425,107 @@ class _GroundGate:
             self.refused += 1
             return True
 
-    def bind_unwritten(self, unwritten: Callable[[HeldSites], Collection[FnLocator]]) -> None:
-        """The holders the fill would open a run on, read on the held view
-        (:func:`unwritten_holders`, bound by the executor with its cursor)."""
-        self._unwritten = unwritten
+    def bind(self, cursor: _Cursor) -> None:
+        """The executor's runs ahead and the moves a claim may make on them."""
+        self._cursor = cursor
 
-    def bind_ahead(self, ahead: Callable[[], Mapping[FnLocator, str]]) -> None:
-        """The executor's reading of the runs still ahead of its cursor:
-        each unit they write, with the label of the first that writes it."""
-        self._ahead = ahead
+    def claim_for(self, run: RouteRun, holders: HolderQueue | None
+                  ) -> Callable[[frozenset[str] | None, frozenset[FnLocator]], str]:
+        """The gate one run's clock asks at each claim (`RunClock.yields_to`):
+        the label of a run this claim waits behind, or "" to go on. Before
+        answering "" it may hand ``holders`` a measured holder, which the
+        clock then answers as "take"."""
+        def _ask(scope: frozenset[str] | None,
+                 units: frozenset[FnLocator]) -> str:
+            return self._claim(scope, units, run, holders)
+        return _ask
 
-    def blockers_now(self) -> frozenset[FnLocator]:
-        """The still-stubbed functions red tests stop in on the ground as it
-        stands after this fill's keeps (empty before any keep)."""
+    def at_cursor(self) -> None:
+        """The executor's own claim of its next run: a holder a keep of the
+        last wave measured, that no run ahead writes, is opened at the
+        cursor before the next wave forms. Also the only claim left when
+        the last wave ends the plan: run `2355041-eae39441` (2026-10-27)
+        fill 3 ended with about 145 of 200 budget minutes unspent while the
+        callee its last keep measured had no run."""
+        self._claim(None, frozenset(), None, None)
+
+    def _claim(self, scope: frozenset[str] | None,
+               units: frozenset[FnLocator], run: RouteRun | None,
+               holders: HolderQueue | None) -> str:
+        """The one answer to a claim on the ground the fill's keeps
+        measured (`held`): wait behind a run ahead that writes what every
+        planned test now stops in; else take a holder no run writes first
+        — into this run's own queue when it can take one (``holders``),
+        else as a per-fn run opened at the cursor — and go on.
+
+        Run `15370-6a4cfd45` (2026-10-30), fill 1: the keep of
+        `src/error.rs::deref` at 18:05:44 UTC named `src/ptr.rs::by_ref` as
+        the stub its tests stop in; the 16-unit per-fn run went on claiming
+        callers of that stub, ten more keeps named it, and its run opened
+        only at 19:06:37, when the wave ended and the boundary opener read
+        the held view. A per-fn run in flight now writes such a holder at
+        its next claim."""
+        if not self.armed or self._cursor is None:
+            return ""
         with self._lock:
             self._look()
-            return (frozenset().union(*held_locators(self.held).values())
-                    if self.held else frozenset())
+            if not self.held:
+                return ""
+            if self._promoted_seen != self._seen:
+                self._promoted_seen = self._seen
+                self._cursor.promote(
+                    frozenset().union(*held_locators(self.held).values()))
+            if run is not None:
+                writer = self._writer_for(scope, units)
+                if writer is not None and self._cursor.queue_behind(
+                        run, units, writer[0]):
+                    self._log_yield(units, writer[0].run.label, writer[1])
+                    return writer[0].run.label
+            self._take_holders(units, run, holders)
+            if run is None or holders is not None:
+                return ""
+            # A run that cannot take the holder waits behind the run opened
+            # on it, so the holder is written first; a claim already made
+            # (in flight) completes.
+            first = self._cursor.opened_ahead()
+            if (first is None or units & first.run.targets
+                    or not self._cursor.queue_behind(run, units, first)):
+                return ""
+            self.yields += 1
+            key = (frozenset(units), first.run.label)
+            if key not in self._yields_logged:
+                self._yields_logged.add(key)
+                self._log(
+                    f"  [phase-c/schedule] fill {self._iteration}: claim of "
+                    f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in units))} "
+                    f"waits for {first.run.label} — a keep of this fill "
+                    "measured those holders and no run ahead wrote them")
+            return first.run.label
 
-    def yields_to(self, scope: frozenset[str] | None,
-                  units: frozenset[FnLocator]) -> str:
-        """The label of a run still ahead this claim waits behind, or "".
+    def waits_behind(self, scope: frozenset[str] | None,
+                     units: frozenset[FnLocator]) -> str:
+        """The label of a run ahead a run not yet opened would wait behind
+        (the rule of :meth:`_claim`), with no move made: the executor's
+        premise pass keeps such a run on the plan instead of deferring it."""
+        if not self.armed or self._cursor is None:
+            return ""
+        with self._lock:
+            self._look()
+            if not self.held:
+                return ""
+            writer = self._writer_for(scope, units)
+            return writer[0].run.label if writer is not None else ""
 
-        Blockers-first, applied to the blockers this fill's own keeps
+    def _writer_for(self, scope: frozenset[str] | None,
+                    units: frozenset[FnLocator]
+                    ) -> tuple[ScheduledRun, frozenset[FnLocator]] | None:
+        """Blockers-first, applied to the blockers this fill's own keeps
         measured: every test the claim was planned on now stops inside a
         still-stubbed function the claim does not write, and a run still
-        ahead writes one of them. No body the claim writes can be measured
-        until that function has one, so the claim waits behind its writer
-        instead of spending its share in front of it. A claim with no named
-        tests, or with one test the ground now does not hold, does not wait.
+        ahead writes one of them; that run and the holders. No body the
+        claim writes can be measured until that function has one. A claim
+        with no named tests, or with one test the ground now does not hold,
+        does not wait. Caller holds the lock.
 
         Run `42057-641e589c` (2026-10-26), fill 3: the per-fn run opened
         first on the sweep's blockers and spent 96.5 min and 20 calls
@@ -426,80 +535,66 @@ class _GroundGate:
         targets of the file runs ranked 2nd and 4th; the error.rs file run
         then cashed in its first reply (`pass 90 -> 99`), and the next
         sweep read 111 -> 237 once those layers were written."""
-        if not self.armed:
-            return ""
-        with self._lock:
-            self._look()
-            if not self.held:
-                return ""
-            writer = self._writer_ahead(scope, units)
-            if writer:
-                return writer
-            return self._holder_first(units)
-
-    def _writer_ahead(self, scope: frozenset[str] | None,
-                      units: frozenset[FnLocator]) -> str:
-        """The 369.1 rule: every test the claim was planned on stops in a
-        stub a run still ahead writes. Caller holds the lock."""
+        assert self._cursor is not None
         if not scope:
-            return ""
+            return None
         holders: set[FnLocator] = set()
-        by_unit = held_locators(self.held)
+        by_unit = held_by_leaf(self.held)
         for t in scope:
-            held = by_unit.get(str(t).rsplit("::", 1)[-1])
+            held = by_unit.get(test_leaf(str(t)))
             if not held:
-                return ""
+                return None
             if held & units:
-                return ""
+                return None
             holders |= held
-        ahead = self._ahead()
+        ahead = self._cursor.ahead()
         writer = next((ahead[u] for u in sorted(
-            holders, key=lambda k: (k.file, k.fn_name)) if u in ahead), "")
-        if not writer:
-            return ""
-        self.yields += 1
-        key = (frozenset(units), writer)
-        if key not in self._yields_logged:
-            self._yields_logged.add(key)
-            self._log(
-                f"  [phase-c/schedule] fill {self._iteration}: claim of "
-                f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in units))} "
-                f"waits behind {writer} — every test it was planned on "
-                f"now stops in "
-                f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in holders))}, "
-                "which that run writes")
-        return writer
+            holders, key=lambda k: (k.file, k.fn_name)) if u in ahead), None)
+        if writer is None:
+            return None
+        return writer, frozenset(holders)
 
-    def _holder_first(self, units: frozenset[FnLocator]) -> str:
-        """A keep of this fill measured a holder no run writes: every claim
-        but the holder's own waits, so the wave ends after the units already
-        in flight and the boundary opens the holder's run at the cursor with
-        the waiting claims queued behind it. Caller holds the lock.
-
-        Run `15370-6a4cfd45` (2026-10-30), fill 1: the keep of
-        `src/error.rs::deref` at 18:05:44 UTC named `src/ptr.rs::by_ref` as
-        the stub its tests stop in; the 16-unit run went on claiming callers
-        of that stub, ten more keeps named it, and its run opened at 19:06:37
-        when the wave ended. Waiting only when every one of a claim's own
-        tests stops in the holder (the rule above) never fired there: each
-        caller's tests stopped in the caller until it was written."""
-        if self._unwritten is None:
-            return ""
-        holders = frozenset(self._unwritten(self.held)) - units
-        if not holders:
-            return ""
-        label = (f"the per-fn run the fill opens on "
-                 f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in holders))}")
+    def _log_yield(self, units: frozenset[FnLocator], label: str,
+                   holders: frozenset[FnLocator]) -> None:
         self.yields += 1
         key = (frozenset(units), label)
-        if key not in self._yields_logged:
-            self._yields_logged.add(key)
-            self._log(
-                f"  [phase-c/schedule] fill {self._iteration}: claim of "
-                f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in units))} "
-                f"waits for {label} — a keep of this fill measured it, no run "
-                "ahead writes it")
-        return label
+        if key in self._yields_logged:
+            return
+        self._yields_logged.add(key)
+        self._log(
+            f"  [phase-c/schedule] fill {self._iteration}: claim of "
+            f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in units))} "
+            f"waits behind {label} — every test it was planned on "
+            f"now stops in "
+            f"{names_of(sorted(f'{u.file}::{u.fn_name}' for u in holders))}, "
+            "which that run writes")
+
+    def _take_holders(self, units: frozenset[FnLocator],
+                      run: RouteRun | None,
+                      holders: HolderQueue | None) -> None:
+        """A holder a keep of this fill measured that no run would write
+        before the sweep (:func:`unwritten_holders`) is written first: by
+        the asking run, before its unclaimed units, when it can take one
+        (``holders``; its own unclaimed targets are not "ahead" then, so a
+        holder that is a later target of the same run comes forward); else
+        by a per-fn run opened at the cursor, which the asking claim then
+        waits behind (:meth:`_claim`). A claim that writes the holder itself
+        goes on. Each holder is taken once per fill. Caller holds the
+        lock."""
+        cur = self._cursor
+        assert cur is not None
+        if cur.unwritten is None:
+            return
+        taker = run if holders is not None else None
+        busy = holders.claimed() if holders is not None else frozenset()
+        new = [u for u in cur.unwritten(self.held, taker, self.moved)
+               if u not in units and u not in busy]
+        if not new:
+            return
+        if holders is not None and run is not None and cur.admit is not None:
+            cur.admit(new, self.held, run, holders)
+        elif cur.open_run is not None:
+            cur.open_run(new, self.held)
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -678,55 +773,6 @@ def _yield_piece(w: ScheduledRun,
     return replace(w, run=piece, deferred=False, reason="yielded")
 
 
-def _requeue_behind(
-    ordered: list[ScheduledRun], i: int, wave: Sequence[ScheduledRun],
-    yielded: Mapping[str, frozenset[FnLocator]],
-    blockers: frozenset[FnLocator], requeued: dict[str, int],
-    deps: FillExecutionDeps, origin: dict[str, str],
-) -> list[ScheduledRun]:
-    """`ordered` with the runs ahead of the cursor re-ordered on the
-    blockers the fill's own keeps measured: every run that writes one goes
-    first (in plan order), then the yielded claims of this wave, then the
-    rest (in plan order). The plan-time order of `fill_schedule.schedule`
-    applied again, on the ground now, with no second rule."""
-    ahead = ordered[i:]
-    writers = [x for x in ahead if x.run.targets & blockers]
-    rest = [x for x in ahead if not (x.run.targets & blockers)]
-    pieces: list[ScheduledRun] = []
-    for w in wave:
-        ys = yielded.get(w.run.key)
-        if not ys or requeued.get(w.run.plan_key, 0) >= _MAX_REQUEUES:
-            continue
-        piece = _yield_piece(w, ys)
-        if piece is None:
-            continue
-        requeued[w.run.plan_key] = requeued.get(w.run.plan_key, 0) + 1
-        if piece.run.key != w.run.key:
-            origin[piece.run.key] = origin.get(w.run.key, w.run.key)
-        pieces.append(piece)
-    new = [*writers, *pieces, *rest]
-    if [x.run.key for x in new] == [x.run.key for x in ahead]:
-        return ordered
-    deps.log(
-        f"  [phase-c/schedule] fill {deps.iteration}: blockers measured in "
-        f"this fill ({names_of(sorted(f'{u.file}::{u.fn_name}' for u in blockers))}) "
-        f"— {names_of([x.run.label for x in writers]) or 'no run ahead writes one'} "
-        "open first"
-        + (f"; {names_of([x.run.label for x in pieces])} wait behind them"
-           if pieces else ""))
-    deps.emit("phase_c.fill.blockers_reordered", data={
-        "cluster": deps.cluster, "iter": deps.iteration,
-        "blockers": sorted(f"{u.file}::{u.fn_name}" for u in blockers),
-        "writers": [x.run.label for x in writers],
-        "requeued": [x.run.label for x in pieces]})
-    return ordered[:i] + new
-
-
-#: A planned run's claims are queued again at most this many times in one
-#: fill: each requeue follows a writer that has run since, and a blocker
-#: with more writers than this is the sweep's to re-plan.
-_MAX_REQUEUES = 2
-
 #: The parent key of a per-fn run the fill opens when its plan holds no
 #: per-fn run to carve it from.
 _OPENED_PER_FN_KEY = "per-fn:opened-in-fill"
@@ -734,79 +780,93 @@ _OPENED_PER_FN_KEY = "per-fn:opened-in-fill"
 _OPENED_SEQ_BASE = 1000
 
 
+def held_by_leaf(held: HeldSites) -> dict[str, frozenset[FnLocator]]:
+    """The held view per test, keyed by `test_outcome.test_leaf`: the
+    spelling the premise's moved set and a claim's scope are compared in.
+    The held view keys a doc test by libtest's `src/x.rs - Item (line N)`
+    and the premise by `src/x.rs - Item#k`; read raw, the two never joined,
+    so a keep that moved only a doc test onto a holder took nothing."""
+    out: dict[str, frozenset[FnLocator]] = {}
+    for t, us in (held_locators(held) if held else {}).items():
+        k = test_leaf(t)
+        out[k] = out.get(k, frozenset()) | us
+    return out
+
+
 def unwritten_holders(
     held: HeldSites, *, ahead: Collection[FnLocator],
     planned_held: Collection[FnLocator], landed: Collection[FnLocator],
     opened: Collection[FnLocator], asked: FillAsks,
+    own: Collection[FnLocator] = (), moved: Collection[str] = (),
 ) -> list[FnLocator]:
     """The still-stubbed functions red tests first fail in on the ground now
-    that the fill would open a run on: not written by a run still ahead (or
-    in flight), not the sweep's to place (`planned_held`), not kept this
-    fill, not already opened, not asked this fill under unmoved evidence.
+    that the fill would have a run write: not written by a run still ahead
+    (or in flight), not the sweep's to place (`planned_held`), not kept this
+    fill, not already taken, not asked this fill under unmoved evidence.
 
-    One predicate for both readers: the claim gate yields to exactly these
-    (`_GroundGate.yields_to`), and the wave boundary opens exactly these
-    (`_open_for_blockers`), so a claim never waits on a holder no run will
-    write, and each holder is opened at most once per fill."""
-    blockers = frozenset().union(*held_locators(held).values()) if held else frozenset()
-    return sorted(
-        (u for u in blockers
-         if u not in ahead and u not in planned_held and u not in landed
-         and u not in opened
-         and not asked.would_defer(((u.file, u.fn_name),))),
-        key=lambda k: (k.file, k.fn_name))
+    ``own`` is the targets of the run asking to take them into its own
+    queue: one among them that a keep of this fill moved a failing test
+    into (``moved``, the tests whose premise moved) is that run's to write
+    now even when the sweep already held it — the plan placed it in this
+    run, and the keep says it goes before the rest. One a run still ahead
+    also aims at stays that run's (it is promoted to the cursor and the
+    later run would otherwise have the body withheld). A target whose tests
+    still stop in it as planned (a caller not yet written) is the run's
+    ordinary queue and is not taken. Test names are compared through
+    `test_outcome.test_leaf`, the one spelling of a name across the
+    premise (a doc test's `#k`) and the held view (its `(line N)`). Run
+    `15370-6a4cfd45`'s holder sat outside the run; when the sweep already
+    held a holder that the run's rank put behind its callers, excluding
+    `planned_held` left it where the plan put it, last.
 
-
-def _open_for_blockers(
-    ordered: list[ScheduledRun], i: int, held: HeldSites,
-    *, parent: str, planned_held: Collection[FnLocator],
-    landed: Collection[FnLocator], opened: set[FnLocator],
-    asked: FillAsks, bodies_sha: Callable[[frozenset[FnLocator]], str],
-    deps: FillExecutionDeps,
-) -> list[ScheduledRun]:
-    """`ordered` with one per-fn run at the cursor on every blocker the
-    fill's own keeps measured that nothing would write before the sweep.
+    The claim gate is its only reader (`_GroundGate._take_holders`): what
+    it names is handed to the asking run's queue or opened at the cursor in
+    the same step, so each holder is taken at most once per fill.
 
     The obligation is the plan's: every still-stubbed function a red test's
     first failure sits in is aimed by a run. At plan time the driver puts
     every held stub of the sweep in the batch and `fill_schedule.
-    _cover_blockers` opens a deferred writer; inside the fill the held view
-    after each keep (`_GroundGate.held`) was read only by `yields_to` and
-    `_requeue_behind`, which order the runs already planned. A blocker no
-    planned run aims at waited for the next sweep, and the sweep's plan then
-    spent a whole fill before the layer under it was measured. Run
-    `2355041-eae39441` (2026-10-27): fill 3's keep of `src/ensure.rs::new`
-    put 19 tests' first failure in `write_str`, which no run of fill 3
-    targeted (its ensure runs aimed `as_str` and `new`), so both were
-    refused and the fill ended with about 145 of 200 budget minutes unspent;
-    in fill 4 the `src/error.rs::fmt` keeps put 47 tests in
-    `src/fmt.rs::debug` and the `write_str` keep put 19 in `as_str`, and no
-    run of fill 4 aimed either. Ending the fill at such a keep instead would
-    also defer the runs ahead on other branches of the chain (that fill 3
-    landed 20 bodies through).
+    _cover_blockers` opens a deferred writer. A blocker the fill's keeps
+    measure later had no run before the sweep: run `2355041-eae39441`
+    (2026-10-27), fill 3's keep of `src/ensure.rs::new` put 19 tests' first
+    failure in `write_str`, which no run of fill 3 targeted, and the fill
+    ended with about 145 of 200 budget minutes unspent; in fill 4 the
+    `src/error.rs::fmt` keeps put 47 tests in `src/fmt.rs::debug` and no
+    run of fill 4 aimed it.
 
-    Only a blocker the fill's keeps measured is opened: one the sweep
-    already held (`planned_held`) was the plan's to place, and a held stub
-    the plan left out (cut by the dispatch cap, exhausted) stays out. A
-    blocker is also left out when a run still ahead aims at it, when a run of
-    this fill kept a body for it (the sweep grades that body first), when
-    every run of this fill that asked it did so under evidence nothing has
-    moved since (`FillAsks`), or when this fill already opened a run on it:
-    each unit is opened at most once per fill, so the loop ends. The run is
-    a carved run of the per-fn route (`parent`), which writes exactly the
-    targets it is handed; it ranks as a never-served per-fn run and its
-    tests are the ones the ground now holds in its targets — per body,
-    container included (`RouteRun.held_tests`), because those are the tests
-    the run is judged on (`attribution.frontier_for_run`) and a name can
-    have several bodies of which one is the stub."""
-    if not held:
-        return ordered
+    Only a blocker the fill's keeps measured is taken: one the sweep already
+    held (`planned_held`) was the plan's to place, and a held stub the plan
+    left out (cut by the dispatch cap, exhausted) stays out. A blocker is
+    also left out when a run still ahead aims at it, when a run of this
+    fill kept a body for it (the sweep grades that body first), when every
+    run of this fill that asked it did so under evidence nothing has moved
+    since (`FillAsks`), or when this fill already took it."""
+    by_test = held_by_leaf(held)
+    blockers = frozenset().union(*by_test.values()) if by_test else frozenset()
+    moved_leaves = {test_leaf(str(t)) for t in moved}
+    measured_own = {u for t, hs in by_test.items() if t in moved_leaves
+                    for u in hs if u in own}
+    return sorted(
+        (u for u in blockers
+         if u not in ahead and (u in measured_own or u not in planned_held)
+         and u not in landed and u not in opened
+         and not asked.would_defer(((u.file, u.fn_name),))),
+        key=lambda k: (k.file, k.fn_name))
+
+
+def _holder_run(
+    new: Sequence[FnLocator], held: HeldSites, *, parent: str, seq: int,
+    bodies_sha: Callable[[frozenset[FnLocator]], str], iteration: int,
+) -> RouteRun:
+    """A per-fn run on holders a keep of this fill measured. It is a carved
+    run of the per-fn route (`parent`), which writes exactly the targets it
+    is handed; its tests are the ones the ground now holds in its targets —
+    per body, container included (`RouteRun.held_tests`), because those are
+    the tests the run is judged on (`attribution.frontier_for_run`) and a
+    name can have several bodies of which one is the stub. A run in flight
+    that takes the holders carries the same `held_tests`
+    (`HolderAdmission`)."""
     by_unit = held_locators(held)
-    new = unwritten_holders(
-        held, ahead=frozenset(u for x in ordered[i:] for u in x.run.targets),
-        planned_held=planned_held, landed=landed, opened=opened, asked=asked)
-    if not new:
-        return ordered
     tests_of = {u: frozenset(t for t, hs in by_unit.items() if u in hs)
                 for u in new}
     sites_of: dict[FnSite, frozenset[str]] = {}
@@ -815,10 +875,9 @@ def _open_for_blockers(
             if FnLocator(site.file, site.fn_name) in tests_of:
                 sites_of[site] = sites_of.get(site, frozenset()) | {t}
     targets = frozenset(new)
-    names = tuple(f"{u.file}::{u.fn_name}" for u in new)
-    run = RouteRun(
+    return RouteRun(
         kind=RouteKind.PER_FN,
-        label=f"per-fn {len(new)} blocker(s) measured in fill {deps.iteration}",
+        label=f"per-fn {len(new)} blocker(s) measured in fill {iteration}",
         targets=targets,
         target_tests=frozenset().union(*tests_of.values()),
         stubs_in_targets=targets,
@@ -827,31 +886,36 @@ def _open_for_blockers(
         held_tests=tuple(sorted(sites_of.items())),
         # Distinct per opened run: `key` carries it, and two runs of one
         # fill must not share a key.
-        seq=_OPENED_SEQ_BASE + len(opened),
+        seq=seq,
         bodies_sha=bodies_sha(targets),
         parent=parent)
-    position = ordered[i - 1].position if 0 < i <= len(ordered) else 0
-    opened_run = ScheduledRun(
-        run=run, rank=0, weight=2, reason="never_served", level=0,
-        position=position, blocker_writer=names)
-    opened.update(new)
+
+
+def _log_holders(deps: FillExecutionDeps, run: RouteRun, *,
+                 into: str | None) -> None:
+    """The line and event of holders taken: opened at the cursor (``into``
+    None) or handed to the run ``into`` names, ahead of its unclaimed
+    units."""
+    names = [f"{u.file}::{u.fn_name}" for u in sorted(
+        run.targets, key=lambda k: (k.file, k.fn_name))]
+    where = (f"{run.label} opened at the cursor" if into is None else
+             f"taken into {into} ahead of its unclaimed units")
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: blockers measured in "
-        f"this fill that no run ahead writes ({names_of(list(names))}) — "
-        f"{run.label} opened at the cursor; "
-        f"{len(run.target_tests)} failing test(s) now first-fail inside them "
-        f"({names_of(sorted(run.target_tests))})")
+        f"this fill that no run ahead writes ({names_of(names)}) — "
+        f"{where}; {len(run.target_tests)} failing test(s) now first-fail "
+        f"inside them ({names_of(sorted(run.target_tests))})")
     deps.emit("phase_c.fill.blocker_opened", data={
         "cluster": deps.cluster, "iter": deps.iteration,
-        "blockers": list(names),
-        "tests": {n: sorted(tests_of[u]) for n, u in zip(names, new,
-                                                          strict=True)},
+        "blockers": names,
+        "into": into or "",
+        "tests": {f"{u.file}::{u.fn_name}": sorted(ts)
+                  for u, ts in run.unit_tests},
         # The bodies, container included: what the run writes and is judged
         # on (`RouteRun.held_tests`), so a reader can tell the held body
         # from a homonym of its name.
         "sites": [[st.file, st.fn_name, st.container]
-                  for st, _t in sorted(sites_of.items())]})
-    return [*ordered[:i], opened_run, *ordered[i:]]
+                  for st, _t in run.held_tests]})
 
 
 def _log_row(deps: FillExecutionDeps, row: RouteLedgerRow, *,
@@ -1137,20 +1201,13 @@ def execute_fill(
     left_tree: set[str] = set()
     released: set[str] = set()
 
-    def _ahead_writers() -> dict[FnLocator, str]:
-        out: dict[FnLocator, str] = {}
-        for s_ in ordered[i:]:
-            for u_ in s_.run.targets:
-                out.setdefault(u_, s_.run.label)
-        return out
-
-    gate.bind_ahead(_ahead_writers)
-    #: The current wave's targets: a holder one of its runs writes (claimed
-    #: or not yet) is not unwritten.
-    wave_targets: set[FnLocator] = set()
-    # The route a blocker the fill measures with no writer ahead is opened
-    # on (`_open_for_blockers`): the per-fn route, carved from its planned
-    # run, or registered under its own key when it planned none.
+    #: The current wave's runs by key, while the wave runs: a holder one of
+    #: them writes (claimed or not yet) is not unwritten, and a claim that
+    #: waits is carved from its run here.
+    wave_runs: dict[str, ScheduledRun] = {}
+    # The route a blocker the fill measures with no writer ahead is written
+    # by: the per-fn route, carved from its planned run, or registered under
+    # its own key when it planned none.
     per_fn_route = next((r for r in routes if r.kind is RouteKind.PER_FN),
                         None)
     per_fn_parent = next((k for k, r in by_key.items() if r is per_fn_route),
@@ -1158,20 +1215,129 @@ def execute_fill(
     if per_fn_route is not None:
         by_key.setdefault(per_fn_parent, per_fn_route)
     opened_for_blockers: set[FnLocator] = set()
-    if per_fn_route is not None and deps.scheduled and deps.held_now is not None:
-        # The same predicate the boundary opens on, read at each claim.
-        gate.bind_unwritten(lambda h: unwritten_holders(
-            h, ahead=frozenset(u for x in ordered[i:] for u in x.run.targets)
-            | frozenset(wave_targets),
-            planned_held=plan_held, landed=landed_fill,
-            opened=opened_for_blockers, asked=fill_asks))
-    #: How many times each planned run's claims were queued again behind a
-    #: writer (bounded: each requeue follows a writer that has then run).
-    requeued: dict[str, int] = {}
+    #: The keys of the runs the fill opened on holders.
+    opened_keys: set[str] = set()
+    can_take = (per_fn_route is not None and deps.scheduled
+                and deps.held_now is not None)
     #: A queued-again piece's key -> the key of the run whose claims it
     #: carries (the schedule's holds name that run): the run has finished
     #: when its piece has.
     yield_origin: dict[str, str] = {}
+    #: (run whose claims waited, writer they waited behind) -> the piece
+    #: queued behind it and the units it carries. Each run's claims wait
+    #: behind a given writer once per fill: when its piece has run, the
+    #: writer has too, and a second wait on the same writer (a requeued
+    #: writer whose claims waited on this run) would cycle.
+    queued: dict[tuple[str, str], tuple[str, frozenset[FnLocator]]] = {}
+
+    # The executor's side of the claim gate (`_Cursor`). Called by the gate
+    # at a claim, under its lock: workers of the wave in flight ask, and the
+    # main thread touches `ordered` only between waves. The cursor `i` is
+    # already past the wave in flight, so every move lands after it.
+    def _ahead() -> dict[FnLocator, ScheduledRun]:
+        out: dict[FnLocator, ScheduledRun] = {}
+        for s_ in ordered[i:]:
+            for u_ in s_.run.targets:
+                out.setdefault(u_, s_)
+        return out
+
+    def _promote(blockers: frozenset[FnLocator]) -> None:
+        nonlocal ordered
+        ahead = ordered[i:]
+        writers = [x for x in ahead if x.run.targets & blockers]
+        rest = [x for x in ahead if not (x.run.targets & blockers)]
+        new_ahead = [*writers, *rest]
+        if [x.run.key for x in new_ahead] == [x.run.key for x in ahead]:
+            return
+        ordered = ordered[:i] + new_ahead
+        deps.log(
+            f"  [phase-c/schedule] fill {deps.iteration}: blockers measured "
+            f"in this fill ({names_of(sorted(f'{u.file}::{u.fn_name}' for u in blockers))}) "
+            f"— {names_of([x.run.label for x in writers])} open first")
+        deps.emit("phase_c.fill.blockers_reordered", data={
+            "cluster": deps.cluster, "iter": deps.iteration,
+            "blockers": sorted(f"{u.file}::{u.fn_name}" for u in blockers),
+            "writers": [x.run.label for x in writers], "requeued": []})
+
+    def _queue_behind(asker: RouteRun, units: frozenset[FnLocator],
+                      writer: ScheduledRun) -> bool:
+        nonlocal ordered
+        w = wave_runs.get(asker.key)
+        if w is None:
+            return False
+        ahead_keys = [x.run.key for x in ordered[i:]]
+        if writer.run.key not in ahead_keys:
+            return False
+        origin = yield_origin.get(asker.key, asker.key)
+        pair = (origin, yield_origin.get(writer.run.key, writer.run.key))
+        prior = queued.get(pair)
+        if prior is not None and prior[0] not in ahead_keys:
+            return False
+        carried = units | (prior[1] if prior is not None else frozenset())
+        piece = _yield_piece(w, carried)
+        if piece is None:
+            return False
+        rest = [x for x in ordered[i:]
+                if prior is None or x.run.key != prior[0]]
+        at = next(n for n, x in enumerate(rest)
+                  if x.run.key == writer.run.key) + 1
+        ordered = ordered[:i] + [*rest[:at], piece, *rest[at:]]
+        queued[pair] = (piece.run.key, carried)
+        if piece.run.key != asker.key:
+            yield_origin[piece.run.key] = origin
+        if prior is None:
+            deps.emit("phase_c.fill.blockers_reordered", data={
+                "cluster": deps.cluster, "iter": deps.iteration,
+                "blockers": [], "writers": [writer.run.label],
+                "requeued": [piece.run.label]})
+        return True
+
+    def _unwritten(h: HeldSites, taker: RouteRun | None,
+                   moved: Collection[str]) -> list[FnLocator]:
+        ahead = {u for x in ordered[i:] for u in x.run.targets}
+        ahead |= {u for k, x in wave_runs.items()
+                  if taker is None or k != taker.key for u in x.run.targets}
+        return unwritten_holders(
+            h, ahead=ahead, planned_held=plan_held, landed=landed_fill,
+            opened=opened_for_blockers, asked=fill_asks,
+            own=taker.targets if taker is not None else (), moved=moved)
+
+    def _open_run(new: Sequence[FnLocator], h: HeldSites) -> None:
+        nonlocal ordered, held_units
+        run = _holder_run(new, h, parent=per_fn_parent,
+                          seq=_OPENED_SEQ_BASE + len(opened_for_blockers),
+                          bodies_sha=bodies_sha, iteration=deps.iteration)
+        position = ordered[i - 1].position if 0 < i <= len(ordered) else 0
+        opened_for_blockers.update(new)
+        opened_keys.add(run.key)
+        held_units = held_units | run.targets
+        ordered = [*ordered[:i], ScheduledRun(
+            run=run, rank=0, weight=2, reason="never_served", level=0,
+            position=position,
+            blocker_writer=tuple(f"{u.file}::{u.fn_name}" for u in new)),
+            *ordered[i:]]
+        _log_holders(deps, run, into=None)
+
+    def _admit(new: Sequence[FnLocator], h: HeldSites, taker: RouteRun,
+               queue: HolderQueue) -> None:
+        nonlocal held_units
+        run = _holder_run(new, h, parent=per_fn_parent,
+                          seq=_OPENED_SEQ_BASE + len(opened_for_blockers),
+                          bodies_sha=bodies_sha, iteration=deps.iteration)
+        opened_for_blockers.update(new)
+        held_units = held_units | run.targets
+        queue.admit(HolderAdmission(run.targets, run.held_tests))
+        _log_holders(deps, run, into=taker.label)
+
+    def _opened_ahead() -> ScheduledRun | None:
+        return next((x for x in ordered[i:] if x.run.key in opened_keys), None)
+
+    gate.bind(_Cursor(
+        ahead=_ahead, promote=_promote, queue_behind=_queue_behind,
+        opened_ahead=_opened_ahead,
+        unwritten=_unwritten if can_take else None,
+        open_run=_open_run if can_take else None,
+        admit=_admit if can_take else None))
 
     def _flush(new_rows: list[RouteLedgerRow]) -> None:
         if deps.ledger is not None and new_rows:
@@ -1185,8 +1351,15 @@ def execute_fill(
         if not freed:
             return
         released.update(h.run.key for h in freed)
-        ordered = ordered[:i] + sorted([*ordered[i:], *freed],
-                                       key=lambda r: r.position)
+        # Each released run goes in at its plan position among the runs
+        # ahead, which keep the order the claim gate gave them (writers
+        # promoted, waited claims queued behind their writer).
+        ahead = list(ordered[i:])
+        for h in sorted(freed, key=lambda r: r.position):
+            at = next((n for n, x in enumerate(ahead)
+                       if x.position > h.position), len(ahead))
+            ahead.insert(at, h)
+        ordered = ordered[:i] + ahead
         labels = {h.run.key: h.run.label for h in sched.ordered}
         for h in freed:
             deps.log(
@@ -1199,7 +1372,13 @@ def execute_fill(
             "released": [h.run.label for h in freed],
             "holders": sorted({labels.get(k, k) for h in freed
                                for k in h.held_by})})
-    while i < len(ordered):
+    while True:
+        # The executor's own claim of its next run: a holder the last wave's
+        # keeps measured, that no run ahead writes, opens here, ahead of the
+        # next wave — and also when that wave ended the plan.
+        gate.at_cursor()
+        if i >= len(ordered):
+            break
         s = ordered[i]
         route = by_key[s.run.plan_key]
         # A wave: this run plus the consecutive runs of the same route when
@@ -1286,8 +1465,8 @@ def execute_fill(
             wave = _kept_wave
             if not wave:
                 continue
-        wave_targets.clear()
-        wave_targets.update(u for w in wave for u in w.run.targets)
+        wave_runs.clear()
+        wave_runs.update((w.run.key, w) for w in wave)
         clocks: dict[str, RunClock] = {}
         shares: dict[str, float | None] = {}
         # The plan reserved later floors against the whole budget. Opening
@@ -1298,6 +1477,11 @@ def execute_fill(
         granted = budget.opening_shares(ahead)
         for w, share in zip(wave, granted[:len(wave)], strict=True):
             shares[w.run.key] = share
+            # A run whose route takes a unit it was not planned with writes
+            # a holder its own keeps measure at its next claim; any other
+            # run's holder opens at the cursor (`_GroundGate._take_holders`).
+            _holders = (HolderQueue() if can_take
+                        and getattr(route, "takes_holders", False) else None)
             clocks[w.run.key] = RunClock(
                 share_minutes=share, fill_remaining=budget.remaining,
                 now=deps.now, ground_moved=gate.for_run(dict(w.run.left_red)),
@@ -1305,8 +1489,9 @@ def execute_fill(
                 unit_multiple=deps.unit_share_multiple,
                 call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp),
                 owed=held_units & w.run.targets,
-                yields_to=(gate.yields_to if deps.held_now is not None
-                           else None))
+                yields_to=(gate.claim_for(w.run, _holders)
+                           if deps.held_now is not None else None),
+                holders=_holders)
         mark = kept_mark()
         t0 = deps.now()
         reports: dict[str, RouteRunReport] = {}
@@ -1415,9 +1600,11 @@ def execute_fill(
             rep_w = reports.get(w.run.key)
             if rep_w is not None:
                 landed_fill |= rep_w.kept
-        # Claims that waited behind a run still ahead (`_GroundGate.
-        # yields_to`): the run they yielded is not a landing either, but its
-        # holds stand until its claims have run behind their writer.
+        wave_runs.clear()
+        # Claims that waited behind a run still ahead (`_GroundGate._claim`,
+        # queued behind it at the claim): the run they yielded is not a
+        # landing either, but its holds stand until its claims have run
+        # behind their writer.
         _yielded = {w.run.key: frozenset(clocks[w.run.key].yielded)
                     for w in wave if clocks[w.run.key].yielded}
         # A run of this wave whose row kept nothing (reverted, empty, or
@@ -1428,24 +1615,6 @@ def execute_fill(
             [(w.run.key, bool(row.kept))
              for w, row in zip(wave, rows[-len(wave):], strict=True)],
             _yielded, yield_origin))
-        # Blockers-first again, on the blockers this fill's keeps measured:
-        # the runs still ahead that write one open first, and the claims
-        # that yielded to them queue behind them (`_requeue_behind`).
-        if deps.held_now is not None and i <= len(ordered):
-            ordered = _requeue_behind(
-                ordered, i, wave, _yielded, gate.blockers_now(), requeued,
-                deps, yield_origin)
-            # A blocker those keeps measured that no run ahead writes gets
-            # a run of its own here, before the plan goes on.
-            if per_fn_route is not None and deps.scheduled and gate.armed:
-                _before_open = len(ordered)
-                ordered = _open_for_blockers(
-                    ordered, i, gate.held, parent=per_fn_parent,
-                    planned_held=plan_held, landed=landed_fill,
-                    opened=opened_for_blockers,
-                    asked=fill_asks, bodies_sha=bodies_sha, deps=deps)
-                if len(ordered) != _before_open:
-                    held_units = held_units | ordered[i].run.targets
         if unjudged and i < len(ordered):
             # The same exit as a moved premise: the rest of the plan was
             # planned on a tree no verdict describes. The fill returns and
@@ -1482,11 +1651,11 @@ def execute_fill(
         # same question before it opens; the loop ends when a pass defers
         # nothing (each pass removes at least one run from the plan).
         while i < len(ordered) and gate.armed:
-            # A run that waits behind a writer still ahead (`yields_to`) is
-            # not deferred for the sweep: it opens after that writer.
+            # A run that waits behind a writer still ahead (`waits_behind`)
+            # is not deferred for the sweep: it opens after that writer.
             rest = [w for w in ordered[i:]
-                    if not gate.yields_to(w.run.target_tests or None,
-                                          w.run.targets)
+                    if not gate.waits_behind(w.run.target_tests or None,
+                                             w.run.targets)
                     and gate.for_run(dict(w.run.left_red))(
                         w.run.target_tests or None, w.run.targets)]
             if not rest:

@@ -157,7 +157,16 @@ class RouteRunReport:
 
 @runtime_checkable
 class FillRoute(Protocol):
-    """One fill route as the schedule sees it."""
+    """One fill route as the schedule sees it.
+
+    A route whose runs claim unit by unit and can write a unit they were not
+    planned with declares ``takes_holders = True`` (the per-fn route): the
+    executor then hands each of its runs a `HolderQueue`, and the claim gate
+    puts a holder a keep of the fill measured at the front of that run's
+    queue (`RunClock.refusal` answers "take"). A route without the attribute
+    has such a holder opened as a per-fn run at the cursor. It is read with
+    ``getattr`` and not declared here, so that `isinstance` against this
+    protocol does not refuse the routes that cannot take one."""
 
     @property
     def kind(self) -> RouteKind: ...

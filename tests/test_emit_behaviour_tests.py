@@ -30,9 +30,11 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.application.emit_behaviour_tests import (
+    WORLD_NOT_HELD,
     behaviour_test_stem,
     emit_behaviour_tests,
     replay_fn_name,
+    verify_progress,
 )
 from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.behaviour_probe import (
@@ -392,9 +394,10 @@ def test_a_withdrawn_replay_records_whether_that_test_failed(tmp_path: Path) -> 
     assert _first_line_reader(out, first) == f"test {first} ... FAILED"
     assert "observed_liar" in _first_line_reader(out, second)
 
-    # Three rounds each fail a new capture and pass the rest. The ones the
-    # last round passed are withdrawn by the budget, and the row says they
-    # were not in that failed set.
+    # Every round fails a new capture and passes the rest. Each capture is
+    # withdrawn by the round that read it red: no row is stamped red by a
+    # count of rounds for a capture its last round passed (run
+    # `1878910-be648607`, 22 and 24 such rows under a three-round budget).
     budget = tmp_path / "budget"
     specs = [_spec(f"s{i}") for i in range(6)]
     order = [replay_fn_name(s) for s in specs]
@@ -405,14 +408,8 @@ def test_a_withdrawn_replay_records_whether_that_test_failed(tmp_path: Path) -> 
         return False, _libtest(present[1:], present[:1])
 
     _dest2, _dropped2, misses2 = _emit(budget, specs, budget_verify)
-    by_id = {m["unit"]: m for m in misses2}
-    budget_rows = [m for m in misses2 if m["reason"] == "replay still red after the verification budget"]
-    assert len(budget_rows) == 3
-    assert {m["replay_failed"] for m in budget_rows} == {"no"}
-    assert all("replay_output" not in m for m in budget_rows)
-    disagreed = [m for m in misses2 if m["reason"] == "replay disagreed with the capture"]
-    assert disagreed and {m["replay_failed"] for m in disagreed} == {"yes"}
-    assert by_id
+    assert [m["reason"] for m in misses2] == ["replay disagreed with the capture"] * 6
+    assert {m["replay_failed"] for m in misses2} == {"yes"}
 
 
 def test_a_red_verdict_that_names_no_capture_withdraws_rather_than_retries(tmp_path: Path) -> None:
@@ -509,11 +506,14 @@ def test_a_perturbed_run_with_no_verdict_withdraws(tmp_path: Path) -> None:
     assert dest2 is not None and dropped2 == ()
 
 
-def test_a_file_that_stays_red_past_the_budget_leaves_nothing_behind(tmp_path: Path) -> None:
-    """Each round drops at least one capture, so the loop normally ends green
-    or empty. The bound is a backstop for a file that keeps failing somewhere
-    NEW every round, and on it the rest is withdrawn rather than left failing
-    in the oracle for the life of the project."""
+def test_a_file_that_fails_somewhere_new_every_round_ends_empty_one_round_per_capture(
+        tmp_path: Path) -> None:
+    """Each round withdraws what it read red, so a file that keeps failing
+    somewhere NEW ends empty after one round per capture, every capture
+    withdrawn on its own reading. Negative control, the three-round budget
+    this replaces: three captures withdrawn by their rounds and the other
+    three stamped `replay still red after the verification budget`, though
+    the last round had passed them."""
     specs = [_spec(f"s{i}") for i in range(6)]
     order = [replay_fn_name(s) for s in specs]
     rounds = iter(range(99))
@@ -526,7 +526,9 @@ def test_a_file_that_stays_red_past_the_budget_leaves_nothing_behind(tmp_path: P
 
     dest, dropped, misses = _emit(tmp_path, specs, verify)
     assert dest is None and set(dropped) == {s.behaviour_id for s in specs}
-    assert [m["reason"] for m in misses].count("replay still red after the verification budget") == 3
+    assert next(rounds) == 6
+    assert [m["reason"] for m in misses] == ["replay disagreed with the capture"] * 6
+    assert {m["replay_failed"] for m in misses} == {"yes"}
     assert list((tmp_path / "tests").iterdir()) == []
 
 
@@ -684,7 +686,9 @@ def test_a_world_pinned_capture_is_narrowed_to_what_the_replay_shares(
 def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
         tmp_path: Path) -> None:
     """Narrowing is not a licence to keep everything: a replay that shares no
-    leading text with the capture pins nothing, and the capture goes."""
+    leading text with the capture pins nothing, and the capture goes. It is
+    red in the capture-env binary, which is not the world it pins, so the row
+    says it was not verified rather than stamping that run's verdict on it."""
     from dataclasses import replace as dc_replace
 
     from pipeline_core.domain.behaviour_probe import env_twin_id
@@ -704,7 +708,7 @@ def test_a_world_pinned_capture_sharing_nothing_with_the_replay_is_withdrawn(
     # The TWIN goes; the capture-world original, which reproduces, stays.
     from pipeline_core.domain.behaviour_probe import env_twin_id as _tid
     assert dropped == (_tid(moving.behaviour_id),)
-    assert "replay disagreed with the capture" in misses[0]["reason"]
+    assert misses[0]["reason"] == WORLD_NOT_HELD and "replay_failed" not in misses[0]
     assert dest is not None
     body = dest.read_text(encoding="utf-8")
     assert twin_fn not in body and replay_fn_name(moving) in body
@@ -789,3 +793,122 @@ def test_the_verified_file_is_settled_into_its_measured_worlds(tmp_path: Path) -
             bare, "stable", [keep], crate="anyhow", verify=_verifier(bare),
             failing_alone=None, settle=lambda _d, body: body)  # type: ignore[arg-type]
     assert list((bare / "tests").glob("*.rs")) == []
+
+
+def _process_world_verifier(tmp: Path, renders: Mapping[str, str],
+                            env_renders: Mapping[str, str]) -> Verify:
+    """A `verify` with the physics run `1878910-be648607` recorded: the
+    observable env is read once per test PROCESS, so every test of a run
+    renders the world that run was started in and a test's own `set_var`
+    does not hold (the `::env` twins rendered `disabled` in the capture-env
+    binary). `renders` is the capture world, `env_renders` the perturbed one;
+    a fn with no entry passes. Failures carry the emitted marker."""
+
+    def verify(stem: str, extra: Mapping[str, str]) -> tuple[bool, str]:
+        body = (tmp / "tests" / f"{stem}.rs").read_text(encoding="utf-8")
+        present = re.findall(r"fn (behaviour_\w+)\(\)", body)
+        world = env_renders if extra else renders
+        passed, failed, marks = [], [], []
+        for fn in present:
+            chunk = body[body.index(f"fn {fn}()"):]
+            chunk = chunk[:chunk.index("\n}\n") + 1]
+            base = fn[:-len("_env")] if fn.endswith("_env") else fn
+            actual = world.get(base)
+            q = r'"((?:[^"\\]|\\.)*)"'
+            lit = (re.search(r"starts_with\(" + q, chunk)
+                   or re.search(r"actual == " + q, chunk)
+                   or re.search(r"assert_eq!\(.*, " + q + r"\);", chunk))
+            if actual is None or lit is None:
+                passed.append(fn)
+                continue
+            want = lit.group(1).encode().decode("unicode_escape")
+            ok = (actual.startswith(want) and len(actual) > len(want)
+                  if "starts_with" in chunk else actual == want)
+            (passed if ok else failed).append(fn)
+            if not ok:
+                marks.append(f"thread '{fn}' panicked:\n"
+                             f"determ-observed[{fn}]<<<{actual}>>>")
+        return not failed, _libtest(passed, failed) + "\n".join(marks)
+
+    return verify
+
+
+def test_world_pinned_captures_a_shared_binary_cannot_hold_leave_by_name(
+        tmp_path: Path) -> None:
+    """The recorded shape of `1878910-be648607`'s harvest, both worlds: the
+    perturbed replay is red on the movers, which split into two pinned
+    worlds; the capture-env binary renders the twins in the capture world,
+    so they leave; the perturbed binary then renders the pinned originals in
+    the perturbed world. Claim: those originals leave on their own names,
+    unverified, and the captures that never moved are emitted. No row says
+    the verdict named no capture, and none is stamped red by a round count.
+
+    Negative control (run against the code before this change): the third
+    round's perturbed branch kept the originals ("set_var should have
+    isolated it"), found no split and no withdrawal, and withdrew the whole
+    file as `perturbed replay red on a verdict naming no capture in the
+    file`, the fixed captures with it."""
+    fixed = [_spec(f"fixed{i}") for i in range(3)]
+    movers = [_spec(f"mover{i}", when="e.backtrace()") for i in range(2)]
+    perturb = {"RUST_BACKTRACE": "1"}
+    capture = {replay_fn_name(m): "boom" for m in movers}
+    trace = {replay_fn_name(m): "Stack backtrace: 0x1" for m in movers}
+    verify = _process_world_verifier(tmp_path, capture, trace)
+    moved = {m.behaviour_id for m in movers}
+
+    dest, dropped, misses = _emit(
+        tmp_path, fixed + movers, verify, perturb_env=perturb,
+        recapture=lambda s, _e: ("Stack backtrace: 0x1"
+                                 if s.behaviour_id in moved else None))
+    assert dest is not None
+    body = dest.read_text(encoding="utf-8")
+    assert all(replay_fn_name(f) in body for f in fixed)
+    assert all(replay_fn_name(m) not in body for m in movers)
+    assert len(dropped) == 4  # two originals and their two twins
+    assert {m["reason"] for m in misses} == {WORLD_NOT_HELD}
+    assert all("replay_failed" not in m for m in misses)
+
+
+def test_a_round_that_continues_without_progress_is_a_loud_bounded_exit(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The loop has no round count: a branch re-renders only after a round
+    that lowered `verify_progress`. A future branch that continues without
+    progress ends the loop loudly, with the rest withdrawn unverified and no
+    verdict stamped. Control: the same round with the real measure emits the
+    survivor."""
+    import pipeline_core.application.emit_behaviour_tests as ebt
+
+    specs = [_spec("keeper"), _spec("liar")]
+    red = frozenset({replay_fn_name(specs[1])})
+    healthy = tmp_path / "healthy"
+    dest, dropped, _m = _emit(healthy, specs, _verifier(healthy, red=red))
+    assert dest is not None and dropped == (specs[1].behaviour_id,)
+
+    monkeypatch.setattr(ebt, "verify_progress", lambda _keep: (0, 0, 0))
+    stuck = tmp_path / "stuck"
+    dest2, dropped2, misses2 = _emit(stuck, specs, _verifier(stuck, red=red))
+    assert dest2 is None and set(dropped2) == {s.behaviour_id for s in specs}
+    assert misses2[-1]["reason"] == "not verified: the round made no progress"
+    assert "replay_failed" not in misses2[-1]
+    assert list((stuck / "tests").iterdir()) == []
+
+
+def test_verify_progress_falls_on_a_split_a_withdrawal_and_a_narrowing() -> None:
+    """Each kind of continue lowers the measure lexicographically, including
+    a split, which grows the file by one capture."""
+    from pipeline_core.domain.behaviour_probe import (
+        narrow_then_to_agreement,
+        split_env_worlds,
+    )
+
+    fixed, mover = _spec("fixed"), _spec("mover", stdout="head tail")
+    before = verify_progress([fixed, mover])
+    worlds = split_env_worlds(mover, "other world", {"RUST_BACKTRACE": "1"})
+    assert worlds is not None
+    orig, twin = worlds
+    after_split = verify_progress([fixed, orig, twin])
+    assert after_split < before
+    assert verify_progress([fixed, orig]) < after_split
+    cut = narrow_then_to_agreement(orig, "head other")
+    assert cut is not None and cut.required_env == orig.required_env
+    assert verify_progress([fixed, cut, twin]) < after_split

@@ -282,13 +282,13 @@ def test_the_opener_carries_the_held_body_with_its_container(
         check_stop=lambda _c: None, ledger=RouteLedgerStore(tmp_path),
         project="p", cluster="c", run_id="r", iteration=1, oracle_fp="o")
     held = {"t1": frozenset({_MID_A}), "t2": frozenset({_MID_A})}
-    ordered = fs._open_for_blockers(
-        [], 0, held, parent="per-fn:p", planned_held=(), landed=(),
-        opened=set(), asked=FillAsks(), bodies_sha=lambda _t: "",
-        deps=deps)
-    (opened,) = ordered
-    assert opened.run.targets == frozenset({FnLocator(_FILE, "mid")})
-    assert dict(opened.run.held_tests) == {_MID_A: frozenset({"t1", "t2"})}
+    new = fs.unwritten_holders(held, ahead=(), planned_held=(), landed=(),
+                               opened=set(), asked=FillAsks())
+    run = fs._holder_run(new, held, parent="per-fn:p", seq=1000,
+                         bodies_sha=lambda _t: "", iteration=1)
+    fs._log_holders(deps, run, into=None)
+    assert run.targets == frozenset({FnLocator(_FILE, "mid")})
+    assert dict(run.held_tests) == {_MID_A: frozenset({"t1", "t2"})}
     assert "phase_c.fill.blocker_opened" in events
 
 

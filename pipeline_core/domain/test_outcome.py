@@ -46,6 +46,7 @@ from pipeline_core.domain.test_results import (
 
 __all__ = [
     "abort_readings",
+    "test_leaf",
     "RunKind",
     "SiteKind",
     "HeldSites",
@@ -324,7 +325,7 @@ def stub_hold_of(
     return StubHold({t: frozenset(ss) for t, ss in held.items()})
 
 
-def _scope_leaf(name: str) -> str:
+def test_leaf(name: str) -> str:
     """One spelling for a test name across the readers that carry it: the
     premise's stable key (a doc test's `#k`), libtest's raw name (a doc
     test's `(line N)`), and the leaf a route keeps (`rsplit("::")`). Two
@@ -361,8 +362,8 @@ def moved_in_scope(
     moved_t = tuple(sorted(set(moved)))
     if not scope:
         return moved_t
-    leaves = {_scope_leaf(s) for s in scope}
-    return tuple(m for m in moved_t if _scope_leaf(m) in leaves)
+    leaves = {test_leaf(s) for s in scope}
+    return tuple(m for m in moved_t if test_leaf(m) in leaves)
 
 
 def ground_left(
@@ -392,11 +393,11 @@ def ground_left(
     rule of :func:`moved_in_scope`."""
     if not scope:
         return ()
-    gone = {_scope_leaf(m) for m in moved}
-    seen = {_scope_leaf(r) for r in read}
+    gone = {test_leaf(m) for m in moved}
+    seen = {test_leaf(r) for r in read}
     return tuple(sorted({s for s in scope
-                         if _scope_leaf(s) in seen
-                         and _scope_leaf(s) not in gone}))
+                         if test_leaf(s) in seen
+                         and test_leaf(s) not in gone}))
 
 
 def _first_fail_fns(identity: tuple[str, ...]) -> frozenset[tuple[str, str]]:

@@ -68,6 +68,7 @@ from pipeline_core.domain.behaviour_probe import (
     observed_values,
     render_replay_test,
     split_env_worlds,
+    unperturbed_env,
 )
 from pipeline_core.domain.generation import (
     as_integration_test,
@@ -95,12 +96,39 @@ Settle = Callable[[Path, str], str | None]
 # Recapture Then under an extra env: raw stdout, or None if the program
 # failed to run. Injected so the emitter does not own cargo.
 Recapture = Callable[[BehaviourSpec, Mapping[str, str]], str | None]
-# How many times the file may be re-rendered after dropping what failed. Three
-# is a termination bound, not a budget: each round drops at least one capture,
-# so the loop ends either green or empty. A round that withdraws only the
-# captures a no-verdict reading located (:func:`no_verdict_culprits`) is not
-# charged to it: it strictly shrinks the file, so it terminates on its own.
-MAX_VERIFY_ROUNDS = 3
+# Why a pinned capture that is red in a run of another world leaves. The
+# observable env is read once per test process, so a capture's own `set_var`
+# does not hold once a sibling in the same binary has read it: run
+# `1878910-be648607` (2026-10-31) rendered `disabled` for every `::env` twin
+# in the capture-env binary. A red there says nothing about the crate, so the
+# row is not stamped as that round's verdict.
+WORLD_NOT_HELD = ("not verified: red in a test binary whose environment is "
+                  "not the world this capture pins")
+
+
+def verify_progress(keep: Sequence[BehaviourSpec]) -> tuple[int, int, int]:
+    """(unpinned captures, captures, total length of the pinned Thens).
+
+    The verify loop re-renders only after a round that lowered this
+    lexicographically, so it ends without a round count. A world split pins
+    both halves (`split_env_worlds`) and a pinned capture never splits again,
+    so the first part falls although the file grows; a withdrawal lowers the
+    second; a narrowing strictly shortens a pinned Then
+    (`narrow_then_to_agreement` returns None on an equal prefix) and keeps
+    the pin. A count of rounds is what this replaces: on `1878910-be648607`
+    the third round withdrew 8 twins, the count was spent, and the 22 and 24
+    captures that round had passed were stamped red with no reading."""
+    pinned = [s for s in keep if s.required_env]
+    return (len(keep) - len(pinned), len(keep),
+            sum(len(s.then.value) for s in pinned
+                if s.then is not None and s.then.value))
+
+
+def out_of_world(spec: BehaviourSpec, run_world: Mapping[str, str] | None) -> bool:
+    """True when `spec` pins a world and the run that read it red was started
+    in another one (`run_world`; None when the run's world is not known)."""
+    return (bool(spec.required_env) and run_world is not None
+            and dict(spec.required_env) != dict(run_world))
 
 
 def behaviour_test_stem(cfg_cluster: str) -> str:
@@ -325,8 +353,8 @@ def _narrow_world_pinned(
     twin was emitted with the probe's whole render and the test binary that
     ran it was never the binary that captured it.
 
-    Narrowing is strictly shortening, so the caller's round bound ends the
-    loop; a capture that shares no leading text with its replay is not
+    Narrowing is strictly shortening and keeps the pin, so it lowers
+    :func:`verify_progress`; a capture that shares no leading text with its replay is not
     narrowed and goes on to be withdrawn."""
     seen = observed_values(output)
     if not seen:
@@ -356,8 +384,8 @@ def _withdraw(
     Returning the withdrawn list rather than a count is what lets the caller
     tell "this round made progress" from "the verdict names nothing we can
     remove" — the second is not a round to retry, it is a red file with no
-    attribution, and retrying it is how a bounded loop spends its whole budget
-    re-rendering the same thing."""
+    attribution, and retrying it re-renders the same thing (the loop's
+    progress check, :func:`verify_progress`, would refuse that round)."""
     survivors, went = [], []
     for spec in keep:
         if replay_fn_name(spec) in failed:
@@ -475,9 +503,9 @@ def emit_behaviour_tests(
     if not keep:
         return None, (), misses, ()
 
-    # The verify output of the round a drop is charged to. A budget drop is
-    # whoever remained after the last continue, which includes a capture that
-    # round had already passed. `replay_failed` says which, and the assertion
+    # The verify output of the round a drop is charged to. A verdict drop
+    # can name a capture that round passed (the "naming no capture" exits
+    # take whoever remains); `replay_failed` says which, and the assertion
     # text is kept only for a name that round failed.
     round_out = ""
     round_failed: frozenset[str] | None = None
@@ -494,8 +522,33 @@ def emit_behaviour_tests(
         dropped.append(spec.behaviour_id)
         misses.append(row)
 
-    def _drop_verdict(spec: BehaviourSpec, reason: str) -> None:
-        _drop(spec, reason, verdict=True)
+    # The world each verify run starts in. The capture-env run is the world
+    # the captures were taken in (`unperturbed_env` of the flip); without a
+    # flip no capture is split here and the world is not known.
+    capture_world = unperturbed_env(perturb_env) if perturb_env else None
+    world_went: list[BehaviourSpec] = []
+
+    def _drop_red(run_world: Mapping[str, str] | None) -> Callable[[BehaviourSpec, str], None]:
+        """The drop for a capture a red verdict names: that round's verdict,
+        unless the capture pins another world than the run's
+        (:data:`WORLD_NOT_HELD`)."""
+        def drop(spec: BehaviourSpec, reason: str) -> None:
+            if out_of_world(spec, run_world):
+                world_went.append(spec)
+                _drop(spec, WORLD_NOT_HELD)
+            else:
+                _drop(spec, reason, verdict=True)
+        return drop
+
+    def _log_world_went() -> None:
+        if world_went:
+            log(
+                f"  [task0d] cluster {cfg_cluster}: {len(world_went)} world-pinned "
+                "capture(s) were red in a test binary of the other world and "
+                "were withdrawn unverified (the binary does not hold a pinned "
+                "environment)."
+            )
+            world_went.clear()
 
     (Path(project_dir) / "tests").mkdir(parents=True, exist_ok=True)
     dest = _free_dest(project_dir, stem)
@@ -557,9 +610,29 @@ def emit_behaviour_tests(
     # and then saves the suite — so a raise here used to leave an unverified
     # `tests/` file in the crate AND every capture still listed as a MUST.
     try:
-        budget = MAX_VERIFY_ROUNDS
-        while budget > 0:
-            budget -= 1
+        progress: tuple[int, int, int] | None = None
+        last_round = ""
+        while True:
+            # A round re-renders only after the one before it made progress.
+            # A branch that continues without it is a defect of that branch:
+            # loud, bounded, and nothing stamped red without a reading.
+            now = verify_progress(keep)
+            if progress is not None and not now < progress:
+                log(
+                    f"  [task0d] cluster {cfg_cluster}: HEALTH ‼ "
+                    f"BEHAVIOUR_VERIFY_NO_PROGRESS — the {last_round} round "
+                    "continued without withdrawing, splitting or narrowing a "
+                    f"capture; {len(keep)} capture(s) withdrawn unverified."
+                )
+                emit("task0d.behaviour_verify_no_progress",
+                     data={"cluster": cfg_cluster, "branch": last_round,
+                           "captures": len(keep)})
+                with suppress(OSError):
+                    dest.unlink()
+                for s in keep:
+                    _drop(s, "not verified: the round made no progress")
+                return None, tuple(dropped), misses, ()
+            progress = now
             # One capture whose own replay text fails the check is dropped.
             # The others are rendered again, and the assembled file is checked
             # with the same function: a broken tests/ file is still not written.
@@ -605,7 +678,7 @@ def emit_behaviour_tests(
                     out, keep, body, dest, executed,
                     lambda st, names: failing_alone(st, names, {}))
                 if _drop_located(culprits, perturbed=False):
-                    budget += 1
+                    last_round = "located no-verdict"
                     continue
                 log(
                     f"  [task0d] cluster {cfg_cluster}: emitted behaviour tests produced no "
@@ -627,13 +700,18 @@ def emit_behaviour_tests(
                         "the capture and the replay share — the rendering "
                         "process owns the rest."
                     )
+                    last_round = "narrow"
                     continue
-                keep, went = _withdraw(keep, failed, _drop_verdict, "replay disagreed with the capture")
+                keep, went = _withdraw(keep, failed, _drop_red(capture_world),
+                                       "replay disagreed with the capture")
+                n_world = len(world_went)
                 log(
-                    f"  [task0d] cluster {cfg_cluster}: {len(went)} capture(s) did not "
+                    f"  [task0d] cluster {cfg_cluster}: {len(went) - n_world} capture(s) did not "
                     f"reproduce as a test against the original and were withdrawn."
                 )
+                _log_world_went()
                 if keep and went:
+                    last_round = "withdraw"
                     continue
                 # Nothing left, or a red verdict that names no capture in this file
                 # — which cannot be made green by dropping anything. Either way the
@@ -658,6 +736,7 @@ def emit_behaviour_tests(
                     "capture(s) pass only beside the file's other tests "
                     "and were withdrawn.")
                 if keep and went:
+                    last_round = "alone"
                     continue
                 with suppress(OSError):
                     dest.unlink()
@@ -682,7 +761,7 @@ def emit_behaviour_tests(
                         out2, keep, body, dest, executed2,
                         lambda st, names: failing_alone(st, names, perturb_env))
                     if _drop_located(culprits, perturbed=True):
-                        budget += 1
+                        last_round = "located perturbed no-verdict"
                         continue
                     log(
                         f"  [task0d] cluster {cfg_cluster}: the environment-perturbed "
@@ -711,13 +790,16 @@ def emit_behaviour_tests(
                         if spec.required_env:
                             # Already pinned to one world. A red under this
                             # extra is a replay disagreement in that world
-                            # only when the extra IS that world; otherwise
-                            # set_var should have isolated it.
-                            if dict(spec.required_env) == dict(perturb_env):
+                            # when the extra IS that world. Otherwise it is
+                            # the binary not holding the pin, and it goes on
+                            # its own name: keeping it sent the file to the
+                            # "naming no capture" exit below with a verdict
+                            # that named it.
+                            if out_of_world(spec, perturb_env):
+                                _drop_red(perturb_env)(spec, "")
+                            else:
                                 env_went.append(spec)
                                 _drop(spec, "replay disagreed with the capture", verdict=True)
-                            else:
-                                still.append(spec)
                             continue
                         # TWICE, deliberately: the twin's Then may only pin
                         # what two independent processes printed. A render
@@ -759,9 +841,10 @@ def emit_behaviour_tests(
                             f"  [task0d] cluster {cfg_cluster}: {len(env_went)} capture(s) are "
                             "environment-dependent and were withdrawn."
                         )
-                    if split and keep:
-                        continue
-                    if keep and env_went:
+                    world_moved = bool(world_went)
+                    _log_world_went()
+                    if keep and (split or env_went or world_moved):
+                        last_round = "perturbed"
                         continue
                     if keep:
                         for s in keep:
@@ -792,18 +875,6 @@ def emit_behaviour_tests(
                 data={"cluster": cfg_cluster, "captures": len(keep), "file": dest.name, "withdrawn": len(dropped)},
             )
             return dest, tuple(dropped), misses, tuple(keep)
-
-        # Every round dropped something and the budget ran out with the file still
-        # red: withdraw the rest rather than leave a failing test in the oracle.
-        log(
-            f"  [task0d] cluster {cfg_cluster}: behaviour tests still red after "
-            f"{MAX_VERIFY_ROUNDS} round(s) — {len(keep)} capture(s) withdrawn."
-        )
-        with suppress(OSError):
-            dest.unlink()
-        for s in keep:
-            _drop(s, "replay still red after the verification budget", verdict=True)
-        return None, tuple(dropped), misses, ()
     except BaseException:
         with suppress(OSError):
             dest.unlink()

@@ -102,6 +102,8 @@ __all__ = [
     "FillBudget",
     "RankedRun",
     "FillSchedule",
+    "HolderAdmission",
+    "HolderQueue",
     "RouteKind",
     "RouteLedgerRow",
     "RouteRun",
@@ -3207,6 +3209,69 @@ class FillBudget:
 _RESERVED_WAIT_POLL_S = 5.0
 
 
+@dataclass(frozen=True, slots=True)
+class HolderAdmission:
+    """A still-stubbed function a keep of this fill measured, handed to a run
+    in flight to write before its unclaimed units: the bodies, container
+    included, with the failing tests whose first failure each now sits in
+    (`RouteRun.held_tests`, the tests that body is judged on)."""
+    units: frozenset[FnLocator]
+    held_tests: tuple[tuple[FnSite, frozenset[str]], ...]
+
+
+class HolderQueue:
+    """The front of one run's claim queue: the holders the fill's claim gate
+    handed it (`fill_scheduler._GroundGate`), written before any unit the run
+    has not claimed yet. Given only to a run whose route can take a unit it
+    was not planned with (`FillRoute.takes_holders`); a run of any other
+    route has its holder opened as a run of its own.
+
+    It also records what the run has claimed, so the gate does not hand a
+    run a holder one of its workers is already writing. Thread-safe: a
+    pooled run's workers claim concurrently."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: list[HolderAdmission] = []
+        self._claimed: set[FnLocator] = set()
+
+    def admit(self, admission: HolderAdmission) -> None:
+        with self._lock:
+            self._pending.append(admission)
+
+    def note_claimed(self, units: Collection[FnLocator]) -> None:
+        with self._lock:
+            self._claimed.update(units)
+
+    def claimed(self) -> frozenset[FnLocator]:
+        with self._lock:
+            return frozenset(self._claimed)
+
+    def pending(self, claiming: Collection[FnLocator]) -> bool:
+        """True when a holder waits that ``claiming`` does not write. A claim
+        that writes an admitted holder itself (its unit came up in the run's
+        own queue first) removes it from the front."""
+        with self._lock:
+            mine = frozenset(claiming)
+            kept: list[HolderAdmission] = []
+            for a in self._pending:
+                rest = a.units - mine
+                if not rest:
+                    continue
+                kept.append(a if rest == a.units else HolderAdmission(
+                    rest, tuple((s, t) for s, t in a.held_tests
+                                if FnLocator(s.file, s.fn_name) in rest)))
+            self._pending = kept
+            return bool(kept)
+
+    def take(self) -> list[HolderAdmission]:
+        """Every waiting holder, removed from the front: the caller writes
+        them now."""
+        with self._lock:
+            out, self._pending = self._pending, []
+            return out
+
+
 class RunClock:
     """One run's claim gate. It never interrupts: a unit, a turn or a session
     already claimed runs to completion; the clock only answers whether the
@@ -3259,7 +3324,25 @@ class RunClock:
     again, premise included. Same run, fill 2: the share spent on four
     `From` impls left `src/context.rs::context` and `with_context`, holding
     ten red tests, unclaimed. A claim with no units, or with any unit not
-    owed, stays on the share."""
+    owed, stays on the share.
+
+    A holder this run TOOK (:meth:`take_holders`) is the next grant. While
+    the claim of a taken holder is inside :meth:`refusal`, no other claim of
+    this run is granted, whatever branch would grant it; taken holders are
+    granted in take order, and the claim of one is never answered "take".
+    Run `1878910-be648607` (2026-10-31), fill 1: `src/ensure.rs::render`
+    was taken at 08:27:12 and its claim then waited at the reserved share
+    beside the run's plan units; each release woke every waiter, three plan
+    units won the race, and a second holder taken by the waiting claim was
+    written before it, so `render` started 10.7 minutes and four units
+    later. The line is held by a claim of a taken holder while it is inside
+    :meth:`refusal` (registered on entry, removed on exit), and by the
+    thread that took holders until its next claim of anything else, which
+    covers the instant between one taken holder's return and the next
+    one's claim. Neither can strand the run: a taken holder the route never
+    claims (already written by another worker, not a stub of the pass) is
+    passed over by its thread's next claim, and a thread that has ended
+    holds nothing."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
@@ -3274,11 +3357,16 @@ class RunClock:
                  owed: frozenset[FnLocator] = frozenset(),
                  yields_to: Callable[
                      [frozenset[str] | None, frozenset[FnLocator]], str,
-                 ] | None = None) -> None:
+                 ] | None = None,
+                 holders: HolderQueue | None = None) -> None:
         self.share_minutes = share_minutes
-        #: The fill's in-fill blockers-first (`fill_scheduler._GroundGate.
-        #: yields_to`): the run a claim waits behind, or "".
+        #: The fill's claim gate (`fill_scheduler._GroundGate.claim_for`):
+        #: the run a claim waits behind, or "". It may also hand this run a
+        #: measured holder (``holders``) before answering "".
         self._yields_to = yields_to
+        #: The front of this run's claim queue (:class:`HolderQueue`); None
+        #: for a run whose route takes no unit it was not planned with.
+        self.holders = holders
         #: The units this run's claims yielded: the executor queues them
         #: again behind the runs they waited for.
         self.yielded: set[FnLocator] = set()
@@ -3287,6 +3375,15 @@ class RunClock:
         self.call_price = call_price
         #: The held stubs this run was given to write (see the class doc).
         self.owed = frozenset(owed)
+        #: Each unit taken as a holder and not yet granted: its take order.
+        self._take_order: dict[FnLocator, int] = {}
+        self._takes = 0
+        #: The claims of taken holders now inside :meth:`refusal`, by
+        #: thread: the take order of each.
+        self._tickets: dict[int, int] = {}
+        #: Threads that took holders and have not since claimed anything
+        #: else: they are writing their takes, one claim after another.
+        self._draining: dict[int, threading.Thread] = {}
         self._lock = threading.Lock()
         #: Notified on every release, so a claim waiting on a reserved share
         #: re-asks as soon as a sibling's call returns.
@@ -3331,6 +3428,33 @@ class RunClock:
             self._reserved.pop(threading.get_ident(), None)
             self._returned.notify_all()
 
+    def take_holders(self) -> list[HolderAdmission]:
+        """The holders handed to this run, removed from its queue's front
+        for the caller to write now. Each is owed: a measured holder stops
+        red tests whatever else is written, so the share does not skip it."""
+        if self.holders is None:
+            return []
+        # One step with the drain mark: a claim that finds the front empty
+        # must also find this thread writing what it took. The queue's lock
+        # is never held while this one is taken, so the nesting is one-way.
+        with self._lock:
+            taken = self.holders.take()
+            if taken:
+                self._draining[threading.get_ident()] = threading.current_thread()
+                self.owed = self.owed.union(*(a.units for a in taken))
+                for a in taken:
+                    # The order the route writes them in: the admission's
+                    # bodies in its `held_tests` order, then any other unit.
+                    named = [FnLocator(st.file, st.fn_name)
+                             for st, _t in a.held_tests]
+                    rest = sorted(a.units - set(named),
+                                  key=lambda u: (u.file, u.fn_name))
+                    for u in (*named, *rest):
+                        if u in a.units and u not in self._take_order:
+                            self._take_order[u] = self._takes
+                            self._takes += 1
+        return taken
+
     def may_claim(self, tests: Iterable[str] | None = None,
                   units: Iterable[FnLocator] | None = None) -> bool:
         """True when the next claim may be made (:meth:`refusal` is "")."""
@@ -3341,7 +3465,13 @@ class RunClock:
         """Make the next claim, or say why not: ``""`` when claimed,
         ``"premise"`` when the ground this claim was planned on has moved,
         ``"yield"`` when every test it was planned on now stops in a stub a
-        run still ahead writes (the claim waits behind that run),
+        run still ahead writes (the claim waits behind that run), or a keep
+        of this fill measured a holder no run writes and this run cannot
+        take it (the holder's run opens at the cursor and the claim waits
+        behind it), ``"take"`` when such a holder was handed to this run
+        (:attr:`holders`): the route writes it first (:meth:`take_holders`)
+        and asks for this claim again (never to the claim of a holder already
+        taken, which waits for its own grant instead),
         ``"share"`` when the share is spent and the last claim bought
         nothing. Budget follows payoff: within the share, always; past a
         spent share while the last claim cashed, or while the claim names
@@ -3366,6 +3496,27 @@ class RunClock:
             # This thread asking again means its previous unit is over.
             if self._reserved.pop(me, None) is not None:
                 self._returned.notify_all()
+            ticket = (min(self._take_order[u] for u in claimed)
+                      if claimed and all(u in self._take_order for u in claimed)
+                      else None)
+            if ticket is not None:
+                self._tickets[me] = ticket
+            elif self._draining.pop(me, None) is not None:
+                # Its takes are written or passed over: the line is free.
+                self._returned.notify_all()
+        try:
+            return self._decide(me, ticket, scope, claimed, owed_claim)
+        finally:
+            if ticket is not None:
+                with self._lock:
+                    self._tickets.pop(me, None)
+                    self._returned.notify_all()
+
+    def _decide(self, me: int, ticket: int | None,
+                scope: frozenset[str] | None, claimed: frozenset[FnLocator],
+                owed_claim: bool) -> str:
+        """:meth:`refusal`'s answer for one claim; ``ticket`` is its take
+        order when it claims a taken holder."""
         while True:
             # Asked before the premise: a claim whose tests a keep moved
             # into a stub a run still ahead writes waits behind that run
@@ -3376,12 +3527,20 @@ class RunClock:
                     self.refused += 1
                     self.yielded |= claimed
                 return "yield"
+            if (self.holders is not None and self.holders.pending(claimed)
+                    and ticket is None):
+                return "take"
             if (self._ground_moved is not None
                     and self._ground_moved(scope, claimed)):
                 with self._lock:
                     self.refused += 1
                 return "premise"
             with self._lock:
+                # Taken holders first, in take order: in front of every
+                # grant below, so no branch can grant past one.
+                if self._behind_a_take(me, ticket):
+                    self._returned.wait(timeout=_RESERVED_WAIT_POLL_S)
+                    continue
                 if self.share_minutes is None:
                     return self._claimed(scope, claimed)
                 elapsed = self.elapsed()
@@ -3418,6 +3577,18 @@ class RunClock:
                 self.refused += 1
                 return "share"
 
+    def _behind_a_take(self, me: int, ticket: int | None) -> bool:
+        """True when a taken holder goes before this claim: another thread
+        is between the claims of the holders it took, or a claim of a
+        holder taken earlier is waiting here. Caller holds the lock."""
+        for tid, th in list(self._draining.items()):
+            if not th.is_alive():
+                del self._draining[tid]
+            elif tid != me and tid not in self._tickets:
+                return True
+        head = min(self._tickets.values(), default=None)
+        return head is not None and (ticket is None or ticket > head)
+
     def _claimed(self, scope: frozenset[str] | None,
                  claimed: frozenset[FnLocator]) -> str:
         """Count the claim and start the claiming thread's unit clock: the
@@ -3431,6 +3602,10 @@ class RunClock:
         it is a between-units rule, and the unit's own bound is the
         multiple above."""
         self.claims += 1
+        for u in claimed:
+            self._take_order.pop(u, None)
+        if self.holders is not None:
+            self.holders.note_claimed(claimed)
         gate = self._ground_moved
 
         def _ground(tests: Iterable[str] | None = None) -> bool:

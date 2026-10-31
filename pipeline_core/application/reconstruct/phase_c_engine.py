@@ -73,6 +73,7 @@ from pipeline_core.domain.fill_class import (
     FillOutcomeClass,
 )
 from pipeline_core.domain.fill_schedule import (
+    HolderAdmission,
     RouteKind,
     RouteRun,
     RunClock,
@@ -736,6 +737,7 @@ class PhaseCFillEngine:
         crash_sites: CrashSites | None = None,
         _landed_fn: set[FnLocator] | None = None,
         write_sites: frozenset[FnSite] | None = None,
+        take_holders: Callable[[], list[HolderAdmission]] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -743,7 +745,11 @@ class PhaseCFillEngine:
         landed (the stale-refill probe's premise). `write_sites`, when set,
         are the only bodies the passes may write, container-exact: a run
         opened on bodies the fill measured writes those, not every body of
-        their names (`_PerFnRoute.run`)."""
+        their names (`_PerFnRoute.run`). `take_holders` drains the holders
+        the claim gate handed this run (`RunClock.take_holders`): when a
+        claim is answered "take", the worker writes those bodies first —
+        judged on the tests the fill measured in them — and asks for its
+        own unit again."""
         _fill_hist = FillClassHistogram()
         _last_payoff = None
         # Write sets replies named as one (`FillResult.joint_named`).
@@ -813,6 +819,10 @@ class PhaseCFillEngine:
                              target_src_dir, cluster).unit_list()]
             # True remaining stub count BEFORE the frontier filter.
             _all_stubs_count = len(stubs)
+            # Every cluster-active stub by body, before any filter: a holder
+            # the claim gate hands this run is one of them, wherever the
+            # frontier or the write set left it.
+            _stub_by_site = {_site_of(st): st for st in stubs}
             # Pass-start stub keys, also pre-filter: the sibling-blocked U2
             # check needs every cluster-active stub, INCLUDING the
             # exhaustion-skipped ones the frontier no longer carries — those
@@ -1059,17 +1069,165 @@ class PhaseCFillEngine:
             # Units the fill schedule's gate refused this pass, by the
             # clock's reason (`RunClock.refusal`): named once, below.
             _unclaimed: dict[str, list[str]] = {}
+            # Bodies a worker has claimed or taken this pass: a queued unit
+            # the claim gate already handed a worker as a holder is not
+            # written twice.
+            _taken: set[FnSite] = set()
+            _taken_idx = [len(stubs)]
+
+            def _admitted_ctx(adm: HolderAdmission, *,
+                              _pass_ctx: PerFnPassCtx = _pass_ctx
+                              ) -> PerFnPassCtx:
+                """The pass context a handed holder is prompted and judged
+                with: the tests the fill measured in its body join the run's
+                frontier, and its held-stub sentence the crash evidence —
+                the same two readings an opened run is given
+                (`_PerFnRoute.run`)."""
+                return replace(
+                    _pass_ctx,
+                    tdd_frontier_tests=frontier_for_run(
+                        _pass_ctx.tdd_frontier_tests, adm.held_tests),
+                    crash_evidence=with_held_stub_evidence(
+                        _pass_ctx.crash_evidence,
+                        ((locator_of(st), t) for st, t in adm.held_tests)))
+
+            # `_unit` and `_take` call each other (a handed holder's own
+            # claim can be answered "take"); the cell is filled below.
+            _take_ref: list[Callable[[HolderAdmission], None]] = []
+
+            def _unit(idx: int, rec: Stub, ctx: PerFnPassCtx, *,
+                      _take_ref: list[Callable[[HolderAdmission], None]] = _take_ref,
+                      _unclaimed: dict[str, list[str]] = _unclaimed,
+                      filled_this_pass: list[FnLocator] = filled_this_pass,
+                      results_this_pass: list[FillResult] = results_this_pass,
+                      pass_n: int = pass_n) -> None:
+                """Claim one body and, when granted, fill it. A claim
+                answered "take" writes the holders handed to this run first,
+                then asks again."""
+                nonlocal attempts, fns_filled, progress_this_pass
+                nonlocal _fills_landed_total
+                # The fill schedule's gate on THIS unit: no new unit once
+                # the share is spent and the last landing moved no
+                # verdict, and none whose own attributed tests a keep of
+                # this fill moved. A unit whose tests did not move is
+                # still standing on its plan; a unit in flight always
+                # completes.
+                _unit_loc = frozenset({FnLocator(rec.file, rec.fn_name)})
+                # The tests the keep will run for this body, not the
+                # locator's dispatch pool. When the sweep told two
+                # containers apart, a test measured in the other body
+                # is not this claim's ground (`ground_for_body`).
+                _front = ctx.tdd_frontier_tests
+                _own = (_front.ground_for_body(
+                            rec.file, rec.fn_name, rec.container).judged
+                        if _front is not None else frozenset())
+                while True:
+                    _why = (claim_refusal(frozenset(_own), _unit_loc)
+                            if claim_refusal is not None
+                            else ("" if claim(frozenset(_own), _unit_loc)
+                                  else "refused"))
+                    if _why != "take" or take_holders is None:
+                        break
+                    # Another worker may have drained the front first: the
+                    # claim is then asked again with nothing pending.
+                    for _adm in take_holders():
+                        _take_ref[0](_adm)
+                if _why:
+                    with _counters_lock:
+                        _unclaimed.setdefault(_why, []).append(
+                            f"{rec.file}::{rec.fn_name}")
+                    return
+                try:
+                    res = self.fill_one.run(idx, rec, ctx=ctx)
+                except Exception as _e:
+                    # Isolate worker failures so one bad fn doesn't kill the
+                    # worker thread (others keep draining the queue).
+                    self.tel.log(f"  [phase-c/per-fn] worker error on "
+                                 f"{rec.file}::{rec.fn_name}: {_e}")
+                    with _counters_lock:
+                        errors.append(f"{rec.file}::{rec.fn_name}: "
+                                      f"worker exception: {_e}")
+                    return
+                finally:
+                    # The unit returned: the call it reserved on the
+                    # run's share is spent, and in the clock's elapsed.
+                    if claim_release is not None:
+                        claim_release()
+                with _counters_lock:
+                    attempts += res.attempts
+                    results_this_pass.append(res)
+                    # A unit is DISPATCHED only when a model attempt was
+                    # spent on it (attempts==0 is a pre-call skip gate).
+                    if res.attempts > 0 or res.filled:
+                        _dispatched.add(FnLocator(res.file, res.fn_name))
+                        _answer_lost.discard(
+                            FnLocator(res.file, res.fn_name))
+                    if res.filled:
+                        if _landed_fn is not None:
+                            _landed_fn.add(FnLocator(res.file, res.fn_name))
+                        fns_filled += 1
+                        progress_this_pass += 1
+                        _fills_landed_total += 1
+                        self.tel.emit("phase_c.fill.progress", data={
+                            "cluster": cluster_name, "pass_n": pass_n,
+                            "fills_landed": _fills_landed_total,
+                            "file": res.file, "fn": res.fn_name,
+                        })
+                        filled_this_pass.append(FnLocator(res.file, res.fn_name))
+                    # A joint write's extras are bodies this unit landed:
+                    # dispatched like the target, so the landed-change
+                    # audit and the unit ledger grade them.
+                    _joint_sets.extend(res.joint_named)
+                    for _extra in res.joint:
+                        _dispatched.add(_extra)
+                        _answer_lost.discard(_extra)
+                        if _landed_fn is not None:
+                            _landed_fn.add(_extra)
+                    if res.error:
+                        errors.append(res.error)
+
+            def _take(adm: HolderAdmission, *, pass_n: int = pass_n,
+                      _admitted_ctx: Callable[[HolderAdmission], PerFnPassCtx] = _admitted_ctx,
+                      _stub_by_site: dict[FnSite, Stub] = _stub_by_site,
+                      _taken: set[FnSite] = _taken,
+                      _taken_idx: list[int] = _taken_idx,
+                      _unit: Callable[[int, Stub, PerFnPassCtx], None] = _unit,
+                      ) -> None:
+                """Write the holders one admission hands this run, each on
+                the context that carries the tests measured in it. A holder
+                that is no cluster-active stub at pass start, or a site this
+                cluster never compiles, is named and not written."""
+                ctx = _admitted_ctx(adm)
+                for st, _t in adm.held_tests:
+                    site = canon_site(st)
+                    rec = _stub_by_site.get(site)
+                    if rec is None or _is_cfg_dead(rec.key):
+                        self.tel.log(
+                            f"  [phase-c/per-fn] pass {pass_n}: holder "
+                            f"{st.file}::{st.fn_name} [{st.container}] "
+                            "handed to this run is "
+                            + ("cfg-dead in this cluster"
+                               if rec is not None else
+                               "not a stub of this cluster's pass")
+                            + " — not written")
+                        continue
+                    with _counters_lock:
+                        if site in _taken:
+                            continue
+                        _taken.add(site)
+                        _taken_idx[0] += 1
+                        idx = _taken_idx[0]
+                    _unit(idx, rec, ctx)
+
+            _take_ref.append(_take)
 
             def _worker(work_queue: _queue_mod.Queue[tuple[int, Stub]], *,
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
-                        filled_this_pass: list[FnLocator] = filled_this_pass,
-                        results_this_pass: list[FillResult] = results_this_pass,
-                        _unclaimed: dict[str, list[str]] = _unclaimed,
+                        _taken: set[FnSite] = _taken,
+                        _unit: Callable[[int, Stub, PerFnPassCtx], None] = _unit,
                         pass_n: int = pass_n) -> None:
-                # B023: the per-LEVEL queue AND the per-pass ctx/list/number are
+                # B023: the per-LEVEL queue AND the per-pass ctx/number are
                 # passed explicitly — free-var reads would rely on late binding.
-                nonlocal attempts, fns_filled, progress_this_pass
-                nonlocal _fills_landed_total
                 while True:
                     # Stop pulling NEW work once another worker (or the main
                     # thread) has seen a graceful-stop request — raises in
@@ -1081,77 +1239,11 @@ class PhaseCFillEngine:
                         idx, rec = work_queue.get_nowait()
                     except _queue_mod.Empty:
                         return
-                    # The fill schedule's gate on THIS unit: no new unit once
-                    # the share is spent and the last landing moved no
-                    # verdict, and none whose own attributed tests a keep of
-                    # this fill moved. A unit whose tests did not move is
-                    # still standing on its plan; a unit in flight always
-                    # completes.
-                    _unit = frozenset({FnLocator(rec.file, rec.fn_name)})
-                    # The tests the keep will run for this body, not the
-                    # locator's dispatch pool. When the sweep told two
-                    # containers apart, a test measured in the other body
-                    # is not this claim's ground (`ground_for_body`).
-                    _own = (tdd_frontier_tests.ground_for_body(
-                                rec.file, rec.fn_name, rec.container).judged
-                            if tdd_frontier_tests is not None else frozenset())
-                    _why = (claim_refusal(frozenset(_own), _unit)
-                            if claim_refusal is not None
-                            else ("" if claim(frozenset(_own), _unit)
-                                  else "refused"))
-                    if _why:
-                        with _counters_lock:
-                            _unclaimed.setdefault(_why, []).append(
-                                f"{rec.file}::{rec.fn_name}")
-                        continue
-                    try:
-                        res = self.fill_one.run(idx, rec, ctx=_pass_ctx)
-                    except Exception as _e:
-                        # Isolate worker failures so one bad fn doesn't kill the
-                        # worker thread (others keep draining the queue).
-                        self.tel.log(f"  [phase-c/per-fn] worker error on "
-                                     f"{rec.file}::{rec.fn_name}: {_e}")
-                        with _counters_lock:
-                            errors.append(f"{rec.file}::{rec.fn_name}: "
-                                          f"worker exception: {_e}")
-                        continue
-                    finally:
-                        # The unit returned: the call it reserved on the
-                        # run's share is spent, and in the clock's elapsed.
-                        if claim_release is not None:
-                            claim_release()
                     with _counters_lock:
-                        attempts += res.attempts
-                        results_this_pass.append(res)
-                        # A unit is DISPATCHED only when a model attempt was
-                        # spent on it (attempts==0 is a pre-call skip gate).
-                        if res.attempts > 0 or res.filled:
-                            _dispatched.add(FnLocator(res.file, res.fn_name))
-                            _answer_lost.discard(
-                                FnLocator(res.file, res.fn_name))
-                        if res.filled:
-                            if _landed_fn is not None:
-                                _landed_fn.add(FnLocator(res.file, res.fn_name))
-                            fns_filled += 1
-                            progress_this_pass += 1
-                            _fills_landed_total += 1
-                            self.tel.emit("phase_c.fill.progress", data={
-                                "cluster": cluster_name, "pass_n": pass_n,
-                                "fills_landed": _fills_landed_total,
-                                "file": res.file, "fn": res.fn_name,
-                            })
-                            filled_this_pass.append(FnLocator(res.file, res.fn_name))
-                        # A joint write's extras are bodies this unit landed:
-                        # dispatched like the target, so the landed-change
-                        # audit and the unit ledger grade them.
-                        _joint_sets.extend(res.joint_named)
-                        for _extra in res.joint:
-                            _dispatched.add(_extra)
-                            _answer_lost.discard(_extra)
-                            if _landed_fn is not None:
-                                _landed_fn.add(_extra)
-                        if res.error:
-                            errors.append(res.error)
+                        if _site_of(rec) in _taken:
+                            continue
+                        _taken.add(_site_of(rec))
+                    _unit(idx, rec, _pass_ctx)
 
             # Dispatch: process priority levels in order, barrier between them.
             for _level in _levels:
@@ -1671,6 +1763,10 @@ class _PerFnRoute:
 
     kind = RouteKind.PER_FN
     parallel = False
+    #: Its units claim one by one, so a holder a keep of the fill measures
+    #: is written at the next claim instead of after the run
+    #: (`HolderQueue`, `_per_fn_passes`' ``take_holders``).
+    takes_holders = True
 
     def __init__(self, engine: PhaseCFillEngine, **kw: Any) -> None:
         self._engine = engine
@@ -1725,11 +1821,12 @@ class _PerFnRoute:
             unit_tests=unit_tests)]
 
     def run(self, run: RouteRun, clock: RunClock) -> RouteRunReport:
-        if not clock.may_claim():
-            return RouteRunReport(empty=True)
-        # The run is open; its units claim one by one on the workers. This
-        # opening claim is no call of its own, so it reserves nothing.
-        clock.release()
+        # No opening claim over every target at once: each unit claims on
+        # its own (`_per_fn_passes`), so a premise move, a share or a wait
+        # behind a writer is decided per body, and a holder the gate hands
+        # this run is written at the first claim after the keep that
+        # measured it. A run every unit of which is refused makes no call
+        # and is reported empty below.
         eng = self._engine
         kw = dict(self._kw)
         if run.parent:
@@ -1776,7 +1873,8 @@ class _PerFnRoute:
             heal_file=kw["heal_file"],
             claim_refusal=clock.refusal, claim_release=clock.release,
             crash_sites=kw.get("crash_sites"),
-            _landed_fn=kw["landed_fn"], write_sites=write_sites)
+            _landed_fn=kw["landed_fn"], write_sites=write_sites,
+            take_holders=clock.take_holders)
         self.result = _fold_per_fn_results(self.result, res)
         disp = frozenset(kw["dispatched"]) - before_disp
         kept = frozenset(kw["landed_fn"]) - before_landed
