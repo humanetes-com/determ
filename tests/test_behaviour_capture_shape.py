@@ -387,13 +387,15 @@ def test_a_twin_is_narrowed_to_what_the_capture_and_the_replay_share() -> None:
 
     cut = narrow_then_to_agreement(twin, "head + tail\nframe 0x77\n")
     assert cut is not None and cut.then is not None
-    assert cut.then.value == "head + tail\nframe 0x" and cut.then.prefix
+    # Cut at the token both renders were in when they parted, not inside it.
+    assert cut.then.value == "head + tail\nframe " and cut.then.prefix
 
     # Nothing shared, and nothing to cut, are both None — the caller withdraws
     # rather than pinning the empty string or re-rendering forever.
     assert narrow_then_to_agreement(twin, "unrelated") is None
     assert narrow_then_to_agreement(twin, "head + tail\nframe 0x41") is None
-    assert agreed_prefix(["abc", "abd"]) == "ab"
+    assert agreed_prefix(["ab c", "ab d"]) == "ab "
+    assert agreed_prefix(["abc", "abd"]) == ""          # one token, two values
     assert agreed_prefix(["abc"]) == "" and agreed_prefix([]) == ""
 
     # The observed value comes out of the failing run's own marker.
@@ -402,6 +404,82 @@ def test_a_twin_is_narrowed_to_what_the_capture_and_the_replay_share() -> None:
         "determ-observed[behaviour_x]<<<head + tail\nframe 0x77\n>>>\n"
     ) == {"behaviour_x": "head + tail\nframe 0x77\n"}
     assert observed_values("test behaviour_x ... FAILED") == {}
+
+
+def test_a_twin_does_not_keep_the_first_character_two_frame_names_share() -> None:
+    """Run `3178980-c42f7944` (2026-11-01): 4 `::env` twins were stored with
+    a Then ending `   0: <`, the stable one being
+    `probe::stable::context_trait_context_then_error_context::0::env`. The
+    stripped build renders frame 0 as a placeholder that starts with `<`,
+    and the symbolized build renders a trait-impl path that also starts
+    with `<`. Plan sentence: the agreement ends where neither render
+    continues a token, so the twin pins the message, the header and that a
+    frame follows, and nothing of the frame's name.
+
+    The head below is that twin's stored Then minus its last character. The
+    two frame names are invented: the placeholder as std prints it for a
+    build without symbols, and a trait-impl path.
+
+    NEGATIVE CONTROL: the character prefix (the agreement before this
+    change) keeps the `<`."""
+    from pipeline_core.domain.behaviour_probe import split_env_worlds
+
+    head = "outer\n\nCaused by:\n    0: ctx\n    1: e\n\nStack backtrace:\n   0: "
+    stripped = head + "<unknown>\n   1: <unknown>\n"
+    symbolized = head + "<T as some::Trait>::method\n             at ./src/x.rs:9:5\n"
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="outer")
+    worlds = split_env_worlds(spec, [symbolized, stripped], {"SOME_KNOB": "1"})
+    assert worlds is not None
+    _orig, twin = worlds
+    assert twin.then is not None and twin.then.prefix
+    assert twin.then.value == head
+
+    def _characters(values: list[str]) -> str:
+        a, b = values
+        i = 0
+        while i < min(len(a), len(b)) and a[i] == b[i]:
+            i += 1
+        return a[:i]
+    assert _characters([symbolized, stripped]) == head + "<"
+
+
+def test_a_twin_that_agrees_only_on_indentation_is_withdrawn() -> None:
+    """Plan sentence: an agreement with no non-whitespace text is no
+    agreement, so the twin is withdrawn and the replay's narrowing returns
+    None; a Then of blanks plus a longer render would pass almost any
+    reconstruction that prints. Invented renders, indented as a nested
+    Debug or a backtrace line is.
+
+    NEGATIVE CONTROL: the token-boundary cut alone (the agreement before
+    this change) keeps the indentation as the Then."""
+    from pipeline_core.domain.behaviour_probe import (
+        agreed_prefix,
+        narrow_then_to_agreement,
+        split_env_worlds,
+    )
+
+    a, b = "    Node(1)\n", "    Node(2)\n"
+    assert agreed_prefix([a, b]) == ""
+    spec = captured_spec(cfg_cluster="s", probe=_probe(), n=0, stdout="x")
+    assert split_env_worlds(spec, [a, b], {"SOME_KNOB": "1"}) is None
+    worlds = split_env_worlds(spec, a, {"SOME_KNOB": "1"})
+    assert worlds is not None
+    _orig, twin = worlds
+    assert narrow_then_to_agreement(twin, b) is None
+    # Text after the indentation is still an agreement.
+    assert agreed_prefix(["    Node 1", "    Node 2"]) == "    Node "
+
+    def _boundary_only(values: list[str]) -> str:
+        x, y = values
+        i = 0
+        while i < min(len(x), len(y)) and x[i] == y[i]:
+            i += 1
+        while i > 0 and not all(
+                i >= len(v) or v[i - 1].isspace() or v[i].isspace()
+                for v in values):
+            i -= 1
+        return x[:i]
+    assert _boundary_only([a, b]) == "    "
 
 
 def test_a_prefix_then_replays_as_starts_with_and_a_longer_render() -> None:

@@ -688,7 +688,9 @@ def test_a_world_pinned_capture_is_narrowed_to_what_the_replay_shares(
     assert dest is not None
     body = _emitted_text(tmp_path)
     twin_chunk = body[body.index(f"fn {twin_fn}()"):]
-    assert '.starts_with("shared head\\nat 0x")' in twin_chunk
+    # Up to the token where the two binaries part (`0x41` / `0x77`), not
+    # into it (`agreed_prefix`).
+    assert '.starts_with("shared head\\nat ")' in twin_chunk
     assert "actual.len() > " in twin_chunk
     assert "assert!(actual ==" not in twin_chunk
 

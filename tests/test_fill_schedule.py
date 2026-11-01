@@ -1486,7 +1486,7 @@ def test_fill_11s_per_fn_share_grants_one_claim_not_four() -> None:
     fill_11 = next(r for r in rows if r.iteration == 11 and r.model_calls)
     assert (fill_11.model_calls, round(fill_11.minutes, 1)) == (4, 31.9)
     price = call_price([r for r in rows if r.iteration <= 10],
-                       RouteKind.PER_FN, fill_11.oracle_fp)
+                       RouteKind.PER_FN)
     assert price is not None and price > (fill_11.share_minutes or 0.0)
     wall = _Wall()
     clock = RunClock(share_minutes=fill_11.share_minutes, fill_remaining=lambda: 100.0,
@@ -1577,7 +1577,7 @@ def test_a_kind_with_no_price_runs_one_call_at_a_time_and_payoff_extends() -> No
     assert paying.refusal() == ""
     paying.note_delta(2)
     assert paying.refusal() == "", "a claim that cashed extends past the share"
-    assert call_price([], RouteKind.PER_FN, "o") is None
+    assert call_price([], RouteKind.PER_FN) is None
 
 
 # --- the share does not skip a held stub the run was given to write ----------
@@ -1850,3 +1850,62 @@ def test_only_a_run_that_holds_jointly_has_an_answer_to_spend() -> None:
     file_run = _file("file src/x.rs", {_FMT}, set(), {"t_fmt"})
     with pytest.raises(ValueError):
         file_run.gives_same_answer(_row(file_run, RunOutcome.FLAT))
+
+
+_PER_FN_ROWS_3178980 = (Path(__file__).parent / "fixtures" / "fills"
+                        / "3178980-c42f7944_per_fn_rows.json")
+
+
+def test_the_first_fill_on_a_new_oracle_is_priced_and_runs_wider_than_one() -> None:
+    """Run `3178980-c42f7944` fill 1 (2026-11-01): the re-harvest moved the
+    oracle, the per-fn run's 14.3-minute share had no price on it, every
+    grant reserved the rest of the share, and the four-wide pool wrote 55
+    calls in 216.5 minutes one at a time. The rows before that run (two
+    other oracles) price the kind; with that price, four workers asking at
+    once get more than one grant.
+
+    NEGATIVE CONTROL: the oracle-keyed price (frozen here) is None on the
+    same rows, and the clock grants one claim."""
+    raw = json.loads(_PER_FN_ROWS_3178980.read_text(encoding="utf-8"))["rows"]
+    rows = [r for r in (RouteLedgerRow.from_dict(x) for x in raw) if r is not None]
+    fill_1 = next(r for r in rows if r.run_id == "3178980-c42f7944"
+                  and r.model_calls)
+    assert (fill_1.model_calls, round(fill_1.minutes, 1)) == (55, 216.5)
+    prior = [r for r in rows if r.run_id != "3178980-c42f7944"]
+    assert fill_1.oracle_fp not in {r.oracle_fp for r in prior}
+    price = call_price(prior, RouteKind.PER_FN)
+    assert price is not None and price < (fill_1.share_minutes or 0.0) / 2
+    wall = _Wall()
+    clock = RunClock(share_minutes=fill_1.share_minutes,
+                     fill_remaining=lambda: 100.0, now=wall, call_price=price)
+    assert _granted_at_once(clock, 4) >= 2
+
+    keyed = [r for r in prior if r.oracle_fp == fill_1.oracle_fp
+             and r.model_calls > 0 and r.minutes > 0]
+    assert keyed == []
+    held = _Wall()
+    control = RunClock(share_minutes=fill_1.share_minutes,
+                       fill_remaining=lambda: 100.0, now=held, call_price=None)
+    assert _granted_at_once(control, 4) == 1
+
+
+def _granted_at_once(clock: RunClock, n: int) -> int:
+    """`n` workers ask at once on a clock that does not move; how many
+    are granted before any granted call returns."""
+    import threading
+    finish = threading.Event()
+
+    def _worker() -> None:
+        if clock.refusal() == "":
+            finish.wait(5)
+            clock.release()
+
+    threads = [threading.Thread(target=_worker, daemon=True) for _ in range(n)]
+    for t in threads:
+        t.start()
+    threading.Event().wait(0.3)
+    at_once = clock.claims
+    finish.set()
+    for t in threads:
+        t.join(timeout=10)
+    return at_once

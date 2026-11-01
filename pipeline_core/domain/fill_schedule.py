@@ -2419,14 +2419,24 @@ def _later_turn_sample(r: RouteLedgerRow) -> float | None:
 CALL_PRICE_WINDOW = 20
 
 
-def call_price(rows: Iterable[RouteLedgerRow], kind: RouteKind, oracle_fp: str,
+def call_price(rows: Iterable[RouteLedgerRow], kind: RouteKind,
                *, window: int = CALL_PRICE_WINDOW) -> float | None:
-    """Minutes one call of `kind` takes on this oracle: the median of
-    minutes per call over the newest `window` rows of that kind that made a
-    call. None when no such row exists — the clock then reserves the rest of
-    the share on a grant (:class:`RunClock`). What a granted claim reserves
-    while its unit is in flight."""
-    graded = [r for r in rows if r.kind is kind and r.oracle_fp == oracle_fp
+    """Minutes one call of `kind` takes: the median of minutes per call over
+    the newest `window` rows of that kind that made a call, whatever oracle
+    they ran on. None when no such row exists — the clock then reserves the
+    rest of the share on a grant (:class:`RunClock`). What a granted claim
+    reserves while its unit is in flight.
+
+    Any oracle, as :func:`session_turn_price`: a call's minutes are the
+    model's and the route's prompt, not which tests fail. Keyed on the
+    oracle, the price was None on the first fill after every oracle change,
+    which is every from-scratch run and every re-harvest, and that fill ran
+    one call at a time: run `3178980-c42f7944` (2026-11-01) fill 1, the
+    per-fn run 216.5 min and 55 calls on a four-wide pool, serial but for a
+    few minutes, then the fill's 200-minute budget was gone and its 13 file
+    and impl runs were deferred at 0 minutes. `scripts/call_price_census.py`
+    prints the old and the new price per run and the spread across oracles."""
+    graded = [r for r in rows if r.kind is kind
               and r.model_calls > 0 and r.minutes > 0]
     if not graded:
         return None
@@ -3265,11 +3275,33 @@ class HolderQueue:
             return bool(kept)
 
     def take(self) -> list[HolderAdmission]:
-        """Every waiting holder, removed from the front: the caller writes
-        them now."""
+        """The front body, removed from the front: the caller writes it
+        now. One body per take, in admission order and then in the
+        admission's `held_tests` order, so the next claim of any worker
+        takes the next one and holders admitted together are written side
+        by side, not one after another on the thread that asked first. Run
+        `3178980-c42f7944` (2026-11-01) fill 1: `construct_from_boxed` and
+        `object_boxed` were handed to w3 together, `object_boxed` waited the
+        20 minutes `construct_from_boxed` took while w0–w2 were idle, and the
+        fill's budget ran out before it was granted. An admission whose
+        bodies are all named in no `held_tests` entry has nothing to write
+        and leaves the front."""
         with self._lock:
-            out, self._pending = self._pending, []
-            return out
+            while self._pending:
+                head = self._pending[0]
+                if not head.held_tests:
+                    self._pending.pop(0)
+                    continue
+                site, tests = head.held_tests[0]
+                rest = head.held_tests[1:]
+                loc = FnLocator(site.file, site.fn_name)
+                left = frozenset(FnLocator(s.file, s.fn_name) for s, _t in rest)
+                if rest:
+                    self._pending[0] = HolderAdmission(left, rest)
+                else:
+                    self._pending.pop(0)
+                return [HolderAdmission(frozenset({loc}), ((site, tests),))]
+            return []
 
 
 class RunClock:
@@ -3337,12 +3369,21 @@ class RunClock:
     written before it, so `render` started 10.7 minutes and four units
     later. The line is held by a claim of a taken holder while it is inside
     :meth:`refusal` (registered on entry, removed on exit), and by the
-    thread that took holders until its next claim of anything else, which
-    covers the instant between one taken holder's return and the next
-    one's claim. Neither can strand the run: a taken holder the route never
-    claims (already written by another worker, not a stub of the pass) is
-    passed over by its thread's next claim, and a thread that has ended
-    holds nothing."""
+    thread that took a holder until its next claim, which covers the
+    instant between the take and that claim. It is not held while a
+    granted holder runs: the line orders STARTS, so the pool stays as wide
+    as the share allows. A take is one body, and a holder still at the
+    front is taken by the next claim of any worker (answered "take"), so
+    holders admitted together run side by side in take order. Run
+    `3178980-c42f7944` (2026-11-01) fill 1 is what the narrower line
+    replaces: the thread that took holders held the line until its next
+    claim of anything else, which came only after every holder it took had
+    RETURNED, so the four-wide pool wrote one unit at a time and
+    `object_boxed`, taken with `construct_from_boxed`, waited 20 minutes on
+    the same worker while three sat idle. Neither hold can strand the run:
+    a taken holder the route never claims (already written by another
+    worker, not a stub of the pass) is passed over by its thread's next
+    claim, and a thread that has ended holds nothing."""
 
     def __init__(self, *, share_minutes: float | None,
                  fill_remaining: Callable[[], float | None],
@@ -3429,9 +3470,11 @@ class RunClock:
             self._returned.notify_all()
 
     def take_holders(self) -> list[HolderAdmission]:
-        """The holders handed to this run, removed from its queue's front
-        for the caller to write now. Each is owed: a measured holder stops
-        red tests whatever else is written, so the share does not skip it."""
+        """The front holder handed to this run (:meth:`HolderQueue.take`:
+        one body), removed from the queue for the caller to write now; the
+        next holder stays at the front for the next claim of any worker. It
+        is owed: a measured holder stops red tests whatever else is
+        written, so the share does not skip it."""
         if self.holders is None:
             return []
         # One step with the drain mark: a claim that finds the front empty
@@ -3500,9 +3543,12 @@ class RunClock:
                       if claimed and all(u in self._take_order for u in claimed)
                       else None)
             if ticket is not None:
+                # In the same step as the drain mark ends: the ticket holds
+                # the line from here, so there is no instant without either.
                 self._tickets[me] = ticket
-            elif self._draining.pop(me, None) is not None:
-                # Its takes are written or passed over: the line is free.
+            if self._draining.pop(me, None) is not None:
+                # Its take is claimed now, or passed over: once granted the
+                # holder is started, and the line is for the next take.
                 self._returned.notify_all()
         try:
             return self._decide(me, ticket, scope, claimed, owed_claim)

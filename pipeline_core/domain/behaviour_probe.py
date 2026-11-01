@@ -830,8 +830,32 @@ def narrow_then_to_agreement(
 
 
 def agreed_prefix(values: Sequence[str]) -> str:
-    """The longest leading text every value shares. `""` for fewer than two
-    values, or none. Pure."""
+    """The longest leading text every value shares that ends where every
+    value is at a token boundary. `""` for fewer than two values, or none.
+    Pure.
+
+    A token is a run of non-whitespace characters. The shared characters of
+    two DIFFERENT tokens are not an agreement. They are where the two
+    renders part, and they pin the first characters of one side. Run
+    `3178980-c42f7944` (2026-11-01): the stripped build rendered the first
+    frame `<unknown>`, and the symbolized build rendered a `<T as
+    Trait>::method` frame. The character prefix kept their shared `<`, so 4
+    twins pinned `   0: <`. Since std drops its own capture frames, that
+    `<` says the original captures inside a trait-impl method, and a
+    reconstruction that captures from an inherent or a free fn is red on
+    those tests forever. The cut goes back to the last point where no value
+    continues a token, here `   0: `. A value that ends there is at a
+    boundary. Both writers of a prefix Then read this function
+    (:func:`split_env_worlds` and :func:`narrow_then_to_agreement`), so
+    neither can pin part of a token. It names no format, no runtime and no
+    placeholder.
+
+    An agreement of whitespace alone is `""`. Two renders that share only
+    their indentation (`"  A(1)"` and `"  A(2)"` agree on `"  "` once the
+    cut leaves the token) agree on no output of the crate, and a prefix Then
+    of blanks plus a longer render passes almost any reconstruction that
+    prints anything: a test that cannot go red is not an observable, so the
+    caller withdraws as it does when nothing is shared."""
     if len(values) < 2:
         return ""
     head = values[0]
@@ -842,8 +866,19 @@ def agreed_prefix(values: Sequence[str]) -> str:
             i += 1
         head = head[:i]
         if not head:
-            break
-    return head
+            return ""
+    i = len(head)
+    while i > 0 and not all(_token_boundary(v, i) for v in values):
+        i -= 1
+    cut = head[:i]
+    return cut if cut.strip() else ""
+
+
+def _token_boundary(value: str, i: int) -> bool:
+    """True when position `i` of `value` is not inside a run of
+    non-whitespace characters."""
+    return (i <= 0 or i >= len(value)
+            or value[i - 1].isspace() or value[i].isspace())
 
 
 def split_env_worlds(

@@ -1487,7 +1487,7 @@ def execute_fill(
                 now=deps.now, ground_moved=gate.for_run(dict(w.run.left_red)),
                 scope=w.run.target_tests or None, units=w.run.targets,
                 unit_multiple=deps.unit_share_multiple,
-                call_price=call_price([*prior, *rows], w.run.kind, deps.oracle_fp),
+                call_price=call_price([*prior, *rows], w.run.kind),
                 owed=held_units & w.run.targets,
                 yields_to=(gate.claim_for(w.run, _holders)
                            if deps.held_now is not None else None),

@@ -8,15 +8,23 @@ and a second holder taken by the waiting claim was written first. The
 holder started 10.7 minutes and four units after it was taken.
 
 Plan sentence: while a taken holder's claim waits, or the thread that took
-holders is between their claims, no other claim of the run is granted;
+a holder has not yet claimed it, no other claim of the run is granted;
 taken holders are granted in take order, and the claim of one is never
 answered "take". A taken holder the route never claims, or a thread that
 ends, holds nothing.
 
-NEGATIVE CONTROLS: the clock with the line removed (no drain mark, no take
-order), which is the clock before this change: a plan claim is granted
-between two holders taken together, and a waiting holder's claim is
-answered "take" and writes the newer holder first.
+Run `3178980-c42f7944` (2026-11-01), t2a fill 1, narrowed the line: the
+thread that took holders held it until every holder it took had returned,
+so the four-wide pool wrote one unit at a time and a holder taken with
+another waited 20 minutes on the same worker. A take is one body; a holder
+still at the front is taken by the next claim of any worker; a granted
+holder does not hold the line while it runs.
+
+NEGATIVE CONTROLS: the clock with the line removed: a waiting holder's
+claim is answered "take" and writes the newer holder first. The queue that
+handed one thread every waiting holder: a plan claim lands between two
+holders taken together, and the second holder waits for the first to
+return although the share has room for both.
 
 Invented shape, no crate names.
 """
@@ -156,10 +164,35 @@ def test_a_holder_refused_on_its_premise_frees_the_line() -> None:
     assert b.answers == ["premise"]
 
 
-def _two_taken(clear_line: bool) -> tuple[list[str], _Worker]:
-    """Two holders taken together; the worker that took them releases the
-    first and only then claims the second, while a plan claim waits."""
+def _taking(w: _Worker, unit: FnLocator, *, hold: bool = False) -> str:
+    """One claim as the per-fn worker makes it: answered "take", write the
+    front holder (one body) and ask again."""
+    while (why := w.clock.refusal(None, [unit])) == "take":
+        w.answers.append("take")
+        for adm in w.clock.take_holders():
+            for site, _t in adm.held_tests:
+                w.claim(FnLocator(site.file, site.fn_name), hold=hold)
+    w.answers.append(why or unit.fn_name)
+    if why:
+        return why
+    w.granted.append(unit.fn_name)
+    if hold:
+        w.go.setdefault(unit.fn_name, threading.Event()).wait(5)
+    w.clock.release()
+    return ""
+
+
+def _two_taken(take_all: bool) -> list[str]:
+    """Two holders admitted together while a plan unit holds the only
+    reservation. The worker that took first pauses between its holder's
+    return and its next claim; a plan claim waits."""
     q = HolderQueue()
+    if take_all:                   # the queue before this change
+        def _all() -> list[HolderAdmission]:
+            with q._lock:
+                out, q._pending = q._pending, []
+                return out
+        q.take = _all              # type: ignore[method-assign]
     clock = _clock(q)
     granted: list[str] = []
     a = _Worker(clock, granted).start(lambda w: w.claim(_P[0]))
@@ -170,43 +203,91 @@ def _two_taken(clear_line: bool) -> tuple[list[str], _Worker]:
     took = threading.Event()
 
     def b_script(w: _Worker) -> None:
-        w.clock.refusal(None, [_P[1]])
-        w.clock.take_holders()
+        assert w.clock.refusal(None, [_P[1]]) == "take"
+        taken = w.clock.take_holders()
         took.set()
-        if clear_line:             # the clock before this change: no line
-            with w.clock._lock:
-                w.clock._draining.clear()
-                w.clock._take_order.clear()
         w.claim(_H1)
-        between.set()              # h1 returned; h2 not yet claimed
+        between.set()              # h1 returned; b's next claim not made yet
         go_on.wait(5)
-        w.claim(_H2, hold=False)
-        w.claim(_P[1], hold=False)
+        if len(taken[0].held_tests) > 1:
+            w.claim(_H2, hold=False)
+        _taking(w, _P[1])
     b = _Worker(clock, granted).start(b_script)
     assert took.wait(3)
     _pause(0.1)                # b is inside its claim of h1
-    c = _Worker(clock, granted).start(lambda w: w.claim(_P[2], hold=False))
-    assert _waiting(c, 0)
+    c = _Worker(clock, granted).start(lambda w: _taking(w, _P[2]))
+    _pause(0.1)
     a.release("p1")
     assert _until(lambda: "h1" in granted)
     b.release("h1")
     assert between.wait(3)
-    # The plan claim's chance: it lands now or never (the line holds it).
+    # The plan claim's chance: it lands now or never (the front holds it).
     _until(lambda: "p3" in granted, timeout=1.0)
     go_on.set()
     assert _until(lambda: len(granted) == 5)
-    return granted, c
+    assert c.thread is not None
+    return granted
 
 
 def test_two_holders_taken_together_are_both_granted_before_a_plan_unit() -> None:
-    granted, _c = _two_taken(clear_line=False)
+    granted = _two_taken(take_all=False)
     assert granted[:3] == ["p1", "h1", "h2"]
 
 
-def test_negative_control_without_the_line_a_plan_unit_slips_between_them() -> None:
-    granted, _c = _two_taken(clear_line=True)
-    # The plan claim wins the first release or the gap after h1's return.
+def test_negative_control_one_thread_taking_both_lets_a_plan_unit_between() -> None:
+    granted = _two_taken(take_all=True)
+    # Both bodies sit on b's thread; the line ends at b's claim of h1, and
+    # the plan claim lands in the gap before b claims h2.
     assert granted.index("p3") < granted.index("h2")
+
+
+def _side_by_side(take_all: bool) -> tuple[list[str], bool]:
+    """A price that fits three calls in the share: p1 runs, two holders are
+    admitted together, b takes and is granted the first and holds it. Is
+    the second granted while the first still runs?"""
+    q = HolderQueue()
+    if take_all:
+        def _all() -> list[HolderAdmission]:
+            with q._lock:
+                out, q._pending = q._pending, []
+                return out
+        q.take = _all              # type: ignore[method-assign]
+    clock = RunClock(share_minutes=13.0, fill_remaining=lambda: 100.0,
+                     now=lambda: 0.0, holders=q, yields_to=lambda _s, _u: "",
+                     call_price=4.0)
+    granted: list[str] = []
+    a = _Worker(clock, granted).start(lambda w: w.claim(_P[0]))
+    assert _until(lambda: granted == ["p1"])
+    q.admit(_adm(_H1, _H2))
+
+    def b_script(w: _Worker) -> None:
+        assert w.clock.refusal(None, [_P[1]]) == "take"
+        for adm in w.clock.take_holders():
+            for site, _t in adm.held_tests:
+                w.claim(FnLocator(site.file, site.fn_name))
+    b = _Worker(clock, granted).start(b_script)
+    assert _until(lambda: "h1" in granted)
+    c = _Worker(clock, granted).start(lambda w: _taking(w, _P[2], hold=True))
+    side = _until(lambda: "h2" in granted, timeout=1.0)
+    for name in ("p1", "h1", "h2", "p3"):
+        a.release(name)
+        b.release(name)
+        c.release(name)
+    assert _until(lambda: len(granted) == 4)
+    return granted, side
+
+
+def test_holders_taken_together_run_side_by_side_within_the_share() -> None:
+    """The line orders starts, not runs: while h1 is in flight, the next
+    claim takes h2 and is granted, and the plan unit starts after both."""
+    granted, side = _side_by_side(take_all=False)
+    assert side, "h2 waited for h1 to return"
+    assert granted[:3] == ["p1", "h1", "h2"]
+
+
+def test_negative_control_both_holders_on_one_thread_run_one_after_another() -> None:
+    _granted, side = _side_by_side(take_all=True)
+    assert not side
 
 
 def _nested(clear_line: bool) -> tuple[list[str], list[str]]:
