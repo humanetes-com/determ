@@ -3219,6 +3219,14 @@ class FillBudget:
 _RESERVED_WAIT_POLL_S = 5.0
 
 
+class IdleMove(StrEnum):
+    """What a pool worker whose plan queue is empty does next
+    (:meth:`HolderQueue.idle_move`)."""
+    TAKE = "take"
+    EXIT = "exit"
+    AGAIN = "again"
+
+
 @dataclass(frozen=True, slots=True)
 class HolderAdmission:
     """A still-stubbed function a keep of this fill measured, handed to a run
@@ -3238,16 +3246,142 @@ class HolderQueue:
 
     It also records what the run has claimed, so the gate does not hand a
     run a holder one of its workers is already writing. Thread-safe: a
-    pooled run's workers claim concurrently."""
+    pooled run's workers claim concurrently.
+
+    It also holds the claimer state of one level of the run's worker pool
+    (:meth:`arm`, :meth:`claim_plan`, :meth:`idle_move`): a worker whose
+    plan queue is empty stays a claimer until the front is empty and no
+    worker of the level is inside a claim, so holders admitted together
+    start on the idle workers instead of waiting for the one that asked.
+    Run `528728-f4e7de82` (2026-11-02), t2a fill 1: two of four workers
+    had drained their plan units by 20:13 and returned; nine holders
+    admitted at 20:26:57 then ran one after another on the two workers
+    still inside a claim (`context` started seven minutes after
+    `backtrace`, on the same worker)."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        #: Notified by an admission, by a claim that ends, and by a worker
+        #: that ends: what a parked claimer waits on.
+        self._cond = threading.Condition(self._lock)
         self._pending: list[HolderAdmission] = []
         self._claimed: set[FnLocator] = set()
+        #: Called after an admission, outside this lock (the run's clock
+        #: registers its wake: :meth:`RunClock.take_holders` takes the
+        #: clock's lock and then this one, so the other order deadlocks).
+        self._on_admit: list[Callable[[], None]] = []
+        #: Workers of the level inside a claim (a plan unit, or a body
+        #: taken from the front).
+        self._busy = 0
+        #: Claims entered since the level was armed: an exit decided across
+        #: the gate ask is valid only if no claim began in between.
+        self._entered = 0
+        #: The level decided every worker may leave.
+        self._closed = False
+        self._living = 0
+
+    def on_admit(self, wake: Callable[[], None]) -> None:
+        with self._lock:
+            self._on_admit.append(wake)
 
     def admit(self, admission: HolderAdmission) -> None:
         with self._lock:
             self._pending.append(admission)
+            self._cond.notify_all()
+            wakes = list(self._on_admit)
+        for wake in wakes:
+            wake()
+
+    def arm(self, width: int) -> None:
+        """A level of `width` workers starts: nobody inside a claim, the
+        level open. A stop that closed the previous level does not carry."""
+        with self._lock:
+            self._busy = 0
+            self._entered = 0
+            self._closed = False
+            self._living = width
+
+    def claim_plan[T](self, pull: Callable[[], T | None]) -> T | None:
+        """The next plan unit (`pull`, None when the plan queue is empty),
+        counted inside a claim in the same step: no other worker can see
+        the level idle between the pull and the count."""
+        with self._lock:
+            item = pull()
+            if item is not None:
+                self._busy += 1
+                self._entered += 1
+            return item
+
+    def leave_claim(self) -> None:
+        with self._lock:
+            self._busy -= 1
+            self._cond.notify_all()
+
+    def worker_ended(self) -> None:
+        """A worker of the level ended, for any reason (a stop included):
+        the others re-decide, and the last one closes the level."""
+        with self._lock:
+            self._living -= 1
+            if self._living <= 0:
+                self._closed = True
+            self._cond.notify_all()
+
+    def _front(self) -> bool:
+        """A body waits at the front (the condition :meth:`take` writes
+        on). Caller holds the lock; the queue is not rewritten."""
+        return any(a.held_tests for a in self._pending)
+
+    def _enter_front(self) -> IdleMove | None:
+        """Caller holds the lock."""
+        if self._closed:
+            return IdleMove.EXIT
+        if self._front():
+            self._busy += 1
+            self._entered += 1
+            return IdleMove.TAKE
+        return None
+
+    def idle_move(self, ask: Callable[[], None] | None) -> IdleMove:
+        """One decision of a worker whose plan queue is empty.
+
+        TAKE: a body waits at the front; the worker is counted inside a
+        claim and takes it (:meth:`RunClock.take_holders`), then calls
+        :meth:`leave_claim`. EXIT: the level is closed. AGAIN: decide again
+        (after one wait while a sibling is inside a claim).
+
+        A keep admits nothing: it moves the kept mark, and the gate admits
+        at a claim (`fill_scheduler._GroundGate._claim`). So the idle
+        worker makes that claim itself, `ask` (:meth:`RunClock.admit_measured`),
+        holding no lock. The exit is two-phase: nobody inside a claim and an
+        empty front, then the ask, then the same reading with no claim
+        begun since. With nobody inside a claim no keep can land between
+        the ask and the close, and the last unit's keep moved the mark
+        before its claim ended. Run `528728-f4e7de82` (2026-11-02), fill
+        1: w0's keep of a plan unit measured a holder at 21:28:59 and w0
+        made no further claim; the holder was admitted at 21:31:30, at the
+        next claim of w2, whose own unit had to return first."""
+        with self._lock:
+            move = self._enter_front()
+            if move is not None:
+                return move
+            idle = self._busy == 0
+            entered = self._entered
+        if ask is not None:
+            ask()
+        with self._lock:
+            move = self._enter_front()
+            if move is not None:
+                return move
+            if idle and self._busy == 0 and self._entered == entered:
+                self._closed = True
+                self._cond.notify_all()
+                return IdleMove.EXIT
+            if self._busy > 0:
+                # A sibling is inside a claim: its keep may measure a
+                # holder, and nothing wakes this worker on a keep. Ask
+                # again on an admission, a claim's end, or the poll.
+                self._cond.wait(timeout=_RESERVED_WAIT_POLL_S)
+            return IdleMove.AGAIN
 
     def note_claimed(self, units: Collection[FnLocator]) -> None:
         with self._lock:
@@ -3444,6 +3578,29 @@ class RunClock:
         self.last_delta = 0
         self.claims = 0
         self.refused = 0
+        if holders is not None:
+            # An admission wakes a claim waiting here, so it re-asks and
+            # is answered "take" without waiting for a release or the poll.
+            holders.on_admit(self._wake)
+
+    def _wake(self) -> None:
+        with self._lock:
+            self._returned.notify_all()
+
+    def admit_measured(self) -> None:
+        """The claim gate's own claim with nothing claimed: a holder a
+        keep of this fill measured, that no run ahead writes, is admitted
+        to :attr:`holders` now (`fill_scheduler._GroundGate._claim`). A
+        keep only moves the kept mark; the gate reads it at a claim. A pool
+        worker with no plan unit left makes this claim, so a keep whose
+        worker claims nothing after it is still admitted
+        (:meth:`HolderQueue.idle_move`). Not :meth:`refusal`: no share
+        check, no reservation, no ``pending`` prune, and the answer (a
+        label, or "") is not a grant. Hold no lock of this clock or of the
+        queue when calling it: the gate's lock is taken before the queue's."""
+        if self._yields_to is None or self.holders is None:
+            return
+        self._yields_to(None, frozenset())
 
     def elapsed(self) -> float:
         return (self._now() - self._started) / 60.0

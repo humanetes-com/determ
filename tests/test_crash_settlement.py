@@ -558,6 +558,84 @@ class _CountingSettler:
         return self.settler.settle(capture, {READ}, baseline)
 
 
+def test_a_reused_refusal_reports_the_stored_loss(tmp_path: Path) -> None:
+    """The event of a refusal this fill already measured carries the loss
+    the reason names. A memo that stored the sentence emits an empty
+    `lost`."""
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+    s.settle(_PASS, _baseline())
+    s.settle(_PASS, _baseline())
+    ev = [d for e, d in s.events if e == "phase_c.crash.settle"]
+    assert ev[1]["reused"] is True
+    assert ev[1]["lost"] == ["other"]
+    assert ev[1]["aborted_green"] == []
+    assert ev[1]["unmeasured"] == []
+    assert "['other']" in ev[1]["reason"]
+
+
+_SILENT_OTHER = (
+    "     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 2 tests\n"
+    "test other ... FAILED\ntest t1 ... FAILED\n\n"
+    "failures:\n\n---- other stdout ----\n"
+    "determ-isolation: test process aborted\n\n"
+    "test result: FAILED. 0 passed; 2 failed\n")
+
+
+def test_a_reused_silent_abort_stays_out_of_lost_alone(
+        tmp_path: Path) -> None:
+    """A baseline pass whose own process died without a panic is in `lost`
+    and in `aborted_green`. Writing the union into `lost` alone leaves
+    `aborted_green` empty."""
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+
+    def _suite() -> str:
+        s.suite_runs += 1
+        return _SILENT_OTHER
+    s.settler.deps = _deps_with_suite(s, _suite)
+    s.settle(_PASS, _baseline())
+    s.settle(_PASS, _baseline())
+    ev = [d for e, d in s.events if e == "phase_c.crash.settle"]
+    assert ev[1]["reused"] is True
+    assert ev[1]["lost"] == ["other"]
+    assert ev[1]["aborted_green"] == ["other"]
+    assert s.suite_runs == 1
+
+
+_TWO_BASELINE = (
+    "     Running tests/a.rs (target/debug/deps/a-1)\n\nrunning 1 test\n"
+    "test other ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; "
+    "0 measured; 0 filtered out\n\n"
+    "     Running tests/b.rs (target/debug/deps/b-1)\n\nrunning 1 test\n"
+    "test t1 ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 "
+    "ignored; 0 measured; 0 filtered out\n")
+_ONE_BINARY = (
+    "     Running tests/a.rs (target/debug/deps/a-1)\n\nrunning 1 test\n"
+    "test other ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 "
+    "ignored; 0 measured; 0 filtered out\n")
+
+
+def test_a_reused_refusal_names_a_binary_the_stub_reading_never_started(
+        tmp_path: Path) -> None:
+    """`not_run` is the baseline binaries absent from the stub reading.
+    Recomputing it from the write's capture, which started them, is empty."""
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+
+    def _suite() -> str:
+        s.suite_runs += 1
+        return _ONE_BINARY
+    s.settler.deps = _deps_with_suite(s, _suite)
+    base = TestStateReading(parse_binary_results(_TWO_BASELINE))
+    s.settle(_TWO_BASELINE, base)
+    s.settle(_TWO_BASELINE, base)
+    ev = [d for e, d in s.events if e == "phase_c.crash.settle"]
+    assert ev[1]["reused"] is True
+    assert any("b.rs" in n for n in ev[1]["not_run"])
+    assert ev[1]["lost"] == ["other"]
+
+
 def test_a_stub_that_cost_the_baseline_is_not_bought_again(
         tmp_path: Path) -> None:
     root = _tree(tmp_path)
@@ -624,10 +702,18 @@ def test_control_a_new_settler_measures_again(tmp_path: Path) -> None:
 _SCOPED = ("     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 1 test\n"
            "test t1 ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed\n")
 
-# `other` printed FAILED and the binary never closed: an abort, not a
-# judged failure. The name is not the stub's cost.
+# The binary opened and died before it reported `other`: the after-reading
+# never judged that baseline pass. It is unmeasured, not the stub's cost.
 _ABORTED = ("     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 2 tests\n"
-            "test other ... FAILED\n")
+            "test t1 ... FAILED\n")
+
+# `other` printed FAILED and the binary never closed. The comparator every
+# keep reads (`assertion_position.outcomes_of`) counts a failure in any
+# binary, so this is a lost baseline pass. Until 2026-11-02 the settlement
+# alone read only completed binaries here.
+_ABORTED_AFTER_FAILING = (
+    "     Running tests/t.rs (target/debug/deps/t-1)\n\nrunning 2 tests\n"
+    "test other ... FAILED\n")
 
 
 def test_a_scoped_capture_that_never_ran_the_lost_test_still_teaches(
@@ -645,10 +731,11 @@ def test_a_scoped_capture_that_never_ran_the_lost_test_still_teaches(
             if _e == "phase_c.crash.settle"] == [False, True]
 
 
-def test_control_an_aborted_binary_teaches_nothing(tmp_path: Path) -> None:
-    """The name is missing because its binary did not finish, not because
-    a completed binary judged it failed. Nothing is remembered, and the
-    next settlement measures."""
+def test_control_an_unjudged_baseline_pass_teaches_nothing(
+        tmp_path: Path) -> None:
+    """The binary started and never reported `other`: no verdict, so the
+    hold names it unmeasured and nothing is remembered; the next settlement
+    measures."""
     root = _tree(tmp_path)
     s = _CountingSettler(root, [_site("t1", "make_a", 6)])
 
@@ -656,10 +743,27 @@ def test_control_an_aborted_binary_teaches_nothing(tmp_path: Path) -> None:
         s.suite_runs += 1
         return _ABORTED
     s.settler.deps = _deps_with_suite(s, _suite)
-    s.settle(_PASS, _baseline())
+    first = s.settle(_PASS, _baseline())
+    assert first.outcome is SettlementOutcome.UNSETTLED
+    assert first.reason == "not measured after the stubs: ['other']"
     s.settle(_PASS, _baseline())
     assert s.suite_runs == 2
     assert (root / "src" / "lib.rs").read_text() == _LIB
+    ev = [d for e, d in s.events if e == "phase_c.crash.settle"][0]
+    assert ev["unmeasured"] == ["other"] and ev["lost"] == []
+
+
+def test_a_failure_printed_before_the_abort_is_a_lost_pass(
+        tmp_path: Path) -> None:
+    root = _tree(tmp_path)
+    s = _CountingSettler(root, [_site("t1", "make_a", 6)])
+
+    def _suite() -> str:
+        s.suite_runs += 1
+        return _ABORTED_AFTER_FAILING
+    s.settler.deps = _deps_with_suite(s, _suite)
+    first = s.settle(_PASS, _baseline())
+    assert first.reason == "the stubs cost baseline passes: ['other']"
 
 
 def _deps_with_suite(counter: _CountingSettler, suite):
@@ -753,3 +857,99 @@ def test_crash_text_is_the_writes_own_crash_only() -> None:
     text = crash_text_of(stubbed)
     assert "src/store.rs:41" not in text.split("Before the verdicts")[0]
     assert "src/store.rs::take_out" in text
+
+
+# ---- the hold reads one test per binary, never a count or a bare name ----
+#
+# Two test files each hold a test named `t`: it passes in `tests/a.rs` and is
+# red in `tests/b.rs` at the baseline (the `test_drop` shape of run
+# `14495-a26ad4ea`). Invented names.
+
+def _two(a: str, b: str) -> str:
+    return ("     Running tests/a.rs (target/debug/deps/a-1)\n\nrunning 1 test\n"
+            f"test t ... {a}\n\ntest result: ok. 1 passed; 0 failed\n"
+            "     Running tests/b.rs (target/debug/deps/b-1)\n\nrunning 1 test\n"
+            f"test t ... {b}\n\ntest result: FAILED. 0 passed; 1 failed\n")
+
+
+_TWO_BASE = _two("ok", "FAILED")
+
+
+def _old_stub_own_cost(capture: str, stubbed: str,
+                       baseline: TestStateReading) -> list[str]:
+    """The bare-name rule this batch replaced, kept as the negative control."""
+    def _judged_failed(r: TestStateReading) -> frozenset[str]:
+        out: set[str] = set()
+        for b in r.binaries:
+            if b.completed:
+                out |= b.failed
+        return frozenset(out)
+    cap = _judged_failed(TestStateReading(parse_binary_results(capture)))
+    aft = _judged_failed(TestStateReading(parse_binary_results(stubbed)))
+    return sorted((baseline.passed_names & aft) - cap)
+
+
+def test_a_name_red_in_another_file_is_not_the_stubs_cost() -> None:
+    from pipeline_core.application.reconstruct.crash_settler import _stub_own_cost
+    base = TestStateReading(parse_binary_results(_TWO_BASE))
+    assert _stub_own_cost(_SCOPED, _TWO_BASE, base) == []
+    # Negative control: the bare-name rule charged it.
+    assert _old_stub_own_cost(_SCOPED, _TWO_BASE, base) == ["t"]
+
+
+def test_the_same_name_lost_in_its_own_file_is_the_stubs_cost() -> None:
+    from pipeline_core.application.reconstruct.crash_settler import _stub_own_cost
+    base = TestStateReading(parse_binary_results(_TWO_BASE))
+    lost = _two("FAILED", "FAILED")
+    assert _stub_own_cost(_SCOPED, lost, base) == ["t"]
+
+
+def _hold(reading: str, baseline: str):
+    s = CrashSettler(CrashSettlerDeps(
+        localize=lambda _c, _e: [], run_suite=lambda: None,
+        is_proven=_never, src_dir=Path("."),
+        record_settled=lambda _l, _s: None, log=lambda _m: None))
+    return s._holds(reading, TestStateReading(parse_binary_results(baseline)))
+
+
+def test_the_hold_judges_per_file() -> None:
+    assert _hold(_TWO_BASE, _TWO_BASE)[0] is SettlementOutcome.SETTLED
+    out, why = _hold(_two("FAILED", "FAILED"), _TWO_BASE)
+    assert out is SettlementOutcome.UNSETTLED
+    assert why == "the stubs cost baseline passes: ['t']"
+
+
+def test_a_binary_that_never_started_decides_nothing() -> None:
+    """Only `tests/a.rs` ran after the stubs: `tests/b.rs` has no section,
+    which is not a reading of its tests."""
+    base = _two("ok", "ok").replace("0 passed; 1 failed", "1 passed; 0 failed")
+    only_a = base.split("     Running tests/b.rs")[0]
+    assert _hold(only_a, base)[0] is SettlementOutcome.SETTLED
+
+
+def _isolated(name: str, status: str, other: str = "passed") -> str:
+    from pipeline_core.domain.test_isolation import (
+        IsolatedStatus,
+        IsolatedTest,
+        render_isolated_section,
+    )
+    tests = [IsolatedTest("other", IsolatedStatus(other)),
+             IsolatedTest(name, IsolatedStatus(status),
+                          body="" if status == "passed" else "boom")]
+    return ("     Running tests/t.rs (target/debug/deps/t-1)\n\n"
+            + render_isolated_section(tests) + "\n")
+
+
+def test_an_isolated_abort_of_a_baseline_pass_unsettles() -> None:
+    base = _isolated("t1", "passed")
+    out, why = _hold(_isolated("t1", "aborted"), base)
+    assert out is SettlementOutcome.UNSETTLED
+    assert "['t1']" in why
+
+
+def test_an_isolated_abort_of_a_test_red_at_the_baseline_does_not() -> None:
+    """The settlement has no gain to weigh, and the keep's abort rule
+    (`AbortPartition.refuses`) is not read here: a red test that now dies
+    lost nothing that passed."""
+    base = _isolated("t1", "failed")
+    assert _hold(_isolated("t1", "aborted"), base)[0] is SettlementOutcome.SETTLED

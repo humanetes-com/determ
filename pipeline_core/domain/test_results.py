@@ -1571,7 +1571,11 @@ class TestStateReading:
         ignored: set[TestKey] = set()
         aborted: set[TestKey] = set()
         silent: set[TestKey] = set()
+        opened: set[str] = set()
         for b in self.binaries:
+            # Every binary in the reading is a section that opened; one that
+            # never started has no BinaryResult at all.
+            opened.add(b.key)
             if b.completed:
                 passed |= _k(b.key, b.passed)
             failed |= _k(b.key, b.failed)
@@ -1581,7 +1585,8 @@ class TestStateReading:
         return KeyedVerdicts(
             passed=frozenset(passed), failed=frozenset(failed),
             ignored=frozenset(ignored), aborted=frozenset(aborted),
-            aborted_silent=frozenset(silent), positions=dict(self.positions))
+            aborted_silent=frozenset(silent), positions=dict(self.positions),
+            opened=frozenset(opened))
 
 
 # Verdict tokens libtest itself prints. Anything ELSE sitting where a verdict

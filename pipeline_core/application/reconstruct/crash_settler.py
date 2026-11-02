@@ -24,10 +24,14 @@ The loop, per reading of the suite:
    whole suite — a culprit off this binary's stack (another caller of the
    same reader) shows up as the next reading's crash.
 
-At the end the reading is compared to the write's baseline with the gates'
-own comparison: a settlement that loses a test that passed before the write
-is given back byte for byte (`TreeTxn.rollback`), as is every outcome but
-SETTLED. A settlement that holds is committed: the write stands, its tests now
+At the end the reading is compared to the write's baseline per test, by the
+comparator every keep reads (`assertion_position.outcomes_of`, `_holds`): a
+settlement that loses a test that passed before the write, or leaves one
+with no verdict in a binary that started, is given back byte for byte
+(`TreeTxn.rollback`), as is every outcome but SETTLED. No count is read: a
+pass count, an executed count or a crashed binary decided nothing on 170
+recorded settlements that the newly-red test did not (2026-10-31), and a
+count names no test. A settlement that holds is committed: the write stands, its tests now
 stop in the stubs, and those stubs are the next held units dispatch offers.
 
 A stub that costs the baseline is a fact about the culprit's body and the
@@ -35,14 +39,20 @@ baseline, not about the write that exposed the crash. Run
 `1643490-850cf640` (2026-10-29) put the same `downcast` body back 21 times
 across two fills, one per write the crash surfaced under, and every time
 the stub cost the same baseline tests and was given back; each round paid
-a suite run to relearn it. The settler keeps that outcome for the fill it
+a suite run to relearn it. The settler keeps that cost for the fill it
 is bound to (`_cost_of_stub`), keyed on the culprits' body bytes and the
-baseline's verdicts. A test is that cost when it passed at the baseline, a
-completed binary judged it failed after the stub, and the write's own
-capture had not already judged it failed (`_stub_own_cost`). A scoped
-capture that never ran the test still teaches it. A name only missing
-because its binary aborted was not judged, and a capture that already
-failed the name teaches nothing about the culprit. Any later stub step on
+baseline's verdicts: the comparator's outcomes, with the capture's own
+losses taken out, and the baseline binaries the stub reading never
+started. A reused refusal renders its reason from those outcomes, and the
+settle event copies lost, aborted_green, unmeasured and not_run from the
+same value. A test is that cost when it passed at the baseline and
+the reading after the stub lost it (failed, or died in its own process) as
+the comparator every keep reads judges it per binary and test
+(`assertion_position.outcomes_of`), and the write's own capture had not
+already lost it (`_stub_own_cost`). A scoped capture that never ran the
+test still teaches it. A test with no verdict after the stub was not
+judged and teaches nothing, and a capture that already lost the test
+teaches nothing about the culprit. Any later stub step on
 the same key — a later round, a crash carried beside the culprit — ends
 UNSETTLED without stubbing or running the suite. The bodies a multi-round
 settlement measured are remembered as the set on the tree for that
@@ -54,12 +64,13 @@ write left it, and the crash text is this capture's own sites.
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
 from pipeline_core.application.reconstruct.tree_txn import TreeTxn, note_kept_edit
+from pipeline_core.domain.assertion_position import TestKey, TestOutcomes, outcomes_of
 from pipeline_core.domain.crash_settlement import (
     SettlementOutcome,
     frame_locator,
@@ -71,7 +82,6 @@ from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import locate_all_fns
 from pipeline_core.domain.test_results import (
     TestStateReading,
-    compare_readings,
     parse_binary_results,
 )
 
@@ -218,50 +228,101 @@ class Settlement:
 @dataclass(frozen=True, slots=True)
 class _StubCostKey:
     """What a stub's cost to the baseline depends on: the culprit bodies put
-    back, as (file, fn, body text), and the verdicts `_holds` compares
-    against, as (world, binary, passing tests, failing tests) per binary."""
+    back, as (file, fn, body text), and the baseline's passing tests, per
+    binary and test, which are all `_holds` and `_stub_own_cost` compare."""
 
     bodies: frozenset[tuple[str, str, str]]
-    baseline: frozenset[tuple[str, str, frozenset[str], frozenset[str]]]
+    baseline: frozenset[TestKey]
 
 
-def _baseline_verdicts(
-    baseline: TestStateReading,
-) -> frozenset[tuple[str, str, frozenset[str], frozenset[str]]]:
-    return frozenset((b.world, b.label, frozenset(b.passed), frozenset(b.failed))
-                     for b in baseline.binaries)
+@dataclass(frozen=True, slots=True)
+class _StubCost:
+    """One stub's cost, as the hold judged it.
+
+    ``outcomes`` is the baseline passes the stub reading lost and the
+    baseline passes it left unjudged, with losses the write's own capture
+    already had taken out. ``not_run`` is the baseline's binaries with no
+    section in that reading. The reuse arm renders its reason from
+    ``outcomes`` and the event copies these fields. A rendered sentence
+    cannot fill them: run `941823-6d7acea5` (2026-11-02) emitted ``lost:
+    []`` beside a reason that named the test."""
+
+    outcomes: TestOutcomes
+    not_run: tuple[str, ...]
 
 
-def _judged_failed(reading: TestStateReading) -> frozenset[str]:
-    """Tests a completed binary judged failed.
+def _baseline_outcomes(baseline: TestStateReading,
+                       reading: str) -> TestOutcomes:
+    """`reading` judged against the baseline over the baseline's passing
+    tests, per binary and test. The one comparator every keep reads; the
+    settlement asks it what a stub cost instead of counting."""
+    before = baseline.keyed()
+    after = TestStateReading(parse_binary_results(reading)).keyed()
+    return outcomes_of({k.test for k in before.passed},
+                       before=before, after=after)
 
-    A name only absent because its binary aborted, or failed inside a
-    binary that did not finish, is not a judged loss. Which tests print
-    before a signal varies, and an abort is not the stub's verdict on the
-    ones that never received one."""
-    out: set[str] = set()
-    for binary in reading.binaries:
-        if binary.completed:
-            out |= binary.failed
-    return frozenset(out)
+
+def _baseline_losses(outcomes: TestOutcomes) -> frozenset[str]:
+    """The baseline passes a reading lost: failed after, or died in their
+    own process (an isolated abort is in both sets)."""
+    return outcomes.lost | outcomes.aborted_green
+
+
+def _not_run(baseline: TestStateReading | None,
+             reading: str | None) -> list[str]:
+    """The baseline's binaries with no section in `reading`: never started,
+    so excluded from the hold (`cargo test --no-fail-fast` leaves this only
+    to a cut run or a target that did not build). Counted on the event."""
+    if baseline is None or reading is None:
+        return []
+    after = {b.key for b in parse_binary_results(reading)}
+    return sorted({b.key for b in baseline.binaries} - after)
+
+
+def _stub_cost_reason(outcomes: TestOutcomes) -> str:
+    """The refusal a remembered stub cost prints. The fresh store and the
+    reuse both call this, so the sentence and the event name one reading."""
+    return ("the stub costs baseline tests that pass with "
+            f"the body: {sorted(_baseline_losses(outcomes))}")
+
+
+def _remembered_cost(capture: str, stubbed_reading: str,
+                     baseline: TestStateReading) -> _StubCost | None:
+    """The stub's own cost, or None when it lost nothing the capture had
+    not already lost.
+
+    Losses are judged per binary and test, then subtracted by name: one
+    name the capture lost in one binary and the stub in another is not
+    charged, the direction that never memoizes a false cost. A test the
+    stubbed reading did not judge is not a loss. ``unmeasured`` and
+    ``not_run`` stay on the value so the reuse event can report them;
+    they are not themselves a reason to remember."""
+    after = _baseline_outcomes(baseline, stubbed_reading)
+    already = _baseline_losses(_baseline_outcomes(baseline, capture))
+    lost = frozenset(after.lost - already)
+    green = frozenset(after.aborted_green - already)
+    if not lost and not green:
+        return None
+    return _StubCost(
+        replace(after, lost=lost, aborted_green=green,
+                aborted=frozenset(after.aborted - already)),
+        tuple(_not_run(baseline, stubbed_reading)))
 
 
 def _stub_own_cost(capture: str, stubbed_reading: str,
                    baseline: TestStateReading) -> list[str]:
     """The baseline passes the stub itself lost.
 
-    A test counts when it passed at the baseline, a completed binary of the
-    stubbed reading judged it failed, and a completed binary of the write's
-    own capture had not already judged it failed. The capture not having run
-    the test is not the write's regression: a scoped capture never sees the
-    tests the full suite loses. A name merely missing after the stub, because
-    its binary aborted, was not judged failed and is not the stub's cost.
-    What the capture already failed is the write's own regression."""
-    capture_failed = _judged_failed(
-        TestStateReading(parse_binary_results(capture)))
-    after_failed = _judged_failed(
-        TestStateReading(parse_binary_results(stubbed_reading)))
-    return sorted((baseline.passed_names & after_failed) - capture_failed)
+    A test counts when the stubbed reading lost it, per binary and test, and
+    the write's own capture had not already lost it. The capture not having
+    run the test is not the write's regression: a scoped capture never sees
+    the tests the full suite loses. A test the stubbed reading did not judge
+    is not the stub's cost. Until 2026-11-02 this was bare-name arithmetic
+    over every binary: a name passing in one test file and red in another
+    before and after the stub (the `test_drop` shape of run
+    `14495-a26ad4ea`) was charged to the stub."""
+    got = _remembered_cost(capture, stubbed_reading, baseline)
+    return sorted(_baseline_losses(got.outcomes)) if got is not None else []
 
 
 @dataclass(frozen=True, slots=True)
@@ -292,7 +353,11 @@ class CrashSettler:
         self._stubbed_at: list[tuple[str, str, int]] = []
         # Why stubbing these culprit bodies against this baseline was given
         # back, by `_StubCostKey` (module docstring).
-        self._cost_of_stub: dict[_StubCostKey, str] = {}
+        self._cost_of_stub: dict[_StubCostKey, _StubCost] = {}
+        # The last `_holds` reading of the settlement in progress, for its
+        # event; on a reused refusal, the stored cost's outcomes. None when
+        # no hold was taken and nothing was reused.
+        self._last_hold: TestOutcomes | None = None
 
     def localize(self, capture: str,
                  baseline: TestStateReading | None) -> tuple[CrashSite, ...]:
@@ -339,7 +404,9 @@ class CrashSettler:
         pending: list[tuple[_StubCostKey, str]] = []
         cumulative: _StubCostKey | None = None
         reused = False
+        reused_not_run: list[str] | None = None
         decided_hold = False
+        self._last_hold = None
         try:
             while rounds < MAX_ROUNDS:
                 rounds += 1
@@ -405,15 +472,17 @@ class CrashSettler:
                     known = self._cost_of_stub.get(fresh_key)
                     if known is not None:
                         outcome = SettlementOutcome.UNSETTLED
-                        reason = known
+                        reason = _stub_cost_reason(known.outcomes)
                         reused = True
+                        self._last_hold = known.outcomes
+                        reused_not_run = list(known.not_run)
                         d.log(f"  {tag}[phase-c/crash-settle] the crash under "
                               "the write was produced by unproven "
                               + ", ".join(f"{f.file_rel}::{f.fn_name} "
                                           f"(line {f.line})" for f in fresh)
                               + " — not put back: this fill already put the "
                               "same body back against the same baseline and "
-                              f"gave it back ({known}); the write is judged "
+                              f"gave it back ({reason}); the write is judged "
                               "as before.")
                         break
                 if not fresh or not self._stub(txn, fresh):
@@ -543,6 +612,17 @@ class CrashSettler:
             "own": [f"{f.file_rel}::{f.fn_name}:{f.line}" for f in own],
             "blame": [s.blame_label for s in first_sites],
             "reused": reused,
+            # The hold's per-test reading, or the stored one when this
+            # refusal reused it. A missing hold reports nothing: the fields
+            # and the reason are one value.
+            "lost": sorted(self._last_hold.lost) if self._last_hold else [],
+            "aborted_green": (sorted(self._last_hold.aborted_green)
+                              if self._last_hold else []),
+            "unmeasured": (sorted(self._last_hold.unmeasured)
+                           if self._last_hold else []),
+            "not_run": (reused_not_run if reused_not_run is not None
+                        else _not_run(baseline,
+                                      reading if self._last_hold else None)),
         })
         return result
 
@@ -559,23 +639,30 @@ class CrashSettler:
         for key, stub_reading in pending:
             if key in self._cost_of_stub:
                 continue
-            own_cost = _stub_own_cost(capture, stub_reading, baseline)
-            if own_cost:
-                self._cost_of_stub[key] = (
-                    "the stub costs baseline tests that pass with "
-                    f"the body: {own_cost}")
+            own_cost = _remembered_cost(capture, stub_reading, baseline)
+            if own_cost is not None:
+                self._cost_of_stub[key] = own_cost
 
     def _holds(self, reading: str,
                baseline: TestStateReading | None,
                ) -> tuple[SettlementOutcome, str]:
+        """SETTLED when the reading after the stubs lost no baseline pass and
+        left none unjudged in a binary that started; else UNSETTLED, naming
+        the tests. A binary that never started is not a reading of its
+        tests and decides nothing."""
+        self._last_hold = None
         if baseline is None:
             return SettlementOutcome.UNSETTLED, "no baseline to compare with"
-        after = TestStateReading(parse_binary_results(reading))
-        cmp = compare_readings(baseline, after)
-        lost = cmp.cur_pass < cmp.base_pass or bool(cmp.newly_red)
-        if lost or cmp.newly_crashed or cmp.cur_executed < cmp.base_executed:
+        got = _baseline_outcomes(baseline, reading)
+        self._last_hold = got
+        lost = _baseline_losses(got)
+        if lost:
             return (SettlementOutcome.UNSETTLED,
-                    "the stubs cost the baseline " + (cmp.summary or "a test"))
+                    f"the stubs cost baseline passes: {sorted(lost)}")
+        if got.unmeasured:
+            return (SettlementOutcome.UNSETTLED,
+                    "not measured after the stubs: "
+                    f"{sorted(got.unmeasured)}")
         return SettlementOutcome.SETTLED, ""
 
     def _narrow(
@@ -671,7 +758,7 @@ class CrashSettler:
                 return None
             _sig, _s, b, e = locs[i]
             bodies.add((f.file_rel, f.fn_name, text[b:e]))
-        return _StubCostKey(frozenset(bodies), _baseline_verdicts(baseline))
+        return _StubCostKey(frozenset(bodies), baseline.keyed().passed)
 
     @staticmethod
     def _locatable(txn: TreeTxn, f: CrashFrame) -> bool:

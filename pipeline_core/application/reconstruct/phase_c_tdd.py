@@ -114,7 +114,13 @@ from pipeline_core.domain.body_ledger import (
     tests_creditable_to_locator,
 )
 from pipeline_core.domain.body_standing import bind as bind_body_standing
-from pipeline_core.domain.body_standing import is_proven_text, lost_to_aborts, proven_units
+from pipeline_core.domain.body_standing import (
+    death_places,
+    death_vetoes,
+    is_proven_text,
+    proven_units,
+    render_place,
+)
 from pipeline_core.domain.candidate_tiers import (
     DEFAULT_MISSES,
     JUDGED_JOINT_OUTCOMES,
@@ -3341,29 +3347,60 @@ def run_phase_c_tdd(
                     LedgerKey(project_dir.name, cluster.name, u.file,
                               u.fn_name): body_sha(b)
                     for u, b in _bodies_p.items()})
+                _attr_p = {bare_test_name(t): us
+                           for t, us in test_reverse_map.items()}
+                # Where each dead test died (`body_standing.death_places`):
+                # the sweep's crash sites that name a producer. A death
+                # with no such site, including one that printed a panic,
+                # is unlocated. That abort is not a native crash, so the
+                # localizer has no site for it.
+                _deaths_p = death_places(
+                    _sweep_view.aborted, sites=_sweep_view.crash_sites)
                 _units_p = proven_units(
                     [FnLocator(k.file, k.fn_name) for k, e in _stand_p.items()
                      if e.state is BodyState.PROVEN],
-                    {bare_test_name(t): us
-                     for t, us in test_reverse_map.items()},
-                    passed=_sweep_view.passed, died=_sweep_view.aborted,
+                    _attr_p, passed=_sweep_view.passed, deaths=_deaths_p,
                     intact=_rec.reconciled)
                 bind_body_standing({u: _bodies_p[u] for u in _units_p
                                     if u in _bodies_p}, known=_bodies_p)
-                _lost_p = (lost_to_aborts(
-                    {bare_test_name(t): us for t, us in test_reverse_map.items()},
-                    passed=_sweep_view.passed, died=_sweep_view.aborted)
-                    - _units_p) if _rec.reconciled else frozenset()
+                _veto_p = (death_vetoes(_attr_p, passed=_sweep_view.passed,
+                                        deaths=_deaths_p)
+                           if _rec.reconciled else None)
+
+                def _vetoes_line(
+                    rows: Mapping[FnLocator, tuple[tuple[str, frozenset[FnLocator]], ...]],
+                ) -> str:
+                    return "; ".join(
+                        f"{u.file}::{u.fn_name} ("
+                        + ", ".join(f"{t} died at {render_place(pl)}"
+                                    for t, pl in dead[:2]) + ")"
+                        for u, dead in sorted(
+                            rows.items(), key=lambda kv: (kv[0].file,
+                                                          kv[0].fn_name))[:6])
                 deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: "
                          f"{len(_units_p)} of {len(_bodies_p)} unit(s) proven "
                          "on this tree (ledger or a passing attributed test); "
                          "only these are shown as the crate's own idioms."
-                         + (f" {len(_lost_p)} more had a passing attributed test "
-                            f"and are left out because another of their "
-                            f"{len(_sweep_view.aborted)} aborted test(s) died: "
-                            + ", ".join(sorted(f"{u.file}::{u.fn_name}"
-                                               for u in _lost_p)[:6])
-                            if _lost_p else ""))
+                         + (f" {len(_veto_p.kept)} kept beside an attributed "
+                            "test that died in another unit: "
+                            + _vetoes_line(_veto_p.kept)
+                            if _veto_p is not None and _veto_p.kept else "")
+                         + (f" {len(_veto_p.refused)} more had a passing "
+                            "attributed test and are left out because an "
+                            "attributed test died in them or unlocated: "
+                            + _vetoes_line(_veto_p.refused)
+                            if _veto_p is not None and _veto_p.refused else ""))
+                if _veto_p is not None and (_veto_p.kept or _veto_p.refused):
+                    deps.emit("phase_c.standing.vetoes", data={
+                        "cluster": cluster.name, "iter": iter_n,
+                        "proven": len(_units_p),
+                        "deaths": {t: sorted(f"{u.file}::{u.fn_name}"
+                                             for u in pl)
+                                   for t, pl in sorted(_deaths_p.items())},
+                        "kept": {f"{u.file}::{u.fn_name}": [t for t, _pl in d]
+                                 for u, d in _veto_p.kept.items()},
+                        "refused": {f"{u.file}::{u.fn_name}": [t for t, _pl in d]
+                                    for u, d in _veto_p.refused.items()}})
             except Exception as exc:  # noqa: BLE001 — a reading never ends a sweep
                 bind_body_standing(None)
                 deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: not "
@@ -4532,6 +4569,13 @@ def run_phase_c_tdd(
                             "repeats": _site.cycle.repeats}),
                         "origin_unattributed": _site.origin_unattributed,
                         "provenance": _site.provenance,
+                        # Whether the culprit is the producer
+                        # (`CrashSite.producer_refusal`), and the two facts
+                        # that decide it, so a census can read it off the
+                        # record instead of re-deriving the trace.
+                        "origin_traced_at_reader": _site.origin_traced_at_reader,
+                        "origin_stack_lines": _site.origin_stack_lines,
+                        "names_producer": _site.names_producer,
                         "raw_report": _site.raw_report})
                 if not _sites:
                     # Leave the raw symptoms behind — "no native fault" with

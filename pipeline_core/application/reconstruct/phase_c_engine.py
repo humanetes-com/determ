@@ -74,6 +74,8 @@ from pipeline_core.domain.fill_class import (
 )
 from pipeline_core.domain.fill_schedule import (
     HolderAdmission,
+    HolderQueue,
+    IdleMove,
     RouteKind,
     RouteRun,
     RunClock,
@@ -738,6 +740,8 @@ class PhaseCFillEngine:
         _landed_fn: set[FnLocator] | None = None,
         write_sites: frozenset[FnSite] | None = None,
         take_holders: Callable[[], list[HolderAdmission]] | None = None,
+        holders: HolderQueue | None = None,
+        admit_measured: Callable[[], None] | None = None,
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -749,7 +753,13 @@ class PhaseCFillEngine:
         the claim gate handed this run (`RunClock.take_holders`): when a
         claim is answered "take", the worker writes those bodies first —
         judged on the tests the fill measured in them — and asks for its
-        own unit again."""
+        own unit again. `holders` is that run's queue: with it, a worker
+        whose plan queue is empty stays a claimer of the level
+        (`HolderQueue.idle_move`), asking the gate itself
+        (`admit_measured`, `RunClock.admit_measured`) and taking the front
+        body, until the front is empty and no worker is inside a claim;
+        the level then has the run's full width, since a holder admitted
+        in it is written before its join."""
         _fill_hist = FillClassHistogram()
         _last_payoff = None
         # Write sets replies named as one (`FillResult.joint_named`).
@@ -768,6 +778,9 @@ class PhaseCFillEngine:
         _splice_check_lock = self.mut.lock_for(target_src_dir)
         _counters_lock = _threading.Lock()
         errors: list[str] = []
+        # The run's holder queue keeps the pool's claimers; without a way to
+        # take a body from it, a worker returns when its plan queue is empty.
+        _claimer = holders if take_holders is not None else None
 
         failures_dir = project_dir / ".skeleton" / "_failures"
         failures_dir.mkdir(parents=True, exist_ok=True)
@@ -1225,25 +1238,58 @@ class PhaseCFillEngine:
                         _pass_ctx: PerFnPassCtx = _pass_ctx,
                         _taken: set[FnSite] = _taken,
                         _unit: Callable[[int, Stub, PerFnPassCtx], None] = _unit,
+                        _take: Callable[[HolderAdmission], None] = _take,
+                        _claimer: HolderQueue | None = _claimer,
                         pass_n: int = pass_n) -> None:
                 # B023: the per-LEVEL queue AND the per-pass ctx/number are
                 # passed explicitly — free-var reads would rely on late binding.
-                while True:
-                    # Stop pulling NEW work once another worker (or the main
-                    # thread) has seen a graceful-stop request — raises in
-                    # THIS thread immediately, same as the per-fn check inside
-                    # `fill_one.run` below; the main thread's own check (after
-                    # the join below) is what actually ends the process.
-                    self.tel.check_stop(f"per-fn pass {pass_n} worker dispatch")
-                    try:
-                        idx, rec = work_queue.get_nowait()
-                    except _queue_mod.Empty:
-                        return
-                    with _counters_lock:
-                        if _site_of(rec) in _taken:
+                try:
+                    while True:
+                        # Stop pulling NEW work once another worker (or the
+                        # main thread) has seen a graceful-stop request —
+                        # raises in THIS thread immediately, same as the
+                        # per-fn check inside `fill_one.run` below; the main
+                        # thread's own check (after the join below) is what
+                        # actually ends the process.
+                        self.tel.check_stop(
+                            f"per-fn pass {pass_n} worker dispatch")
+                        if _claimer is None:
+                            try:
+                                item: tuple[int, Stub] | None = (
+                                    work_queue.get_nowait())
+                            except _queue_mod.Empty:
+                                return
+                        else:
+                            item = _claimer.claim_plan(
+                                lambda: _pull_plan(work_queue))
+                        if item is not None:
+                            try:
+                                idx, rec = item
+                                with _counters_lock:
+                                    if _site_of(rec) in _taken:
+                                        continue
+                                    _taken.add(_site_of(rec))
+                                _unit(idx, rec, _pass_ctx)
+                            finally:
+                                if _claimer is not None:
+                                    _claimer.leave_claim()
                             continue
-                        _taken.add(_site_of(rec))
-                    _unit(idx, rec, _pass_ctx)
+                        assert _claimer is not None and take_holders is not None
+                        # The plan queue is empty: still a claimer while a
+                        # sibling is inside a claim or a body waits at the
+                        # front.
+                        move = _claimer.idle_move(admit_measured)
+                        if move is IdleMove.EXIT:
+                            return
+                        if move is IdleMove.TAKE:
+                            try:
+                                for _adm in take_holders():
+                                    _take(_adm)
+                            finally:
+                                _claimer.leave_claim()
+                finally:
+                    if _claimer is not None:
+                        _claimer.worker_ended()
 
             # Dispatch: process priority levels in order, barrier between them.
             for _level in _levels:
@@ -1251,6 +1297,12 @@ class PhaseCFillEngine:
                 for _item in _level:
                     _work_queue.put(_item)
                 _nw = min(_parallelism, len(_level))
+                if _claimer is not None:
+                    # Holders admitted in this level are written in it, side
+                    # by side: the pool is the run's width, not the plan
+                    # units', and an idle worker parks instead of leaving.
+                    _nw = max(_nw, _parallelism, 1)
+                    _claimer.arm(_nw)
                 if _nw > 1:
                     _workers = [
                         context_thread(_worker, args=(_work_queue,),
@@ -1755,6 +1807,14 @@ def _site_of(stub: Stub) -> FnSite:
     return canon_site(FnSite(stub.file, stub.fn_name, stub.container))
 
 
+def _pull_plan[T](work_queue: _queue_mod.Queue[T]) -> T | None:
+    """The next plan unit of a level, or None once the level queue is empty."""
+    try:
+        return work_queue.get_nowait()
+    except _queue_mod.Empty:
+        return None
+
+
 class _PerFnRoute:
     """The engine's own route: the per-fn passes, as ONE run of the fill
     schedule (its levels are a compile-order barrier inside the route, not
@@ -1874,7 +1934,8 @@ class _PerFnRoute:
             claim_refusal=clock.refusal, claim_release=clock.release,
             crash_sites=kw.get("crash_sites"),
             _landed_fn=kw["landed_fn"], write_sites=write_sites,
-            take_holders=clock.take_holders)
+            take_holders=clock.take_holders, holders=clock.holders,
+            admit_measured=clock.admit_measured)
         self.result = _fold_per_fn_results(self.result, res)
         disp = frozenset(kw["dispatched"]) - before_disp
         kept = frozenset(kw["landed_fn"]) - before_landed

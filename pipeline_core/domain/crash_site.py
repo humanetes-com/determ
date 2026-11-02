@@ -863,6 +863,11 @@ class PlaceholderPointerFault:
             "those alone.")
 
 
+
+#: The faults whose culprit can be a body that made bad memory or a cycle:
+#: what a settlement may act on and what a death may be placed by.
+SETTLEABLE_FAULTS = frozenset({FaultClass.INVALID_MEMORY, FaultClass.EXHAUSTION})
+
 @dataclass(frozen=True, slots=True)
 class CrashSite:
     """A localized binary crash: which test was in flight, what signal, the
@@ -1037,6 +1042,39 @@ class CrashSite:
     def culprit_locators(self) -> frozenset[FnLocator]:
         return frozenset(FnLocator(f.file_rel, f.fn_name)
                          for f in self.culprit_frames)
+
+    def producer_refusal(self) -> str | None:
+        """Why this site's culprit is not the body that made the bad memory
+        or the cycle, or None when it is (:attr:`names_producer`). A reading
+        of the site alone, so a reader that computes whether a body is
+        proven can ask it (`body_standing`); the settlement asks it first and
+        then whether the culprit is proven (`crash_settlement._unactionable`).
+
+        Three shapes name no producer: a fault that is not a memory fault or
+        a cycle (a runtime abort while unwinding is sited where it happened);
+        a site with no culprit; and a debugger trace that stopped at the
+        frame that read the bad address with no sanitizer origin, where the
+        pointer the reader loaded has a producer the trace cannot see. Run
+        `14235-bf24f931` iter 3 stubbed and refuted a correct accessor on the
+        third shape."""
+        if self.fault not in SETTLEABLE_FAULTS:
+            return f"{self.key}: {self.fault} is not settled"
+        culprits = self.culprit_frames
+        if not culprits:
+            return f"{self.key}: {self.blame_label}"
+        if (self.origin_traced and self.origin_traced_at_reader
+                and not self.origin_stack_lines):
+            return (f"{self.key}: the debugger's trace stops at the "
+                    f"frame that read the bad address ({culprits[0].fn_name}); a "
+                    "pointer it loaded from memory has a producer the trace "
+                    "cannot see")
+        return None
+
+    @property
+    def names_producer(self) -> bool:
+        """The culprit is the body that made the bad memory or the cycle
+        (:meth:`producer_refusal` is None)."""
+        return self.producer_refusal() is None
 
     @property
     def blame_label(self) -> str:

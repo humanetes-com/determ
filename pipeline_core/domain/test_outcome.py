@@ -46,6 +46,7 @@ from pipeline_core.domain.test_results import (
 
 __all__ = [
     "abort_readings",
+    "first_fail_units",
     "test_leaf",
     "RunKind",
     "SiteKind",
@@ -416,6 +417,13 @@ def _first_fail_fns(identity: tuple[str, ...]) -> frozenset[tuple[str, str]]:
         if len(parts) >= 3 and parts[0] == "fn":
             out.add((parts[1], parts[2]))
     return frozenset(out)
+
+
+def first_fail_units(entry: PremiseEntry) -> frozenset[FnLocator]:
+    """The crate functions a premise entry's first failures stop in (its
+    own, and each other binary's copy), located on the tree the premise
+    was read on. Empty when no first failure resolved to a function."""
+    return frozenset(FnLocator(f, n) for f, n in _first_fail_fns(entry[1]))
 
 
 def standing_in(

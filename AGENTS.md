@@ -79,6 +79,14 @@ Chat replies are short and plain. No markdown: no headings, lists, tables, bold,
 
 "The pipeline is slow" means it is slow to complete steps (fills landing, iterations closing, verdicts moving), not that token throughput is low.
 
+## A requested plan is a new entry in technical_debt.md — plan mode is not used
+
+When the user asks for a plan, the deliverable is a new top-level entry in `technical_debt.md`. Do not enter plan mode. Do not put the plan only in the chat, in a session plan file, or as a section of an entry that already exists.
+
+The entry number is the next integer after the highest `# N —` heading in `technical_debt.md` and `completed_tech_debt.md`. The entry names the fact, the writer, the consumers, the tests, the negative control, and the reading lever. It is for review until the user says to implement.
+
+A review of a plan that is already an entry is the other request. That one appends an addendum and leaves the plan text and the scheduled Reading unchanged. It does not open a new entry, and it does not enter plan mode either.
+
 ## Which model answers which topic — Claude only
 
 This pin applies only when the session model is Claude. The environment block names the model. Grok, and any session that is not Claude, answers every topic with no warning and no model switch.

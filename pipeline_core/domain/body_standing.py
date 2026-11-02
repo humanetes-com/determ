@@ -12,8 +12,8 @@ it.
 
 A body is PROVEN ON THE TREE when the body on the tree is the one a proven
 ledger row graded, or when, in the latest intact sweep, at least one test
-attributed to the unit passed with this body on the tree and none of them
-died. That second clause is not written back to the ledger: the schedule
+attributed to the unit passed with this body on the tree and no attributed
+test died in it or died unlocated (:func:`death_places`). That second clause is not written back to the ledger: the schedule
 reads a landing's later grade as that landing's payoff
 (`fill_schedule.unit_evidence_from`), and a test a sibling turned green is
 not what the landing bought. It is a reading of the tree, recomputed at every
@@ -26,9 +26,12 @@ reading was taken: readers then make no claim either way.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 
+from pipeline_core.domain.assertion_position import leaf
 from pipeline_core.domain.body_ledger import canon_body, strip_comments
+from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.rust_fn_headers import fn_headers, locate_all_fns
 from pipeline_core.domain.rust_scan import is_hollow_body
@@ -96,52 +99,132 @@ def mark_unverified(path: str, text: str) -> str:
     return text
 
 
+#: Where a test's own process died: the crate units the death is placed in.
+#: Empty means the death is placed nowhere (unlocated), which refutes every
+#: unit the test is attributed to.
+DeathPlace = frozenset[FnLocator]
+
+
+def death_places(
+    aborted: Iterable[str],
+    *,
+    sites: Sequence[CrashSite],
+) -> dict[str, DeathPlace]:
+    """Every dead test (bare name) and the units its death is placed in.
+
+    A death is placed by its crash sites: the culprit of a site that names
+    a producer (:meth:`CrashSite.producer_refusal`, the settlement's own
+    reading). A site that names none, or no site at all, leaves the death
+    unlocated. The debugger's reader, a runtime abort and NOBODY say
+    nothing about who made the bad memory, and one unlocated site of a
+    test unlocates the test. An abort that printed a panic is not a native
+    crash (`test_results.native_crashes`), so the localizer never sites it
+    and the death is unlocated. Run `941823-6d7acea5` (2026-11-02, iter 2)
+    placed that death at the panic's function and proved 17 units beside
+    it. Not `abort_verdict.crash_units_by_test`: that is every crate frame
+    of the stack ("this crash names a body the loop can rewrite"), and on
+    a destructor crash the stack is the test's own call chain, so it would
+    refute every attributed unit again."""
+    by_test: dict[str, list[CrashSite]] = {}
+    for site in sites:
+        if site.test_name:
+            by_test.setdefault(leaf(site.test_name), []).append(site)
+    out: dict[str, DeathPlace] = {}
+    for t in {leaf(n) for n in aborted}:
+        mine = by_test.get(t, [])
+        out[t] = (frozenset().union(*(s.culprit_locators for s in mine))
+                  if mine and all(s.names_producer for s in mine)
+                  else frozenset())
+    return out
+
+
+def _refutes(unit: FnLocator, place: DeathPlace) -> bool:
+    """A death refutes ``unit`` when it is placed nowhere, or in ``unit``. A
+    death placed in other units only says nothing about this one."""
+    return not place or unit in place
+
+
 def proven_units(
     ledger_proven: Iterable[FnLocator],
     attributed: Mapping[str, Iterable[FnLocator]],
     *,
     passed: Iterable[str],
-    died: Iterable[str],
+    deaths: Mapping[str, DeathPlace],
     intact: bool,
 ) -> frozenset[FnLocator]:
     """The units whose on-tree bodies :func:`bind` records.
     ``ledger_proven`` are the units whose on-tree body a proven ledger row
-    graded; ``attributed`` maps a test
-    (bare name) to the units it is attributed to; ``passed`` and ``died``
-    are the sweep's passing tests and the tests whose process died. A sweep
-    that could not be reconciled (``intact`` False) proves nothing new."""
+    graded; ``attributed`` maps a test (bare name) to the units it is
+    attributed to; ``passed`` are the sweep's passing tests and ``deaths``
+    every test whose own process died, with where (:func:`death_places`). A
+    unit is proven when an attributed test passed and no attributed test's
+    death refutes it (:func:`_refutes`). A sweep that could not be
+    reconciled (``intact`` False) proves nothing new.
+
+    Until 2026-11-02 any attributed death removed the unit, wherever it
+    died: the standing line read 33 of 394 with 18 more left out over one
+    aborted test (run `3178980-c42f7944`, iter 2), and 39 of 367 with 17
+    left out over two (`4112620-8a89f05c`, iter 2), where the one located
+    death was a segfault blamed on `src/error.rs::drop`. A unit left out is
+    marked unverified in every prompt's file view and may be stubbed by a
+    settlement."""
     out = set(ledger_proven)
     if not intact:
         return frozenset(out)
-    dead = frozenset(died)
-    by_unit: dict[FnLocator, set[str]] = {}
-    for test, units in attributed.items():
-        for u in units:
-            by_unit.setdefault(u, set()).add(test)
     passing = frozenset(passed)
-    for unit, tests in by_unit.items():
-        if tests & passing and not tests & dead:
+    for unit, tests in _tests_by_unit(attributed).items():
+        if tests & passing and not any(
+                _refutes(unit, deaths[t]) for t in tests if t in deaths):
             out.add(unit)
     return frozenset(out)
 
 
-def lost_to_aborts(
+def _tests_by_unit(
     attributed: Mapping[str, Iterable[FnLocator]],
-    *,
-    passed: Iterable[str],
-    died: Iterable[str],
-) -> frozenset[FnLocator]:
-    """The units a passing attributed test would prove that :func:`proven_units`
-    leaves out only because another attributed test's process died. The
-    reading entry 365.4 asks for: on run `2355041-eae39441` (2026-10-27) the
-    standing set read 48, 4, 48 proven units at iterations 3, 4, 5 with the
-    sweep reconciled every time; iteration 4 was the abort-heavy sweep. This
-    count says whether the `died` clause is what emptied it."""
-    dead = frozenset(died)
-    passing = frozenset(passed)
+) -> dict[FnLocator, set[str]]:
     by_unit: dict[FnLocator, set[str]] = {}
     for test, units in attributed.items():
         for u in units:
             by_unit.setdefault(u, set()).add(test)
-    return frozenset(u for u, tests in by_unit.items()
-                     if tests & passing and tests & dead)
+    return by_unit
+
+
+@dataclass(frozen=True, slots=True)
+class DeathVetoes:
+    """The units with a passing attributed test and an attributed death,
+    split by what the deaths decide: ``kept`` (every death placed in other
+    units) and ``refused`` (a death unlocated or placed in the unit), each
+    unit with its dead tests and their places. The standing line prints
+    both, so a reading can check every veto against its location."""
+
+    kept: Mapping[FnLocator, tuple[tuple[str, DeathPlace], ...]]
+    refused: Mapping[FnLocator, tuple[tuple[str, DeathPlace], ...]]
+
+
+def death_vetoes(
+    attributed: Mapping[str, Iterable[FnLocator]],
+    *,
+    passed: Iterable[str],
+    deaths: Mapping[str, DeathPlace],
+) -> DeathVetoes:
+    """:class:`DeathVetoes` of one sweep, by the rule :func:`proven_units`
+    applies."""
+    passing = frozenset(passed)
+    kept: dict[FnLocator, tuple[tuple[str, DeathPlace], ...]] = {}
+    refused: dict[FnLocator, tuple[tuple[str, DeathPlace], ...]] = {}
+    for unit, tests in _tests_by_unit(attributed).items():
+        dead = tuple(sorted((t, deaths[t]) for t in tests if t in deaths))
+        if not dead or not tests & passing:
+            continue
+        if any(_refutes(unit, place) for _t, place in dead):
+            refused[unit] = dead
+        else:
+            kept[unit] = dead
+    return DeathVetoes(kept=kept, refused=refused)
+
+
+def render_place(place: DeathPlace) -> str:
+    """A death's place for a log line."""
+    if not place:
+        return "unlocated"
+    return ", ".join(sorted(f"{u.file}::{u.fn_name}" for u in place))

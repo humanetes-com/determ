@@ -459,7 +459,8 @@ class TestOutcomes:
     comparable position. `aborted`: ran to its own verdict before (passed,
     or failed with its own panic, in a process that did not abort), and
     after, its own process died without printing a panic — a native fault
-    (stack exhaustion, a signal) in the code it now runs.
+    (stack exhaustion, a signal) in the code it now runs. `unmeasured`:
+    passing before, no verdict after in a binary whose section opened.
 
     :attr:`refuses` is the decided rule, and the only one: any loss refuses,
     an abort refuses by :class:`abort_verdict.AbortPartition` (a test that
@@ -493,6 +494,13 @@ class TestOutcomes:
     #: The aborted tests that were failing before and whose crash site names
     #: an authorable crate frame (`abort_verdict.located_tests`).
     aborted_located: frozenset[str] = frozenset()
+    #: Passing before, and after with no verdict in a binary whose section
+    #: OPENED (:attr:`KeyedVerdicts.opened`): the after-reading started the
+    #: test's binary and never judged the test. A binary that never started
+    #: is not in this set (absence of a section is not a reading), and
+    #: neither is a reading with no `opened` record. No keep's rule reads
+    #: it; the crash settlement does (`crash_settler._holds`).
+    unmeasured: frozenset[str] = frozenset()
 
     @property
     def abort(self) -> AbortPartition:
@@ -557,6 +565,12 @@ class KeyedVerdicts:
     aborted: frozenset[TestKey] = frozenset()
     aborted_silent: frozenset[TestKey] = frozenset()
     positions: Positions = field(default_factory=dict)
+    #: The binaries (`TestKey.binary`) whose section opened in this
+    #: reading, completed or not. Keys alone cannot tell a binary that
+    #: started and never judged a test from one that never started: both
+    #: hold no key for it. Empty means the reading did not record it
+    #: (`of_names`, an invented view), and nothing is read as unmeasured.
+    opened: frozenset[str] = frozenset()
 
     @property
     def keys(self) -> frozenset[TestKey]:
@@ -621,6 +635,12 @@ def outcomes_of(
     aborted_green = {k for k in aborted
                      if k in before.passed and k not in before.failed}
     located = located_tests(crash_sites) if crash_sites else frozenset()
+    # A baseline pass the after-reading's opened binary never judged.
+    unmeasured = {k for k in keys
+                  if k in before.passed and k not in before.failed
+                  and k.binary in after.opened
+                  and k not in after.passed and k not in after.failed
+                  and k not in after.ignored}
     return TestOutcomes(
         gained=frozenset(k.test for k in gained),
         lost=frozenset(k.test for k in lost),
@@ -629,4 +649,5 @@ def outcomes_of(
         aborted=frozenset(k.test for k in aborted),
         aborted_green=frozenset(k.test for k in aborted_green),
         aborted_located=frozenset(k.test for k in aborted - aborted_green
-                                  if k.test in located))
+                                  if k.test in located),
+        unmeasured=frozenset(k.test for k in unmeasured))

@@ -47,7 +47,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pipeline_core.domain.crash_site import CrashFrame, CrashSite, FaultClass
+from pipeline_core.domain.crash_site import SETTLEABLE_FAULTS, CrashFrame, CrashSite
 from pipeline_core.domain.models import FnLocator
 
 
@@ -69,7 +69,7 @@ class SettlementOutcome(StrEnum):
     the rest of the write is judged as written."""
 
 
-_SETTLEABLE = frozenset({FaultClass.INVALID_MEMORY, FaultClass.EXHAUSTION})
+_SETTLEABLE = SETTLEABLE_FAULTS
 
 
 def frame_locator(frame: CrashFrame) -> FnLocator:
@@ -99,29 +99,14 @@ def _unactionable(
     site: CrashSite, is_proven: Callable[[FnLocator], bool],
 ) -> tuple[str, tuple[CrashFrame, ...]] | None:
     """Why a site outside the write names no body a stub may replace, with
-    the proven culprits when that is the reason; None when it does."""
-    if site.fault not in _SETTLEABLE:
-        # A runtime abort (a panic while unwinding) is sited where it
-        # happened and is the double-panic renderer's question; only a
-        # fault whose culprit is a body that made bad memory or a cycle
-        # can be settled against that body.
-        return f"{site.key}: {site.fault} is not settled", ()
+    the proven culprits when that is the reason; None when it does. The
+    site's own half is :meth:`CrashSite.producer_refusal`, the reading
+    proven standing shares (`body_standing.proven_units`); this adds only
+    the proven check, which standing cannot read because it computes it."""
+    refusal = site.producer_refusal()
+    if refusal is not None:
+        return refusal, ()
     culprits = site.culprit_frames
-    if not culprits:
-        return f"{site.key}: {site.blame_label}", ()
-    if (site.origin_traced and site.origin_traced_at_reader
-            and not site.origin_stack_lines):
-        # Outside the write only: a written reader is judged as written, as
-        # an untraced fault is. Run `14235-bf24f931` iter 3: the trace named
-        # the accessor that dereferenced a stale pointer it had loaded from a
-        # freed object (`src/error.rs::error`, line 818), and the settlement
-        # stubbed and refuted a correct body. Only an origin the sanitizer
-        # printed, or a trace that runs past a crate frame handed the
-        # address, names a producer.
-        return (f"{site.key}: the debugger's trace stops at the "
-                f"frame that read the bad address ({culprits[0].fn_name}); a "
-                "pointer it loaded from memory has a producer the trace "
-                "cannot see"), ()
     proven = tuple(f for f in culprits if is_proven(frame_locator(f)))
     if proven:
         return (f"{site.key}: the culprit {proven[0].file_rel}::"
