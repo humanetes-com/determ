@@ -124,7 +124,7 @@ def main() -> None:
         run_id, it = key
         stage = _stage(ratio.get((run_id, it)))
         fill = fills[key]
-        opened = [r for r in fill if r.get("outcome") not in ("deferred", "empty")]
+        opened = [r for r in fill if r.get("outcome") not in ("deferred", "empty", "unopenable")]
         deferred = [r for r in fill if r.get("outcome") == "deferred"]
         floor = min((yield_of(str(r["kind"]), stage) for r in opened), default=float("inf"))
         later = [r for k2, rs in fills.items() if k2[0] == run_id and k2[1] > it for r in rs

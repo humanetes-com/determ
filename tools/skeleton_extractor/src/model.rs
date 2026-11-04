@@ -248,6 +248,10 @@ pub struct DocItemRecord {
     pub cfg_predicates: Vec<String>,
     /// The doc fragments joined by newlines, as rustdoc joins them.
     pub doc: String,
+    /// The doc was written inside a macro's token stream. rustdoc numbers
+    /// its examples from the item the expansion produces, whose line no
+    /// syntactic walk knows, so `line` is not rustdoc's base for this record.
+    pub in_macro_body: bool,
 }
 
 /// A `const` or `static` item (public-API surface), enumerated by `--enumerate-consts`.

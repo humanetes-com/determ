@@ -26,7 +26,7 @@ from pipeline_core.domain.last_error import (
     instruction_for,
 )
 from pipeline_core.domain.oracle_ledger import bare_test_name
-from pipeline_core.domain.reference_floor import doc_test_line
+from pipeline_core.domain.reference_floor import doc_test_keys
 
 if TYPE_CHECKING:
     from pipeline_core.domain.assertion_position import KeyedVerdicts, TestKey
@@ -2386,17 +2386,9 @@ def stable_test_keys(b: BinaryResult) -> dict[str, str]:
 def stable_name_keys(names: Iterable[str]) -> dict[str, str]:
     """:func:`stable_test_keys` over any set of names of ONE binary (or of
     a capture whose doc tests all come from one doc-test target)."""
-    out: dict[str, str] = {}
-    ordinal: dict[str, int] = {}
-    for n in sorted(names, key=lambda x: (doc_test_line(x) or 0, x)):
-        if doc_test_line(n) is None:
-            out[n] = n
-            continue
-        head = n.strip().rpartition(" (line ")[0].rstrip()
-        k = ordinal.get(head, 0)
-        ordinal[head] = k + 1
-        out[n] = f"{head}#{k}"
-    return out
+    names = list(names)
+    doc = doc_test_keys(names)
+    return {n: doc.get(n, n) for n in names}
 
 
 def compare_readings(base: TestStateReading,

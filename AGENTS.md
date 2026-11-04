@@ -1186,6 +1186,67 @@ them, stop and run the census. A new pathology no census detector catches is
 real work twice over: fix it AND extend `pattern_census.py` so its next
 instance is a lookup, not an investigation.
 
+## A supervisor restart of the loop is already the ask ledger — do not design another
+
+Reviewed 2026-11-03, from the question of taking the self-healing restart of
+an actor supervisor and applying it to the TDD loop, including a
+retrospective phase on each restart. The review is the addendum of that date
+in `technical_debt.md`. Do not re-open it as a new mechanism.
+
+An Erlang-style supervisor restarts a child by calling the same start
+function with the same arguments. That helps when the process crashed and
+the fault was transient. A deviation here is a kept body, a test that cannot
+run, or an aim that missed. The process is still up and the tree is the
+state, so restarting the loop on that tree, that oracle and those stores
+replays the iteration. A restart that also reverts bodies is the lock
+`domain/destruction_epoch.py` exists for. `lib/record_death.sh` is already
+the process parent and relaunches nothing.
+
+What does transfer is already one writer each:
+
+- One red test is the scope. `due_reading` owes its unspent tier, or the
+  stub it dies in. `scope_to_crash_culprits` drops every other owner while a
+  native crash has a named culprit. `dispatch_rank` puts held stubs and
+  fault sites first.
+- A retry is admitted only when the inputs moved. `ask_fingerprint` is what
+  the test says about itself. `AskLedger.spent`, read by `due_reading`,
+  stops offering a unit for that test once a body has landed under that
+  fingerprint, or enough offers landed nothing. `drop_standing_flat` removes
+  a unit whose file, retrospective prompt fields and crash excerpt are
+  unchanged (`evidence_fingerprints`). `asked_unchanged` removes a served
+  unit nothing owes that was already opened under its own body plus its red
+  tests' words.
+- The loop already stops when nothing new can be asked. The `cluster_failed`
+  break in `run_phase_c_tdd` writes the red ledger and returns exhausted.
+  The phase after that is publish and task 3 on the same tree. There is no
+  next cluster: `one_tree_cluster` runs one loop, and every world is summed
+  into the same sweep's oracle. Closing early so "the next cluster gets
+  scored" aims at a parent this loop does not have.
+
+A retrospective on the restart does not supply the missing fact. The
+diagnosis is `diagnose_phase_c`, a model call. About fifty of those outcomes
+bought about six honoured guidances on run `58819-ee78a1d1`. The session
+builder, which the schedule opens first, has no retrospective-guidance
+parameter. It already carries the panic, the observed value, whether the
+failing tests enter each editable unit, the crash, and the compiler note.
+The file, per-fn and per-impl builders already have a guidance slot, and
+`screen_guidance` exists because that prose prescribes bodies. Keying a
+restart on a reworded lesson moves the flat exclusion and does not move the
+ask fingerprint.
+
+The one decision that is not already taken is a cap that withdraws a test
+after a fixed number of changed fingerprints while the ask ledger would
+still offer the next one. It writes no body. On run `1680589-7a6824f8`
+stable sat at 158 for four sweeps and then went green. A cluster-level cap
+of three would have closed it red. Do not ship that cap unless a census
+shows a measured fact the builders above do not already render, which a
+later attempt carrying it moved. A dropped reply is the route that lost it,
+not a child to withdraw.
+
+The tell is a proposal whose first move is "restart the loop", "supervise
+the sweep", or "add a retrospective phase when a restart fires". On that
+sentence, name `due_reading` and `drop_standing_flat` and stop.
+
 ## An integration test is written only when the defect lives in how the pipeline reads an external tool
 
 `tests/integration/` is for one question: does the pipeline still read the

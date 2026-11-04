@@ -3645,6 +3645,15 @@ def run_phase_c_tdd(
                     "cluster": cluster.name, "iter": iter_n,
                     "reason": _floor_why,
                     "fail_count": fail_count,
+                    # Same fields as task 3's floor_met: the doc tests met
+                    # through a re-hosted example, and each one that is not
+                    # with its reason (the floor met, so `_floor_verdict` is
+                    # the verdict `_floor_why` was read from).
+                    "doc_stand_ins": (len(_floor_verdict.doc_stand_ins)
+                                      if _floor_verdict is not None else 0),
+                    "advisory_gaps": ({f"{a}::{b}": g for (a, b), g in sorted(
+                        _floor_verdict.advisory_gaps.items())}
+                        if _floor_verdict is not None else {}),
                 })
                 _cluster_done = True
                 _close_kind = "reference floor"

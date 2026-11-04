@@ -157,6 +157,13 @@ class RunOutcome(StrEnum):
     DEFERRED = "deferred"    # the schedule did not open it this fill
     STOPPED = "stopped"      # a graceful stop ended it mid-way
     EMPTY = "empty"          # nothing to do when it opened
+    #: Opened nothing because its prompt cannot be sent: a session whose
+    #: turn 0, built when it opened, was over capacity at the narrowest
+    #: rendering. Run `3203804-8c6a0066` (2026-11-03) had 13 such sessions
+    #: graded EMPTY, indistinguishable from a stale plan, while each held a
+    #: per-fill session slot. Like EMPTY it consumed nothing and is no
+    #: evidence about a body (:attr:`opened_nothing`).
+    UNOPENABLE = "unopenable"
     #: The run's only landings (if any) came from reasoning-capped replies:
     #: a truncated call is not a measured refusal (the batch routes' rule
     #: for an escalated rewrite), so the row is not a re-buy verdict and
@@ -164,6 +171,14 @@ class RunOutcome(StrEnum):
     #: `3014175-d98ed09e` (2026-09-08) session #3: turn 0 cut at the cap,
     #: an empty follow-up, `FLAT after 14.3 min (1 call(s))`.
     UNMEASURED = "unmeasured"
+
+    @property
+    def opened_nothing(self) -> bool:
+        """The run returned before its first dispatch: EMPTY (nothing to do)
+        or UNOPENABLE (no prompt could be sent). Neither row consumed a
+        model call or says anything about a body; every reader that skips
+        such rows reads this, so a new no-dispatch outcome is one edit."""
+        return self in (RunOutcome.EMPTY, RunOutcome.UNOPENABLE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -868,8 +883,8 @@ def _unpaid_streak(rows: Iterable[RouteLedgerRow],
     for r in reversed(list(rows)):
         if r.oracle_fp != oracle_fp or not match(r):
             continue
-        if r.outcome in (RunOutcome.DEFERRED, RunOutcome.EMPTY,
-                         RunOutcome.STOPPED):
+        if (r.outcome in (RunOutcome.DEFERRED, RunOutcome.STOPPED)
+                or r.outcome.opened_nothing):
             continue
         if paid(r):
             break
@@ -1014,7 +1029,8 @@ def unpaid_pair_fills(rows: Iterable[RouteLedgerRow], test: str,
                 or r.outcome is RunOutcome.STOPPED):
             continue
         key = (r.run_id, r.iteration)
-        paid = (r.outcome not in (RunOutcome.DEFERRED, RunOutcome.EMPTY)
+        paid = (r.outcome is not RunOutcome.DEFERRED
+                and not r.outcome.opened_nothing
                 and row_paid_test(
                     r, test, aimed_later=bool(r.run_id)
                     and aimed.get(r.run_id, r.iteration) > r.iteration))
@@ -1246,9 +1262,9 @@ class UnitService:
             if r.oracle_fp != oracle_fp:
                 continue
             bucket = (self._deferred if r.outcome is RunOutcome.DEFERRED
-                      else self._opened if r.outcome not in (
-                          RunOutcome.EMPTY, RunOutcome.STOPPED,
-                          RunOutcome.UNMEASURED)
+                      else self._opened if not r.outcome.opened_nothing
+                      and r.outcome not in (
+                          RunOutcome.STOPPED, RunOutcome.UNMEASURED)
                       else None)
             if r.kind is RouteKind.SESSION and (
                     bucket is self._opened
@@ -1822,6 +1838,32 @@ def release_held(held: Sequence[ScheduledRun],
         if h.held_by and gone.issuperset(h.held_by))
 
 
+def release_capped(deferred: Sequence[ScheduledRun], kind: RouteKind,
+                   released: Collection[str]) -> ScheduledRun | None:
+    """The next run the kind cap deferred for ``kind``, in schedule order,
+    released: no longer deferred, ranked again with the reason it had
+    before the cap; None when there is none left (``released`` holds the
+    keys already given back).
+
+    A run of ``kind`` that could not open its prompt (`RunOutcome.
+    UNOPENABLE`) spent none of what the cap bounds: no model call, no
+    minute, no session. Its slot is the next one's. Run `3203804-8c6a0066`
+    (2026-11-03), fill 5: `SLICE_SESSION_MAX_PER_FILL=4` opened four
+    sessions, three returned with no turn 0 in 0.03 min, and three sessions
+    of 4, 3 and 2 units were deferred `kind_cap`; a 2-unit session had sent
+    a turn 0 of 118,571 in fill 4. The cap is read once per fill at plan
+    time (stage 2 of :func:`schedule`), so the give-back is the executor's,
+    at the wave that measured it."""
+    gone = frozenset(released)
+    for s in deferred:
+        if (s.reason == "kind_cap" and s.run.kind is kind
+                and s.run.key not in gone):
+            return replace(s, deferred=False,
+                           reason=s.prior_reason or s.reason,
+                           share_minutes=None)
+    return None
+
+
 def withhold_landed(run: RouteRun, landed: Collection[FnLocator],
                     ) -> tuple[RouteRun | None, frozenset[FnLocator]]:
     """`run` without the targets an earlier run of THIS fill kept a body
@@ -1907,7 +1949,7 @@ def _rank_of(run: RouteRun, oracle_fp: str,
         if r.outcome is RunOutcome.DEFERRED:
             deferrals += 1
             continue
-        if r.outcome is RunOutcome.EMPTY:
+        if r.outcome.opened_nothing:
             continue
         last = r
         break

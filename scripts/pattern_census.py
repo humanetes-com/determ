@@ -411,6 +411,22 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      `attribution.frontier_for_run`, so a post-fix hit is a writer that was
      bypassed.
 
+  P54 unopenable session — a planned session whose turn 0, built when it
+     opened, was over the turn-0 capacity at the narrowest rendering, so it
+     sent nothing (`the session is not opened`). Run `3203804-8c6a0066`
+     (2026-11-03): 13 of 19 turn 0 builds in fills 3-5, each admitted by a
+     packer that charged an estimate of the planned units, each holding a
+     per-fill session slot. Reaction keys: the packer reporting a test no
+     rendering step opens (`no session — turn 0 is`) and the fill giving an
+     unopenable session's slot to the next (`could not open its prompt`).
+     Post-fix the packer builds the same turn 0, so a hit is a tree that
+     changed between plan and open. The narrowest step has already dropped
+     every optional section and the probe's observed lines. The `largest
+     sections:` clause names the tagged sections of what remains: the
+     editable files, the target tests, the types section, and the failing
+     tests' panic quotes. The instruction preamble and the session protocol
+     are outside tags and are not a step.
+
   P51 unjudged write — a fill's gates judged from a tree no verdict left.
      Two readings. After the fill ground shipped (2026-10-22): any
      `phase_c.fill.unjudged_write` event (the lock restored bytes written
@@ -779,6 +795,13 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P39": [],
     "P51": [],
     "P53": [],
+    "P54": [
+        # The packer built the turn 0 and reported the test instead of
+        # planning a session that cannot send it.
+        ("no session — turn 0 is", "packer-reported"),
+        # An unopenable session gave its kind-cap slot to the next.
+        ("could not open its prompt", "slot-released"),
+    ],
     "P52": [
         # The unseen tests were named and no guess was dispatched at them.
         ("HEALTH ‼ UNSEEN iter", "unseen-named"),
@@ -3685,6 +3708,29 @@ def detect_p50(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [r for r, _ in hits[:4]]}]
 
 
+RE_P54_UNOPENED = re.compile(
+    r"\[phase-c/session\] (session\[[^\]]*\])[^:]*: turn 0 at the narrowest "
+    r"rendering is .*the session is not opened")
+
+
+def detect_p54(run: Run, iters: list[dict]) -> list[dict]:
+    """Planned sessions that sent no turn 0: the turn 0 built when the
+    session opened was over capacity at the narrowest rendering. One hit
+    per run, keyed by the slice labels seen most."""
+    seen: dict[str, int] = {}
+    refs: list[str] = []
+    for ref, text in run.lines:
+        if (m := RE_P54_UNOPENED.search(text)):
+            seen[m.group(1)] = seen.get(m.group(1), 0) + 1
+            refs.append(ref)
+    if not seen:
+        return []
+    top = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"evidence": f"{sum(seen.values())} planned session(s) sent no "
+                         "turn 0: " + ", ".join(f"{a} x{n}" for a, n in top[:4]),
+             "key": [a for a, _ in top[:3]], "refs": refs[:4]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3707,7 +3753,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
              "P49": detect_p49, "P50": detect_p50, "P51": detect_p51,
-             "P52": detect_p52, "P53": detect_p53}
+             "P52": detect_p52, "P53": detect_p53, "P54": detect_p54}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3754,6 +3800,7 @@ CLASS_NAMES = {
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
     "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
     "P52": "unseen red test (an owed red test with no observation of it executing on the tree: no measured owner set, no recorded set of a run that started, no crate frame on any crash site, no first failure inside a crate body; pre-fix the loop guessed from the recently-filled ring, run 1947461-b4eb65c3 iters 13-14)",
+    "P54": "unopenable session (a planned session whose turn 0, built when it opened, was over capacity at the narrowest rendering and sent nothing, holding a session slot; pre-fix the packer charged an estimate of the planned units, run 3203804-8c6a0066 fills 3-5: 13 of 19)",
     "P53": "opened run kept untested (a body a run opened on a measured blocker wrote was kept with no scoped test: the gate was handed none of the tests the run carried; pre-fix the run was judged on the sweep's owner sets, run 2129106-ead996ab fill 1: 28 of 28)",
     "P51": "unjudged write (a fill's gates judged from a tree no verdict left: its first baseline was not the sweep's reading with no keep before it, or the fill ground restored bytes written outside every hold; pre-fix the joint ask spliced its candidate before the fill, run 4012759-5c5177c6 fill 9)",
     "P43": "stack overflow blamed nobody (the sanitizer's stack-overflow report was read as invalid memory with an unattributed origin; its repeating in-crate frames are the culprits, jointly; pre-fix the cycle's units were refill targets of no route)"}

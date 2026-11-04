@@ -1315,6 +1315,7 @@ impl DocCollector {
                 line,
                 cfg_predicates: self.cfg_stack.clone(),
                 doc,
+                in_macro_body: false,
             });
         }
         inner(self);
@@ -1378,6 +1379,7 @@ impl DocCollector {
             line,
             cfg_predicates: self.cfg_stack.clone(),
             doc: run.join("\n"),
+            in_macro_body: true,
         });
         run.clear();
     }

@@ -1383,6 +1383,9 @@ def build_app(
     def types_section_for_fix(*a: Any, **k: Any) -> Any:
         return _live().fix_context.types_section_for_fix(*a, **k)
 
+    def types_section_for_files(*a: Any, **k: Any) -> Any:
+        return _live().fix_context.types_section_for_files(*a, **k)
+
     def task3_via_app(*a: Any, **k: Any) -> Any:
         return _live().task3(*a, **k)
 
@@ -3250,6 +3253,7 @@ def build_app(
             splice_lock_for=_splice_mod.splice_lock_for,
             parse_ok=_validate_parse,
             types_section_for_fix=types_section_for_fix,
+            types_section_for_files=types_section_for_files,
             bound_methods_section_for=bound_methods_section_for,
             u2_test_gate=_via("u2_test_gate"),
             test_regression_baseline=helpers.test_regression_baseline,

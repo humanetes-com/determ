@@ -9,7 +9,7 @@ model-notes store (I/O) and the truncation guard (telemetry).
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,7 +30,22 @@ from pipeline_core.domain.type_refs import (
     hidden_symbols_from_types,
     types_referenced_in_text,
 )
-from pipeline_core.prompts.sections import render_types_section
+from pipeline_core.prompts.sections import (
+    render_types_section,
+    render_types_section_for_viewers,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TypesPart:
+    """One file's share of a multi-file TYPES_IN_SCOPE: the text that names
+    its types (the editable units' signatures, their containers, and the
+    file's text the session shows) and the file it is rendered for."""
+
+    file_rel: str
+    sig_text: str
+    body_text: str
+    container: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +116,59 @@ class FixContextAssembler:
         `MessageError`, `BoxedError` and `DisplayError` from `src/error.rs`
         units, whose file names them only as `crate::wrapper::…` inside
         sibling bodies. Last means the section's char cap cuts them first."""
+        recs = self._ranked_types(sig_text, body_text, error_excerpt,
+                                  container, impl_where, type_records,
+                                  file_rel=file_rel, file_text=file_text)
+        # The blanket list is printed once, ahead of the records. A record
+        # that does not fit is cut before a list that says it is complete:
+        # slicing after that header would make the sentence a lie.
+        full = render_types_section(
+            recs, observables, viewer_file=file_rel)
+        if len(full) > self.budgets.types_section:  # surface starvation
+            self.guard("phase-c/types_truncated",
+                       f"{(container or sig_text)[:50]}: type context {len(full):,} > "
+                       f"cap {self.budgets.types_section:,} ({len(recs)} types)")
+        return render_types_section(
+            recs, observables, viewer_file=file_rel,
+            cap=self.budgets.types_section)
+
+    def types_section_for_files(
+        self,
+        parts: Sequence[TypesPart],
+        type_records: list[TypeRecord],
+        observables: frozenset[str] = frozenset(),
+        cap: int = 0,
+    ) -> str:
+        """One TYPES_IN_SCOPE over several files' units (a session's slice):
+        each part selected and ranked exactly as `types_section_for_fix`
+        selects for that file, then merged by rank — every part's first
+        type before any part's second — and rendered once, each record for
+        the file that selected it, a repeated block printed once.
+
+        ``cap`` 0 is the section's own budget (`budgets.types_section`); a
+        positive cap below it is a rendering-ladder step
+        (`domain.slice_session.Rendering.types_cap`), and it cuts the merged
+        ranking from the end, so what a narrower cap drops first is what
+        every part ranked last."""
+        ranked = [self._ranked_types(p.sig_text, p.body_text, "", p.container,
+                                     "", type_records, file_rel=p.file_rel)
+                  for p in parts]
+        entries: list[tuple[TypeRecord, str]] = []
+        for rank in range(max((len(r) for r in ranked), default=0)):
+            for part, recs in zip(parts, ranked, strict=True):
+                if rank < len(recs):
+                    entries.append((recs[rank], part.file_rel))
+        limit = self.budgets.types_section
+        return render_types_section_for_viewers(
+            entries, observables,
+            cap=min(cap, limit) if cap > 0 else limit)
+
+    def _ranked_types(
+        self, sig_text: str, body_text: str, error_excerpt: str,
+        container: str, impl_where: str, type_records: list[TypeRecord],
+        *, file_rel: str = "", file_text: str = "",
+    ) -> list[TypeRecord]:
+        """The records `types_section_for_fix` renders, in rank order."""
         search = "\n".join([
             sig_text or "", container or "", impl_where or "",
             body_text or "", error_excerpt or "",
@@ -148,19 +216,7 @@ class FixContextAssembler:
                 file_text, type_records, visible_from=file_rel)
             if r.name not in named and not getattr(r, "external_path", "")
             and r.file and r.file != file_rel] if file_text else []
-        recs = (head + rest + declared_elsewhere)[:self.budgets.types_count]
-        # The blanket list is printed once, ahead of the records. A record
-        # that does not fit is cut before a list that says it is complete:
-        # slicing after that header would make the sentence a lie.
-        full = render_types_section(
-            recs, observables, viewer_file=file_rel)
-        if len(full) > self.budgets.types_section:  # surface starvation
-            self.guard("phase-c/types_truncated",
-                       f"{(container or sig_text)[:50]}: type context {len(full):,} > "
-                       f"cap {self.budgets.types_section:,} ({len(recs)} types)")
-        return render_types_section(
-            recs, observables, viewer_file=file_rel,
-            cap=self.budgets.types_section)
+        return (head + rest + declared_elsewhere)[:self.budgets.types_count]
 
     def bound_methods_section_for(
         self, impl_where: str, type_records: list[TypeRecord],

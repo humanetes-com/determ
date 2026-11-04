@@ -280,3 +280,155 @@ def test_negative_control_without_the_cfg_at_rustdoc_the_example_is_a_shell(
     verdict, out = _floor(tmp_path, _reported_rustflags_only)
     assert verdict.met is True, out[-2000:]
     assert not verdict.unexcused_failures and not verdict.unmet
+
+
+# --- the line rustdoc names a doc test by, which the doc stand-in join reads ---
+#
+# The reference floor matches each of the original's doc tests to the
+# re-hosted example that stands for it in the oracle (`domain.doc_stand_in`)
+# by the line rustdoc names the doc test with. The join assumes rustdoc's rule:
+# the item's first doc line plus the opening fence's line in the joined doc
+# text, and, for a doc written inside a `macro_rules!` body, the expansion's
+# line plus that offset. Measured 2026-11-02 on the pristine anyhow tree: 24
+# of 26 doc tests at record line plus offset, the two in the `__ensure` macro
+# body at its call site plus offset. If rustdoc changes the rule, the premise
+# below fails before the floor reports a covered doc test absent, or a wrong
+# one covered.
+
+_LINES_LIB = """//! Crate doc.
+//!
+//! ```
+//! assert_eq!(gadgets::one(), 1);
+//! ```
+
+/// Plain.
+///
+/// ```
+/// assert_eq!(gadgets::one(), 1);
+/// ```
+pub fn one() -> u8 {
+    1
+}
+
+/// Split by an attribute.
+#[inline]
+///
+/// ```
+/// assert_eq!(gadgets::two(), 2);
+/// ```
+pub fn two() -> u8 {
+    2
+}
+
+macro_rules! documented {
+    ($item:item) => {
+        /// Made by a macro.
+        ///
+        /// ```
+        /// assert_eq!(gadgets::three(), 3);
+        /// ```
+        ///
+        /// ```ignore
+        /// not compiled
+        /// ```
+        ///
+        /// ```no_run
+        /// let _ = gadgets::three();
+        /// ```
+        $item
+    };
+}
+
+documented! {
+    pub fn three() -> u8 {
+        3
+    }
+}
+"""
+
+
+def _lines_crate(tmp_path: Path) -> Path:
+    root = tmp_path / "gadgets"
+    (root / "src").mkdir(parents=True)
+    (root / "Cargo.toml").write_text(_CARGO_TOML)
+    (root / "src" / "lib.rs").write_text(_LINES_LIB)
+    return root
+
+
+def _rustdoc_lines(root: Path) -> dict[tuple[str, str], tuple[str, int]]:
+    """The reference's own reading: `cargo test --doc` through the real
+    runner and parser, normalized pairs to (file, line)."""
+    from pipeline_core.application.reference_run import _doc_lines
+    env = dict(os.environ)
+    env.pop("RUSTFLAGS", None)
+    env.pop("RUSTDOCFLAGS", None)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "doc-lines")
+    _rc, out = run_cargo(CargoCli(), "cargo test --offline --doc", root, env, timeout=600)
+    return _doc_lines(parse_binary_results(out))
+
+
+def _origins(root: Path, *, macro_flag: bool) -> list[Any]:
+    from pipeline_core.domain.doc_example_test import doc_fences
+    from pipeline_core.domain.doc_stand_in import DocOrigin
+    records = _deps(doc_records=True).enumerate_doc_items(root) or []
+    out = []
+    for rec in records:
+        for i, f in enumerate(doc_fences(rec.doc)):
+            out.append(DocOrigin(rec.file, rec.line, i, f.offset,
+                                 rec.in_macro_body and macro_flag,
+                                 kept_as=f"doc_lib_gen_{rec.line}_{i}.rs", test_fn="t"))
+    return out
+
+
+def _first_doc_line(marker: str) -> int:
+    return _LINES_LIB.splitlines().index(marker) + 1
+
+
+#: Each rustdoc doc test of the crate, by normalized name, and the record it
+#: must join: (the record's first doc line, the fence's index in that doc).
+_EXPECTED = {
+    "src/lib.rs -#0": ("//! Crate doc.", 0),
+    "src/lib.rs - one#0": ("/// Plain.", 0),
+    "src/lib.rs - two#0": ("/// Split by an attribute.", 0),
+    "src/lib.rs - three#0": ("        /// Made by a macro.", 0),
+    "src/lib.rs - three#1": ("        /// Made by a macro.", 1),
+    "src/lib.rs - three#2": ("        /// Made by a macro.", 2),
+}
+
+
+def test_premise_rustdoc_numbers_a_doc_test_from_its_first_doc_line_plus_offset(
+        tmp_path: Path) -> None:
+    """The crate doc, a plain doc and a doc split by `#[inline]` are named at
+    the record line plus the fence offset in the joined text. A doc in a
+    `macro_rules!` body is named from the `documented!` call site plus the
+    same offset, `ignore` and `no_run` fences included: rustdoc numbers both
+    (`ignored`, `compile`), and libtest's ignored names reach the reading."""
+    root = _lines_crate(tmp_path)
+    lines = _rustdoc_lines(root)
+    assert sorted(b for _a, b in lines) == sorted(_EXPECTED), lines
+    call_site = _first_doc_line("documented! {")
+    for o in _origins(root, macro_flag=True):
+        want = [b for b, (marker, index) in _EXPECTED.items()
+                if _first_doc_line(marker) == o.item_line and index == o.index]
+        assert len(want) == 1, o
+        (_file, line), = [v for (_a, b), v in lines.items() if b == want[0]]
+        base = call_site if o.in_macro_body else o.item_line
+        assert line == base + o.offset, (o, line)
+
+
+def test_every_doc_test_joins_its_own_example_and_the_macro_rule_is_load_bearing(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.doc_stand_in import join_origins
+    root = _lines_crate(tmp_path)
+    lines = _rustdoc_lines(root)
+    joined = join_origins(lines, _origins(root, macro_flag=True))
+    assert len(joined) == len(_EXPECTED)
+    for (_a, name), o in joined.items():
+        marker, index = _EXPECTED[name]
+        assert (o.item_line, o.index) == (_first_doc_line(marker), index), (name, o)
+    # NEGATIVE CONTROL: a record that does not say its doc is in a macro body
+    # is joined at its own line, which rustdoc does not use, so none of the
+    # macro's three fences join.
+    unflagged = join_origins(lines, _origins(root, macro_flag=False))
+    assert sorted(b for _a, b in unflagged) == [
+        "src/lib.rs - one#0", "src/lib.rs - two#0", "src/lib.rs -#0"]

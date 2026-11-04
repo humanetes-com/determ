@@ -30,15 +30,27 @@ import subprocess
 import time
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from ..domain.cluster_env import overlay_cluster_env, world_env_extra
+from ..domain.doc_example_test import rendered_sha
+from ..domain.doc_stand_in import (
+    ORIGINS_STORE,
+    DocCover,
+    DocOrigin,
+    doc_covers,
+    doc_test_file,
+    origins_from_json,
+)
 from ..domain.measurement import combine_source_hashes
 from ..domain.reference_floor import (
     ClusterReference,
     ReferenceMeasurement,
+    binary_pairs,
+    doc_test_line,
+    is_doc_pair,
     pairs_of,
 )
 from ..domain.same_failure import FailureSignature, ReferenceFailure
@@ -53,7 +65,10 @@ from .failure_reading import read_one
 # 3 (2026-10-22): a failed test is excused only by the same failure, so the
 # store carries how each failed (`failures`); a schema-2 file has none and
 # would excuse every failure by name.
-_SCHEMA = 3
+# 4 (2026-11-02): each doc test's place as rustdoc named it (`doc_lines`) and
+# what stands for it in the oracle (`doc_covers`); a schema-3 file has
+# neither and would report every re-hosted doc test absent.
+_SCHEMA = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +144,25 @@ def _tests_fingerprint(tree: Path) -> str:
     return combine_source_hashes(entries)
 
 
+def doc_origins_fingerprint(project_dir: Path) -> str:
+    """Content hash of what the doc covers are built from on the workspace
+    side: the emitter's origins store and the rendered part of every
+    re-hosted example file. A re-emission changes it and re-measures."""
+    entries: list[tuple[str, bytes]] = []
+    store = project_dir / ORIGINS_STORE
+    if store.is_file():
+        with suppress(OSError):
+            entries.append((ORIGINS_STORE, store.read_bytes()))
+    for name, sha in sorted(_present_doc_files(project_dir).items()):
+        entries.append((name, sha.encode()))
+    return combine_source_hashes(entries)
+
+
 def reference_key(clusters: Sequence[Any], source_ref: str,
-                  tests_fingerprint: str) -> str:
+                  tests_fingerprint: str, doc_origins: str = "") -> str:
     """The identity of a reference measurement. Any change re-measures."""
     h = hashlib.sha256()
-    h.update(f"v{_SCHEMA}\0{source_ref}\0{tests_fingerprint}\0".encode())
+    h.update(f"v{_SCHEMA}\0{source_ref}\0{tests_fingerprint}\0{doc_origins}\0".encode())
     for c in sorted(clusters, key=lambda x: str(x.name)):
         h.update(str(c.name).encode())
         h.update(b"\0")
@@ -228,7 +257,9 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
         log(f"  [reference/{cluster.name}] did not run: {exc}")
         return ClusterReference(cluster=str(cluster.name), rc=-1)
     gap = find_unreported_tests(output)
-    passed, failed, ignored, incomplete = pairs_of(parse_binary_results(output))
+    binaries = parse_binary_results(output)
+    passed, failed, ignored, incomplete = pairs_of(binaries)
+    doc_lines = _doc_lines(binaries)
     failures = _read_failures(tree, output, env, deps.test_timeout,
                               str(cluster.name))
     # Every failed test gets an entry: one the alone read did not reach is
@@ -239,10 +270,48 @@ def _measure_cluster(tree: Path, cluster: Any, deps: ReferenceDeps) -> ClusterRe
     ref = ClusterReference(
         cluster=str(cluster.name), passed=passed, ignored=ignored,
         incomplete=incomplete, announced=gap.announced, reported=gap.reported, rc=rc,
-        failures=failures)
+        failures=failures, doc_lines=doc_lines)
     log(f"  [reference/{cluster.name}] {len(passed)} passing, {len(failed)} failing, "
         f"{len(ignored)} ignored (rc={rc}, {time.monotonic() - t0:.1f}s)")
     return ref
+
+
+def _doc_lines(binaries: Sequence[Any]) -> dict[tuple[str, str], tuple[str, int]]:
+    """Each doc test's normalized pair → `(file, line)` from the name rustdoc
+    gave it, before normalization drops the line."""
+    out: dict[tuple[str, str], tuple[str, int]] = {}
+    for b in binaries:
+        for _verdict, raw, pair in binary_pairs(b):
+            line = doc_test_line(raw)
+            if is_doc_pair(pair) and line is not None:
+                out[pair] = (doc_test_file(raw), line)
+    return out
+
+
+def _present_doc_files(project_dir: Path) -> dict[str, str]:
+    """The oracle's re-hosted example files now: name → rendered-part hash."""
+    out: dict[str, str] = {}
+    tests = project_dir / "tests"
+    if tests.is_dir():
+        for p in sorted(tests.glob("doc_*_gen_*.rs")):
+            with suppress(OSError):
+                out[p.name] = rendered_sha(p.read_text(encoding="utf-8"))
+    return out
+
+
+def _load_origins(project_dir: Path) -> tuple[DocOrigin, ...]:
+    store = project_dir / ORIGINS_STORE
+    if not store.is_file():
+        return ()
+    try:
+        return origins_from_json(json.loads(store.read_text(encoding="utf-8"))) or ()
+    except (OSError, ValueError, TypeError):
+        return ()
+
+
+def _with_doc_covers(c: ClusterReference, origins: Sequence[DocOrigin],
+                     present: dict[str, str]) -> ClusterReference:
+    return replace(c, doc_covers=doc_covers(c.doc_lines, origins, present))
 
 
 def _read_failures(tree: Path, output: str, env: dict[str, str], timeout: int,
@@ -296,6 +365,11 @@ def _to_json(m: ReferenceMeasurement) -> dict[str, Any]:
                 "ignored": sorted([a, b] for a, b in c.ignored),
                 "incomplete": sorted(c.incomplete),
                 "announced": c.announced, "reported": c.reported, "rc": c.rc,
+                "doc_lines": sorted([a, b, f, ln] for (a, b), (f, ln)
+                                    in c.doc_lines.items()),
+                "doc_covers": sorted(
+                    [a, b, list(v.stand_in) if v.stand_in else None, v.gap]
+                    for (a, b), v in c.doc_covers.items()),
                 "failures": [
                     [a, b,
                      f.first.text if f.first is not None else None,
@@ -324,7 +398,12 @@ def _from_json(raw: dict[str, Any]) -> ReferenceMeasurement | None:
             incomplete=frozenset(str(x) for x in c.get("incomplete", [])),
             announced=int(c.get("announced", 0)),
             reported=int(c.get("reported", 0)), rc=int(c.get("rc", 0)),
-            failures=failures)
+            failures=failures,
+            doc_lines={(str(a), str(b)): (str(f), int(ln))
+                       for a, b, f, ln in c.get("doc_lines", [])},
+            doc_covers={(str(a), str(b)): DocCover(
+                stand_in=(str(si[0]), str(si[1])) if si else None, gap=str(g))
+                for a, b, si, g in c.get("doc_covers", [])})
     return ReferenceMeasurement(
         key=str(raw.get("key", "")), clusters=clusters,
         hollow=frozenset((str(f), str(n)) for f, n in raw.get("hollow", [])),
@@ -370,7 +449,8 @@ def measure_reference(project_dir: Path, clusters: Sequence[Any],
             "criterion stays absolute.")
         return None
     try:
-        key = reference_key(clusters, ref_name, _tests_fingerprint(dest))
+        key = reference_key(clusters, ref_name, _tests_fingerprint(dest),
+                            doc_origins_fingerprint(project_dir))
         cached = load_reference(project_dir)
         if cached is not None and cached.key == key and not force:
             log(f"  [reference] reusing measurement {key} of '{ref_name}' "
@@ -378,9 +458,12 @@ def measure_reference(project_dir: Path, clusters: Sequence[Any],
             return cached
         log(f"  [reference] measuring pristine '{ref_name}' under "
             f"{len(clusters)} baked cluster(s) — key {key}.")
+        origins = _load_origins(project_dir)
+        present = _present_doc_files(project_dir)
         measured = ReferenceMeasurement(
             key=key, source_ref=ref_name,
-            clusters={str(c.name): _measure_cluster(dest, c, deps)
+            clusters={str(c.name): _with_doc_covers(_measure_cluster(dest, c, deps),
+                                                    origins, present)
                       for c in sorted(clusters, key=lambda x: str(x.name))},
             hollow=_hollow_fns(dest, deps))
     finally:
@@ -403,6 +486,18 @@ def measure_reference(project_dir: Path, clusters: Sequence[Any],
             f"{len(c.ignored)} skipped by the original; {len(c.failed)} failed "
             "by it, each excused here only by the same failure"
             + (f": {_names(c.failed)}" if c.failed else ""))
+    for name, c in sorted(measured.clusters.items()):
+        if not c.doc_lines:
+            continue
+        stood = sum(1 for v in c.doc_covers.values() if v.stand_in is not None)
+        gaps = sorted(f"{a}::{b} ({v.gap})" for (a, b), v in c.doc_covers.items()
+                      if v.stand_in is None)
+        log(f"  [reference/{name}] doc tests: {stood} of {len(c.doc_lines)} have "
+            f"a re-hosted example in the oracle ({len(origins)} origin(s) in "
+            f"{ORIGINS_STORE}; whether each runs in this world is the sweep's "
+            f"to read)" + (f"; none for: {', '.join(gaps[:6])}"
+                                   + (f", … (+{len(gaps) - 6})" if len(gaps) > 6 else "")
+                                   if gaps else ""))
     if measured.hollow:
         log(f"  [reference] the original leaves {len(measured.hollow)} fn(s) "
             f"hollow: {', '.join(f'{f}::{n}' for f, n in sorted(measured.hollow))}")
@@ -410,7 +505,10 @@ def measure_reference(project_dir: Path, clusters: Sequence[Any],
         "key": key, "source_ref": ref_name,
         "hollow": sorted(f"{f}::{n}" for f, n in measured.hollow),
         "clusters": {n: {"passed": len(c.passed), "failed": len(c.failed),
-                         "ignored": len(c.ignored), "announced": c.announced}
+                         "ignored": len(c.ignored), "announced": c.announced,
+                         "doc_tests": len(c.doc_lines),
+                         "doc_stand_ins": sum(1 for v in c.doc_covers.values()
+                                              if v.stand_in is not None)}
                      for n, c in measured.clusters.items()}})
     return measured
 

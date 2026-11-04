@@ -62,6 +62,15 @@ which is the exact defect this module exists to remove. Absent ones are
 compared and REPORTED (:attr:`FloorVerdict.advisory_unmet`) so the gap stays
 visible, and excluded from the verdict until something can write a doc comment.
 
+**Most of those examples are not absent: they were re-hosted.** Before strip
+each runnable doc example becomes an oracle test (`domain.doc_example_test`),
+so the behaviour a lost doc comment pinned is still required. The reference
+records each doc test's place and what stands for it in the oracle
+(:attr:`ClusterReference.doc_covers`, joined in `domain.doc_stand_in`); a doc
+test whose stand-in passes here is met and not reported, and only a doc test
+with no stand-in that ran is advisory, with the reason. On run
+`391506-3403a6a7` (2026-10-22) all 26 reported absent had a passing stand-in.
+
 **A doc test that runs here and fails is not that case, and it gates.** The
 example is in the tree, rustdoc compiled it, and its assertion is false about
 the reconstruction: a body rewrite can address it. Until 2026-10-02 one filter
@@ -76,6 +85,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from pipeline_core.domain.doc_stand_in import DocCover, doc_test_file
 from pipeline_core.domain.same_failure import (
     FailedReading,
     FailureSignature,
@@ -105,15 +115,59 @@ def is_doc_pair(pair: tuple[str, str]) -> bool:
     return pair[0].startswith(_DOC_LABEL_PREFIX)
 
 
+# rustdoc appends the mode of a doc test that is only compiled: `no_run`
+# reads `src/lib.rs - a (line 8) - compile`, `compile_fail` reads
+# `… (line 11) - compile fail` (rustdoc on rustc 1.97, 2026-11-02). A parser
+# that wanted the name to end in `)` read neither as a doc test, so their line
+# was never stripped and they could never match across two trees.
+_DOC_MODE_SUFFIXES = (" - compile fail", " - compile")
+
+
+def _doc_name(test_name: str) -> tuple[str, int] | None:
+    """`(item head, line)` of a doc test's libtest name, or None when the
+    name is not a doc test's."""
+    name = test_name.strip()
+    for suffix in _DOC_MODE_SUFFIXES:
+        if name.endswith(suffix):
+            name = name[:-len(suffix)].rstrip()
+            break
+    if not name.endswith(")") or _LINE_SUFFIX_OPEN not in name:
+        return None
+    head, _, tail = name.rpartition(_LINE_SUFFIX_OPEN)
+    digits = tail[:-1].strip()
+    return (head.rstrip(), int(digits)) if digits.isdigit() else None
+
+
 def doc_test_line(test_name: str) -> int | None:
     """The source line a doc test's ``` block opens on, or None if the name
     carries no such suffix (i.e. it is not a doc test)."""
-    name = test_name.strip()
-    if not name.endswith(")") or _LINE_SUFFIX_OPEN not in name:
-        return None
-    _head, _, tail = name.rpartition(_LINE_SUFFIX_OPEN)
-    digits = tail[:-1].strip()
-    return int(digits) if digits.isdigit() else None
+    parsed = _doc_name(test_name)
+    return parsed[1] if parsed else None
+
+
+def doc_test_head(test_name: str) -> str | None:
+    """A doc test's name without its line and mode (`src/lib.rs - Context`),
+    or None if it is not a doc test."""
+    parsed = _doc_name(test_name)
+    return parsed[0] if parsed else None
+
+
+def doc_test_keys(names: Iterable[str]) -> dict[str, str]:
+    """Each doc test name of ONE binary → its stable key: the head plus the
+    example's ordinal among that head's doc tests in source order, counted
+    over every verdict. An ordinal counted per verdict made a passing and an
+    ignored example of one item both `#0`, so one key named two tests.
+    Names that are not doc tests are left out."""
+    out: dict[str, str] = {}
+    ordinal: dict[str, int] = {}
+    for n in sorted(names, key=lambda x: (doc_test_line(x) or 0, x)):
+        head = doc_test_head(n)
+        if head is None:
+            continue
+        k = ordinal.get(head, 0)
+        ordinal[head] = k + 1
+        out[n] = f"{head}#{k}"
+    return out
 
 
 def normalize_pair(label: str, test_name: str) -> tuple[str, str]:
@@ -149,8 +203,9 @@ def normalize_pair(label: str, test_name: str) -> tuple[str, str]:
     that genuinely passes.
     """
     name = test_name.strip()
-    if doc_test_line(name) is not None:
-        name = name.rpartition(_LINE_SUFFIX_OPEN)[0].rstrip()
+    head = doc_test_head(name)
+    if head is not None:
+        name = head
     elif "::" in name:
         kept = [s for s in name.split("::") if not _is_test_module_segment(s)]
         name = "::".join(kept) or name
@@ -196,18 +251,15 @@ def binary_pairs(b: object) -> tuple[tuple[str, str, tuple[str, str]], ...]:
     (:func:`pairs_of` is this, summed). The raw name is what runs the test
     again; the pair is what the reference keys it by."""
     label = str(getattr(b, "label", "?"))
+    by_attr = {attr: [str(n) for n in getattr(b, attr, ())]
+               for attr in ("passed", "failed", "ignored")}
+    keys = doc_test_keys(n for names in by_attr.values() for n in names)
     out: list[tuple[str, str, tuple[str, str]]] = []
-    for attr in ("passed", "failed", "ignored"):
-        raw = [str(n) for n in getattr(b, attr, ())]
-        ordinal: dict[tuple[str, str], int] = {}
+    for attr, raw in by_attr.items():
         for name in sorted(raw, key=lambda n: (doc_test_line(n) or 0, n)):
-            pair = normalize_pair(label, name)
-            if doc_test_line(name) is None:
-                out.append((attr, name, pair))
-                continue
-            k = ordinal.get(pair, 0)
-            ordinal[pair] = k + 1
-            out.append((attr, name, (pair[0], f"{pair[1]}#{k}")))
+            key = keys.get(name)
+            out.append((attr, name, (label.strip(), key) if key is not None
+                        else normalize_pair(label, name)))
     return tuple(out)
 
 
@@ -245,6 +297,12 @@ class ClusterReference:
     announced: int = 0
     reported: int = 0
     rc: int = 0
+    # Each doc test's place, as rustdoc named it: normalized pair → (file,
+    # line). Lines of the original; held for the join below, never shown.
+    doc_lines: Mapping[tuple[str, str], tuple[str, int]] = field(default_factory=dict)
+    # What stands for each doc test in the oracle (`domain.doc_stand_in`):
+    # its re-hosted example's pair, or why there is none.
+    doc_covers: Mapping[tuple[str, str], DocCover] = field(default_factory=dict)
 
     @property
     def failed(self) -> frozenset[tuple[str, str]]:
@@ -298,6 +356,11 @@ class FloorVerdict:
     # failure gave no stable reading to compare (two runs differed, or it
     # could not be read). Logged, never silent.
     excused_by_name: frozenset[tuple[str, str]] = frozenset()
+    # Of the reference's doc tests absent here, those whose re-hosted example
+    # passes here: met through their stand-in, not reported.
+    doc_stand_ins: frozenset[tuple[str, str]] = frozenset()
+    # Why each `advisory_unmet` pair has no stand-in that passed.
+    advisory_gaps: Mapping[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def met(self) -> bool:
@@ -312,10 +375,13 @@ class FloorVerdict:
                 note += (f"; {len(self.excused_by_name)} failing test(s) excused by "
                          f"name only, the original's own failure gave no stable reading: "
                          f"{_render(self.excused_by_name)}")
+            if self.doc_stand_ins:
+                note += (f"; {len(self.doc_stand_ins)} doc test(s) of the "
+                         f"reference pass here through their re-hosted example")
             if self.advisory_unmet:
                 return (f"{note}; {len(self.advisory_unmet)} doc test(s) the "
                         f"reference passes are absent here (advisory, not gated): "
-                        f"{_render(self.advisory_unmet)}")
+                        f"{self.render_gaps()}")
             return note
         parts = []
         if self.unmet:
@@ -333,6 +399,14 @@ class FloorVerdict:
                     for a, b in shown)
                 + (f"; … (+{len(self.diverged) - 3})" if len(self.diverged) > 3 else ""))
         return "; ".join(parts)
+
+
+    def render_gaps(self, cap: int = 6) -> str:
+        """The advisory doc tests, each with why no stand-in passed here."""
+        shown = sorted(self.advisory_unmet)
+        text = ", ".join(f"{a}::{b} ({self.advisory_gaps.get((a, b), 'no record')})"
+                         for a, b in shown[:cap])
+        return text + (f", … (+{len(shown) - cap})" if len(shown) > cap else "")
 
 
 def _render(pairs: frozenset[tuple[str, str]], cap: int = 6) -> str:
@@ -373,8 +447,9 @@ def judge_against_reference(
     A doc test is a test under both conditions, with one advisory state: a
     doc test the reference passes that is ABSENT here — it neither passed nor
     failed, because the doc comment carrying it was not reconstructed — is
-    reported and not gated (the module docstring says why). One that RAN here
-    and failed is a failing test like any other.
+    reported and not gated (the module docstring says why), unless its
+    re-hosted example stands for it here (:func:`_doc_stand_ins`). One that
+    RAN here and failed is a failing test like any other.
     """
     required = reference.passed
     unmet = required - ours_passed
@@ -400,9 +475,11 @@ def judge_against_reference(
             assert theirs.first is not None
             diverged.add(pair)
             divergence[pair] = mine.first_difference(theirs.first)
-    advisory = frozenset(p for p in unmet
-                         if is_doc_pair(p) and p not in failing)
-    unmet = unmet - advisory
+    absent_docs = frozenset(p for p in unmet
+                            if is_doc_pair(p) and p not in failing)
+    stood_in, advisory, gaps = _doc_stand_ins(reference, absent_docs,
+                                              ours_passed, failing)
+    unmet = unmet - absent_docs
     return FloorVerdict(
         cluster=reference.cluster,
         unmet=unmet,
@@ -413,7 +490,45 @@ def judge_against_reference(
         divergence=divergence,
         excused=frozenset(excused),
         excused_by_name=frozenset(by_name),
+        doc_stand_ins=stood_in,
+        advisory_gaps=gaps,
     )
+
+
+def _doc_stand_ins(reference: ClusterReference,
+                   absent: frozenset[tuple[str, str]],
+                   ours_passed: frozenset[tuple[str, str]],
+                   failing: frozenset[tuple[str, str]],
+                   ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]],
+                              dict[tuple[str, str], str]]:
+    """Split the reference doc tests absent here by their stand-in.
+
+    A stand-in that passes here meets the doc test. One that fails here is
+    already a failing test this verdict gates (the reference does not have
+    it), so the doc test is not counted a second time. Every other doc test
+    stays advisory, with the reason: the record's, or that its stand-in did
+    not run in this world."""
+    stood: set[tuple[str, str]] = set()
+    advisory: set[tuple[str, str]] = set()
+    gaps: dict[tuple[str, str], str] = {}
+    for pair in sorted(absent):
+        cover = reference.doc_covers.get(pair)
+        if cover is None:
+            advisory.add(pair)
+            gaps[pair] = (f"no origin recorded for {doc_test_file(pair[1])}"
+                          if reference.doc_covers else "no doc-example origins recorded")
+        elif cover.stand_in is None:
+            advisory.add(pair)
+            gaps[pair] = cover.gap
+        elif cover.stand_in in ours_passed:
+            stood.add(pair)
+        elif cover.stand_in in failing:
+            continue
+        else:
+            advisory.add(pair)
+            gaps[pair] = (f"its re-hosted example {cover.stand_in[0]} did not "
+                          f"run in this world")
+    return frozenset(stood), frozenset(advisory), gaps
 
 
 def reference_floor_close_reason(

@@ -577,6 +577,10 @@ class DocItemRecord:
     line: int = 0
     cfg_predicates: tuple[str, ...] = ()
     doc: str = ""
+    # The doc was written inside a macro's token stream. rustdoc numbers its
+    # examples from the item the expansion produces, whose line no syntactic
+    # walk knows, so `line` is not rustdoc's base for this record.
+    in_macro_body: bool = False
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> DocItemRecord:
@@ -585,6 +589,7 @@ class DocItemRecord:
             line=int(d.get("line", 0) or 0),
             cfg_predicates=_strs(d.get("cfg_predicates")),
             doc=d.get("doc", ""),
+            in_macro_body=bool(d.get("in_macro_body", False)),
         )
 
 

@@ -14,7 +14,7 @@ import time
 import uuid
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, NamedTuple
@@ -62,6 +62,7 @@ from pipeline_core.application.reconstruct.fill_scheduler import (
     FillExecutionDeps,
     execute_fill,
 )
+from pipeline_core.application.reconstruct.fix_context import TypesPart
 from pipeline_core.application.reconstruct.import_repair import (
     repair_missing_imports,
 )
@@ -248,6 +249,7 @@ from pipeline_core.domain.post_fill_mismatch import (
     put_back_bodies,
     still_stubbed_after_accept,
 )
+from pipeline_core.domain.prompt_budget import PromptBudgets
 from pipeline_core.domain.reasoning_cap import (
     CallCapReading,
     observe_call,
@@ -327,12 +329,21 @@ from pipeline_core.domain.sibling_regression import stamped as sibling_stamped
 from pipeline_core.domain.sibling_regression import union_of as sibling_union
 from pipeline_core.domain.sibling_steer import sibling_steer
 from pipeline_core.domain.slice_session import (
+    SESSION_OBSERVED_MAX_CHARS,
+    Rendering,
     SessionSlice,
     SliceCosts,
+    Turn0Fit,
+    bound_observed,
+    evidence_for_step,
     expand_locator_sites,
     fit_turn0,
+    largest_sections,
     locator_only_expansions,
+    omitted_names,
     plan_slices,
+    quoted_test_for_targets,
+    rendering_ladder,
     slice_plan_gaps,
     slice_plan_payload,
 )
@@ -520,6 +531,29 @@ _ATTRIBUTED_TEST_LEAF_CAP = 12
 
 
 @dataclass(frozen=True, slots=True)
+class _Turn0Prep:
+    """A session's turn 0 as the one builder prepared it: the planned
+    slice, the slice it opens on (grown by its write set, frozen units
+    removed), what was admitted or left out on the way, and ``build`` —
+    the text at a rendering step. ``build`` is None when no unit is left
+    to write (no record on the tree, or every one frozen)."""
+
+    planned: SessionSlice
+    slice_: SessionSlice
+    records: Mapping[FnSite, FnRecord]
+    missing: tuple[FnSite, ...] = ()
+    installable: Mapping[FnSite, str] = field(default_factory=dict)
+    coupled: Mapping[FnSite, str] = field(default_factory=dict)
+    blocked: tuple[FnSite, ...] = ()
+    build: Callable[[Rendering], str] | None = None
+    srec: Mapping[str, Any] = field(default_factory=dict)
+    skey: Any = None
+    notes_withheld: bool = False
+    #: Some planned unit has a fn record on the tree.
+    resolved: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ImplFillDeps:
     """Collaborators for the per-impl fill engine, injected by the composition root."""
 
@@ -570,6 +604,9 @@ class ImplFillDeps:
     splice_fn_with_where: Callable[..., SpliceOutcome]
     splice_lock_for: Callable[..., TreeLock]
     types_section_for_fix: Callable[..., str]
+    #: One TYPES_IN_SCOPE over a session's files
+    #: (`FixContextAssembler.types_section_for_files`).
+    types_section_for_files: Callable[..., str]
     bound_methods_section_for: Callable[..., str]
     u2_test_gate: U2TestGate
     test_regression_baseline: RegressionBaselinePort
@@ -872,6 +909,7 @@ def prepare_impl_fill(
     _splice_fn_with_where = deps.splice_fn_with_where
     _splice_lock_for = deps.splice_lock_for
     _types_section_for_fix = deps.types_section_for_fix
+    _types_section_for_files = deps.types_section_for_files
     _bound_methods_section_for = deps.bound_methods_section_for
     _u2_test_gate = deps.u2_test_gate
     _fill_classes = FillClassCounter()
@@ -6461,12 +6499,7 @@ def prepare_impl_fill(
             the charge is an upper bound on what that session renders —
             conservative in the direction that cannot refuse a session
             that would have fit."""
-            limit = int(deps.single_call_char_limit or 0)
-            raw_cap = os.getenv("SLICE_SESSION_TURN0_CHARS", "")
-            try:
-                max_chars = int(raw_cap) if raw_cap else int(limit * 0.45)
-            except ValueError:
-                max_chars = int(limit * 0.45)
+            max_chars = _cap
             if max_chars <= 0:
                 return None
             file_chars: dict[int, dict[str, int]] = {
@@ -6529,15 +6562,237 @@ def prepare_impl_fill(
                               types_chars=types_chars,
                               evidence_chars=evidence_chars)
 
+        _limit = int(deps.single_call_char_limit or 0)
+        _raw_cap = os.getenv("SLICE_SESSION_TURN0_CHARS", "")
+        try:
+            _cap = int(_raw_cap) if _raw_cap else int(_limit * 0.45)
+        except ValueError:
+            _cap = int(_limit * 0.45)
+        _ladder = rendering_ladder(
+            _SESSION_FILE_THRESHOLDS,
+            PromptBudgets.derive(_limit).types_section if _limit > 0 else 0)
+        _run_cargo = deps.run_cargo
+
+        def _probe(names: Sequence[str]) -> Mapping[str, str]:
+            if not _probe_on or _run_cargo is None:
+                return {}
+            by_file: dict[Path, list[str]] = {}
+            for _n in names:
+                _leaf = _n.rsplit("::", 1)[-1]
+                for _p, _txt in _test_files_for(_leaf):
+                    if f"fn {_leaf}(" not in _txt:
+                        continue
+                    _fp = Path(_p)
+                    if not _fp.is_absolute():
+                        _fp = project_dir / _fp
+                    by_file.setdefault(_fp, []).append(_leaf)
+                    break
+            if not by_file:
+                return {}
+            return run_assert_probes(
+                project_dir=project_dir, cluster_root=target_src_dir,
+                cluster_name=cluster_name, cluster_env=cluster_env,
+                tests_by_file=by_file, run_cargo=_run_cargo, log=_log).rendered
+
+        # The oracle's test files do not change inside a fill: one lookup per
+        # leaf serves the packer's many builds and every session's.
+        _test_lookups: dict[str, list[tuple[str, str]]] = {}
+
+        def _test_files_for(leaf: str) -> list[tuple[str, str]]:
+            hit = _test_lookups.get(leaf)
+            if hit is None:
+                hit = list(_find_tests_referencing_fn(
+                    tests_dir_files, leaf, max_blocks=1))
+                _test_lookups[leaf] = hit
+            return hit
+
+        def _read_slice_file(f: str) -> str | None:
+            try:
+                return (target_src_dir / f).read_text(
+                    encoding="utf-8", errors="replace")
+            except OSError:
+                return None
+
+        def _prepare_turn0(_sl: SessionSlice, *, live: bool) -> _Turn0Prep:
+            """THE builder of a session's turn 0, for the packer and for the
+            session: the slice resolved on the tree as it stands, grown by
+            its write set (installable and coupled bodies), the bodies this
+            fill kept frozen, and every section the session sends. The
+            packer calls it with ``live=False`` on the tree it plans on and
+            decides on the length of what it builds (`Turn0Fit`); the
+            session calls it with ``live=True`` when it opens and sends what
+            it builds. ``live`` changes one input: the assertion probe runs
+            cargo, so the packer reserves its bound per target test
+            (`SESSION_OBSERVED_MAX_CHARS`) instead of running it, and the
+            session cuts the probe's lines at that bound.
+
+            There was a second answer before this: the packer charged an
+            estimate of the PLANNED units (`SliceCosts`), and on run
+            `3203804-8c6a0066` (2026-11-03) 13 of the 19 sessions it
+            admitted were over capacity when this builder built them, each
+            taking a session slot of its fill."""
+            records = _resolve(_sl.units, _all_recs)
+            missing = tuple(u for u in _sl.units if u not in records)
+            if not records:
+                return _Turn0Prep(planned=_sl, slice_=_sl, records={},
+                                  missing=missing, resolved=False)
+            ws = session_write_set(
+                _sl, records, list(_all_recs.values()),
+                _crate_type_records, _read_slice_file)
+            sl, records = ws.slice_, dict(ws.records)
+            blocked: tuple[FnSite, ...] = ()
+            if sl.frozen:
+                # The run carries every body this fill kept; the slice
+                # keeps, and the prompt names, only those its grown
+                # editable set held. A landed body outside the set has no
+                # record here and is refused as out of scope anyway.
+                blocked = tuple(dict.fromkeys(
+                    [*(u for u in sl.units if locator_of(u) in sl.frozen),
+                     *(u for u in records if locator_of(u) in sl.frozen)]))
+                sl = replace(sl, units=tuple(
+                    u for u in sl.units if locator_of(u) not in sl.frozen),
+                    frozen=frozenset(locator_of(u) for u in blocked))
+                records = {u: r for u, r in records.items()
+                           if locator_of(u) not in sl.frozen}
+            prep = _Turn0Prep(planned=_sl, slice_=sl, records=records,
+                              missing=missing, installable=ws.installable,
+                              coupled=ws.coupled, blocked=blocked)
+            if not sl.units or not records:
+                return prep
+            leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in sl.tests))
+            tblocks = attributed_test_blocks(
+                leaves, _test_files_for,
+                file_cap=_ATTRIBUTED_TEST_FILE_CAP, into=[])
+            tsources = tuple(t for _, t in tblocks)
+            spins = pinned_observables_from_tests(leaves, tsources)
+            sobs = asserted_output_literals_from_tests(leaves, tsources)
+            file_texts = {
+                f: (target_src_dir / f).read_text(encoding="utf-8", errors="replace")
+                for f in sl.files}
+            types_parts: list[TypesPart] = []
+            bound_parts: list[str] = []
+            for f in sl.files:
+                frecs = [records[u] for u in sl.units if u.file == f]
+                types_parts.append(TypesPart(
+                    file_rel=f, sig_text=" ".join(r.sig_text for r in frecs),
+                    body_text=file_texts[f],
+                    container=" ".join(dict.fromkeys(r.container for r in frecs))))
+                for cont in dict.fromkeys(r.container for r in frecs if r.container):
+                    wc = _extract_impl_where_clause(file_texts[f], cont)
+                    bsec = _bound_methods_section_for(
+                        wc, _crate_type_records, file_rel=f) if wc else ""
+                    if bsec and bsec not in bound_parts:
+                        bound_parts.append(bsec)
+            if live:
+                observed = {t: bound_observed(v)
+                            for t, v in _probe(sl.tests).items()}
+            elif _probe_on and _run_cargo is not None:
+                observed = dict.fromkeys(sl.tests, " " * SESSION_OBSERVED_MAX_CHARS)
+            else:
+                observed = {}
+            quotes: dict[str, str] = {}
+            for t in sl.tests:
+                ev = _frontier_tests.evidence_for(t)
+                quotes[t] = quote_panic_site(ev, _read_source) if ev else ""
+            skey = _retro_key(sl.files[0], "*session*",
+                              "+".join(sorted(sl.member_scope())))
+            srec = retros_cache.get(skey, {}) or {}
+            prior_notes = ""
+            stored_scope = srec.get(JOINT_MEMBERS)
+            notes_withheld = False
+            if (isinstance(stored_scope, list)
+                    and frozenset(str(x) for x in stored_scope) == sl.member_scope()):
+                prior_notes = str(srec.get("guidance") or "")
+                guard = pins_for_contradiction_guard(spins, sobs)
+                if (prior_notes and guard
+                        and prescription_removes_pinned_observable(
+                            prior_notes, guard)):
+                    notes_withheld = True
+                    prior_notes = ""
+            prior_regr = render_prior_regression(
+                tuple(str(t) for t in (srec.get("regressed") or [])),
+                spins,
+                {str(k): str(v) for k, v in dict(
+                    srec.get(REGRESSED_OUTPUT) or {}).items()},
+                regressed_attempt_of(srec))
+            sib_regr = _sibling_regression_for(
+                [_retro_key(u.file, u.fn_name, u.container) for u in sl.units],
+                spins, skip=[str(t) for t in (srec.get("regressed") or [])])
+            prior_regr = "\n".join(x for x in (prior_regr, sib_regr) if x)
+            bp = ""
+            if not _blueprint.empty:
+                bp = _blueprint.slice_for(
+                    frozenset(u.fn_name for u in sl.units)
+                    | frozenset(tok for r in records.values()
+                                for tok in _container_names(r.container)),
+                    cap=6000)
+            types_at: dict[int, str] = {}
+            cut_blocks = [(path, quoted_test_for_targets(txt, sl.tests))
+                          for path, txt in tblocks]
+
+            def _build(step: Rendering) -> str:
+                if step.types_cap not in types_at:
+                    types_at[step.types_cap] = _types_section_for_files(
+                        types_parts, _crate_type_records, sobs,
+                        cap=step.types_cap)
+                evidence = {
+                    t: evidence_for_step(
+                        quotes[t],
+                        observed.get(t) or observed.get(
+                            t.rsplit("::", 1)[-1], ""),
+                        omit_observed=step.omits_observed)
+                    for t in sl.tests}
+                return build_slice_session_prompt(
+                    module_name=module_name, cluster_name=cluster_name,
+                    slice_=sl, records=records,
+                    all_records=list(_all_recs.values()),
+                    file_texts=file_texts, target_evidence=evidence,
+                    test_blocks=cut_blocks if step.tests_cut else tblocks,
+                    types_section=types_at[step.types_cap],
+                    bound_methods="\n\n".join(bound_parts),
+                    invariants=invariants_section, macros=macros_section,
+                    notes=prior_notes, prior_regression=prior_regr,
+                    kind=kind_from_record(srec),
+                    blueprint=bp, fr_path=fr_path,
+                    max_turns=_max_turns, executed=_executed_all,
+                    file_chars=step.file_chars or SESSION_FILE_CHARS,
+                    installable=ws.installable,
+                    crash_evidence=crash_evidence_for_units(
+                        crash_evidence or {}, sl.units, crash_sites),
+                    behaviour_must=_behaviour_must(*records.values()),
+                    unit_notes=unit_notes_text(
+                        (locator_of(u) for u in sl.units), _frontier_tests),
+                    omit=omitted_names(step.context_drops))
+
+            return replace(prep, build=_build, srec=srec, skey=skey,
+                           notes_withheld=notes_withheld)
+
+        # The packer's builds, one preparation per packing: the ladder's
+        # steps rebuild only the text.
+        _plan_preps: dict[tuple[tuple[str, ...], frozenset[FnSite]], _Turn0Prep] = {}
+
+        def _planned_length(sl: SessionSlice) -> int:
+            key = (sl.tests, frozenset(sl.units))
+            prep = _plan_preps.get(key)
+            if prep is None:
+                prep = _prepare_turn0(sl, live=False)
+                _plan_preps[key] = prep
+            # A packing with no editable unit on the tree builds no turn 0;
+            # the session reports it empty when it opens, as before.
+            return len(prep.build(sl.rendering)) if prep.build is not None else 0
+
         _all_recs = _tree_sites()
         _slices = expand_locator_sites(session_slices or {}, _all_recs)
         for _file, _fn, _n in locator_only_expansions(session_slices or {}, _all_recs):
             _log(f"  [phase-c/session] locator-only {_file}::{_fn} "
                  f"expanded to {_n} tree site(s)")
         _costs = _session_costs(_slices)
+        _fit = (Turn0Fit(length=_planned_length, ladder=_ladder, capacity=_cap)
+                if _cap > 0 and _ladder else None)
+        _plan_t0 = time.monotonic()
         _plans = list(plan_slices(_slices, held_tests=_held_now.by_test.keys(),
                                   held_units=_held_now.units,
-                                  max_units=_max_units, costs=_costs))
+                                  max_units=_max_units, fit=_fit))
         # The plan is a record on every fill, refusal included: the union
         # the engine actually handed `plan_slices` (owners plus hops plus
         # locator expansion) was in no event before, so the over-union
@@ -6549,22 +6804,48 @@ def prepare_impl_fill(
         # that moved a verdict, and a count-gated withhold would have skipped
         # it while leaving the routes that burned the night untouched.
         _gaps = slice_plan_gaps(_slices, held_tests=_held_now.by_test.keys(),
-                                max_units=_max_units, costs=_costs)
+                                max_units=_max_units, fit=_fit)
         if session_slices:
             _emit("phase_c.session.plan", data={
                 "cluster": cluster_name,
-                **slice_plan_payload(_slices, _plans, _gaps, _costs),
-                "opened": len(_plans)})
-        if _costs is not None and _plans:
+                **slice_plan_payload(_slices, _plans, _gaps, _costs, _fit),
+                "opened": len(_plans),
+                "plan_builds": len(_plan_preps),
+                "plan_seconds": round(time.monotonic() - _plan_t0, 2)})
+        if _fit is not None and _plans:
             def _size_of(p: SessionSlice, i: int) -> str:
-                n = _costs.chars(p.tests, p.units,
-                                 file_chars=p.file_chars or None)
-                at = ("" if not p.file_chars or p.file_chars == _costs.widest()
-                      else f" rendered at {p.file_chars:,}")
-                return f"{p.label(seq=i)} {n:,} chars{at}"
+                n = _fit.length_at(p.tests, p.units, p.rendering)
+                at = ("" if p.rendering == _fit.widest()
+                      else f" at {p.rendering.label()}")
+                charged = ("" if _costs is None else
+                           f", charged {_costs.chars(p.tests, p.units, file_chars=p.file_chars or None):,}")
+                return f"{p.label(seq=i)} built {n:,} chars{at}{charged}"
             _log("  [phase-c/session] turn-0 size per session: "
                  + ", ".join(_size_of(p, i) for i, p in enumerate(_plans))
-                 + f" (capacity {_costs.max_chars:,})")
+                 + f" (capacity {_cap:,})")
+        # A test no rendering step opens gets no session; what its turn 0 is
+        # made of is the record that says which section the ladder must
+        # reach next, so it is printed from the built text, never estimated.
+        _narrowest = _ladder[-1] if _ladder else Rendering(SESSION_FILE_CHARS)
+        for _t in _gaps.over_chars_tests:
+            _tsl = SessionSlice(tests=(_t,), units=tuple(sorted(
+                _slices.get(_t, ()), key=lambda u: (u.file, u.fn_name, u.container))))
+            _tprep = _prepare_turn0(_tsl, live=False)
+            if _tprep.build is None:
+                continue
+            _ttext = _tprep.build(_narrowest)
+            _tsecs = largest_sections(_ttext)
+            _log(f"  [phase-c/session] {_t}: no session — turn 0 is "
+                 f"{len(_ttext):,} chars at {_narrowest.label()} against "
+                 f"{_cap:,} ({len(_tprep.slice_.units)} editable unit(s)); "
+                 "largest sections: " + ", ".join(
+                     f"{n} {c:,}" for n, c in _tsecs))
+            _emit("phase_c.session.unopenable_test", data={
+                "cluster": cluster_name, "test": _t, "built": len(_ttext),
+                "capacity": _cap, "rendering": _narrowest.label(),
+                "units_planned": len(_tsl.units),
+                "units_opened": len(_tprep.slice_.units),
+                "sections": [{"name": n, "chars": c} for n, c in _tsecs]})
         if _gaps.fitted_clause():
             _log(f"  [phase-c/session] {_gaps.fitted_clause()}")
         if _gaps.condensed_clause():
@@ -6588,30 +6869,6 @@ def prepare_impl_fill(
                      f"({len(session_slices)} failing test(s) — "
                      f"{_gaps.log_clause()})")
             return None
-        _run_cargo = deps.run_cargo
-
-        def _probe(names: Sequence[str]) -> Mapping[str, str]:
-            if not _probe_on or _run_cargo is None:
-                return {}
-            by_file: dict[Path, list[str]] = {}
-            for _n in names:
-                _leaf = _n.rsplit("::", 1)[-1]
-                for _p, _txt in _find_tests_referencing_fn(
-                        tests_dir_files, _leaf, max_blocks=1):
-                    if f"fn {_leaf}(" not in _txt:
-                        continue
-                    _fp = Path(_p)
-                    if not _fp.is_absolute():
-                        _fp = project_dir / _fp
-                    by_file.setdefault(_fp, []).append(_leaf)
-                    break
-            if not by_file:
-                return {}
-            return run_assert_probes(
-                project_dir=project_dir, cluster_root=target_src_dir,
-                cluster_name=cluster_name, cluster_env=cluster_env,
-                tests_by_file=by_file, run_cargo=_run_cargo, log=_log).rendered
-
         def _run_one_session(_sl: SessionSlice, clock: RunClock) -> RouteRunReport:
             nonlocal fns_filled_total, impls_filled, impls_failed
             nonlocal _all_recs, served
@@ -6622,14 +6879,13 @@ def prepare_impl_fill(
                 # sibling sharing a hub unit must open on the tree as it
                 # now stands, not on the records enumerated at plan time.
                 _all_recs = _tree_sites()
-            _planned_sl = _sl
-            _records = _resolve(_sl.units, _all_recs)
-            _missing = [u for u in _sl.units if u not in _records]
-            if _missing:
-                _log(f"  [phase-c/session] {_sl.label()}: {len(_missing)} unit(s) "
+            _prep = _prepare_turn0(_sl, live=True)
+            _planned_sl = _prep.planned
+            if _prep.missing:
+                _log(f"  [phase-c/session] {_sl.label()}: {len(_prep.missing)} unit(s) "
                      "have no fn record on the tree and are left out: "
-                     + ", ".join(site_label(u) for u in _missing[:6]))
-            if not _records:
+                     + ", ".join(site_label(u) for u in _prep.missing[:6]))
+            if not _prep.resolved:
                 return RouteRunReport(empty=True)
             # The write set's table complement: free fns of a slice file whose
             # signature fits a field of a table an editable unit builds, and
@@ -6637,17 +6893,7 @@ def prepare_impl_fill(
             # literal installs. Coverage cannot put either in the slice, and
             # without them an editable builder cannot be written together
             # with the slots it fills.
-
-            def _read_slice_file(f: str) -> str | None:
-                try:
-                    return (target_src_dir / f).read_text(
-                        encoding="utf-8", errors="replace")
-                except OSError:
-                    return None
-            _ws = session_write_set(
-                _sl, _records, list(_all_recs.values()),
-                _crate_type_records, _read_slice_file)
-            _installable_sites = _ws.installable
+            _installable_sites = _prep.installable
             if _installable_sites:
                 _log(f"  [phase-c/session] {_sl.label()}: "
                      f"{len(_installable_sites)} installable fn(s) admitted to "
@@ -6660,168 +6906,78 @@ def prepare_impl_fill(
                     "cluster": cluster_name, "tests": list(_sl.tests),
                     "admitted": [{**site_payload(u), "slot": t}
                                  for u, t in _installable_sites.items()]})
-            if _ws.coupled:
-                _log(f"  [phase-c/session] {_sl.label()}: {len(_ws.coupled)} "
+            if _prep.coupled:
+                _log(f"  [phase-c/session] {_sl.label()}: {len(_prep.coupled)} "
                      "coupled body(ies) admitted to the editable set — they "
                      "sit on one cycle with an editable unit: " + ", ".join(
                          f"{site_label(u)} ({c})"
-                         for u, c in _ws.coupled.items()))
+                         for u, c in _prep.coupled.items()))
                 _emit("phase_c.session.coupled_admitted", data={
                     "cluster": cluster_name, "tests": list(_sl.tests),
                     "admitted": [{**site_payload(u), "coupling": c}
-                                 for u, c in _ws.coupled.items()]})
-            _sl, _records = _ws.slice_, _ws.records
-            if _sl.frozen:
-                # The run carries every body this fill kept; the slice
-                # keeps, and the prompt names, only those its grown
-                # editable set held. A landed body outside the set has no
-                # record here and is refused as out of scope anyway.
-                _blocked = tuple(dict.fromkeys(
-                    [*(u for u in _sl.units if locator_of(u) in _sl.frozen),
-                     *(u for u in _records if locator_of(u) in _sl.frozen)]))
-                if _blocked:
-                    _log(f"  [phase-c/session] {_sl.label()}: "
-                         f"{len(_blocked)} unit(s) kept by an earlier run of "
-                         "this fill are not editable: " + ", ".join(
-                             site_label(u) for u in _blocked[:6]))
-                _sl = replace(_sl, units=tuple(
-                    u for u in _sl.units if locator_of(u) not in _sl.frozen),
-                    frozen=frozenset(locator_of(u) for u in _blocked))
-                _records = {u: r for u, r in _records.items()
-                            if locator_of(u) not in _sl.frozen}
-            if not _sl.units or not _records:
+                                 for u, c in _prep.coupled.items()]})
+            _sl, _records = _prep.slice_, _prep.records
+            if _prep.blocked:
+                _log(f"  [phase-c/session] {_sl.label()}: "
+                     f"{len(_prep.blocked)} unit(s) kept by an earlier run of "
+                     "this fill are not editable: " + ", ".join(
+                         site_label(u) for u in _prep.blocked[:6]))
+            if _prep.build is None:
                 # Every editable unit was kept by an earlier run of this
                 # fill, or none of them has a record. There is no body
                 # this session may write.
                 return RouteRunReport(empty=True)
+            if _prep.notes_withheld:
+                _log(f"  [phase-c/session] {_sl.label()}: previous notes "
+                     "prescribed removing a pinned observable — withheld")
             _units = _sl.units
-            _leaves = tuple(dict.fromkeys(t.rsplit("::", 1)[-1] for t in _sl.tests))
-            _tblocks = attributed_test_blocks(
-                _leaves,
-                lambda leaf: _find_tests_referencing_fn(tests_dir_files, leaf, max_blocks=1),
-                file_cap=_ATTRIBUTED_TEST_FILE_CAP, into=[])
-            _tsources = tuple(t for _, t in _tblocks)
-            _spins = pinned_observables_from_tests(_leaves, _tsources)
-            _sobs = asserted_output_literals_from_tests(_leaves, _tsources)
-            _file_texts = {
-                f: (target_src_dir / f).read_text(encoding="utf-8", errors="replace")
-                for f in _sl.files}
-            _types_parts: list[str] = []
-            _bound_parts: list[str] = []
-            for _f in _sl.files:
-                _frecs = [_records[u] for u in _sl.units if u.file == _f]
-                _tsec = _types_section_for_fix(
-                    " ".join(r.sig_text for r in _frecs), _file_texts[_f], "",
-                    " ".join(dict.fromkeys(r.container for r in _frecs)), "",
-                    _crate_type_records, file_rel=_f, observables=_sobs)
-                if _tsec and _tsec not in _types_parts:
-                    _types_parts.append(_tsec)
-                for _cont in dict.fromkeys(r.container for r in _frecs if r.container):
-                    _wc = _extract_impl_where_clause(_file_texts[_f], _cont)
-                    _bsec = _bound_methods_section_for(
-                        _wc, _crate_type_records, file_rel=_f) if _wc else ""
-                    if _bsec and _bsec not in _bound_parts:
-                        _bound_parts.append(_bsec)
-            _initial_obs = _probe(_sl.tests)
-            _evidence: dict[str, str] = {}
-            for _t in _sl.tests:
-                _ev = _frontier_tests.evidence_for(_t)
-                _said = quote_panic_site(_ev, _read_source) if _ev else ""
-                _obs = _initial_obs.get(_t) or _initial_obs.get(_t.rsplit("::", 1)[-1], "")
-                _evidence[_t] = "\n".join(x for x in (_said, _obs) if x)
-            _skey = _retro_key(_sl.files[0], "*session*",
-                               "+".join(sorted(_sl.member_scope())))
-            _srec = retros_cache.get(_skey, {}) or {}
-            _prior_notes = ""
-            _stored_scope = _srec.get(JOINT_MEMBERS)
-            if (isinstance(_stored_scope, list)
-                    and frozenset(str(x) for x in _stored_scope) == _sl.member_scope()):
-                _prior_notes = str(_srec.get("guidance") or "")
-                _guard = pins_for_contradiction_guard(_spins, _sobs)
-                if (_prior_notes and _guard
-                        and prescription_removes_pinned_observable(
-                            _prior_notes, _guard)):
-                    _log(f"  [phase-c/session] {_sl.label()}: previous notes "
-                         "prescribed removing a pinned observable — withheld")
-                    _prior_notes = ""
-            _prior_regr = render_prior_regression(
-                tuple(str(t) for t in (_srec.get("regressed") or [])),
-                _spins,
-                {str(k): str(v) for k, v in dict(
-                    _srec.get(REGRESSED_OUTPUT) or {}).items()},
-                regressed_attempt_of(_srec))
-            _sib_regr = _sibling_regression_for(
-                [_retro_key(u.file, u.fn_name, u.container) for u in _sl.units],
-                _spins, skip=[str(t) for t in (_srec.get("regressed") or [])])
-            _prior_regr = "\n".join(x for x in (_prior_regr, _sib_regr) if x)
-            _bp = ""
-            if not _blueprint.empty:
-                _bp = _blueprint.slice_for(
-                    frozenset(u.fn_name for u in _sl.units)
-                    | frozenset(tok for r in _records.values()
-                                for tok in _container_names(r.container)),
-                    cap=6000)
-            def _build_turn0(file_chars: int) -> str:
-                return build_slice_session_prompt(
-                    module_name=module_name, cluster_name=cluster_name,
-                    slice_=_sl, records=_records,
-                    all_records=list(_all_recs.values()),
-                    file_texts=_file_texts, target_evidence=_evidence,
-                    test_blocks=_tblocks,
-                    types_section="\n\n".join(_types_parts),
-                    bound_methods="\n\n".join(_bound_parts),
-                    invariants=invariants_section, macros=macros_section,
-                    notes=_prior_notes, prior_regression=_prior_regr,
-                    kind=kind_from_record(_srec),
-                    blueprint=_bp, fr_path=fr_path,
-                    max_turns=_max_turns, executed=_executed_all,
-                    file_chars=file_chars,
-                    installable=_installable_sites,
-                    crash_evidence=crash_evidence_for_units(
-                        crash_evidence or {}, _sl.units, crash_sites),
-                    behaviour_must=_behaviour_must(*_records.values()),
-                    unit_notes=unit_notes_text(
-                        (locator_of(u) for u in _sl.units), _frontier_tests))
-
-            _cap = _costs.max_chars if _costs is not None else 0
-            _fitted = fit_turn0(
-                _build_turn0, _sl.file_chars or SESSION_FILE_CHARS,
-                _SESSION_FILE_THRESHOLDS, _cap)
+            _srec, _skey = _prep.srec, _prep.skey
+            _start = (_planned_sl.rendering if _planned_sl.rendering in _ladder
+                      else _ladder[0] if _ladder
+                      else Rendering(SESSION_FILE_CHARS))
+            _charged = (0 if _costs is None else _costs.chars(
+                _planned_sl.tests, _planned_sl.units,
+                file_chars=_planned_sl.file_chars or None))
+            _fitted = fit_turn0(_prep.build, _start, _ladder, _cap)
+            _t0_payload = {
+                "cluster": cluster_name, "tests": list(_sl.tests),
+                "charged": _charged, "capacity": _cap,
+                "planned_file_chars": (_planned_sl.file_chars
+                                       or SESSION_FILE_CHARS),
+                "planned_rendering": _start.label(),
+                "planned_built": (_fit.length_at(
+                    _planned_sl.tests, _planned_sl.units, _planned_sl.rendering)
+                    if _fit is not None and not _planned_sl.joint else None),
+                "units_planned": len(_planned_sl.units),
+                "units_opened": len(_sl.units)}
             if _fitted is None:
-                # The narrowest rendering is still over capacity. There is
-                # no prompt to send, so the session does not open.
-                _charged = (0 if _costs is None else _costs.chars(
-                    _planned_sl.tests, _planned_sl.units,
-                    file_chars=_planned_sl.file_chars or None))
+                # The narrowest step is still over capacity on the tree as
+                # it now stands. There is no prompt to send, so the session
+                # does not open, and its row says so (`unopenable`): the
+                # fill gives its session slot to the next session.
+                _over_text = _prep.build(_ladder[-1] if _ladder else _start)
+                _over_secs = largest_sections(_over_text)
                 _log(f"  [phase-c/session] {_sl.label()}: turn 0 at the "
-                     f"narrowest rendering is over capacity {_cap:,} "
-                     f"(charged {_charged:,} on the planned slice) — "
-                     "the session is not opened")
+                     f"narrowest rendering is {len(_over_text):,} chars, over "
+                     f"capacity {_cap:,} (planned at {_start.label()}, "
+                     f"charged {_charged:,}) — the session is not opened; "
+                     "largest sections: " + ", ".join(
+                         f"{n} {c:,}" for n, c in _over_secs))
                 _emit("phase_c.session.turn0", data={
-                    "cluster": cluster_name, "tests": list(_sl.tests),
-                    "sent": 0, "charged": _charged, "capacity": _cap,
-                    "file_chars": 0, "over": True,
-                    "planned_file_chars": (_planned_sl.file_chars
-                                           or SESSION_FILE_CHARS),
-                    "units_planned": len(_planned_sl.units),
-                    "units_opened": len(_sl.units)})
-                return RouteRunReport(empty=True)
-            _turn0, _t0_chars = _fitted
-            if _costs is not None:
-                _charged = _costs.chars(_planned_sl.tests, _planned_sl.units,
-                                        file_chars=_planned_sl.file_chars or None)
-                _log(f"  [phase-c/session] {_sl.label()}: turn 0 "
-                     f"{len(_turn0):,} chars at file threshold {_t0_chars:,} "
-                     f"(charged {_charged:,} on the planned slice, capacity "
-                     f"{_costs.max_chars:,})")
-                _emit("phase_c.session.turn0", data={
-                    "cluster": cluster_name, "tests": list(_sl.tests),
-                    "sent": len(_turn0), "charged": _charged,
-                    "capacity": _costs.max_chars, "file_chars": _t0_chars,
-                    "planned_file_chars": (_planned_sl.file_chars
-                                           or SESSION_FILE_CHARS),
-                    "units_planned": len(_planned_sl.units),
-                    "units_opened": len(_sl.units)})
+                    **_t0_payload, "sent": 0, "file_chars": 0, "over": True,
+                    "rendering": "", "built_narrowest": len(_over_text),
+                    "sections": [{"name": n, "chars": c}
+                                 for n, c in _over_secs]})
+                return RouteRunReport(empty=True, unopenable=True)
+            _turn0, _t0_step = _fitted
+            _log(f"  [phase-c/session] {_sl.label()}: turn 0 "
+                 f"{len(_turn0):,} chars at {_t0_step.label()} "
+                 f"(planned at {_start.label()}, charged {_charged:,}, "
+                 f"capacity {_cap:,})")
+            _emit("phase_c.session.turn0", data={
+                **_t0_payload, "sent": len(_turn0),
+                "file_chars": _t0_step.file_chars,
+                "rendering": _t0_step.label()})
             _pull_file.file = _sl.files[0]
 
             def _check_now() -> tuple[int, str, list[Any]]:

@@ -30,6 +30,18 @@ _FIXTURE = (Path(__file__).resolve().parent / "fixtures" / "sessions"
             / "32959-4a2ff1ab_iter5_plan.json")
 
 
+
+def _fit_of(costs):  # noqa: ANN001, ANN202 — a length table as the built fit
+    """A `Turn0Fit` whose builder's length is this table's: the packing
+    tests below are about where tests go given a length per packing and
+    rendering, and the table is how they state it."""
+    from pipeline_core.domain.slice_session import Rendering, Turn0Fit
+    return Turn0Fit(
+        length=lambda sl: costs.chars(sl.tests, sl.units,
+                                      file_chars=sl.file_chars or None),
+        ladder=tuple(Rendering(t) for t in costs.thresholds),
+        capacity=costs.max_chars)
+
 def _fixture() -> dict:
     data: dict = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     return data
@@ -81,9 +93,9 @@ def test_before_the_recorded_refusal_reproduces() -> None:
     data = _fixture()
     slices, cap = _slices(data), data["max_units"]
     costs = _costs_before(data)
-    plans = plan_slices(slices, max_units=cap, costs=costs)
+    plans = plan_slices(slices, max_units=cap, fit=_fit_of(costs))
     assert [p.tests for p in plans] == []
-    gaps = slice_plan_gaps(slices, max_units=cap, costs=costs)
+    gaps = slice_plan_gaps(slices, max_units=cap, fit=_fit_of(costs))
     assert gaps.empty == data["recorded"]["empty"]
     assert (gaps.over_cap + gaps.over_chars_single
             == data["recorded"]["over_cap"])
@@ -94,7 +106,7 @@ def test_after_both_red_tests_open_as_sessions_rendered_narrower() -> None:
     data = _fixture()
     slices, cap = _slices(data), data["max_units"]
     costs = _costs_after(data)
-    plans = plan_slices(slices, max_units=cap, costs=costs)
+    plans = plan_slices(slices, max_units=cap, fit=_fit_of(costs))
     assert sorted(t for p in plans for t in p.tests) == [
         "test_too_long", "test_whitespace"]
     for p in plans:
@@ -110,7 +122,7 @@ def test_after_both_red_tests_open_as_sessions_rendered_narrower() -> None:
         if units:
             assert costs.chars((t,), units, file_chars=costs.widest()) > \
                 data["max_chars"]
-    gaps = slice_plan_gaps(slices, max_units=cap, costs=costs)
+    gaps = slice_plan_gaps(slices, max_units=cap, fit=_fit_of(costs))
     assert gaps.over_cap == 0 and gaps.over_chars_single == 0
     assert gaps.condensed == len(plans)
     assert "rendered below the widest threshold" in gaps.condensed_clause()
@@ -123,7 +135,7 @@ def test_the_refusal_clause_names_the_capacity_that_fired() -> None:
     data = _fixture()
     slices, cap = _slices(data), data["max_units"]
     assert max(len(u) for u in _slices(data).values()) < cap
-    gaps = slice_plan_gaps(slices, max_units=cap, costs=_costs_before(data))
+    gaps = slice_plan_gaps(slices, max_units=cap, fit=_fit_of(_costs_before(data)))
     clause = gaps.log_clause()
     assert "SLICE_SESSION_TURN0_CHARS" in clause
     assert "SLICE_SESSION_MAX_UNITS" not in clause

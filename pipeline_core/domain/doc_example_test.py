@@ -35,6 +35,7 @@ and is dropped, which is the same outcome as an example rustdoc marks
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from pipeline_core.domain.generation import PIPELINE_GEN_TEST_ORIGIN
@@ -65,40 +66,67 @@ class DocExample:
 
     code: str                 # hidden-line markers removed
     should_panic: bool = False
+    # Line of the opening fence within the item's joined doc text (0-based).
+    # rustdoc names the doc test by the item's first doc line plus this
+    # offset, which is how a re-hosted example is matched back to the
+    # reference doc test it came from (`domain.doc_stand_in`).
+    offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class DocFence:
+    """One fenced block of an item's doc text, runnable or not.
+
+    `skip_tag` names the rustdoc attribute that keeps it from running here
+    (`ignore`, `no_run`, `compile_fail`); a block in another language is not
+    a fence rustdoc tests and is not returned at all."""
+
+    offset: int
+    code: str
+    should_panic: bool = False
+    skip_tag: str = ""
+
+    @property
+    def runs(self) -> bool:
+        return not self.skip_tag
 
 
 def _fence_tags(info: str) -> set[str]:
     return {t.strip().lower() for t in info.replace(",", " ").split() if t.strip()}
 
 
-def doc_examples(doc: str) -> list[DocExample]:
-    """The examples of one item's doc text that rustdoc would run, in order.
+def doc_fences(doc: str) -> list[DocFence]:
+    """Every fenced block of one item's doc text that rustdoc treats as a doc
+    test, runnable or not, in order, with its opening line's offset.
 
     Each item's doc is read on its own, as rustdoc reads it, so a fence left
     open in one item cannot swallow the next. A closing fence is never taken
     for an opening one (`doc_tests._count_rust_fences` records what that
     mistake cost)."""
-    out: list[DocExample] = []
-    open_fence = False
-    keep = False
+    out: list[DocFence] = []
+    open_at: int | None = None
+    rust = False
     should_panic = False
+    skip_tag = ""
     lines: list[str] = []
-    for raw in doc.splitlines():
+    for i, raw in enumerate(doc.splitlines()):
         body = raw.strip()
         if body.startswith("```"):
-            if open_fence:
-                if keep and any(ln.strip() for ln in lines):
-                    out.append(DocExample("\n".join(lines).rstrip() + "\n",
-                                          should_panic))
-                open_fence, keep, lines = False, False, []
+            if open_at is not None:
+                if rust and any(ln.strip() for ln in lines):
+                    out.append(DocFence(open_at, "\n".join(lines).rstrip() + "\n",
+                                        should_panic, skip_tag))
+                open_at, rust, lines = None, False, []
                 continue
-            open_fence = True
+            open_at = i
             tags = _fence_tags(body[3:])
             edition = {t for t in tags if t.startswith("edition")}
-            keep = not (tags & _SKIP_ATTRS) and (tags - edition) <= _RUN_ATTRS
+            rust = (tags - edition) <= (_RUN_ATTRS | _SKIP_ATTRS)
+            skipped = sorted(tags & _SKIP_ATTRS)
+            skip_tag = skipped[0] if skipped else ""
             should_panic = "should_panic" in tags
             continue
-        if open_fence and keep:
+        if open_at is not None and rust:
             # One leading space is the doc comment's own; a `# ` line is
             # hidden from the rendered docs and still compiled.
             line = raw[1:] if raw.startswith(" ") else raw
@@ -111,6 +139,13 @@ def doc_examples(doc: str) -> list[DocExample]:
                 line = line[:len(line) - len(stripped)] + stripped[1:]
             lines.append(line)
     return out
+
+
+def doc_examples(doc: str) -> list[DocExample]:
+    """The examples of one item's doc text that rustdoc would run, in order
+    (:func:`doc_fences`, less the skipped ones)."""
+    return [DocExample(f.code, f.should_panic, f.offset)
+            for f in doc_fences(doc) if f.runs]
 
 
 def _is_inner_attr(line: str) -> bool:
@@ -145,6 +180,29 @@ def render_doc_example_test(example: DocExample, *, fn_name: str,
             f"fn doc_example_body() -> impl DocOutcome {{\n{body}\n}}\n\n"
             f"{attrs}fn {fn_name}() {{\n"
             "    DocOutcome::check(doc_example_body());\n}\n")
+
+
+def doc_example_names(stem: str, n: int) -> tuple[str, str]:
+    """`(file name, test fn name)` of the n-th kept example of a stem: the one
+    place both are spelled, read by the emitter that writes the file and by
+    the floor that names the test cargo reports for it."""
+    return f"{stem}_gen_{n}.rs", f"{stem}_example_{n}"
+
+
+def rendered_part(text: str) -> str:
+    """The part of a re-hosted example file the renderer wrote: from the
+    origin marker on. A world gate is written above the marker, and the
+    settle may rewrite it, so the identity of a rendered example excludes
+    it."""
+    marker = f"// {PIPELINE_GEN_TEST_ORIGIN}"
+    i = text.find(marker)
+    return text[i:] if i >= 0 else text
+
+
+def rendered_sha(text: str) -> str:
+    """The identity of a re-hosted example file: the hash of the part the
+    renderer wrote, which a later world-gate rewrite does not touch."""
+    return hashlib.sha256(rendered_part(text).encode("utf-8")).hexdigest()[:16]
 
 
 def doc_example_stem(src_file: str) -> str:

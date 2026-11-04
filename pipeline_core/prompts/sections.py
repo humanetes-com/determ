@@ -822,6 +822,54 @@ def render_types_section(
     return join_type_blocks(plain, cap)
 
 
+def render_types_section_for_viewers(
+    entries: Sequence[tuple[TypeRecord, str]],
+    observables: frozenset[str] = frozenset(),
+    *,
+    cap: int | None = None,
+) -> str:
+    """One TYPES_IN_SCOPE for a prompt that shows several files: each entry
+    is a record and the file it is rendered for (`viewer_file`), in rank
+    order. The blanket list is printed once, and a block whose rendering is
+    already in the section is not printed again — the same type seen from
+    two files renders the same unless a field's accessibility differs, and
+    then both renderings stay.
+
+    A session's section used to be one `render_types_section` per slice
+    file, concatenated with exact-string dedup of whole sections: on run
+    `3203804-8c6a0066`'s fill-5 session (2026-11-03) 6,660 of the section's
+    37,087 chars were blocks already printed above (`Result`, `Chain`,
+    `core::fmt::Formatter`, `std::backtrace::Backtrace`), and the blanket
+    list was printed once per file. `cap` behaves as in
+    `render_types_section`: later blocks drop whole, so rank order decides
+    what a narrower cap keeps."""
+    records = [r for r, _ in entries]
+    blanket = blanket_impl_block(records)
+
+    def _blocks(shown: bool) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for rec, viewer in entries:
+            block = _type_block(rec, observables, viewer_file=viewer,
+                                blankets_shown=shown)
+            if block in seen:
+                continue
+            seen.add(block)
+            out.append(block)
+        return out
+
+    if blanket:
+        shown = _blocks(True)
+        if cap is None:
+            return "\n\n".join([blanket, *shown])
+        if not shown or len(blanket) + 2 + len(shown[0]) <= cap:
+            return join_type_blocks([blanket, *shown], cap)
+    plain = _blocks(False)
+    if cap is None:
+        return "\n\n".join(plain)
+    return join_type_blocks(plain, cap)
+
+
 def _slot_fit_lines(f: FieldRecord, type_file: str) -> list[str]:
     """For a fn-pointer field, the crate fns that fit it — the only names a
     table literal can put there — or the statement that none does. Nothing

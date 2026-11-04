@@ -56,6 +56,7 @@ from pipeline_core.domain.fill_schedule import (
     UnitEvidence,
     call_price,
     premise_refused_last_fill,
+    release_capped,
     release_held,
     schedule,
     withhold_landed,
@@ -633,6 +634,8 @@ def _notify_wave(deps: FillExecutionDeps,
 def _outcome(report: RouteRunReport, delta: int) -> RunOutcome:
     if report.stopped:
         return RunOutcome.STOPPED
+    if report.unopenable:
+        return RunOutcome.UNOPENABLE
     if report.empty:
         return RunOutcome.EMPTY
     if report.declined:
@@ -1372,6 +1375,26 @@ def execute_fill(
             "released": [h.run.label for h in freed],
             "holders": sorted({labels.get(k, k) for h in freed
                                for k in h.held_by})})
+    def _give_back_cap(w: ScheduledRun) -> None:
+        nonlocal ordered
+        nxt = release_capped(sched.deferred, w.run.kind, released)
+        if nxt is None:
+            return
+        released.add(nxt.run.key)
+        ahead = list(ordered[i:])
+        at = next((n for n, x in enumerate(ahead)
+                   if x.position > nxt.position), len(ahead))
+        ahead.insert(at, nxt)
+        ordered = ordered[:i] + ahead
+        deps.log(
+            f"  [phase-c/schedule] fill {deps.iteration}: {w.run.label} "
+            f"could not open its prompt — its {w.run.kind.value} slot goes to "
+            f"{nxt.run.label} (ranked {nxt.reason})")
+        deps.emit("phase_c.fill.cap_released", data={
+            "cluster": deps.cluster, "iter": deps.iteration,
+            "unopenable": w.run.label, "released": nxt.run.label,
+            "kind": w.run.kind.value})
+
     while True:
         # The executor's own claim of its next run: a holder the last wave's
         # keeps measured, that no run ahead writes, opens here, ahead of the
@@ -1615,6 +1638,11 @@ def execute_fill(
             [(w.run.key, bool(row.kept))
              for w, row in zip(wave, rows[-len(wave):], strict=True)],
             _yielded, yield_origin))
+        # A run that could not open its prompt took a kind-cap slot at plan
+        # time and spent nothing; the next run the cap deferred opens in it.
+        for w, row in zip(wave, rows[-len(wave):], strict=True):
+            if row.outcome is RunOutcome.UNOPENABLE:
+                _give_back_cap(w)
         if unjudged and i < len(ordered):
             # The same exit as a moved premise: the rest of the plan was
             # planned on a tree no verdict describes. The fill returns and

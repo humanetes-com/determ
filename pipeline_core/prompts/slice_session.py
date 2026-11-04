@@ -25,7 +25,11 @@ from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.models import FnRecord, FnSite
 from pipeline_core.domain.prompt_holdings import FileView, file_block
-from pipeline_core.domain.slice_session import NOTES_CLOSE, NOTES_OPEN, SessionSlice
+from pipeline_core.domain.slice_session import (
+    NOTES_CLOSE,
+    NOTES_OPEN,
+    SessionSlice,
+)
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
 from pipeline_core.prompts.sections import tag_block
@@ -173,6 +177,7 @@ def build_slice_session_prompt(
     crash_evidence: str = "",
     behaviour_must: str = "",
     unit_notes: str = "",
+    omit: Collection[str] = (),
 ) -> str:
     """Turn 0 of a session over `slice_`.
 
@@ -206,7 +211,21 @@ def build_slice_session_prompt(
     `kind` is the stored verdict of that attempt when the record carries one;
     a faulting-call kind prefixes PRIOR_REGRESSION with the same
     `last_error_prefix` sentence the pair builder already uses, so the
-    quoted expression is an instruction not only evidence."""
+    quoted expression is an instruction not only evidence.
+
+    `omit` is the optional sections this ladder step has dropped
+    (`domain.slice_session.omitted_names`). The failing tests, the files,
+    the quoted tests and TYPES_IN_SCOPE are not in it: those narrow by
+    their own steps. An empty optional section emits no tag, the same rule
+    as every other builder, so an empty gotchas summary is absent rather
+    than an empty pair of tags."""
+    skipped = frozenset(omit)
+
+    def _opt(tag: str, content: str, *, prefix: str = "") -> str:
+        if tag in skipped:
+            return ""
+        return tag_block(tag, content, prefix=prefix)
+
     tests_part = "\n\n".join(
         f"* {t} — FAILING. It said:\n"
         + "\n".join(f"    {ln}" for ln in (target_evidence.get(t) or "(no captured output)").splitlines())
@@ -256,16 +275,11 @@ failing tests pass while EVERY other test in the suite stays green. You will
 be shown, after each change set, exactly what the assertions printed.
 
 Crate: {module_name} | Cluster: {cluster_name} | Session budget: {max_turns} turn(s)
-
-FAILING TESTS (the targets):
-
-{tests_part}
-{tag_block("UNIT_NOTES", unit_notes)}{tag_block("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{tag_block("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
-{tag_block("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{tag_block("PRIOR_REGRESSION", regression_body)}
-<RUST_GOTCHAS>
-{language_driver().gotchas_summary()}
-</RUST_GOTCHAS>
-{tag_block("REPOSITORY_SPECIFICATIONS", repo_spec_section(fr_path, file_rel=first_file), prefix="The crate's own specification documents. When your plan conflicts with them, follow the spec.\n")}{tag_block("DESIGN_BLUEPRINT", blueprint)}{tag_block("TYPES_IN_SCOPE", types_section)}{tag_block("BOUND_METHODS", bound_methods)}{tag_block("CLUSTER_INVARIANTS", invariants)}{tag_block("RECURRING_ERRORS", promoted_error_rules(fr_path))}{tag_block("MACROS", macros)}
+{tag_block("FAILING_TESTS", tests_part, prefix="The targets:\n")}
+{_opt("UNIT_NOTES", unit_notes)}{_opt("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{_opt("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
+{_opt("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{_opt("PRIOR_REGRESSION", regression_body)}
+{_opt("RUST_GOTCHAS", language_driver().gotchas_summary())}
+{_opt("REPOSITORY_SPECIFICATIONS", repo_spec_section(fr_path, file_rel=first_file), prefix="The crate's own specification documents. When your plan conflicts with them, follow the spec.\n")}{_opt("DESIGN_BLUEPRINT", blueprint)}{tag_block("TYPES_IN_SCOPE", types_section)}{_opt("BOUND_METHODS", bound_methods)}{_opt("CLUSTER_INVARIANTS", invariants)}{_opt("RECURRING_ERRORS", promoted_error_rules(fr_path))}{_opt("MACROS", macros)}
 THE SLICE — the crate fns the failing tests execute (plus the formatter
 implementers their dispatchers delegate to), per file; editable units are
 named in each FILE header, everything else in these files is read-only.

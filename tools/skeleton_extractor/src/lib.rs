@@ -817,6 +817,14 @@ macro_rules! documented {
         let m = recs.iter().find(|r| r.doc.contains("Expanded.")).unwrap();
         assert_eq!(m.cfg_predicates, vec!["outer_gate"]);
         assert!(m.doc.contains("let _ = 3;"), "{:?}", m.doc);
+        // Its line is the macro body's, not the expansion's, and the record
+        // says so; every syntactic doc says the opposite.
+        assert!(m.in_macro_body);
+        assert!(
+            recs.iter()
+                .filter(|r| !r.doc.contains("Expanded."))
+                .all(|r| !r.in_macro_body)
+        );
         assert!(recs[0].doc.contains("Crate doc") && recs[0].cfg_predicates.is_empty());
         assert_eq!(recs[0].line, 1);
         let a = recs.iter().find(|r| r.doc.contains("A.")).unwrap();

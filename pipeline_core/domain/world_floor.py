@@ -113,7 +113,23 @@ def judge_every_world(
         divergence={k: d for v in verdicts for k, d in v.divergence.items()},
         excused=frozenset().union(*(v.excused for v in verdicts)),
         excused_by_name=frozenset().union(*(v.excused_by_name for v in verdicts)),
+        # A doc test met through its stand-in in one world and advisory in
+        # another is advisory: the union is a statement about every world.
+        doc_stand_ins=(frozenset().union(*(v.doc_stand_ins for v in verdicts))
+                       - frozenset().union(*(v.advisory_unmet for v in verdicts))),
+        advisory_gaps=_world_gaps(verdicts),
     )
+
+
+def _world_gaps(verdicts: list[FloorVerdict]) -> dict[tuple[str, str], str]:
+    """Each advisory doc test's reasons, named by the world that gave them:
+    a doc test can stand in through its example in one world and not in
+    another (an example the original passes only under a world's cfg)."""
+    out: dict[tuple[str, str], list[str]] = {}
+    for v in verdicts:
+        for pair, gap in sorted(v.advisory_gaps.items()):
+            out.setdefault(pair, []).append(f"{v.cluster}: {gap}")
+    return {pair: "; ".join(gaps) for pair, gaps in out.items()}
 
 
 def excused_everywhere(

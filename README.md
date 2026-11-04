@@ -206,6 +206,88 @@ different scaffold.
 
 ---
 
+## Self-healing: the loop as a supervision tree
+
+The reconstruct loop borrows its recovery model from Erlang/OTP supervisors.
+A supervisor owns children at a scope. It **detects** that a child deviated,
+**restarts** it with a strategy, and **escalates** to its parent when restarts
+recur faster than its intensity allows. One OTP assumption does not hold here,
+and it shapes everything else. An actor restarted from a known-good state
+usually succeeds, because its failures are transient. A fill asked again with
+the same tree, the same oracle and the same evidence usually returns the same
+wrong body. A restart is therefore admitted only when its inputs have changed.
+A restart that would replay the last attempt escalates instead.
+
+### How it is applied today, with evidence
+
+| Scope | Detect | Restart | Escalate |
+|---|---|---|---|
+| unit (one fn, impl or file) | the fix loop's error-set signature; `domain/unit_clock.py` (`UNIT_BOUND`) | the fix loop's own retries; a retrospective written at give-up (`adapters/retros.py`) changes the unit's evidence fingerprint (`domain/evidence_premise.py`), which lifts its exclusion and re-admits it | `fully_exhausted` / `retro_gate`: the unit leaves dispatch |
+| fill (one schedule of routes) | `domain/fill_asks.py`: a run whose every target was asked under unmoved evidence | deferral to the next fill, which is re-planned from the sweep | the fill's wall clock (`FILL_PHASE_STOP`) |
+| tree (one cluster's sources) | the batch ratchet; the crash localizer and settler | the ratchet restores an older tree; heal restores `.best_tree`; the crash/layout retrigger re-stubs a component | the retrigger's attempt cap |
+| loop (one cluster's iterations) | the zero-payoff shadow (`domain/zero_payoff.py`, six axes: pass count, vanished tests, per-binary verdicts, aim, re-stub, first-failure sites); `flat_score.py`; the stall counter | none yet | the run stops: `NO_VERDICT_STOP`, `GPU_GUARD_STOP`, plateau exit, `NO_FRONTIER_STOP`, `UNSEEN_STOP` |
+| process | `lib/record_death.sh` is the pipeline's parent and records every exit in `logs/deaths.jsonl`; the flow auditor (`pipeline_core/audit.py`, checks C1–C14 every 15 minutes) reports invariant violations | none, deliberately: an unattended relaunch spends GPU nobody decided to spend | the operator |
+
+What the record says about this table:
+
+- **Restart must change the inputs.** Run `837207-ce5b1647` (2026-09-15)
+  kept three compiling, non-paying bodies, and the units that wrote them were
+  then excluded for three hours on a frontier of three. Nothing could tell a
+  re-ask with the same evidence from a re-ask with new evidence. The evidence
+  fingerprint is that distinction: the exclusion stands while what the next
+  prompt would carry is unchanged, and lapses once it changes.
+- **A restart that destroys progress has to tell every gate.** In run
+  `259637-36db9aad` (2026-08-07) the layout retrigger deliberately reverted
+  56 of 178 bodies. The re-admission gate kept comparing against the
+  high-water mark taken before the revert, so the loop never re-admitted a
+  unit again: nine hours, 148 fills, +5 tests. `domain/destruction_epoch.py`
+  now tells the gates that read that number.
+- **The loop scope has a detector and no reaction.** Over every recorded run,
+  the zero-payoff shadow fired 46 times in 28 runs: 26 vindicated, 6 false
+  alarms, 14 unresolved, and 13 authoritative stops it missed
+  (`python scripts/zp_shadow_calibration.py`). A stop must never fire on a
+  climb that was about to pay, so this detector cannot be given a stop.
+- **The end-game is where the loop deviates.** In 43 runs, 106 of the 128
+  iterations entered with 15 or fewer failing tests moved no verdict. Only
+  32 of the 724 fills inside them paid; the dominant classes were a wrong
+  body (315) and a verdict the body could not reach (216). Run
+  `171582-cb964fb9` spent 21 consecutive iterations at 3 failing tests. Run
+  `1680589-7a6824f8` sat at 158 for four sweeps and then closed its cluster
+  green, so any escalation has to be judged per red test, never by a
+  cluster-wide flat counter.
+- **Today the operator is the loop's supervisor.** Since 2026-10-01, 59 of
+  the 82 recorded process exits were a `TERM` from outside.
+
+### The direction (planned, not built)
+
+One supervisor at the loop scope, built from the pieces above:
+
+1. **One progress verdict per sweep.** The six axes the shadow already reads
+   become the single verdict that the stall counter, the flat-score guard and
+   the no-verdict clock all read, instead of each counting its own way.
+2. **A retrospective of measured facts, keyed on the facts.** For a red test
+   that made no progress, the retrospective records what was measured: the
+   failing assertion, the observed value, the first-failure site, the bodies
+   on the test's executed path and their hashes, and the blocker the verdict
+   could not get past. The model's diagnosis may ride along, but it is outside
+   the key, so the same facts worded twice are one attempt.
+3. **A scoped, non-destructive restart.** The red test's units are offered
+   again only when the retrospective holds a fact no earlier unpaid attempt
+   was given, and the fact goes into the prompt builder that route uses.
+   Nothing is reverted, so a false alarm costs one aim, not a climb.
+4. **Restart intensity per red test, and escalation to the cluster.** A test
+   whose restarts stop producing new facts is withdrawn with a red-ledger
+   row: the test, its units, the last facts, and why nothing new exists. When
+   every owed red test is green or withdrawn, the cluster closes as failed,
+   naming them, and the next cluster is scored. The run is not stopped.
+
+The order is measure first: a census of whether changed-evidence retries
+pay where same-evidence retries did not; then shadow; then act. Any reaction
+that ends a cluster needs the same zero-false-alarm calibration the stops
+need.
+
+---
+
 ## Serving the model
 
 Self-hosted only — the pipeline never calls a cloud LLM. Three transports are

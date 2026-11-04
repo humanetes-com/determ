@@ -31,37 +31,38 @@ from pipeline_core.application.reconstruct.slice_session import (
 )
 from pipeline_core.domain.crash_keep import SameCrashJudge
 from pipeline_core.domain.models import FnRecord, FnSite
-from pipeline_core.domain.slice_session import SessionSlice, fit_turn0
+from pipeline_core.domain.slice_session import Rendering, SessionSlice, fit_turn0
 from pipeline_core.domain.test_results import BinaryResult, TestStateReading
 
-_THRESHOLDS = (36_000, 18_000, 9_000, 4_500)
+_THRESHOLDS = tuple(Rendering(t) for t in (36_000, 18_000, 9_000, 4_500))
+_WIDE = _THRESHOLDS[0]
 
 
-def _build(t: int) -> str:
+def _build(r: Rendering) -> str:
     # A fixed part plus one file rendered at threshold t.
-    return "p" * 50_000 + "f" * (t * 3)
+    return "p" * 50_000 + "f" * (r.file_chars * 3)
 
 
 def test_turn0_is_rebuilt_narrower_until_it_fits() -> None:
-    text, used = fit_turn0(_build, 36_000, _THRESHOLDS, 110_000)
-    assert used == 18_000 and len(text) <= 110_000
+    text, used = fit_turn0(_build, _WIDE, _THRESHOLDS, 110_000)
+    assert used == Rendering(18_000) and len(text) <= 110_000
     # Negative control: built once at the planned threshold.
-    assert len(_build(36_000)) > 110_000
+    assert len(_build(_WIDE)) > 110_000
 
 
 def test_nothing_is_sent_when_none_fits_and_no_capacity_builds_once() -> None:
     calls: list[int] = []
 
-    def counted(t: int) -> str:
-        calls.append(t)
-        return _build(t)
+    def counted(r: Rendering) -> str:
+        calls.append(r.file_chars)
+        return _build(r)
 
-    assert fit_turn0(counted, 36_000, _THRESHOLDS, 10_000) is None
+    assert fit_turn0(counted, _WIDE, _THRESHOLDS, 10_000) is None
     assert calls == [36_000, 18_000, 9_000, 4_500]
     # Negative control: the narrowest rendering was built and is over.
-    assert len(_build(4_500)) > 10_000
+    assert len(_build(_THRESHOLDS[-1])) > 10_000
     calls.clear()
-    assert fit_turn0(counted, 36_000, _THRESHOLDS, 0) == (_build(36_000), 36_000)
+    assert fit_turn0(counted, _WIDE, _THRESHOLDS, 0) == (_build(_WIDE), _WIDE)
     assert calls == [36_000]
 
 

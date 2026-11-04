@@ -78,7 +78,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                  - timedelta(days=7)).date().isoformat()
     opened = [r for r in rows
               if (r.get("share_minutes") or 0) > 0
-              and r.get("outcome") not in ("deferred", "empty")
+              and r.get("outcome") not in ("deferred", "empty", "unopenable")
               and r.get("started", "")[:10] >= (since or "")]
     print(f"route runs on a positive share since {since}: {len(opened)}")
     by_kind: dict[str, list[dict]] = defaultdict(list)

@@ -26,8 +26,9 @@ that does not exist yet.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pipeline_core.domain.abort_verdict import AbortPartition
@@ -42,6 +43,7 @@ from pipeline_core.domain.last_error import (
 )
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.rust_idents import container_identity
+from pipeline_core.domain.rust_scan import attributed_test_fn_names, without_test_fns
 
 NOTES_OPEN = "<NOTES>"
 NOTES_CLOSE = "</NOTES>"
@@ -52,16 +54,25 @@ class SessionSlice:
     """One session's work: the failing tests it answers for and the units
     it may write, with the units grouped by file for rendering.
 
-    ``file_chars`` is the rendering threshold the planner sized this
-    session at — files longer than it are condensed in turn 0 (editable
-    fns in full, the rest as signatures). ``0`` means the renderer's own
-    default; a narrower value is how a slice that no packing can split
+    ``file_chars``, ``tests_cut``, ``types_cap`` and ``context_drops`` are
+    the step of the turn-0 rendering ladder (:class:`Rendering`) the
+    planner found this slice's BUILT turn 0 fits at: files longer than
+    ``file_chars`` are condensed (editable fns in full, the rest as
+    signatures), a cut quotes each test file without its other ``#[test]``
+    fns, a positive ``types_cap`` bounds TYPES_IN_SCOPE below its own
+    budget, and ``context_drops`` omits that many optional sections
+    (:data:`CONTEXT_DROPS`), the probe's observed lines on the step past
+    the last of them. ``0`` / ``False`` / ``0`` / ``0`` is the renderer's
+    own default; a narrower step is how a slice that no packing can split
     fits under the turn-0 char capacity instead of being dropped.
     """
 
     tests: tuple[str, ...]
     units: tuple[FnSite, ...]
     file_chars: int = 0
+    tests_cut: bool = False
+    types_cap: int = 0
+    context_drops: int = 0
     #: Bodies the session puts on the tree before turn 0 and judges as one
     #: turn of its own (`file::fn`, body text). Empty for every slice but a
     #: joint ask's: a reverted run that turned red tests green and a sibling
@@ -87,6 +98,18 @@ class SessionSlice:
     @property
     def files(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(u.file for u in self.units))
+
+    @property
+    def rendering(self) -> Rendering:
+        return Rendering(self.file_chars, self.tests_cut, self.types_cap,
+                         self.context_drops)
+
+    def at(self, rendering: Rendering) -> SessionSlice:
+        """This slice rendered at ``rendering``."""
+        return replace(self, file_chars=rendering.file_chars,
+                       tests_cut=rendering.tests_cut,
+                       types_cap=rendering.types_cap,
+                       context_drops=rendering.context_drops)
 
     def label(self, seq: int | None = None) -> str:
         """Display string of the slice's counts. Optional ``seq`` is the plan
@@ -255,33 +278,335 @@ def _merge_pending(
     return groups
 
 
-def fit_turn0(build: Callable[[int], str], start: int,
-              thresholds: Sequence[int], capacity: int,
-              ) -> tuple[str, int] | None:
-    """The turn-0 prompt a session may send, and the file rendering
-    threshold it was built at. None when a positive ``capacity`` rejects
-    even the narrowest rendering: there is no prompt to send.
+@dataclass(frozen=True, slots=True)
+class Rendering:
+    """One step of the turn-0 rendering ladder: how the same slice is
+    rendered narrower when its turn 0, as built, is over the capacity.
 
-    The planner's charge (:class:`SliceCosts`) prices the slice it packed;
-    the session opens on that slice grown by its write set (installable and
-    coupled bodies) and carrying sections the charge does not price (notes,
-    prior regression, blueprint, probe readings). So the prompt is measured
-    as built: over ``capacity`` it is rebuilt at each narrower threshold in
-    ``thresholds``, the planner's own lever, until one fits. When none
-    fits the session is not opened. Run `3366333-dfeac80c` (2026-10-29):
-    charged 131,982 against 132,000 and sent 166,299 at the planned
-    threshold, because the narrowest rendering was still sent; the session
-    then ended on its transcript bound after 2 judged turns of 8.
-    ``capacity`` 0 is no capacity: built once at ``start`` and returned
-    even when that text is long."""
+    Every step keeps what the session may write: the editable fns render in
+    full at every step. What narrows is, in ladder order, (1) the
+    non-editable siblings of a file over ``file_chars`` (they become
+    signatures), (2) the quoted test files, which keep the slice's target
+    tests and every non-test item (helpers, in-file macros, ``use`` lines)
+    and drop the other ``#[test]`` fns, (3) TYPES_IN_SCOPE, cut at
+    ``types_cap`` from the end of its own rank (own-file body types first;
+    external and other-file types stay, because the file text already
+    shows the file's own types), then (4) the optional sections in
+    :data:`CONTEXT_DROPS`, one section per step, and last the probe's
+    observed lines. The panic quote, the editable files, the target tests
+    and the remaining types stay at every step: they are what a session is.
+
+    The ladder has more than file thresholds because files were not what
+    made sessions unopenable. Run `3203804-8c6a0066` (2026-11-03), fill 5:
+    13 of 19 turn 0 builds were over 132,000 at the narrowest file
+    threshold; on the session that did open (127,810 chars) the `<FILE>`
+    sections were about 35,000 at 18,000, against TYPES_IN_SCOPE 37,106,
+    a quoted behaviour test file of 15,372, macros, and the repository
+    specification, none of which a file threshold touches."""
+
+    file_chars: int = 0
+    tests_cut: bool = False
+    types_cap: int = 0
+    #: How many entries of :data:`CONTEXT_DROPS` this step has omitted,
+    #: from the front. One past the length of that tuple also omits the
+    #: probe's observed lines (:meth:`omits_observed`).
+    context_drops: int = 0
+
+    @property
+    def omits_observed(self) -> bool:
+        return self.context_drops > len(CONTEXT_DROPS)
+
+    def label(self) -> str:
+        parts = [f"files@{self.file_chars:,}" if self.file_chars else "files"]
+        if self.tests_cut:
+            parts.append("target tests only")
+        if self.types_cap:
+            parts.append(f"types<={self.types_cap:,}")
+        if self.context_drops > 0:
+            n = min(self.context_drops, len(CONTEXT_DROPS))
+            if n:
+                parts.append(f"without through {CONTEXT_DROPS[n - 1]}")
+            if self.omits_observed:
+                parts.append("panic quote only")
+        return ", ".join(parts)
+
+
+# Optional sections of a session's turn 0, dropped earliest first. One
+# rule, not a list of incidents: shared background, then the previous
+# session's own record, then this attempt's evidence. The probe's
+# observed lines are the step after the last name, because showing those
+# printed values is what the session route is for. A section the prompt
+# emits that is not here and not in :data:`KEPT_TAGS` has no step, and
+# the contract test of the builder fails.
+CONTEXT_DROPS: tuple[str, ...] = (
+    "RUST_GOTCHAS",
+    "RECURRING_ERRORS",
+    "CLUSTER_INVARIANTS",
+    "DESIGN_BLUEPRINT",
+    "BOUND_METHODS",
+    "MACROS",
+    "REPOSITORY_SPECIFICATIONS",
+    "PREVIOUS_SESSION_NOTES",
+    "PRIOR_REGRESSION",
+    "UNIT_NOTES",
+    "CRASH_EVIDENCE",
+    "BEHAVIOUR_RULES",
+)
+
+#: Tags a step never omits. FILE and TEST are one block per path.
+#: FAILING_TESTS stays; its observed lines are the step past
+#: :data:`CONTEXT_DROPS`. TYPES_IN_SCOPE narrows by ``types_cap``.
+KEPT_TAGS: frozenset[str] = frozenset({
+    "FAILING_TESTS", "TYPES_IN_SCOPE", "FILE", "TEST",
+})
+
+
+def omitted_names(context_drops: int) -> frozenset[str]:
+    """The optional sections ``context_drops`` has removed, from the front
+    of :data:`CONTEXT_DROPS`."""
+    if context_drops <= 0:
+        return frozenset()
+    return frozenset(CONTEXT_DROPS[:context_drops])
+
+
+def omits_observed(context_drops: int) -> bool:
+    """True on the step past the last optional section: the panic quote
+    stays and the probe's observed lines (or the packer's reserve) do not."""
+    return context_drops > len(CONTEXT_DROPS)
+
+
+def evidence_for_step(quote: str, observed: str, *, omit_observed: bool) -> str:
+    """One target's own words at this step. ``quote`` is the panic site.
+    ``observed`` is the probe's printed lines, or the packer's reserved
+    block of the same bound. The last ladder step drops ``observed`` and
+    keeps the quote: a session that cannot carry the probe still carries
+    what the test said."""
+    obs = "" if omit_observed else observed
+    return "\n".join(x for x in (quote, obs) if x)
+
+
+_SECTION_OPEN = re.compile(r"^<([A-Z][A-Z0-9_]*)((?:\s[^>\n]*)?)>", re.M)
+_SECTION_PATH = re.compile(r'path="([^"]*)"')
+
+
+def largest_sections(text: str, n: int = 5) -> tuple[tuple[str, int], ...]:
+    """The ``n`` largest top-level tagged sections of a built prompt, as
+    ``(name, chars)``, largest first; a ``<FILE path=…>`` or ``<TEST
+    path=…>`` section is named with its path. What a turn 0 that cannot
+    open is made of, read off the text the session would have sent.
+
+    Only tagged sections are visible. The failing tests' panic quotes and
+    observed lines are a ``<FAILING_TESTS>`` section so a reserve of probe
+    lines is named here and not mistaken for whichever tagged section is
+    next largest. The instruction preamble and the session protocol stay
+    outside tags; they are the output contract and are not a ladder step."""
+    out: list[tuple[str, int]] = []
+    pos = 0
+    while True:
+        m = _SECTION_OPEN.search(text, pos)
+        if m is None:
+            break
+        close = text.find(f"</{m.group(1)}>", m.end())
+        if close < 0:
+            pos = m.end()
+            continue
+        path = _SECTION_PATH.search(m.group(2) or "")
+        name = m.group(1) + (f" {path.group(1)}" if path else "")
+        out.append((name, close - m.end()))
+        pos = close
+    merged: dict[str, int] = {}
+    for name, size in out:
+        merged[name] = merged.get(name, 0) + size
+    return tuple(sorted(merged.items(), key=lambda kv: (-kv[1], kv[0]))[:n])
+
+
+def rendering_ladder(file_thresholds: Sequence[int],
+                     types_budget: int) -> tuple[Rendering, ...]:
+    """The rendering steps widest first: every file threshold, then the
+    narrowest threshold with the test files cut to the target tests, then
+    that with TYPES_IN_SCOPE at half, a quarter and an eighth of
+    ``types_budget`` (the section's own cap; ``0`` adds no types step),
+    then one step per :data:`CONTEXT_DROPS` entry, then the step that
+    also drops the probe's observed lines.
+
+    Sibling tests are cut before types because they are not this session's
+    evidence: the target tests are quoted whole at every earlier step, and
+    the helpers they call stay. The types steps come before the context
+    drops because their order is a ranking another history chose (a stub's
+    signature names few types, and from 2026-09-01 to 09-24 fills asked 65
+    times for a definition the prompt had not rendered). Lowering the cap
+    cuts that ranking from the end. Within a tier, types the file itself
+    declares sort last — the model already reads them in the file text —
+    and external and other-file types sort first, so a lower cap cuts
+    own-file body types first. The session builder does not pass the file
+    text into that ranker, so the bucket of types named only in sibling
+    bodies stays empty on this path. Context drops come last, one section
+    at a time, so the first step that fits has given up the shortest
+    prefix of :data:`CONTEXT_DROPS` and nothing after it."""
+    files = sorted({t for t in file_thresholds if t > 0}, reverse=True)
+    if not files:
+        return ()
+    steps = [Rendering(t) for t in files]
+    narrow = files[-1]
+    steps.append(Rendering(narrow, tests_cut=True))
+    if types_budget > 0:
+        steps.extend(Rendering(narrow, True, types_budget >> n)
+                     for n in range(1, 4) if types_budget >> n > 0)
+    tail = steps[-1]
+    steps.extend(replace(tail, context_drops=n)
+                 for n in range(1, len(CONTEXT_DROPS) + 2))
+    return tuple(steps)
+
+
+def fit_turn0(build: Callable[[Rendering], str], start: Rendering,
+              ladder: Sequence[Rendering], capacity: int,
+              ) -> tuple[str, Rendering] | None:
+    """The turn-0 prompt a session may send, and the ladder step it was
+    built at. None when a positive ``capacity`` rejects even the narrowest
+    step: there is no prompt to send.
+
+    The packer found the step this slice fits at on the tree it planned on
+    (:class:`Turn0Fit`, the same builder). The session opens on the tree as
+    it stands after the earlier runs of the fill: records re-read, the
+    bodies they kept frozen, the installable complement re-derived, the
+    assertion probe run. So the prompt is measured again as built: over
+    ``capacity`` it is rebuilt at each later step of ``ladder`` until one
+    fits. Run `3366333-dfeac80c` (2026-10-29): charged 131,982 against
+    132,000 and sent 166,299 at the planned threshold, because the
+    narrowest rendering was still sent; the session then ended on its
+    transcript bound after 2 judged turns of 8. A ``start`` that is not a
+    ladder step tries every step after it. ``capacity`` 0 is no capacity:
+    built once at ``start`` and returned even when that text is long."""
     text = build(start)
     if capacity <= 0 or len(text) <= capacity:
         return text, start
-    for t in sorted((x for x in thresholds if x < start), reverse=True):
-        text = build(t)
+    later = (ladder[ladder.index(start) + 1:] if start in ladder
+             else tuple(ladder))
+    for step in later:
+        text = build(step)
         if len(text) <= capacity:
-            return text, t
+            return text, step
     return None
+
+
+#: The bound on one target test's `observed:` lines (the assertion probe's
+#: printed operands) in a session's turn 0. The probe runs cargo when the
+#: session opens, so the packer cannot read its output; it reserves this
+#: bound per test instead, and the session cuts at it. Measured 2026-11-03
+#: over the 6,000 most recent logged prompts: 1,375 observed blocks in 235
+#: prompts, p50 302, p90 1,676, p99 4,340, max 4,412 chars — so the bound
+#: has cut none of them, and a value printed past it is the exception the
+#: marker names.
+SESSION_OBSERVED_MAX_CHARS = 4_500
+
+
+def bound_observed(text: str, max_chars: int = SESSION_OBSERVED_MAX_CHARS,
+                   ) -> str:
+    """``text`` (`observed:` lines) within ``max_chars``: whole lines while
+    they fit, then one line saying how many were not shown. A first line
+    longer than the bound is cut and marked. ``max_chars`` 0 is no bound."""
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    lines = text.split("\n")
+    kept: list[str] = []
+    used = 0
+    for n, line in enumerate(lines):
+        rest = len(lines) - n
+        marker = f"… {rest} more observed line(s) not shown"
+        sep = 1 if kept else 0
+        tail = len(marker) + 1 if rest > 1 else 0
+        if used + sep + len(line) + tail <= max_chars:
+            kept.append(line)
+            used += sep + len(line)
+            continue
+        if not kept:
+            room = max_chars - (len(marker) + 1 if rest > 1 else 0) - 1
+            kept.append(line[:max(0, room)] + "…")
+            rest -= 1
+            if rest:
+                kept.append(f"… {rest} more observed line(s) not shown")
+        else:
+            kept.append(marker)
+        break
+    return "\n".join(kept)[:max_chars]
+
+
+def quoted_test_for_targets(text: str, targets: Collection[str]) -> str:
+    """A quoted test file cut to the session's target tests: every other
+    `#[test]` fn removed whole, every non-test item (helpers the targets
+    call, in-file macros, `use` lines, modules) kept. The file whole when it
+    holds none of the targets, nothing else, or a name that cannot be
+    removed unambiguously (`rust_scan.without_test_fns` refuses): a quote
+    that might have lost what a target calls is not a narrower quote."""
+    want = {_bare_test(t) for t in targets}
+    declared = attributed_test_fn_names(text)
+    if not want & set(declared):
+        return text
+    others = [n for n in dict.fromkeys(declared) if n not in want]
+    if not others:
+        return text
+    cut = without_test_fns(text, others)
+    return text if cut is None else cut
+
+
+@dataclass(frozen=True, slots=True)
+class Turn0Fit:
+    """Whether a packing can open: the length of the turn 0 the SESSION
+    BUILDER produces for it, at each :class:`Rendering` step, against the
+    capacity. The packer's only verdict.
+
+    ``length`` builds the slice's turn 0 with the builder the session
+    itself sends from (the write set grown, every section included, the
+    probe's observed lines reserved at their bound), on the tree the plan
+    reads. The packer used to decide on an estimate (:class:`SliceCosts`)
+    of the planned units, and the session opened on its write set: run
+    `3203804-8c6a0066` (2026-11-03) planned 19 sessions whose charges were
+    121,121 to 130,369 against 132,000, and 13 of them were over at the
+    narrowest rendering when built — 11 widened by their installable and
+    coupled bodies (6 → 14, 12 → 17, 14 → 22 units), two not widened and
+    still over on sections the estimate did not price. Each took a
+    per-fill session slot from a session that would have opened.
+
+    Lengths are memoised per (tests, units, step): the packer asks the same
+    packing several times while it places tests. ``capacity`` 0 is no
+    capacity: every packing fits at the widest step."""
+
+    length: Callable[[SessionSlice], int]
+    ladder: tuple[Rendering, ...]
+    capacity: int
+    _memo: dict[tuple[frozenset[str], frozenset[FnSite], Rendering], int] = field(
+        default_factory=dict, compare=False, repr=False)
+
+    def widest(self) -> Rendering:
+        return self.ladder[0] if self.ladder else Rendering()
+
+    def length_at(self, tests: Collection[str], units: Collection[FnSite],
+                  at: Rendering) -> int:
+        key = (frozenset(tests), frozenset(units), at)
+        hit = self._memo.get(key)
+        if hit is None:
+            hit = self.length(SessionSlice(
+                tests=tuple(sorted(key[0])),
+                units=tuple(sorted(key[1], key=lambda u: (
+                    u.file, u.fn_name, u.container)))).at(at))
+            self._memo[key] = hit
+        return hit
+
+    def rendering(self, tests: Collection[str],
+                  units: Collection[FnSite]) -> Rendering | None:
+        """The widest step at which this packing's built turn 0 fits, or
+        None when none does."""
+        if self.capacity <= 0:
+            return self.widest()
+        for step in self.ladder or (Rendering(),):
+            if self.length_at(tests, units, step) <= self.capacity:
+                return step
+        return None
+
+    def fits_widest(self, tests: Collection[str],
+                    units: Collection[FnSite]) -> bool:
+        return (self.capacity <= 0
+                or self.length_at(tests, units, self.widest()) <= self.capacity)
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,10 +636,10 @@ class SliceCosts:
     were refused a session on every fill of 2026-09-16.
 
     A narrower threshold buys room without costing the session anything it
-    may write: the editable fns render in full at every threshold. So the
-    same slice has a cost per threshold and :meth:`fit_threshold` answers
-    the question the planner asks — the WIDEST rendering this packing fits
-    in, or ``None`` when even the narrowest is over capacity.
+    may write: the editable fns render in full at every threshold. The
+    planner does not ask this table whether the slice fits. It asks
+    :class:`Turn0Fit`, which measures the session builder's own text. This
+    table is the ``charged`` figure printed beside that length.
 
     ``types_chars`` is the TYPES_IN_SCOPE section each file's units pull in
     (the largest single section of the recorded prompt: 81,217 of 253,828
@@ -325,6 +650,13 @@ class SliceCosts:
     invariants: ~50k on the recorded prompt); ``max_chars`` the capacity a
     turn-0 prompt may reach — the caller's share of the single-call limit,
     leaving the rest for the session's result turns.
+
+    It is an ESTIMATE of the planned units and is printed beside the built
+    length (`charged` on `phase_c.session.turn0`); it decides nothing. The
+    packer decides on :class:`Turn0Fit`, the session builder's own text: on
+    run `3203804-8c6a0066` (2026-11-03) this estimate admitted 13 sessions
+    the builder then could not send, because the session opens on its write
+    set and carries sections the estimate does not price.
     """
 
     file_chars: Mapping[int, Mapping[str, int]]
@@ -357,29 +689,12 @@ class SliceCosts:
                 + sum(self.test_chars.get(t, 0) for t in tests)
                 + sum(self.evidence_chars.get(t, 0) for t in tests))
 
-    def fits(self, tests: Collection[str], units: Collection[FnSite],
-             *, file_chars: int | None = None) -> bool:
-        return (self.max_chars <= 0
-                or self.chars(tests, units, file_chars=file_chars)
-                <= self.max_chars)
-
-    def fit_threshold(self, tests: Collection[str],
-                      units: Collection[FnSite]) -> int | None:
-        """The widest rendering threshold at which this packing fits, or
-        ``None`` when none does. ``0`` means no capacity is in force."""
-        if self.max_chars <= 0:
-            return self.widest()
-        for t in self.thresholds:
-            if self.chars(tests, units, file_chars=t) <= self.max_chars:
-                return t
-        return None
-
 
 def _fit_under_cap(
     names: Sequence[str],
     pending: Mapping[str, frozenset[FnSite]],
     max_units: int,
-    costs: SliceCosts | None = None,
+    fit: Turn0Fit | None = None,
 ) -> tuple[list[tuple[list[str], set[FnSite]]], list[str], list[str]]:
     """Pack one merged group whose UNION is over the cap into sessions that
     are each under it, without truncating any test's slice.
@@ -392,8 +707,9 @@ def _fit_under_cap(
     the cap, else it opens a session. Deterministic; the same inputs pack
     the same way on every call.
 
-    With `costs`, a session has a second capacity: its turn-0 prompt in
-    characters (:class:`SliceCosts`). Joining prefers the WIDEST rendering:
+    With `fit`, a session has a second capacity: its turn-0 prompt in
+    characters, as the session builder builds it (:class:`Turn0Fit`).
+    Joining prefers the WIDEST rendering:
     a test joins a session only when the union still fits with every file
     rendered whole, so a group that can be split is split rather than
     condensed. A test that fits no session that way opens its own, which
@@ -416,13 +732,13 @@ def _fit_under_cap(
         if len(units) > max_units:
             over_units.append(test)
             continue
-        if costs is not None and costs.fit_threshold((test,), units) is None:
+        if fit is not None and fit.rendering((test,), units) is None:
             over_chars.append(test)
             continue
         fits = [i for i, (held_tests, held) in enumerate(bins)
                 if len(held | units) <= max_units
-                and (costs is None
-                     or costs.fits([*held_tests, test], held | units))]
+                and (fit is None
+                     or fit.fits_widest([*held_tests, test], held | units))]
         if not fits:
             bins.append(([test], set(units)))
             continue
@@ -476,6 +792,9 @@ class SlicePlanGaps:
     over_chars_single: int = 0
     #: Planned sessions rendered narrower than the widest threshold to fit.
     condensed: int = 0
+    #: The tests behind ``over_chars_single``, in name order: the session
+    #: route reports each with its built length and its largest sections.
+    over_chars_tests: tuple[str, ...] = ()
 
     def log_clause(self) -> str:
         parts: list[str] = []
@@ -522,11 +841,12 @@ class SlicePlanGaps:
 
 def _group_needs_packing(
     names: Sequence[str], members: Collection[FnSite], max_units: int,
-    costs: SliceCosts | None,
+    fit: Turn0Fit | None,
 ) -> tuple[bool, bool]:
     """(over the unit cap, over the char capacity) for one merged group."""
     over_units = len(members) > max_units
-    over_chars = costs is not None and not costs.fits(names, members)
+    over_chars = (not over_units and fit is not None
+                  and not fit.fits_widest(names, members))
     return over_units, over_chars
 
 
@@ -535,7 +855,7 @@ def slice_plan_gaps(
     *,
     held_tests: Collection[str] = (),
     max_units: int = 32,
-    costs: SliceCosts | None = None,
+    fit: Turn0Fit | None = None,
 ) -> SlicePlanGaps:
     """The drop reasons ``plan_slices`` applies and the packing it did,
     counted separately."""
@@ -548,25 +868,24 @@ def slice_plan_gaps(
     n_over_chars = 0
     n_over_chars_single = 0
     n_condensed = 0
+    over_chars_tests: list[str] = []
     for names, members in _merge_pending(pending):
         if not names:
             continue
-        over_u, over_c = _group_needs_packing(names, members, max_units, costs)
+        over_u, over_c = _group_needs_packing(names, members, max_units, fit)
         if not over_u and not over_c:
-            if costs is not None and costs.fit_threshold(
-                    names, members) != costs.widest():
-                n_condensed += 1
             continue
         bins, dropped_units, dropped_chars = _fit_under_cap(
-            names, pending, max_units, costs)
+            names, pending, max_units, fit)
         n_over += len(dropped_units)
         n_over_chars_single += len(dropped_chars)
+        over_chars_tests.extend(dropped_chars)
         for t in dropped_units:
             over_units = max(over_units, len(pending[t]))
-        if costs is not None:
+        if fit is not None:
             n_condensed += sum(
                 1 for bt, bu in bins
-                if costs.fit_threshold(bt, bu) != costs.widest())
+                if fit.rendering(bt, bu) != fit.widest())
         if bins:
             if over_u:
                 n_over_union += 1
@@ -578,7 +897,8 @@ def slice_plan_gaps(
                          fitted=n_fitted, over_union=n_over_union,
                          fitted_from_units=fitted_from, over_chars=n_over_chars,
                          over_chars_single=n_over_chars_single,
-                         condensed=n_condensed)
+                         condensed=n_condensed,
+                         over_chars_tests=tuple(sorted(over_chars_tests)))
 
 
 def executing_tests(
@@ -629,7 +949,7 @@ def plan_slices(
     held_tests: Collection[str] = (),
     held_units: Collection[FnLocator] = (),
     max_units: int = 32,
-    costs: SliceCosts | None = None,
+    fit: Turn0Fit | None = None,
 ) -> list[SessionSlice]:
     """Group the failing tests into sessions: tests whose unit sets overlap
     share one session (the union). A HELD test (`held_tests`, from
@@ -653,17 +973,19 @@ def plan_slices(
     batches. Each packed session still holds every one of its tests' whole
     slices; no test is split across sessions.
 
-    With `costs` (:class:`SliceCosts`) a group under the unit cap whose
+    With `fit` (:class:`Turn0Fit`) a group under the unit cap whose BUILT
     turn-0 prompt would exceed the char capacity is packed too — by the
-    same first-fit — so a session is sized to leave its turns headroom
-    under the single-call limit. What packing cannot split, RENDERING
-    shrinks: every planned session carries the widest threshold it fits at
-    (`SessionSlice.file_chars`), and a single test that no packing can
-    divide opens as a session rendered narrower rather than being dropped.
-    Condensing costs the session nothing it may write — the editable fns
-    render in full at every threshold; what shrinks is the non-editable
-    siblings' bodies, which become signatures. A test is dropped only when
-    even the narrowest measured rendering is over the capacity.
+    same first-fit, which splits by tests and never truncates a test's
+    slice — so a session is sized to leave its turns headroom under the
+    single-call limit, and every slice emitted is one the session builder
+    could send on the tree the plan read. What packing cannot split,
+    RENDERING shrinks: every planned session carries the widest ladder
+    step it fits at (`SessionSlice.rendering`), and a single test that no
+    packing can divide opens as a session rendered narrower rather than
+    being dropped. Narrowing costs the session nothing it may write — the
+    editable fns render in full at every step. A test is dropped (to
+    `SlicePlanGaps.over_chars_single`) only when even the narrowest step is
+    over the capacity.
 
     Deterministic: tests sorted, units sorted, output ordered by first test.
     """
@@ -674,20 +996,20 @@ def plan_slices(
         if not names:
             continue
         groups: list[tuple[list[str], set[FnSite]]]
-        over_u, over_c = _group_needs_packing(names, members, max_units, costs)
+        over_u, over_c = _group_needs_packing(names, members, max_units, fit)
         if not over_u and not over_c:
             groups = [(list(names), set(members))]
         else:
             groups, _o_units, _o_chars = _fit_under_cap(
-                names, pending, max_units, costs)
+                names, pending, max_units, fit)
         for gnames, gmembers in groups:
-            out.append(SessionSlice(
+            sl = SessionSlice(
                 tests=tuple(sorted(dict.fromkeys(gnames))),
                 units=tuple(sorted(gmembers, key=lambda u: (
                     locator_of(u) not in held_locs,
-                    u.file, u.fn_name, u.container))),
-                file_chars=(0 if costs is None
-                            else costs.fit_threshold(gnames, gmembers) or 0)))
+                    u.file, u.fn_name, u.container))))
+            step = None if fit is None else fit.rendering(gnames, gmembers)
+            out.append(sl if step is None else sl.at(step))
     return out
 
 
@@ -696,13 +1018,19 @@ def slice_plan_payload(
     plans: Sequence[SessionSlice],
     gaps: SlicePlanGaps,
     costs: SliceCosts | None = None,
+    fit: Turn0Fit | None = None,
 ) -> dict[str, Any]:
     """The `phase_c.session.plan` event: what the engine handed
     `plan_slices` and what came back, emitted on every fill — a refusal
     included. Before this the refusal was one log line and the union it
     refused was not in `events.jsonl`, so the packing fixture for run
     `2965-453dd7a4` had to be computed from the owner-map event instead of
-    the engine's actual argument (hops and locator expansion included)."""
+    the engine's actual argument (hops and locator expansion included).
+
+    Per session, ``built`` is the length of the turn 0 the session builder
+    produced for it at its step (:class:`Turn0Fit`, the verdict) and
+    ``chars`` the estimate (:class:`SliceCosts`) beside it, so the
+    estimate's error is a number on every plan."""
     union: set[FnSite] = set()
     for units in slices.values():
         union.update(units)
@@ -721,11 +1049,17 @@ def slice_plan_payload(
         "over_chars_single": gaps.over_chars_single,
         "condensed": gaps.condensed,
         "thresholds": list(costs.thresholds) if costs is not None else [],
-        "max_chars": costs.max_chars if costs is not None else 0,
+        "max_chars": (fit.capacity if fit is not None
+                      else costs.max_chars if costs is not None else 0),
+        "ladder": ([r.label() for r in fit.ladder] if fit is not None else []),
         "slices": {t: sorted(site_label(u) for u in us)
                    for t, us in sorted(slices.items())},
         "sessions": [{"tests": list(p.tests), "units": len(p.units),
                       "file_chars": p.file_chars,
+                      "tests_cut": p.tests_cut, "types_cap": p.types_cap,
+                      "context_drops": p.context_drops,
+                      "built": (fit.length_at(p.tests, p.units, p.rendering)
+                                if fit is not None else None),
                       "chars": (costs.chars(p.tests, p.units,
                                             file_chars=p.file_chars or None)
                                 if costs is not None else None)}

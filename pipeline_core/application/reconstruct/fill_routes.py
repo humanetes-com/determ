@@ -67,6 +67,13 @@ class RouteRunReport:
     #: The route found nothing to do when it opened (the targets were
     #: served by an earlier run, or the plan was stale).
     empty: bool = False
+    #: Why an ``empty`` run opened nothing, when the reason is that its
+    #: prompt cannot be sent: a session whose turn 0, built on the tree as
+    #: it stood when it opened, is over the turn-0 capacity at the narrowest
+    #: rendering. It spent no model call and no session slot; the ledger
+    #: grades it UNOPENABLE, apart from EMPTY, and the fill gives its
+    #: kind-cap slot to the next run of its kind (`release_capped`).
+    unopenable: bool = False
     #: The route declined every target (empty bodies), nothing landed.
     declined: bool = False
     #: A graceful stop ended the run before it finished.

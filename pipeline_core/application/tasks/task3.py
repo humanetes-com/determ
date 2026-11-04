@@ -236,11 +236,14 @@ def run_clusters_strict(project_dir: Path, clusters: list[Any],
                     "excused_by_name": sorted(f"{a}::{b}" for a, b
                                               in verdict.excused_by_name),
                     "advisory_unmet": sorted(f"{a}::{b}" for a, b
-                                             in verdict.advisory_unmet)})
+                                             in verdict.advisory_unmet),
+                    "advisory_gaps": {f"{a}::{b}": g for (a, b), g
+                                      in sorted(verdict.advisory_gaps.items())},
+                    "doc_stand_ins": len(verdict.doc_stand_ins)})
             elif verdict.advisory_unmet:
                 log(f"  [task3/{cluster.name}] note: "
                     f"{len(verdict.advisory_unmet)} doc test(s) the original "
-                    "passes are absent here (not gated).")
+                    f"passes are absent here (not gated): {verdict.render_gaps()}.")
         log(f"  [task3/{cluster.name}] {status}: {reason} "
             f"(rc={rc}, {dt:.1f}s)")
         if status != ClusterStatus.PASS and deps.red_ledger is not None:

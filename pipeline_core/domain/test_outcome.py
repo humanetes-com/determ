@@ -36,7 +36,7 @@ from enum import StrEnum
 from pipeline_core.domain.abort_cause import AbortReading, read_abort
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnLocator, FnSite
-from pipeline_core.domain.reference_floor import doc_test_line
+from pipeline_core.domain.reference_floor import doc_test_head
 from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
 from pipeline_core.domain.test_results import (
     failure_bodies_for,
@@ -333,8 +333,9 @@ def test_leaf(name: str) -> str:
     tests sharing a leaf in different binaries read as one here, which can
     only refuse a claim more often, never admit one whose tests moved."""
     n = name.strip()
-    if doc_test_line(n) is not None:
-        n = n.rpartition(" (line ")[0].rstrip()
+    doc_head = doc_test_head(n)
+    if doc_head is not None:
+        n = doc_head
     head, sep, tail = n.rpartition("#")
     if sep and tail.isdigit():
         n = head

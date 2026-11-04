@@ -45,7 +45,7 @@ from pipeline_core.domain.fill_schedule import RouteLedgerRow, RunOutcome
 __all__ = ["FillAsks"]
 
 _ASKED_NOTHING = frozenset({RunOutcome.DEFERRED, RunOutcome.STOPPED,
-                            RunOutcome.EMPTY})
+                            *(o for o in RunOutcome if o.opened_nothing)})
 # A revert whose classes include a compile failure judged the JOINT write:
 # a narrower write (one block, one fn) can land what the joint could not, so
 # its units are not "asked under unchanged evidence". The per-block fallback

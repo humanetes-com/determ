@@ -35,6 +35,18 @@ _OTHER = FnSite("src/other.rs", "go", "free fn")
 _DEBUG_RENDER = FnSite("src/render.rs", "fmt", "impl fmt::Debug for Renderer")
 
 
+
+def _fit_of(costs):  # noqa: ANN001, ANN202 — a length table as the built fit
+    """A `Turn0Fit` whose builder's length is this table's: the packing
+    tests below are about where tests go given a length per packing and
+    rendering, and the table is how they state it."""
+    from pipeline_core.domain.slice_session import Rendering, Turn0Fit
+    return Turn0Fit(
+        length=lambda sl: costs.chars(sl.tests, sl.units,
+                                      file_chars=sl.file_chars or None),
+        ladder=tuple(Rendering(t) for t in costs.thresholds),
+        capacity=costs.max_chars)
+
 def test_tests_with_overlapping_slices_share_one_session() -> None:
     plans = plan_slices({
         "t_a": {_DISP, _RENDER},
@@ -603,10 +615,10 @@ def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_c
         file_chars={36_000: flat, 18_000: flat},
         test_chars={"t_a": 2_000, "t_b": 2_000}, fixed_chars=5_000,
         max_chars=60_000)
-    packed = plan_slices(leftover, costs=costs)
+    packed = plan_slices(leftover, fit=_fit_of(costs))
     assert [p.tests for p in packed] == [("t_a",), ("t_b",)]
     assert all(costs.chars(p.tests, p.units) <= 60_000 for p in packed)
-    gaps = slice_plan_gaps(leftover, costs=costs)
+    gaps = slice_plan_gaps(leftover, fit=_fit_of(costs))
     assert gaps.over_chars == 1 and gaps.over_union == 0 and gaps.fitted == 2
     assert "char capacity" in gaps.fitted_clause()
     # Control: unit-count packing alone keeps them together (union 3 <= 32).
@@ -617,19 +629,19 @@ def test_a_group_under_the_unit_cap_is_packed_when_its_prompt_is_over_the_char_c
     huge = {"src/a.rs": 70_000, "src/hub.rs": 10_000}
     too_big = SliceCosts(file_chars={36_000: huge, 18_000: huge},
                          test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
-    assert plan_slices({"t_a": {a, hub}}, costs=too_big) == []
-    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_chars_single == 1
-    assert slice_plan_gaps({"t_a": {a, hub}}, costs=too_big).over_cap == 0
+    assert plan_slices({"t_a": {a, hub}}, fit=_fit_of(too_big)) == []
+    assert slice_plan_gaps({"t_a": {a, hub}}, fit=_fit_of(too_big)).over_chars_single == 1
+    assert slice_plan_gaps({"t_a": {a, hub}}, fit=_fit_of(too_big)).over_cap == 0
     # The same single test opens when a NARROWER rendering fits it: the
     # planner condenses rather than dropping, and says which rendering.
     shrinks = SliceCosts(
         file_chars={36_000: huge, 18_000: {"src/a.rs": 55_000, "src/hub.rs": 10_000},
                     9_000: {"src/a.rs": 8_000, "src/hub.rs": 4_000}},
         test_chars={"t_a": 100}, fixed_chars=100, max_chars=60_000)
-    opened = plan_slices({"t_a": {a, hub}}, costs=shrinks)
+    opened = plan_slices({"t_a": {a, hub}}, fit=_fit_of(shrinks))
     assert [p.tests for p in opened] == [("t_a",)]
     assert opened[0].file_chars == 9_000
-    assert slice_plan_gaps({"t_a": {a, hub}}, costs=shrinks).condensed == 1
+    assert slice_plan_gaps({"t_a": {a, hub}}, fit=_fit_of(shrinks)).condensed == 1
 
 
 def test_a_hung_binary_renders_as_a_hang_and_regresses_at_any_gain() -> None:
