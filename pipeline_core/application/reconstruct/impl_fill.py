@@ -206,6 +206,7 @@ from pipeline_core.domain.last_error import (
     kind_from_record,
     kind_of_compiled_run,
 )
+from pipeline_core.domain.live_stubs import LiveStubs
 from pipeline_core.domain.llm_output import (
     ReplyAudit,
     bind_headerless_names,
@@ -644,25 +645,32 @@ class ImplFillDeps:
     parse_ok: Callable[[Path], bool] | None = None
 
 
-def cluster_active_stub_count(
+def cluster_live_stubs(
     target_src_dir: Path, cluster: BuildCluster | None,
     scan_records: Callable[..., list[dict[str, Any]] | None],
-) -> int | None:
-    """The number of stubs the cluster compiles — what the regression gate's
-    crash-only branch needs (`stub_free`). ``None`` when there is no cluster
-    or no scan: unknown is not zero, and the gate keeps its crash-only keep
-    on unknown.
+    cfg_dead: CfgDeadSites,
+) -> LiveStubs:
+    """The reader of the stubs the cluster compiles, run each time the
+    regression gate's crash-only branch asks (`stub_free`). Unknown when there
+    is no cluster or no scan: unknown is not zero, and the gate keeps its
+    crash-only keep on unknown.
 
-    Which sites the cluster never compiles is NOT read off the stub records
-    here any more: a stub difference forgets a dead fn once a route fills it.
-    That verdict is `cluster_membership.cluster_dead_sites`, over every fn
-    record."""
-    if cluster is None:
-        return None
-    active_recs = scan_records(target_src_dir, cluster)
-    if active_recs is None:   # extractor unavailable
-        return None
-    return len(active_recs)
+    It used to be a count taken once when the route call began. A route call
+    runs for hours, and a crash written after the last cluster-active stub
+    was filled was then kept until the next sweep's ratchet instead of being
+    reverted at once (`domain/live_stubs.py`). Which sites the cluster never
+    compiles is `cluster_membership.cluster_dead_sites`, over every fn
+    record: a stub difference forgets a dead fn once a route fills it."""
+    def _scan() -> frozenset[FnLocator] | None:
+        if cluster is None:
+            return None
+        active_recs = scan_records(target_src_dir, cluster)
+        if active_recs is None:   # extractor unavailable
+            return None
+        return frozenset(FnLocator(str(r.get("file", "")),
+                                   str(r.get("fn_name", "")))
+                         for r in active_recs)
+    return LiveStubs(scan=_scan, cfg_dead=cfg_dead)
 
 
 def cluster_scoped_splice(
@@ -1156,13 +1164,13 @@ def prepare_impl_fill(
     # module performs — block, file-first, free-fn reroute, last-resort — goes
     # through the cluster's own membership verdict exactly once.
     _cfg_dead_pairs = deps.cluster_dead_sites(target_src_dir, cluster)
-    _active_stub_count = cluster_active_stub_count(
-        target_src_dir, cluster, _scan_unimplemented_records_for_cluster)
-    # The cluster-active tree holds no hollow body as this call begins: the
-    # regression gate's crash-only keep has no hollow sibling to defer to,
-    # so a fill that newly crashes binaries is reverted at once (see
-    # `cargo_runner.test_regression_gate`, `stub_free`). Unknown ⇒ False.
-    stub_free = _active_stub_count == 0
+    # Whether the cluster-active tree holds no hollow body, read at each
+    # gate: the regression gate's crash-only keep then has no hollow sibling
+    # to defer to, so a fill that newly crashes binaries is reverted at once
+    # (see `cargo_runner.test_regression_gate`, `stub_free`). Unknown ⇒ False.
+    _live_stubs = cluster_live_stubs(
+        target_src_dir, cluster, _scan_unimplemented_records_for_cluster,
+        _cfg_dead_pairs)
     _splice_fn_with_where = cluster_scoped_splice(
         _splice_fn_with_where,
         inactive=_cfg_dead_pairs,
@@ -3055,7 +3063,7 @@ def prepare_impl_fill(
                     return (_test_regression_gate(
                         tdd_test_cmd, target_src_dir, cluster_env,
                         _baseline_test,
-                        stub_free=stub_free,
+                        stub_free=_live_stubs.free(),
                         introduced_stubs=bool(_peel_reverted or _crash_peeled),
                         hollow_before=_hollow_before,
                         written=[FnLocator(file_rel, b.fn_name)
@@ -4403,7 +4411,7 @@ def prepare_impl_fill(
                 # attempts skip it (tests can't run; deferred to the TDD loop).
                 _regr = (_test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _baseline_test,
-                    stub_free=stub_free, hollow_before=_hollow_before,
+                    stub_free=_live_stubs.free(), hollow_before=_hollow_before,
                     written=[FnLocator(block.file, n) for n in _impl_spliced])
                     if rc == 0 else None)
                 if _regr is not None:
@@ -5419,7 +5427,7 @@ def prepare_impl_fill(
                         check_cmd, target_src_dir, cluster_env)
                     _sv_regr = (_test_regression_gate(
                         tdd_test_cmd, target_src_dir, cluster_env, _sv_base,
-                        stub_free=stub_free,
+                        stub_free=_live_stubs.free(),
                         written=[FnLocator(block.file, m.fn_name) for m in (
                             *block.stub_members, *block.refill_members)])
                         if _sv_rc == 0 else None)
@@ -6136,7 +6144,7 @@ def prepare_impl_fill(
                                          target_src_dir, cluster_env)
                 _pair_regr = _test_regression_gate(
                     tdd_test_cmd, target_src_dir, cluster_env, _pair_baseline,
-                    stub_free=stub_free, hollow_before=_pair_hollow_before,
+                    stub_free=_live_stubs.free(), hollow_before=_pair_hollow_before,
                     written=[FnLocator(*_u.rsplit("::", 1))
                              for _u, _sig, _body, _c in _pair_landed])
                 if _pair_regr is not None:

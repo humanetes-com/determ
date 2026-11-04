@@ -175,7 +175,7 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch,
         tdd_frontier_tests=FailureFrontier.of_direct({unit: {"test_reading"}}),
         tdd_test_cmd="cargo test --offline --no-fail-fast",
         splice_check_lock=threading.Lock(), retros_cache={}, idiom_blocks=[],
-        pass_n=1, total=1, cluster_cfg_set=None, still_stubbed=frozenset())
+        pass_n=1, total=1, cluster_cfg_set=None)
     monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "2")
     result = fill.run(1, Stub(file="src/lib.rs", fn_name="reading",
                               container="impl Meter"), ctx=ctx)

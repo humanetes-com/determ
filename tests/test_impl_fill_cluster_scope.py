@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from pipeline_core.application.reconstruct.impl_fill import (
-    cluster_active_stub_count,
+    cluster_live_stubs,
     cluster_scoped_splice,
     file_first_guidance_keys,
 )
@@ -56,17 +56,34 @@ def _accepting_splice(calls: list[str]):
     return _splice
 
 
-def test_the_active_stub_count_is_what_the_cluster_compiles():
-    # The dead-site verdict moved to `cluster_membership.cluster_dead_sites`
-    # (tests/test_cluster_dead_sites.py); what stays here is the count the
-    # regression gate's `stub_free` reads.
-    assert cluster_active_stub_count(_SRC, _Cluster(), _scan) == 2
+def test_the_live_stubs_are_what_the_cluster_compiles():
+    # The dead-site verdict lives in `cluster_membership.cluster_dead_sites`
+    # (tests/test_cluster_dead_sites.py); what stays here is the reader the
+    # regression gate's `stub_free` asks.
+    from pipeline_core.domain.models import FnLocator
+    live = cluster_live_stubs(_SRC, _Cluster(), _scan, CfgDeadSites())
+    assert live.keys() == frozenset({FnLocator("wrapper.rs", "source"),
+                                     FnLocator("error.rs", "context")})
+    assert not live.free()
 
 
 def test_no_cluster_or_no_extractor_is_unknown_not_zero():
-    assert cluster_active_stub_count(_SRC, None, _scan) is None
-    assert cluster_active_stub_count(
-        _SRC, _Cluster(), lambda _d, _c: None) is None
+    assert cluster_live_stubs(_SRC, None, _scan, CfgDeadSites()).keys() is None
+    gone = cluster_live_stubs(_SRC, _Cluster(), lambda _d, _c: None,
+                              CfgDeadSites())
+    assert gone.keys() is None and not gone.free()
+
+
+def test_stub_free_is_read_when_the_gate_asks_not_when_the_call_began():
+    """A route call runs for hours. Its `stub_free` used to be a count taken
+    as the call began, so a crash written after the last cluster-active stub
+    was filled was kept until the next sweep instead of reverted at once."""
+    recs = [{"file": "lib.rs", "fn_name": "only"}]
+    live = cluster_live_stubs(_SRC, _Cluster(), lambda _d, _c: list(recs),
+                              CfgDeadSites())
+    assert not live.free()
+    recs.clear()   # a unit of the same call filled the last stub
+    assert live.free()
 
 
 def test_splice_refuses_a_body_for_a_fn_this_cluster_does_not_compile():

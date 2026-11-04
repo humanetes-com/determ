@@ -1128,6 +1128,13 @@ def test_a_real_regression_reverts_even_with_crash_evidence(
 # the fix loop must not spend calls on it (3.73 call-hours across 6 units on
 # the anyhow run `298540-f792975a`, 2026-08-12).
 
+def _stubs_now(*keys: Any) -> Any:
+    """A per-pass stub reader whose scan finds exactly `keys`."""
+    from pipeline_core.domain.live_stubs import LiveStubs
+    found = frozenset(keys)
+    return LiveStubs(scan=lambda: found)
+
+
 def _hub_ctx(ws: Path) -> PerFnPassCtx:
     from dataclasses import replace
 
@@ -1137,8 +1144,8 @@ def _hub_ctx(ws: Path) -> PerFnPassCtx:
         FnLocator("lib.rs", "spoke"): {"t_hub"},
     })
     return replace(_ctx(ws), tdd_frontier_tests=frontier,
-                   still_stubbed=frozenset({FnLocator("lib.rs", "answer"),
-                                            FnLocator("lib.rs", "spoke")}))
+                   stubs=_stubs_now(FnLocator("lib.rs", "answer"),
+                                       FnLocator("lib.rs", "spoke")))
 
 
 def _hub_reject() -> Any:
@@ -1171,8 +1178,8 @@ def test_sibling_blocked_rejection_is_kept_with_one_call(
 
 def test_the_same_rejection_unblocked_still_burns_the_fix_loop(
         tmp_path: Path) -> None:
-    """Negative control, by injection: with `still_stubbed` empty (spoke
-    filled) the same REJECT re-enters the fix loop and the pre-fix burn
+    """Negative control, by injection: with the scan no longer finding the
+    spoke (spoke filled) the same REJECT re-enters the fix loop and the pre-fix burn
     reproduces. If this stops failing U2 repeatedly, the test above proves
     nothing."""
     from dataclasses import replace
@@ -1184,13 +1191,272 @@ def test_the_same_rejection_unblocked_still_burns_the_fix_loop(
         FnLocator("lib.rs", "spoke"): {"t_hub"},
     })
     ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
-                  still_stubbed=frozenset({FnLocator("lib.rs", "answer")}))
+                  stubs=_stubs_now(FnLocator("lib.rs", "answer")))
     fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
                          body=("Ok(())", "R"))
     res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
                               ctx=ctx)
     assert not res.filled
     assert fake.ask_calls > 1, "the fix loop re-prompted (the measured burn)"
+
+
+# ---- the stub set the sibling-blocked check reads is the tree at the verdict
+# On run `994565-a5b000bb` (2026-11-04, fill 1) `src/error.rs::msg` was kept at
+# about minute 10; forty minutes later `src/error.rs::construct_from_adhoc`,
+# whose own body the crash settle had just blamed, was refused the fix loop
+# and stopped as unpayable "needs still-stubbed sibling src/error.rs::msg":
+# the per-pass context carried the stub set scanned when the pass began.
+
+
+def _live_file_stubs(src: Path) -> Any:
+    """The tree's stubs as the file text says now (what the engine's scan
+    reports, without the extractor)."""
+    from pipeline_core.domain.live_stubs import LiveStubs
+    from pipeline_core.domain.models import FnLocator
+    from pipeline_core.domain.rust_scan import stubbed_fn_names
+
+    def _scan() -> frozenset[Any]:
+        return frozenset(
+            FnLocator(p.name, n) for p in src.glob("*.rs")
+            for n in stubbed_fn_names(p.read_text()))
+    return LiveStubs(scan=_scan)
+
+
+def _hub_and_spoke_ws(tmp_path: Path) -> Path:
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text(
+        "pub fn answer() {\n unimplemented!()\n}\n"
+        "pub fn spoke() {\n unimplemented!()\n}\n")
+    return ws
+
+
+def _spoke_kept_by_another_unit(ws: Path) -> None:
+    (ws / "src" / "lib.rs").write_text(
+        "pub fn answer() {\n unimplemented!()\n}\n"
+        "pub fn spoke() {\n let _ = 1;\n}\n")
+
+
+def test_a_sibling_kept_after_the_pass_began_no_longer_stops_the_unit(
+        tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    ws = _hub_and_spoke_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+        FnLocator("lib.rs", "spoke"): {"t_hub"},
+    })
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  stubs=_live_file_stubs(ws / "src"))
+    _spoke_kept_by_another_unit(ws)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert "phase_c.fn.u2_sibling_blocked" not in fake.events
+    assert not res.blocked_by
+    assert fake.ask_calls > 1, "the fix loop ran on the unit's own failure"
+
+
+def test_negative_control_the_pass_start_set_stops_the_unit(
+        tmp_path: Path) -> None:
+    """The pre-fix input: the stub set read when the pass began, before the
+    spoke was kept. The identical attempt is refused the fix loop."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FnLocator
+    ws = _hub_and_spoke_ws(tmp_path)
+    frontier = FailureFrontier.of_direct({
+        FnLocator("lib.rs", "answer"): {"t_hub"},
+        FnLocator("lib.rs", "spoke"): {"t_hub"},
+    })
+    pass_start = _live_file_stubs(ws / "src").keys()
+    assert pass_start is not None
+    ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
+                  stubs=_stubs_now(*pass_start))
+    _spoke_kept_by_another_unit(ws)
+    fake = RecordingFill(run=(0, ""), u2=_hub_reject(), regr=None,
+                         body=("Ok(())", "R"))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=ctx)
+    assert "phase_c.fn.u2_sibling_blocked" in fake.events
+    assert res.blocked_by and fake.ask_calls == 1
+
+
+def test_the_engine_hands_each_unit_the_tree_not_the_pass_start_list(
+        tmp_path: Path) -> None:
+    """The engine's wiring, which the two tests above take as given: the
+    second unit of one pass reads a scan that no longer holds the first
+    unit's kept body. The pass-start list, which the context used to carry,
+    still holds it."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.models import FillResult, FnLocator
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(stub_records=[{"file": "lib.rs", "fn_name": "answer"},
+                                  {"file": "lib.rs", "fn_name": "spoke"}],
+                    stub_tuples=[])
+    pass_start = frozenset({FnLocator("lib.rs", "answer"),
+                            FnLocator("lib.rs", "spoke")})
+    seen: list[tuple[str, Any]] = []
+
+    class _KeepsEachUnit:
+        def run(self, idx: int, rec: Stub, *, ctx: PerFnPassCtx) -> FillResult:
+            seen.append((rec.fn_name, ctx.stubs.keys()))
+            fake.s["stub_records"] = [
+                r for r in fake.s["stub_records"] if r["fn_name"] != rec.fn_name]
+            return FillResult(file=rec.file, fn_name=rec.fn_name, filled=True,
+                              attempts=1)
+
+    eng = replace(_engine(fake, FillUnit.FN), fill_one=_KeepsEachUnit())
+    eng.run(ws, ws / "src", [], "m", "t", cluster=None, cluster_env={},
+            skip_end_pass_test=True)
+    assert [n for n, _ in seen] == ["answer", "spoke"]
+    assert seen[0][1] == pass_start
+    assert seen[1][1] == frozenset({FnLocator("lib.rs", "spoke")}), (
+        "the second unit reads the tree after the first unit's keep")
+    assert seen[1][1] != pass_start
+
+
+# The holder path. A keep admits the unit its tests now stop in, and that
+# unit is judged on the pass context (`_admitted_ctx`), which used to carry
+# the stub set scanned when the pass began. Run `994565-a5b000bb` (2026-11-04):
+# the admitted unit's own body crashed, and the pass-start set still named
+# the sibling kept earlier in that pass, so the fix loop was stopped.
+
+
+_KEPT_AND_JUDGED = (
+    "pub fn kept() {\n unimplemented!()\n}\n"
+    "pub fn judged() {\n unimplemented!()\n}\n"
+)
+_KEPT_FILLED = (
+    "pub fn kept() {\n let _ = 1;\n}\n"
+    "pub fn judged() {\n unimplemented!()\n}\n"
+)
+
+
+def _stub_records_of(src: Path) -> list[dict[str, str]]:
+    from pipeline_core.domain.rust_scan import stubbed_fn_names
+
+    return [{"file": p.name, "fn_name": n}
+            for p in sorted(src.glob("*.rs"))
+            for n in sorted(stubbed_fn_names(p.read_text()))]
+
+
+def _admitted_holder_pass(tmp_path: Path, *, freeze: bool) -> RecordingFill:
+    """One per-fn pass. `kept` is filled, then `judged` is admitted through
+    the holder queue with `kept` in its failing test's owner set. `freeze`
+    makes the scan keep returning the pass-start records."""
+    from dataclasses import replace
+
+    from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
+    from pipeline_core.domain.fill_schedule import HolderAdmission, HolderQueue
+    from pipeline_core.domain.models import FnLocator, FnSite
+    from pipeline_core.domain.test_report import U2Decision, U2Verdict
+
+    ws = _mk_ws(tmp_path)
+    src = ws / "src"
+    (src / "lib.rs").write_text(_KEPT_AND_JUDGED)
+    kept = FnLocator("lib.rs", "kept")
+    judged = FnLocator("lib.rs", "judged")
+    judged_site = FnSite("lib.rs", "judged", "")
+    cached: list[dict[str, str]] | None = None
+
+    def _scan(*_a: Any) -> list[dict[str, str]]:
+        nonlocal cached
+        found = _stub_records_of(src)
+        if not freeze:
+            return found
+        if cached is None:
+            cached = found
+        return list(cached)
+
+    class _Asks(RecordingFill):
+        def __init__(self, **scripted: Any) -> None:
+            super().__init__(**scripted)
+            self.by_fn: list[str] = []
+
+        def ask_per_fn_body(self, *a: Any, **k: Any) -> tuple[str | None, str]:
+            self.by_fn.append(a[1] if len(a) > 1 else "")
+            return super().ask_per_fn_body(*a, **k)
+
+        def u2_test_gate(self, _ground: Any, sites: Any, *_a: Any,
+                         **_k: Any) -> Any:
+            names = {s.fn_name for s in sites}
+            if "judged" in names:
+                return U2Verdict(U2Decision.REJECT,
+                                 self_failures=frozenset({"t_hub"}),
+                                 detail="red")
+            return U2Verdict.accept()
+
+        def test_regression_gate(self, *_a: Any, **kw: Any) -> Any:
+            written = kw.get("written") or ()
+            if any(getattr(w, "fn_name", "") == "judged" for w in written):
+                return _regressed()
+            return None
+
+    fake = _Asks(run=(0, ""), body=("Ok(())", "R"))
+    fake.scan_stub_records = _scan  # type: ignore[method-assign]
+    queue = HolderQueue()
+    real = _fill_one(fake)
+    seen: dict[str, Any] = {}
+
+    class _KeepsThenAdmits:
+        def run(self, idx: int, rec: Stub, *, ctx: PerFnPassCtx) -> Any:
+            if rec.fn_name == "judged":
+                seen["keys"] = ctx.stubs.keys()
+            res = real.run(idx, rec, ctx=ctx)
+            if rec.fn_name == "kept" and res.filled:
+                (src / "lib.rs").write_text(_KEPT_FILLED)
+                queue.admit(HolderAdmission(
+                    frozenset({judged}),
+                    ((judged_site, frozenset({"t_hub"})),)))
+            return res
+
+    eng = replace(_engine(fake, FillUnit.FN), fill_one=_KeepsThenAdmits())
+    eng._per_fn_passes(
+        project_dir=ws, target_src_dir=src, tests_dir_files=[],
+        module_name="m", cluster_name="t", cluster=None,
+        check_cmd="cargo check", cluster_env={}, max_passes=1,
+        leaf_name_counts=None, fr_path=None,
+        tdd_frontier_keys={kept}, skip_end_pass_test=True,
+        tdd_frontier_tests=FailureFrontier.of_direct({
+            kept: {"t_hub"}, judged: {"t_hub"},
+        }),
+        tdd_test_cmd="cargo test", crash_evidence=None, crash_blamed=None,
+        crash_blocked=None, culprits_of=None, dispatch_ranks=None,
+        behaviour_specs=(), _cfg_dead=CfgDeadSites(),
+        _is_cfg_dead=lambda _k: False, _dispatched=set(), _reverted=set(),
+        _answer_lost=set(), landed_before=lambda: 0, claim=lambda *_a, **_k: True,
+        claim_release=lambda: None, _landed_fn=set(),
+        holders=queue, take_holders=queue.take, admit_measured=lambda: None)
+    fake.s["seen_keys"] = seen.get("keys")
+    return fake
+
+
+def test_an_admitted_holder_enters_the_fix_loop_after_its_sibling_was_kept(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.models import FnLocator
+    fake = _admitted_holder_pass(tmp_path, freeze=False)
+    assert fake.s["seen_keys"] == frozenset({FnLocator("lib.rs", "judged")}), (
+        fake.logs[-12:])
+    assert fake.by_fn.count("judged") > 1, fake.by_fn
+    assert "phase_c.fn.u2_sibling_blocked" not in fake.events
+    assert not any("STOPPING" in m for m in fake.logs)
+
+
+def test_negative_control_the_pass_start_scan_stops_the_admitted_holder(
+        tmp_path: Path) -> None:
+    from pipeline_core.domain.models import FnLocator
+    fake = _admitted_holder_pass(tmp_path, freeze=True)
+    assert fake.s["seen_keys"] == frozenset({
+        FnLocator("lib.rs", "kept"), FnLocator("lib.rs", "judged")}), (
+        fake.logs[-12:])
+    assert fake.by_fn.count("judged") == 1, fake.by_fn
+    blocked = [d for ev, d in fake.event_data
+               if ev == "phase_c.fn.u2_sibling_blocked"]
+    assert blocked and blocked[0]["blocked_on"] == ["lib.rs::kept"]
+    assert any("STOPPING" in m and "judged" in m for m in fake.logs)
 
 
 # ---- coverage-unreached U2 rejection: the same refusal, measured ----
@@ -1211,7 +1477,7 @@ def _cov_ctx(ws: Path) -> PerFnPassCtx:
         FnLocator("lib.rs", "answer"): {"t_hub"},
     })
     return replace(_ctx(ws), tdd_frontier_tests=frontier,
-                   still_stubbed=frozenset())
+                   stubs=_stubs_now())
 
 
 def test_coverage_unreached_rejection_is_kept_with_one_call(
@@ -1292,7 +1558,7 @@ def test_a_conviction_is_refused_when_no_convictor_executes_the_body(
         FnLocator("lib.rs", "answer"): {"t_hub"},
     })
     ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
-                  still_stubbed=frozenset())
+                  stubs=_stubs_now())
     bind(CoverageSlice(owners={
         "t_hub": frozenset({FnSite("lib.rs", "elsewhere", "impl Hub")})}))
     try:
@@ -1326,7 +1592,7 @@ def test_without_the_reading_the_same_conviction_is_persisted(
         FnLocator("lib.rs", "answer"): {"t_hub"},
     })
     ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
-                  still_stubbed=frozenset())
+                  stubs=_stubs_now())
     bind(None)
     fake = RecordingFill(run=(1, "error[E0308]: mismatched types"),
                          body=("Ok(())", "R"))
@@ -1355,8 +1621,8 @@ def test_a_partially_blocked_rejection_still_enters_the_fix_loop(
         FnLocator("lib.rs", "spoke"): {"t_hub"},
     })
     ctx = replace(_ctx(ws), tdd_frontier_tests=frontier,
-                  still_stubbed=frozenset({FnLocator("lib.rs", "answer"),
-                                           FnLocator("lib.rs", "spoke")}))
+                  stubs=_stubs_now(FnLocator("lib.rs", "answer"),
+                                       FnLocator("lib.rs", "spoke")))
     reject = U2Verdict(U2Decision.REJECT,
                        self_failures=frozenset({"t_hub", "t_own"}),
                        detail="red")

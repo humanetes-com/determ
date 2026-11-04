@@ -13,7 +13,8 @@ from pipeline_core.domain.behaviour import BehaviourSpec
 from pipeline_core.domain.cfg import CfgSet
 from pipeline_core.domain.cfg_dead_sites import CfgDeadSites
 from pipeline_core.domain.crash_site import CrashSites
-from pipeline_core.domain.models import FillResult, FnLocator, ImplBlock, Stub
+from pipeline_core.domain.live_stubs import UNKNOWN_STUBS, LiveStubs
+from pipeline_core.domain.models import FillResult, ImplBlock, Stub
 from pipeline_core.domain.retro_gate import RetroGateTally
 from pipeline_core.ports.fill_engine import TreeLock
 
@@ -75,25 +76,22 @@ class PerFnPassCtx:
     # once per pass so "retires everything" and "retires nothing" are
     # distinguishable — both look like silence in per-unit lines alone.
     retro_gate: RetroGateTally = field(default_factory=RetroGateTally)
-    # Pass-start stub keys from the cluster-active TREE scan, BEFORE the
-    # frontier filter — exhaustion-skipped stubs must stay visible here (they
-    # left the frontier but still abort the test binary). Read by the
-    # sibling-blocked check before the U2 fix loop: a unit whose every
-    # failing attributed test needs one of these is kept-and-deferred instead
-    # of re-prompted (`domain/dispatch.sibling_blocked_u2_failures`).
-    still_stubbed: frozenset[FnLocator] = frozenset()
+    # The cluster-active stubs of the tree, read when a judge asks: the TREE
+    # scan before the frontier filter, so exhaustion-skipped stubs stay
+    # visible (they left the frontier but still abort the test binary). Two
+    # readers: the sibling-blocked check before the U2 fix loop
+    # (`domain/dispatch.sibling_blocked_u2_failures`) and the regression
+    # gate's `stub_free` (`stubs.free()`). A reader, not a set: a pass-start
+    # set held a sibling kept forty minutes earlier as a stub and stopped a
+    # unit whose own body had crashed (`domain/live_stubs.py`). The default
+    # is unknown, under which neither judge refuses anything.
+    stubs: LiveStubs = UNKNOWN_STUBS
     # The sites this cluster's build never compiles, stub or filled
     # (`cluster_membership.cluster_dead_sites`) — the dispatch-side cfg
     # verdict. Read by the retro gate: a conviction that recorded one of
     # these as a blocker can never see it fill, so it is not a tree premise
     # (`screen_guidance(cfg_dead=)`).
     cfg_dead: CfgDeadSites = CfgDeadSites()
-    # True when the cluster-active tree held NO hollow body at pass start.
-    # Read by the regression gate: a fill that newly crashes binaries in a
-    # stub-free tree has no hollow sibling to blame and is reverted at once,
-    # instead of being kept until the next sweep's ratchet while every later
-    # unit in the batch is judged with those binaries excluded.
-    stub_free: bool = False
     # The cluster's fn records at pass start (extractor dicts: `file`,
     # `fn_name`, `container`, `sig_text`, `cfg_predicates`), gen-tests
     # excluded: what the joint-write gate resolves a reply's extra `<FN>`

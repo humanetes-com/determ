@@ -188,7 +188,7 @@ def _run_unit(project: Path, monkeypatch: pytest.MonkeyPatch
             tdd_frontier_tests=FailureFrontier.of_direct({unit: {"test_size"}}),
             tdd_test_cmd=_TEST_CMD, splice_check_lock=threading.Lock(),
             retros_cache={}, idiom_blocks=[], pass_n=1, total=1,
-            cluster_cfg_set=None, still_stubbed=frozenset())
+            cluster_cfg_set=None)
         monkeypatch.setenv("PER_FN_RETRO_ROUNDS_MAX", "3")
         rec = Stub(file="src/lib.rs", fn_name="label", container="impl Gadget",
                    refill=True)

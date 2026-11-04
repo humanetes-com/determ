@@ -83,6 +83,7 @@ from pipeline_core.domain.fill_schedule import (
 )
 from pipeline_core.domain.joint_write import DEFAULT_JOINT_MAX
 from pipeline_core.domain.last_error import resolve_kind
+from pipeline_core.domain.live_stubs import LiveStubs
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -306,6 +307,18 @@ class PhaseCFillEngine:
             self.tel.emit("phase_c.refill.dangling_keys",
                           data={"keys": _dangling[:50]})
         return out
+
+    def _cluster_stubs(self, target_src_dir: Path, cluster: Any) -> list[Stub]:
+        """Every stub the cluster compiles on the tree as it is now, by
+        record when the extractor runs (container + sig_text), by name
+        otherwise. The one scan the pass start, the run plan and the live
+        stub reader share."""
+        recs = self.ws.scan_stub_records(target_src_dir, cluster)
+        if recs is not None:
+            return [Stub.from_dict(r) for r in recs]
+        return [Stub(file=f, fn_name=fn)
+                for f, fn in self.ws.scan_stub_tuples(
+                    target_src_dir, cluster).unit_list()]
 
     def _every_stub_key(self, target_src_dir: Path) -> frozenset[FnLocator]:
         """Every stub of the tree under no cluster filter — what "not a
@@ -823,25 +836,25 @@ class PhaseCFillEngine:
             # Every pass scans for stubs fresh. Cluster-aware: prefer record-based
             # scan (syn enumerator gives container + sig_text). Falls back to
             # name-only tuples when the extractor isn't available.
-            recs = self.ws.scan_stub_records(target_src_dir, cluster)
-            if recs is not None:
-                stubs = [Stub.from_dict(r) for r in recs]
-            else:
-                stubs = [Stub(file=f, fn_name=fn)
-                         for f, fn in self.ws.scan_stub_tuples(
-                             target_src_dir, cluster).unit_list()]
+            stubs = self._cluster_stubs(target_src_dir, cluster)
             # True remaining stub count BEFORE the frontier filter.
             _all_stubs_count = len(stubs)
             # Every cluster-active stub by body, before any filter: a holder
             # the claim gate hands this run is one of them, wherever the
             # frontier or the write set left it.
             _stub_by_site = {_site_of(st): st for st in stubs}
-            # Pass-start stub keys, also pre-filter: the sibling-blocked U2
-            # check needs every cluster-active stub, INCLUDING the
+            # The judges that ask "is this sibling still a stub" (the
+            # sibling-blocked U2 check, the regression gate's `stub_free`)
+            # read the tree when they judge, through the same pre-filter
+            # cluster scan: every cluster-active stub, INCLUDING the
             # exhaustion-skipped ones the frontier no longer carries — those
             # are exactly the blockers the recorded re-admission deadlock
-            # (`259637-36db9aad`) was locked behind.
-            _pass_stub_keys = frozenset(s.key for s in stubs)
+            # (`259637-36db9aad`) was locked behind. Never this pass-start
+            # list: a fill runs for hours (`domain/live_stubs.py`).
+            _live_stubs = LiveStubs(
+                scan=lambda: frozenset(
+                    s.key for s in self._cluster_stubs(target_src_dir, cluster)),
+                cfg_dead=_cfg_dead)
             # Restrict this pass to the TDD frontier's fns when supplied.
             if tdd_frontier_keys is not None:
                 stubs = [s for s in stubs if s.key in tdd_frontier_keys]
@@ -1069,12 +1082,8 @@ class PhaseCFillEngine:
                 crash_sites=crash_sites,
                 crash_blocked=crash_blocked,
                 culprits_of=culprits_of,
-                still_stubbed=_pass_stub_keys,
+                stubs=_live_stubs,
                 cfg_dead=_cfg_dead,
-                # Pass-start, cfg-aware: a stub the cluster never compiles
-                # cannot panic in its binaries and does not make the tree
-                # hollow for the gate's purpose.
-                stub_free=not any(not _is_cfg_dead(k) for k in _pass_stub_keys),
                 fn_records=tuple(_all_recs),
                 joint_max=self.config.per_fn_joint_max,
             )
@@ -1843,13 +1852,7 @@ class _PerFnRoute:
         eng = self._engine
         kw = self._kw
         keys: set[FnLocator] | None = kw["tdd_frontier_keys"]
-        recs = eng.ws.scan_stub_records(kw["target_src_dir"], kw["cluster"])
-        if recs is not None:
-            stubs = [Stub.from_dict(r) for r in recs]
-        else:
-            stubs = [Stub(file=f, fn_name=fn)
-                     for f, fn in eng.ws.scan_stub_tuples(
-                         kw["target_src_dir"], kw["cluster"]).unit_list()]
+        stubs = eng._cluster_stubs(kw["target_src_dir"], kw["cluster"])
         if keys is not None:
             stubs = [st for st in stubs if st.key in keys]
         # A cfg-dead site — stub or filled — is refused by the pass itself,

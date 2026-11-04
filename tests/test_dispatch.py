@@ -156,6 +156,13 @@ def test_file_units_keep_impl_headers_before_free_fn_blocks() -> None:
 from pipeline_core.domain.dispatch import (  # noqa: E402
     sibling_blocked_u2_failures,
 )
+from pipeline_core.domain.live_stubs import UNKNOWN_STUBS, LiveStubs  # noqa: E402
+
+
+def _now(*keys: FnLocator) -> LiveStubs:
+    """A tree whose scan finds exactly `keys` as stubs."""
+    found = frozenset(keys)
+    return LiveStubs(scan=lambda: found)
 
 HUB = FnLocator("src/error.rs", "error")
 SPOKE = FnLocator("src/error.rs", "msg")
@@ -165,8 +172,7 @@ SPOKE2 = FnLocator("src/ptr.rs", "boxed")
 def test_all_failures_held_by_stubbed_siblings_returns_the_blockers() -> None:
     dispatch = {HUB: {"t_a", "t_b"}, SPOKE: {"t_a"}, SPOKE2: {"t_b"}}
     held = sibling_blocked_u2_failures(
-        frozenset({"t_a", "t_b"}), HUB, dispatch,
-        frozenset({HUB, SPOKE, SPOKE2}))
+        frozenset({"t_a", "t_b"}), HUB, dispatch, _now(HUB, SPOKE, SPOKE2))
     assert held == frozenset({SPOKE, SPOKE2})
 
 
@@ -175,8 +181,7 @@ def test_one_unheld_failure_means_the_unit_owns_it() -> None:
     # the fix loop must run (returns None, not a partial blocker set).
     dispatch = {HUB: {"t_a", "t_b"}, SPOKE: {"t_a"}}
     assert sibling_blocked_u2_failures(
-        frozenset({"t_a", "t_b"}), HUB, dispatch,
-        frozenset({HUB, SPOKE})) is None
+        frozenset({"t_a", "t_b"}), HUB, dispatch, _now(HUB, SPOKE)) is None
 
 
 def test_the_unit_itself_never_counts_as_its_own_blocker() -> None:
@@ -185,7 +190,7 @@ def test_the_unit_itself_never_counts_as_its_own_blocker() -> None:
     # "blocked by a sibling".
     dispatch = {HUB: {"t_a"}}
     assert sibling_blocked_u2_failures(
-        frozenset({"t_a"}), HUB, dispatch, frozenset({HUB})) is None
+        frozenset({"t_a"}), HUB, dispatch, _now(HUB)) is None
 
 
 def test_a_filled_sibling_no_longer_blocks() -> None:
@@ -193,7 +198,50 @@ def test_a_filled_sibling_no_longer_blocks() -> None:
     # winnable now; the fix loop runs.
     dispatch = {HUB: {"t_a"}, SPOKE: {"t_a"}}
     assert sibling_blocked_u2_failures(
-        frozenset({"t_a"}), HUB, dispatch, frozenset({HUB})) is None
+        frozenset({"t_a"}), HUB, dispatch, _now(HUB)) is None
+
+
+def test_the_stub_set_is_read_at_the_verdict_not_when_the_reader_was_made(
+        ) -> None:
+    """A sibling kept after the pass handed out its reader no longer blocks.
+    The recorded shape: `msg` kept, then `construct_from_adhoc` judged against
+    a pass-start set that still held `msg` (run `994565-a5b000bb`)."""
+    tree = {HUB, SPOKE}
+    reader = LiveStubs(scan=lambda: frozenset(tree))
+    dispatch = {HUB: {"t_a"}, SPOKE: {"t_a"}}
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, dispatch, reader) == frozenset({SPOKE})
+    tree.discard(SPOKE)   # another unit of the same pass kept SPOKE
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, dispatch, reader) is None
+
+
+def test_negative_control_a_reader_frozen_at_pass_start_still_blocks() -> None:
+    """The pre-fix input: the set scanned when the pass began. The same
+    keep leaves the verdict naming SPOKE, the stop the fix removes."""
+    tree = {HUB, SPOKE}
+    frozen = frozenset(tree)
+    reader = LiveStubs(scan=lambda: frozen)
+    tree.discard(SPOKE)
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, {HUB: {"t_a"}, SPOKE: {"t_a"}},
+        reader) == frozenset({SPOKE})
+
+
+def test_an_unavailable_scan_blocks_nothing() -> None:
+    assert sibling_blocked_u2_failures(
+        frozenset({"t_a"}), HUB, {HUB: {"t_a"}, SPOKE: {"t_a"}},
+        UNKNOWN_STUBS) is None
+
+
+def test_a_dead_site_is_not_a_stub() -> None:
+    reader = LiveStubs(scan=lambda: frozenset({HUB, SPOKE}),
+                       cfg_dead=frozenset({SPOKE}))
+    assert reader.keys() == frozenset({HUB})
+    assert not reader.free()
+    assert LiveStubs(scan=lambda: frozenset({SPOKE}),
+                     cfg_dead=frozenset({SPOKE})).free()
+    assert not UNKNOWN_STUBS.free()
 
 
 def test_unattributed_and_empty_failures_are_the_units_own() -> None:
@@ -201,7 +249,7 @@ def test_unattributed_and_empty_failures_are_the_units_own() -> None:
     # conservative direction is to fix, not defer. No failures: nothing to
     # defer either.
     dispatch = {HUB: {"t_a"}, SPOKE: {"t_a"}}
-    stubs = frozenset({HUB, SPOKE})
+    stubs = _now(HUB, SPOKE)
     assert sibling_blocked_u2_failures(
         frozenset({"t_unknown"}), HUB, dispatch, stubs) is None
     assert sibling_blocked_u2_failures(frozenset(), HUB, dispatch, stubs) is None

@@ -9,12 +9,13 @@ compile-red narrowing, and which route covers a block.
 
 from __future__ import annotations
 
+from pipeline_core.domain.live_stubs import LiveStubs
 from pipeline_core.domain.models import FnLocator, Frontier, ImplBlock
 
 
 def sibling_blocked_u2_failures(
     failing_tests: frozenset[str], unit: FnLocator,
-    dispatch: Frontier, still_stubbed: frozenset[FnLocator],
+    dispatch: Frontier, stubs: LiveStubs,
 ) -> frozenset[FnLocator] | None:
     """The still-stubbed producers holding EVERY test in `failing_tests`, or
     None when at least one failure is this unit's own to fix.
@@ -42,11 +43,21 @@ def sibling_blocked_u2_failures(
     Conservative on ignorance, in both directions: a failing test absent
     from `dispatch` is unattributed, and an attributed test held by no
     still-stubbed sibling is the unit's own — either one returns None and
-    the fix loop runs. `still_stubbed` must be the pass-start TREE scan, not
-    the frontier: exhaustion-skipped stubs leave the frontier but still
-    abort the binary, and they are exactly the blockers the recorded
-    deadlock (`259637-36db9aad`) was locked behind."""
+    the fix loop runs; so does an unavailable stub scan.
+
+    `stubs` is the TREE scan, not the frontier: exhaustion-skipped stubs
+    leave the frontier but still abort the binary, and they are exactly the
+    blockers the recorded deadlock (`259637-36db9aad`) was locked behind. It
+    is read here, at the verdict, and not at the start of the pass: a sibling
+    kept earlier in the same fill is no longer a stub. On run
+    `994565-a5b000bb` (2026-11-04) a pass-start set still held
+    `src/error.rs::msg` forty minutes after it was kept, and refused the fix
+    loop to `src/error.rs::construct_from_adhoc`, whose own body had crashed
+    (`domain/live_stubs.py`)."""
     if not failing_tests:
+        return None
+    still_stubbed = stubs.keys()
+    if still_stubbed is None:
         return None
     blockers: set[FnLocator] = set()
     for t in failing_tests:

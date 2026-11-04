@@ -300,7 +300,7 @@ class FillOneFn:
             ctx.check_cmd, ctx.target_src_dir, ctx.cluster_env)
         _regr = (self.cargo.test_regression_gate(
             ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env, _base,
-            stub_free=ctx.stub_free, hollow_before=_hollow_before,
+            stub_free=ctx.stubs.free(), hollow_before=_hollow_before,
             written=(FnLocator(rel_file, fn_name),))
             if _rc == 0 else None)
         if _rc != 0 or _regr is not None:
@@ -1465,7 +1465,7 @@ class FillOneFn:
                         _held = sibling_blocked_u2_failures(
                             _v.self_failures, FnLocator(rel_file, fn_name),
                             ctx.tdd_frontier_tests.dispatch,
-                            ctx.still_stubbed)
+                            ctx.stubs)
                         if _held:
                             _blocked_by[:] = sorted(
                                 FnSite(k.file, k.fn_name, "")
@@ -1576,7 +1576,7 @@ class FillOneFn:
             if rc == 0 and _u2_fail_sig is None:
                 _regr = self.cargo.test_regression_gate(
                     ctx.tdd_test_cmd, ctx.target_src_dir, ctx.cluster_env,
-                    _attempt_baseline_test, stub_free=ctx.stub_free,
+                    _attempt_baseline_test, stub_free=ctx.stubs.free(),
                     hollow_before=_attempt_hollow_before,
                     written=(FnLocator(rel_file, fn_name), *(
                         FnLocator(u.file, u.fn_name)
