@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Collection, Iterable, Mapping
 
 from pipeline_core.domain.attribution import AttributionResult
+from pipeline_core.domain.body_ledger import OBSERVED as OBSERVED_KIND
 from pipeline_core.domain.body_ledger import (
     LedgerEntry,
     LedgerKey,
@@ -38,13 +39,56 @@ from pipeline_core.domain.body_ledger import (
 )
 from pipeline_core.domain.models import FnLocator, FnSite
 
-__all__ = ["ADVANCED", "advanced_past", "without_advanced", "stranded", "owning_view"]
+__all__ = ["ADVANCED", "OBSERVED", "advanced_past", "edges_on_tree",
+           "observed_by", "without_advanced", "stranded", "owning_view"]
 
 ADVANCED = "advanced"
+OBSERVED = OBSERVED_KIND
 
 
 def _bare(name: str) -> str:
     return name.rsplit("::", 1)[-1].strip()
+
+
+def edges_on_tree(entries: Iterable[LedgerEntry], *, oracle_fp: str,
+                  failing: Collection[str],
+                  body_now: Mapping[LedgerKey, str] | None = None,
+                  ) -> dict[str, dict[FnLocator, frozenset[str]]]:
+    """`bare test -> unit -> kinds`: every per-test edge the standing row of
+    each unit records for a still-failing test (`verdict_delta` kinds:
+    `advanced`, `observed`, …). The one reader of those edges; each meaning
+    is a view of it (:func:`advanced_past`, :func:`observed_by`), so two
+    readers cannot read the same row by two rules. Rows graded under another
+    oracle say nothing about this one (an empty `oracle_fp` matches nothing).
+
+    With `body_now` (the body on the tree per unit) the standing row is the
+    latest one about THAT body (`standing_on_tree`, the view dispatch reads):
+    an edge graded on a body since rewritten is not a claim about the tree,
+    and a body re-seeded at cluster entry brings its edge with it. Without
+    it, `latest_by_unit`, whose proven row outranks a later row about
+    another body. A unit absent from `body_now` has no standing row, so the
+    caller must put every unit that has an edge row in it."""
+    want = {_bare(t) for t in failing}
+    rows = list(entries)
+    standing = (standing_on_tree(rows, body_now) if body_now is not None
+                else latest_by_unit(rows))
+    out: dict[str, dict[FnLocator, set[str]]] = {}
+    for key, row in standing.items():
+        if not oracle_fp or row.oracle_fp != oracle_fp:
+            continue
+        for test, kind in row.verdict_delta:
+            if _bare(test) in want:
+                out.setdefault(_bare(test), {}).setdefault(
+                    FnLocator(key.file, key.fn_name), set()).add(kind)
+    return {t: {u: frozenset(ks) for u, ks in us.items()}
+            for t, us in out.items()}
+
+
+def _of_kind(edges: Mapping[str, Mapping[FnLocator, frozenset[str]]],
+             kind: str) -> dict[str, frozenset[FnLocator]]:
+    out = {t: frozenset(u for u, ks in us.items() if kind in ks)
+           for t, us in edges.items()}
+    return {t: us for t, us in out.items() if us}
 
 
 def advanced_past(entries: Iterable[LedgerEntry], *, oracle_fp: str,
@@ -52,26 +96,24 @@ def advanced_past(entries: Iterable[LedgerEntry], *, oracle_fp: str,
                   body_now: Mapping[LedgerKey, str] | None = None,
                   ) -> dict[str, frozenset[FnLocator]]:
     """`bare test -> units` that the standing row of each unit says advanced
-    that still-failing test. Rows graded under another oracle say nothing
-    about this one (an empty `oracle_fp` matches nothing).
+    that still-failing test (:func:`edges_on_tree`, kind `advanced` only:
+    an `observed` edge is evidence FOR the unit, and reading it here would
+    strip the producing body from the test it produces)."""
+    return _of_kind(edges_on_tree(entries, oracle_fp=oracle_fp,
+                                  failing=failing, body_now=body_now),
+                    ADVANCED)
 
-    With `body_now` (the body on the tree per unit) the standing row is the
-    latest one about THAT body (`standing_on_tree`, the view dispatch reads):
-    an advance graded on a body since rewritten is not a claim about the
-    tree. Without it, `latest_by_unit`, whose proven row outranks a later
-    row about another body."""
-    want = {_bare(t) for t in failing}
-    rows = list(entries)
-    standing = (standing_on_tree(rows, body_now) if body_now is not None
-                else latest_by_unit(rows))
-    out: dict[str, set[FnLocator]] = {}
-    for key, row in standing.items():
-        if not oracle_fp or row.oracle_fp != oracle_fp:
-            continue
-        for test, kind in row.verdict_delta:
-            if kind == ADVANCED and _bare(test) in want:
-                out.setdefault(_bare(test), set()).add(FnLocator(key.file, key.fn_name))
-    return {t: frozenset(us) for t, us in out.items()}
+
+def observed_by(entries: Iterable[LedgerEntry], *, oracle_fp: str,
+                failing: Collection[str],
+                body_now: Mapping[LedgerKey, str] | None = None,
+                ) -> dict[str, frozenset[FnLocator]]:
+    """`bare test -> units` whose standing body's own keep moved that
+    still-failing test at the statement that judges it (kind `observed`).
+    The owed walk owes those units first (`candidate_tiers.due_reading`)."""
+    return _of_kind(edges_on_tree(entries, oracle_fp=oracle_fp,
+                                  failing=failing, body_now=body_now),
+                    OBSERVED)
 
 
 def _strip[K: (FnLocator, FnSite)](

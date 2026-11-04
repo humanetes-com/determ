@@ -1,0 +1,490 @@
+{
+ "capacity": 132000,
+ "max_units": 32,
+ "run_id": "19493-36a4e056",
+ "sessions": [
+  {
+   "built": 121371,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_nightly_context_context_then_error_context_2"
+   ],
+   "tests_cut": true,
+   "types_cap": 20352,
+   "units": 16
+  },
+  {
+   "built": 129838,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_nightly_error_context_then_reallocate_into_boxed_2"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 17
+  },
+  {
+   "built": 126608,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_nightly_reach_0f6e5e5e_0"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 11
+  },
+  {
+   "built": 124472,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_nightly_reach_3e8877f2_0"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 12
+  },
+  {
+   "built": 121237,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_stable_context_context_then_error_context_2"
+   ],
+   "tests_cut": true,
+   "types_cap": 20352,
+   "units": 16
+  },
+  {
+   "built": 129702,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_stable_error_context_then_reallocate_into_boxed_2"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 17
+  },
+  {
+   "built": 126525,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_stable_reach_0f6e5e5e_0"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 11
+  },
+  {
+   "built": 124415,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "behaviour_probe_stable_reach_3e8877f2_0"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 12
+  },
+  {
+   "built": 130499,
+   "context_drops": 0,
+   "file_chars": 36000,
+   "tests": [
+    "behaviour_probe_stable_struct_equality_fail_0",
+    "test_downcast_ref"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 4
+  },
+  {
+   "built": 127430,
+   "context_drops": 0,
+   "file_chars": 18000,
+   "tests": [
+    "doc_error_example_6"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 19
+  },
+  {
+   "built": 127173,
+   "context_drops": 0,
+   "file_chars": 18000,
+   "tests": [
+    "doc_error_example_7"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 19
+  },
+  {
+   "built": 127119,
+   "context_drops": 0,
+   "file_chars": 36000,
+   "tests": [
+    "test_altdebug"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 16
+  },
+  {
+   "built": 120197,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "test_boxed_str"
+   ],
+   "tests_cut": true,
+   "types_cap": 20352,
+   "units": 26
+  },
+  {
+   "built": 126350,
+   "context_drops": 0,
+   "file_chars": 36000,
+   "tests": [
+    "test_downcast_high"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 13
+  },
+  {
+   "built": 126200,
+   "context_drops": 0,
+   "file_chars": 36000,
+   "tests": [
+    "test_downcast_low"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 14
+  },
+  {
+   "built": 126200,
+   "context_drops": 0,
+   "file_chars": 36000,
+   "tests": [
+    "test_downcast_mid"
+   ],
+   "tests_cut": false,
+   "types_cap": 0,
+   "units": 14
+  },
+  {
+   "built": 129651,
+   "context_drops": 0,
+   "file_chars": 4500,
+   "tests": [
+    "test_whitespace"
+   ],
+   "tests_cut": true,
+   "types_cap": 0,
+   "units": 19
+  }
+ ],
+ "slices": {
+  "behaviour_probe_nightly_context_context_then_error_context_2": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::context (impl Context<T,Infallible>for Option<T>)",
+   "src/context.rs::ext_context (impl StdError for E)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_context (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::object_drop",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_nightly_error_context_then_reallocate_into_boxed_2": [
+   "src/context.rs::fmt (impl Debug for ContextError<C,E>)",
+   "src/context.rs::fmt (impl Debug for Quoted<C>)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_adhoc (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::msg (impl Error)",
+   "src/error.rs::object_drop",
+   "src/error.rs::object_reallocate_boxed",
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace (impl Error)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/ptr.rs::boxed (impl Own<T>)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_nightly_reach_0f6e5e5e_0": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::context (impl Context<T,Infallible>for Option<T>)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_display (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_nightly_reach_3e8877f2_0": [
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_boxed (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::from_boxed (impl Error)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_stable_context_context_then_error_context_2": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::context (impl Context<T,Infallible>for Option<T>)",
+   "src/context.rs::ext_context (impl StdError for E)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_context (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::object_drop",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_stable_error_context_then_reallocate_into_boxed_2": [
+   "src/context.rs::fmt (impl Debug for ContextError<C,E>)",
+   "src/context.rs::fmt (impl Debug for Quoted<C>)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_adhoc (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::msg (impl Error)",
+   "src/error.rs::object_drop",
+   "src/error.rs::object_reallocate_boxed",
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace (impl Error)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/ptr.rs::boxed (impl Own<T>)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_stable_reach_0f6e5e5e_0": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::context (impl Context<T,Infallible>for Option<T>)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_display (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_stable_reach_3e8877f2_0": [
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_boxed (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::from_boxed (impl Error)",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "behaviour_probe_stable_struct_equality_fail_0": [
+   "src/error.rs::fmt (impl Display for Error)",
+   "src/fmt.rs::display (impl ErrorImpl)"
+  ],
+  "doc_error_example_6": [
+   "src/error.rs::backtrace (impl Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::downcast_ref (impl Error)",
+   "src/error.rs::from (impl From<E>for Error)",
+   "src/error.rs::into_boxed_dyn_error (impl Error)",
+   "src/error.rs::new (impl Error)",
+   "src/error.rs::object_boxed",
+   "src/error.rs::object_downcast",
+   "src/error.rs::provide (impl StdError for ErrorImpl<E>)",
+   "src/kind.rs::anyhow_kind (trait TraitKind)",
+   "src/kind.rs::new (impl Trait)",
+   "src/lib.rs::must_use (mod __private)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::boxed (impl Own<T>)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "doc_error_example_7": [
+   "src/error.rs::backtrace (impl Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::downcast_ref (impl Error)",
+   "src/error.rs::from (impl From<E>for Error)",
+   "src/error.rs::new (impl Error)",
+   "src/error.rs::object_downcast",
+   "src/error.rs::object_reallocate_boxed",
+   "src/error.rs::provide (impl StdError for ErrorImpl<E>)",
+   "src/error.rs::reallocate_into_boxed_dyn_error_without_backtrace (impl Error)",
+   "src/kind.rs::anyhow_kind (trait TraitKind)",
+   "src/kind.rs::new (impl Trait)",
+   "src/lib.rs::must_use (mod __private)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::boxed (impl Own<T>)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "test_altdebug": [
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::fmt (impl Debug for Error)",
+   "src/error.rs::fmt (impl Debug for ErrorImpl<E>)",
+   "src/error.rs::from (impl From<E>for Error)",
+   "src/error.rs::new (impl Error)",
+   "src/error.rs::object_drop",
+   "src/fmt.rs::debug (impl ErrorImpl)",
+   "src/kind.rs::anyhow_kind (trait TraitKind)",
+   "src/kind.rs::new (impl Trait)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::deref (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "test_boxed_str": [
+   "src/chain.rs::new (impl Chain<'a>)",
+   "src/chain.rs::next (impl Iterator for Chain<'a>)",
+   "src/error.rs::as_ref (impl AsRef<dyn StdError>for Error)",
+   "src/error.rs::chain (impl Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_boxed (impl Error)",
+   "src/error.rs::construct_from_std (impl Error)",
+   "src/error.rs::downcast_ref (impl Error)",
+   "src/error.rs::error (impl ErrorImpl)",
+   "src/error.rs::fmt (impl Display for Error)",
+   "src/error.rs::fmt (impl Display for ErrorImpl<E>)",
+   "src/error.rs::from_boxed (impl Error)",
+   "src/error.rs::object_downcast",
+   "src/error.rs::object_ref",
+   "src/error.rs::source (impl StdError for ErrorImpl<E>)",
+   "src/fmt.rs::display (impl ErrorImpl)",
+   "src/kind.rs::anyhow_kind (trait BoxedKind)",
+   "src/kind.rs::new (impl Boxed)",
+   "src/lib.rs::must_use (mod __private)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)",
+   "src/wrapper.rs::fmt (impl Display for BoxedError)",
+   "src/wrapper.rs::source (impl StdError for BoxedError)"
+  ],
+  "test_downcast_high": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::ext_context (impl StdError for E)",
+   "src/context.rs::ext_context (impl StdError for Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_context (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::context_chain_downcast",
+   "src/error.rs::context_chain_drop_rest",
+   "src/error.rs::downcast (impl Error)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "test_downcast_low": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::ext_context (impl StdError for E)",
+   "src/context.rs::ext_context (impl StdError for Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_context (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::context_chain_downcast",
+   "src/error.rs::context_chain_drop_rest",
+   "src/error.rs::context_downcast",
+   "src/error.rs::downcast (impl Error)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "test_downcast_mid": [
+   "src/context.rs::context (impl Context<T,E>for Result<T,E>)",
+   "src/context.rs::ext_context (impl StdError for E)",
+   "src/context.rs::ext_context (impl StdError for Error)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_context (impl Error)",
+   "src/error.rs::context (impl Error)",
+   "src/error.rs::context_chain_downcast",
+   "src/error.rs::context_chain_drop_rest",
+   "src/error.rs::context_downcast",
+   "src/error.rs::downcast (impl Error)",
+   "src/nightly.rs::request_ref",
+   "src/nightly.rs::request_ref_backtrace",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)"
+  ],
+  "test_downcast_ref": [
+   "src/error.rs::downcast_ref (impl Error)",
+   "src/error.rs::is (impl Error)"
+  ],
+  "test_whitespace": [
+   "src/ensure.rs::__dispatch_ensure (impl BothDebug for(A,B))",
+   "src/ensure.rs::as_str (impl Buf)",
+   "src/ensure.rs::new (impl Buf)",
+   "src/ensure.rs::render",
+   "src/ensure.rs::write_str (impl Write for Buf)",
+   "src/error.rs::construct (impl Error)",
+   "src/error.rs::construct_from_adhoc (impl Error)",
+   "src/error.rs::drop (impl Drop for Error)",
+   "src/error.rs::error (impl ErrorImpl)",
+   "src/error.rs::fmt (impl Display for Error)",
+   "src/error.rs::fmt (impl Display for ErrorImpl<E>)",
+   "src/error.rs::msg (impl Error)",
+   "src/error.rs::object_drop",
+   "src/error.rs::object_ref",
+   "src/fmt.rs::display (impl ErrorImpl)",
+   "src/ptr.rs::by_ref (impl Own<T>)",
+   "src/ptr.rs::from_raw (impl Ref<'a,T>)",
+   "src/ptr.rs::new (impl Own<T>)",
+   "src/wrapper.rs::fmt (impl Display for MessageError<M>)"
+  ]
+ },
+ "ts": "2026-11-04T07:59:17.669+00:00"
+}

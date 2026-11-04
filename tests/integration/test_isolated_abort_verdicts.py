@@ -605,6 +605,103 @@ def test_negative_control_without_the_fault_address_the_reader_is_blamed(
     assert handed.blamed is not None and handed.blamed.fn_name == "read_tag"
 
 
+# ---- a producer frame inside a closure (2026-11-04) ----
+#
+# Run `19493-36a4e056`: the faulting address was produced in a frame gdb
+# names `…::{closure#0}`, and the crash blamed a unit called `{closure#0}`,
+# which no record carries and no route can write. The rule now names the
+# item that holds the synthesized segment (`bare_fn_name`); it rests on gdb
+# printing the closure under its creator's path, and on the frame's line
+# lying in the creator's body. The invented crate: `make` builds a closure
+# that hands a dangling pointer to the correct `read_tag`.
+
+_CLOSURE_LIB = """use core::ptr::NonNull;
+
+#[repr(C)]
+pub struct Item {
+    pub tag: &'static u32,
+}
+
+pub fn read_tag(p: NonNull<Item>) -> u32 {
+    unsafe { *(*p.as_ptr()).tag }
+}
+
+pub fn make() -> u32 {
+    let f = || {
+        read_tag(NonNull::dangling())
+    };
+    f()
+}
+"""
+
+_CLOSURE_TESTS = """#[test]
+fn closure_handed_dangling() {
+    assert_eq!(closure::make(), 7);
+}
+"""
+
+
+def _closure_site(root: Path, monkeypatch: pytest.MonkeyPatch):
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    (root / "src").mkdir(parents=True)
+    (root / "tests").mkdir()
+    (root / "Cargo.toml").write_text(_CARGO_TOML.replace("handles", "closure")
+                                     + "\n[lib]\ndoctest = false\n")
+    (root / "src" / "lib.rs").write_text(_CLOSURE_LIB)
+    (root / "tests" / "closure.rs").write_text(_CLOSURE_TESTS)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / "closure")
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    logs: list[str] = []
+    sites = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                           asan_sweep=None, log=logs.append),
+        out, _CMD, root, lambda _w: env, max_binaries=2)
+    return next((s for s in sites
+                 if s.test_name == "closure_handed_dangling"), None), logs
+
+
+def _make_body_lines() -> range:
+    lines = _CLOSURE_LIB.splitlines()
+    start = next(i for i, ln in enumerate(lines, 1) if "pub fn make(" in ln)
+    end = next(i for i, ln in enumerate(lines, 1) if i > start and ln == "}")
+    return range(start, end + 1)
+
+
+def test_premise_gdb_names_a_closure_frame_under_its_creator(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import shutil
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    site, logs = _closure_site(tmp_path / "c", monkeypatch)
+    assert site is not None, logs
+    closure = [f for f in site.all_frames if "{closure" in f.symbol]
+    assert closure, [(f.fn_name, f.symbol) for f in site.all_frames]
+    for f in closure:
+        assert "make" in f.symbol.split("{closure")[0], f.symbol
+        assert f.line in _make_body_lines(), (f.line, f.symbol)
+
+
+def test_a_producer_inside_a_closure_blames_its_creator(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    site, logs = _closure_site(tmp_path / "c", monkeypatch)
+    assert site is not None, logs
+    assert site.origin_traced, (site.frames, logs)
+    assert site.blamed is not None and site.blamed.fn_name == "make"
+    assert all(not loc.fn_name.startswith("{")
+               for loc in site.culprit_locators)
+    # NEGATIVE CONTROL: the pre-fix name, the symbol's last segment, is the
+    # synthesized one. gdb's printed name is `make::{closure#0}`; the
+    # linkage name it demangles is the legacy `make::{{closure}}`.
+    tail = site.blamed.symbol.split("<")[0].rsplit("::", 1)[-1]
+    assert tail.startswith("{") and "closure" in tail, site.blamed.symbol
+
+
 # ---- the settlement end to end (2026-10-16) ----
 #
 # The same run's lock, with the real runner, debugger, extractor and the
@@ -1045,3 +1142,132 @@ def test_the_sanitizer_runs_the_other_worlds_crash_in_that_world(
                            asan_sweep=run_asan_sweep, log=logs0.append),
         cap, _CMD, root, lambda _w: home)
     assert not [s for s in control if s.origin_capable], (control, logs0)
+
+
+# ---- a crash that turns into a wrong value at the same statement (2026-11-04) ----
+#
+# Run `19493-36a4e056`: a red test died with SIGSEGV inside the body its
+# assertion formats; a kept write of that body made the test fail at the same
+# assertion with a wrong value, and nothing recorded the move. The move is
+# decided at the keep from the crash's first test-source frame (the sweep's
+# localizer, `CrashSite.test_line`) and the later reading's assertion position
+# (`observation_move`). Both rest on what the real tools print: gdb's stack of
+# an isolated test that faults reaches the test's own line, and libtest's
+# `assert_eq!` panic names that same line. The invented crate: `describe`
+# reads through a dangling pointer, then returns a constant.
+
+_OBS_TOML = _CARGO_TOML.replace("handles", "obs") + "\n[lib]\ndoctest = false\n"
+
+_OBS_CRASH = """use core::ptr::NonNull;
+
+pub struct Thing {
+    pub n: &'static u32,
+}
+
+pub fn describe() -> u32 {
+    let p: NonNull<Thing> = NonNull::dangling();
+    unsafe { *(*p.as_ptr()).n }
+}
+"""
+
+_OBS_VALUE = """pub fn describe() -> u32 {
+    3
+}
+"""
+
+_OBS_TESTS = """#[test]
+fn reports_the_value() {
+    let expected = 7;
+    assert_eq!(obs::describe(), expected);
+}
+"""
+_OBS_LINE = 4
+
+
+def _obs_capture(root: Path, lib: str, monkeypatch: pytest.MonkeyPatch,
+                 tag: str) -> tuple[str, dict[str, str]]:
+    if not (root / "src").exists():
+        (root / "src").mkdir(parents=True)
+        (root / "tests").mkdir()
+        (root / "Cargo.toml").write_text(_OBS_TOML)
+        (root / "tests" / "obs.rs").write_text(_OBS_TESTS)
+    (root / "src" / "lib.rs").write_text(lib)
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / tag)
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    return out, env
+
+
+def _obs_readings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *,
+                  bind: bool):
+    import shutil
+
+    from pipeline_core.adapters.gdb_backtrace import localize_crashed_binary
+    from pipeline_core.application.reconstruct.cargo_runner import (
+        bind_crash_positions,
+        oracle_test_source,
+        with_crash_positions,
+    )
+    from pipeline_core.application.reconstruct.crash_localizer import (
+        CrashLocalizerDeps,
+        localize_crashes,
+    )
+    from pipeline_core.domain.assertion_position import crash_positions
+    from pipeline_core.domain.test_report import (
+        failure_fingerprints,
+        reading_of_capture,
+    )
+    assert shutil.which("gdb"), "premise: the crash localizer needs gdb"
+    root = tmp_path / "o"
+    crash_out, env = _obs_capture(root, _OBS_CRASH, monkeypatch, "obs")
+    logs: list[str] = []
+    sites = localize_crashes(
+        CrashLocalizerDeps(gdb_localize=localize_crashed_binary,
+                           asan_sweep=None, log=logs.append),
+        crash_out, _CMD, root, lambda _w: env, max_binaries=4)
+    source = oracle_test_source(root)
+    fps = failure_fingerprints(crash_out)
+    pos = crash_positions(sites, source)
+    try:
+        bind_crash_positions(
+            {k: (line, fps[k]) for k, line in pos.items() if fps.get(k)}
+            if bind else {})
+        base = with_crash_positions(reading_of_capture(crash_out, sources=source))
+    finally:
+        bind_crash_positions({})
+    value_out, _env = _obs_capture(root, _OBS_VALUE, monkeypatch, "obs")
+    after = reading_of_capture(value_out, sources=source)
+    return sites, logs, base, after
+
+
+def test_premise_the_crash_test_frame_and_the_assertion_are_one_line(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sites, logs, base, after = _obs_readings(tmp_path, monkeypatch, bind=True)
+    (site,) = [s for s in sites if s.test_name and
+               s.test_name.endswith("reports_the_value")] or [None]
+    assert site is not None, (sites, logs)
+    assert site.test_line == ("tests/obs.rs", _OBS_LINE), site
+    assert {k.test: v for k, v in base.crash_positions.items()} == {
+        "reports_the_value": _OBS_LINE}
+    assert {k.test: v for k, v in after.positions.items()} == {
+        "reports_the_value": _OBS_LINE}
+
+
+def test_the_keep_comparison_reads_the_move_as_the_same_statement(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _sites, _logs, base, after = _obs_readings(tmp_path, monkeypatch, bind=True)
+    cmp = compare_readings(base, after)
+    assert "reports_the_value" in cmp.still_failing
+    assert dict(cmp.still_failing_moved) == {"reports_the_value": "same_statement"}
+
+
+def test_negative_control_without_the_sweep_crash_nothing_is_written(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pre-fix measurement: the keep reading carries no crash position,
+    so the abort has no comparable position and no move is guessed."""
+    _sites, _logs, base, after = _obs_readings(tmp_path, monkeypatch, bind=False)
+    cmp = compare_readings(base, after)
+    assert "reports_the_value" in cmp.still_failing
+    assert dict(cmp.still_failing_moved) == {}

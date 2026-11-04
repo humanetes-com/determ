@@ -396,6 +396,32 @@ def assertion_positions(capture: str, source_of: TestSource) -> dict[TestKey, in
     return out
 
 
+def crash_positions(sites: Iterable[CrashSite],
+                    source_of: TestSource) -> dict[TestKey, int]:
+    """Per (binary, test) a localized crash names, the position in the
+    test's own body of the crash's first test-source frame
+    (`CrashSite.test_line`).
+
+    The same rule as :func:`assertion_positions`: the frame must be in the
+    file of the binary that ran the test and on a line of the test's own
+    item body, outside every nested fn and closure. A frame in a helper or a
+    closure has no position, so a crash there never compares with an
+    assertion line."""
+    out: dict[TestKey, int] = {}
+    for site in sites:
+        if site.test_line is None or not site.test_name:
+            continue
+        file_, line = site.test_line
+        if not _file_of_binary(site.binary_label, file_):
+            continue
+        name = leaf(site.test_name)
+        src = source_of(file_)
+        lines = own_assertion_lines(src, name) if src else None
+        if lines and line in lines:
+            out[TestKey(site.key, name)] = line
+    return out
+
+
 def positions_for(positions: Positions, tests: Collection[str]) -> dict[TestKey, int]:
     """`positions` restricted to the bare names in `tests`."""
     names = {leaf(t) for t in tests}

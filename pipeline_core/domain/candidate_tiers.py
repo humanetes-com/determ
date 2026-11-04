@@ -504,6 +504,10 @@ class TestTiers:
     held_by: frozenset[str] = frozenset()
     #: owed function -> the ladder rung it is owed on.
     rungs: Mapping[str, str] = field(default_factory=dict)
+    #: The owed functions owed because their standing body's own keep moved
+    #: this test at the statement that judges it (`due_reading`'s
+    #: `observed`). Empty when the owed set came from anything else.
+    observed: frozenset[str] = frozenset()
 
     @property
     def exhausted(self) -> bool:
@@ -582,6 +586,42 @@ class DueReading:
         """(unit, test, fingerprint) for every owed function in `opened`."""
         return self.answered(opened, opened)[0]
 
+    def off_tier(
+        self, opened: Mapping[str, Collection[str]],
+        landed: Collection[FnLocator],
+        shown: Callable[[str, str, str], bool],
+    ) -> tuple[list[tuple[str, str, str, str]], list[tuple[str, str, str, str]]]:
+        """(asks, misses) of one fill outside the owed sets: (unit, test,
+        fingerprint, rung) for every function a route OPENED (`opened`:
+        `file::fn` -> the rungs it was opened on) with a red test's words in
+        that prompt (`shown(unit, test, rung)`) while the test did not owe
+        it. An ask when its body landed, a miss when it did not.
+
+        Without it a route that rewrote a function for a test off that
+        test's owed tier recorded nothing: run `19493-36a4e056` (2026-11-04)
+        reverted a session that rewrote the body a red test reports on while
+        the walk owed tier 0, so no row was written for that pair and the
+        unit read as served with nothing owing it. A test held in a stub owes
+        the stub alone and is skipped: nothing past the stub reads it."""
+        got = {unit_key(u) for u in landed}
+        asks: list[tuple[str, str, str, str]] = []
+        misses: list[tuple[str, str, str, str]] = []
+        for t, r in sorted(self.by_test.items()):
+            if r.held_by:
+                continue
+            fp = self.fingerprints.get(t, "")
+            if not fp:
+                continue
+            for u, rungs in sorted(opened.items()):
+                if u in r.owed:
+                    continue
+                for rung in sorted(set(rungs)):
+                    if not shown(u, t, rung):
+                        continue
+                    (asks if u in got else misses).append((u, t, fp, rung))
+                    break
+        return asks, misses
+
 
 def due_reading(
     red_tests: Iterable[str],
@@ -597,6 +637,7 @@ def due_reading(
     joint: Iterable[JointCandidate] = (),
     ladder: Sequence[str] = ("unit",),
     lessons: Mapping[tuple[str, str], str] | None = None,
+    observed: Mapping[str, Collection[str]] | None = None,
 ) -> DueReading:
     """What each red test owes this sweep.
 
@@ -610,9 +651,17 @@ def due_reading(
     together. With a `ladder` of more than one rung, a tier function stays
     owed until it is spent on every rung, and `TestTiers.rungs` names the
     rung it is owed on. A held stub climbs that same ladder. A joint
-    candidate and a lesson are owed on the first rung only, once. Reads
-    the ledger; `settle` is the one write (the tree each fingerprint was
-    read on)."""
+    candidate and a lesson are owed on the first rung only, once.
+
+    `observed` is test -> the functions whose standing body's own keep
+    moved this test at the statement that judges it
+    (`premise_advance.observed_by`). Those are owed first after a joint
+    candidate, before any tier, once per (function, test, fingerprint) by
+    the ledger's own rule: the move that changed the test's words is what
+    reset its walk to tier 0, so without this rung the body the test now
+    reports on is asked last (run `19493-36a4e056`, 2026-11-04, tier 4 of 8
+    behind three misses on each tier before it). Reads the ledger; `settle`
+    is the one write (the tree each fingerprint was read on)."""
     out_ = frozenset(withdrawn)
     red = sorted(set(red_tests) - out_)
     joint_list = tuple(joint)
@@ -652,6 +701,12 @@ def due_reading(
                       if not ledger.spent(u, t, _fold(fp, c.digest), misses)}
         if joint_owed:
             by_test[t] = TestTiers(t, tiers, -1, joint_owed)
+            continue
+        obs_owed = {u: fp for u in sorted((observed or {}).get(t, ()))
+                    if not ledger.spent(u, t, fp, misses)}
+        if obs_owed:
+            by_test[t] = TestTiers(t, tiers, -1, obs_owed,
+                                   observed=frozenset(obs_owed))
             continue
         # A lesson task 4 admitted for (function, this test) owes that
         # function again, first, once per lesson set (`domain/test_lessons`).
@@ -706,6 +761,7 @@ def tiers_event(reading: DueReading) -> dict[str, Any]:
                 "owed": dict(sorted(r.owed.items())),
                 "held_by": sorted(r.held_by),
                 "rungs": dict(sorted(r.rungs.items())),
+                **({"observed": sorted(r.observed)} if r.observed else {}),
                 "fingerprint": reading.fingerprints.get(t, "")}
             for t, r in sorted(reading.by_test.items())}
 

@@ -201,6 +201,9 @@ class KeptComparison:
     newly_green: tuple[str, ...]
     #: None is "no comparison"; an empty tuple is "nothing stayed red".
     still_failing: tuple[str, ...] | None
+    #: Of ``still_failing``, the tests whose failure moved, bare name ->
+    #: `observation_move` kind.
+    moved: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,13 +284,15 @@ class SessionOutcome:
                 newly_red=tuple(sorted(cmp.newly_red)),
                 newly_crashed=tuple(cmp.newly_crashed),
                 newly_green=tuple(sorted(cmp.newly_green)),
-                still_failing=tuple(sorted(cmp.still_failing)))
+                still_failing=tuple(sorted(cmp.still_failing)),
+                moved=dict(cmp.still_failing_moved))
         return KeptComparison(
             delta=self.final.pass_delta,
             newly_red=tuple(sorted(self.newly_red)),
             newly_crashed=tuple(self.final.crashed),
             newly_green=self.final.newly_green,
-            still_failing=self.final.still_failing)
+            still_failing=self.final.still_failing,
+            moved=dict(self.final.still_failing_moved))
 
     @property
     def carried_body(self) -> bool:
@@ -816,6 +821,7 @@ def run_slice_session(
             pass_delta=cmp.net_pass_delta,
             newly_green=tuple(sorted(cmp.newly_green)),
             still_failing=tuple(sorted(cmp.still_failing)),
+            still_failing_moved=tuple(sorted(cmp.still_failing_moved.items())),
             executed_shrank=cmp.cur_executed < cmp.base_executed,
             positions=positions_now, earlier=earlier, aborted=aborted,
             aborted_green=tuple(sorted(outcomes.aborted_green)),

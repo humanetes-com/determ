@@ -127,7 +127,7 @@ from pipeline_core.adapters.oracle_fingerprint import (  # noqa: E402
     cluster_oracle_files,
 )
 from pipeline_core.application.reconstruct.body_reseed import (  # noqa: E402
-    _definition_checker,
+    definition_checker,
     skeleton_fingerprints,
 )
 from pipeline_core.domain.body_ledger import (  # noqa: E402
@@ -219,7 +219,7 @@ def main() -> int:
         sig_note = f"signatures read from {src_dir} for {len(sig)}/{len(pool)} units"
     plan = plan_reseed(entries, wanted=list(pool.keys()), file_fp=file_fp,
                        sig_sha=sig, oracle_fp=live_fp,
-                       definition_present=_definition_checker(skeleton_root))
+                       definition_present=definition_checker(skeleton_root))
     take = plan.take
     print(f"\ngate walk against {skeleton_root} ({sig_note}; oracle {live_fp}"
           f"{', IGNORED' if a.ignore_oracle else ''}):")

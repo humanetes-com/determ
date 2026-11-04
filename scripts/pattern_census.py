@@ -427,6 +427,23 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      tests' panic quotes. The instruction preamble and the session protocol
      are outside tags and are not a step.
 
+  P55 non-unit crash blame — a crash site blamed a frame whose name is a
+     segment the compiler synthesized (`{closure#0}`, `{{closure}}`): no
+     extractor record carries it and no route can write it, yet it was the
+     culprit, the crashed test's owner and the head of the dispatch batch.
+     Run `19493-36a4e056` (2026-11-04) iter 1 and `14929-381594b7`:
+     `blamed src/error.rs::{closure#0}`, `owner_unrouted` on both. Post-fix
+     (`bare_fn_name` names the item holding the synthesized segment) a hit
+     is a new symbol form the rule does not read.
+
+  P56 split equal slices — one session plan holds two sessions whose unit
+     sets are equal: the same units asked the same question twice, each
+     taking a per-fill session slot. Run `19493-36a4e056` fill 1: four
+     pairs of world twins, the second twin's first change set byte-identical
+     to the first's; 185 of 1,360 recorded sessions on 38 runs. Post-fix
+     (`slice_session._joins_without_cost`) a hit is a join whose joined
+     turn 0 would have dropped an optional section.
+
   P51 unjudged write — a fill's gates judged from a tree no verdict left.
      Two readings. After the fill ground shipped (2026-10-22): any
      `phase_c.fill.unjudged_write` event (the lock restored bytes written
@@ -795,6 +812,8 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P39": [],
     "P51": [],
     "P53": [],
+    "P55": [],
+    "P56": [],
     "P54": [
         # The packer built the turn 0 and reported the test instead of
         # planning a session that cannot send it.
@@ -3731,6 +3750,61 @@ def detect_p54(run: Run, iters: list[dict]) -> list[dict]:
              "key": [a for a, _ in top[:3]], "refs": refs[:4]}]
 
 
+RE_P55_BLAME = re.compile(
+    r"blamed (src/[\w/]+\.rs)::(\{[^}\s]*\}+)")
+
+
+def detect_p55(run: Run, iters: list[dict]) -> list[dict]:
+    """Crash sites blamed on a synthesized segment. One hit per run."""
+    seen: dict[str, int] = {}
+    refs: list[str] = []
+    for ref, text in run.lines:
+        if (m := RE_P55_BLAME.search(text)):
+            key = f"{m.group(1)}::{m.group(2)}"
+            seen[key] = seen.get(key, 0) + 1
+            refs.append(ref)
+    if not seen:
+        return []
+    top = sorted(seen.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [{"evidence": f"{sum(seen.values())} crash blame(s) on a "
+                         "synthesized segment: "
+                         + ", ".join(f"{k} x{n}" for k, n in top[:3]),
+             "key": [k for k, _ in top[:3]], "refs": refs[:4]}]
+
+
+def p56_equal_slice_sessions(plan: dict) -> list[tuple[str, ...]]:
+    """The sessions of one recorded `phase_c.session.plan` whose unit set
+    (the union of their tests' `slices`) equals an earlier session's."""
+    slices = plan.get("slices") or {}
+    if not isinstance(slices, dict):
+        return []
+    seen: set[tuple[str, ...]] = set()
+    dup: list[tuple[str, ...]] = []
+    for sess in plan.get("sessions") or []:
+        tests = tuple(sess.get("tests") or ())
+        units = tuple(sorted({u for t in tests for u in slices.get(t, ())}))
+        if not units:
+            continue
+        if units in seen:
+            dup.append(tests)
+        seen.add(units)
+    return dup
+
+
+def detect_p56(run: Run, iters: list[dict]) -> list[dict]:
+    """Plans that split equal slices into separate sessions."""
+    plans = _session_plan_events_by_run().get(run.run_id) or []
+    per = [(p.get("ts", ""), p56_equal_slice_sessions(p)) for p in plans]
+    hit = [(ts, d) for ts, d in per if d]
+    if not hit:
+        return []
+    n = sum(len(d) for _ts, d in hit)
+    first = hit[0][1][0]
+    return [{"evidence": f"{n} session(s) on an earlier session's unit set "
+                         f"in {len(hit)} plan(s): {', '.join(first)[:160]}",
+             "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3753,7 +3827,8 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P43": detect_p43, "P44": detect_p44, "P45": detect_p45,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
              "P49": detect_p49, "P50": detect_p50, "P51": detect_p51,
-             "P52": detect_p52, "P53": detect_p53, "P54": detect_p54}
+             "P52": detect_p52, "P53": detect_p53, "P54": detect_p54,
+             "P55": detect_p55, "P56": detect_p56}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3800,6 +3875,8 @@ CLASS_NAMES = {
     "P49": "kept process killer (tests whose binary did not complete rose by 10+ after a non-regression keep; pre-fix a test red before and dead after read as still failing, run 2157238-210637e6: 0 -> 86 after self-recursive bodies were kept)",
     "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
     "P52": "unseen red test (an owed red test with no observation of it executing on the tree: no measured owner set, no recorded set of a run that started, no crate frame on any crash site, no first failure inside a crate body; pre-fix the loop guessed from the recently-filled ring, run 1947461-b4eb65c3 iters 13-14)",
+    "P55": "non-unit crash blame (a crash site blamed a frame named by a segment the compiler synthesized, such as `{closure#0}`, which no record carries and no route can write; pre-fix bare_fn_name took the last path segment, run 19493-36a4e056 iter 1)",
+    "P56": "split equal slices (a session plan held two sessions on the same unit set, asking one question twice under the per-fill session cap; pre-fix the packer joined only at the widest rendering, run 19493-36a4e056 fill 1: four twin pairs)",
     "P54": "unopenable session (a planned session whose turn 0, built when it opened, was over capacity at the narrowest rendering and sent nothing, holding a session slot; pre-fix the packer charged an estimate of the planned units, run 3203804-8c6a0066 fills 3-5: 13 of 19)",
     "P53": "opened run kept untested (a body a run opened on a measured blocker wrote was kept with no scoped test: the gate was handed none of the tests the run carried; pre-fix the run was judged on the sweep's owner sets, run 2129106-ead996ab fill 1: 28 of 28)",
     "P51": "unjudged write (a fill's gates judged from a tree no verdict left: its first baseline was not the sweep's reading with no keep before it, or the fill ground restored bytes written outside every hold; pre-fix the joint ask spliced its candidate before the fill, run 4012759-5c5177c6 fill 9)",

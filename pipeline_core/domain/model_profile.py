@@ -67,6 +67,14 @@ class ModelProfile:
     strength_on: str | None       # STRENGTH dialect only
     strength_off: str | None
     calibration: str
+    # The sampling repetition penalty every call sends. vLLM's generation
+    # config supplies temperature, top_p and top_k; this one the transport
+    # always overrode with a single value for every model.
+    repetition_penalty: float = 1.05
+    # ENABLE_THINKING dialect only: the template's reasoning depth, sent with
+    # `enable_thinking: true` (`reasoning_effort` in `chat_template_kwargs`).
+    # None: not sent, the template's own default applies.
+    reasoning_effort: str | None = None
 
 
 QWEN3 = ModelProfile(
@@ -91,7 +99,15 @@ QWEN3 = ModelProfile(
     strength_on=None,
     strength_off=None,
     calibration=("route order 2026-08-12; context 2026-08-11; reasoning shape "
-                 "inherited from Muse 2026-09-21, runaway cap uncalibrated"),
+                 "inherited from Muse 2026-09-21, runaway cap uncalibrated; "
+                 "sampling and reasoning effort from the Qwen3.8-27B-FP8 card "
+                 "2026-11-04, not measured here"),
+    # The Qwen3.8 card recommends 1.0 in thinking and non-thinking mode, and
+    # names reasoning_effort xhigh (default), medium, low. Sent explicitly so
+    # the effort a call ran under is in the request, not a template default.
+    # A Qwen3.6 template has no such variable and ignores it.
+    repetition_penalty=1.0,
+    reasoning_effort="xhigh",
 )
 
 MUSE_GLIMMER = ModelProfile(
@@ -118,6 +134,10 @@ MUSE_GLIMMER = ModelProfile(
     strength_off="low",
     calibration=("route order 2026-08-12; context 2026-08-11; per_call, "
                  "thinking reserve and no runaway cap 2026-09-21"),
+    # The model card recommends no sampling values (it serves with
+    # `--generation-config auto`); 1.05 is what every Muse run here sent.
+    repetition_penalty=1.05,
+    reasoning_effort=None,
 )
 
 PROFILES: tuple[ModelProfile, ...] = (QWEN3, MUSE_GLIMMER)
@@ -175,7 +195,7 @@ def require_profile(model: str, family: str | None = None) -> ModelProfile:
 # settings budget math and RunConfig each carried their own (context 65536 /
 # 65536 / none, thinking reserve 16384 / 0 / none, think chars 120000 / — /
 # 60000); these are the transport's, the values a call actually ran under.
-KnobValue = int | str | None
+KnobValue = int | float | str | None
 
 GLOBAL_DEFAULTS: Mapping[str, KnobValue] = {
     "VLLM_MAX_MODEL_LEN": 65536,
@@ -185,6 +205,8 @@ GLOBAL_DEFAULTS: Mapping[str, KnobValue] = {
     "VLLM_REASONING_STRENGTH": "high",
     "VLLM_REASONING_STRENGTH_OFF": "low",
     "VLLM_MAX_THINK_CHARS": 120000,
+    "VLLM_REPETITION_PENALTY": 1.05,
+    "VLLM_REASONING_EFFORT": None,
 }
 
 
@@ -247,6 +269,23 @@ class ModelKnobs:
     def strength_off(self) -> str:
         return str(self.value("VLLM_REASONING_STRENGTH_OFF"))
 
+    @property
+    def repetition_penalty(self) -> float:
+        v = self.value("VLLM_REPETITION_PENALTY")
+        if not isinstance(v, (int, float)):
+            raise TypeError(f"VLLM_REPETITION_PENALTY resolved to {v!r}, not a number")
+        return float(v)
+
+    @property
+    def reasoning_effort(self) -> str | None:
+        """The reasoning depth sent with thinking on, or None (not sent).
+        `none` in `.env` is an explicit "do not send" for a profile that
+        sets one."""
+        v = self.value("VLLM_REASONING_EFFORT")
+        if v is None or str(v).strip().lower() in ("", "none"):
+            return None
+        return str(v).strip()
+
     def sources(self) -> dict[str, str]:
         return {k: r.source for k, r in self.knobs}
 
@@ -277,6 +316,13 @@ def _int_or(raw: str, name: str) -> int:
         raise ValueError(f"{name}={raw!r} is not an integer") from exc
 
 
+def _float_or(raw: str, name: str) -> float:
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}={raw!r} is not a number") from exc
+
+
 def resolve_model_knobs(env: Mapping[str, str], model: str | None = None) -> ModelKnobs:
     """env → profile → global default for every model-calibrated knob.
 
@@ -299,13 +345,19 @@ def resolve_model_knobs(env: Mapping[str, str], model: str | None = None) -> Mod
             from_profile["VLLM_REASONING_STRENGTH"] = prof.strength_on
         if prof.strength_off is not None:
             from_profile["VLLM_REASONING_STRENGTH_OFF"] = prof.strength_off
+        from_profile["VLLM_REPETITION_PENALTY"] = prof.repetition_penalty
+        if prof.reasoning_effort is not None:
+            from_profile["VLLM_REASONING_EFFORT"] = prof.reasoning_effort
     ints = {"VLLM_MAX_MODEL_LEN", "VLLM_THINKING_BUDGET",
             "VLLM_RUNAWAY_THINK_CHARS", "VLLM_MAX_THINK_CHARS"}
+    floats = {"VLLM_REPETITION_PENALTY"}
     out: list[tuple[str, ResolvedKnob]] = []
     for name, default in GLOBAL_DEFAULTS.items():
         raw = _present(env, name)
         if raw is not None:
-            out.append((name, ResolvedKnob(_int_or(raw, name) if name in ints else raw, "env")))
+            val: KnobValue = (_int_or(raw, name) if name in ints
+                              else _float_or(raw, name) if name in floats else raw)
+            out.append((name, ResolvedKnob(val, "env")))
         elif name in from_profile:
             out.append((name, ResolvedKnob(from_profile[name], "profile")))
         elif (name == "VLLM_RUNAWAY_THINK_CHARS" and prof is not None
@@ -317,8 +369,13 @@ def resolve_model_knobs(env: Mapping[str, str], model: str | None = None) -> Mod
 
 
 def reasoning_payload(dialect: ReasoningDialect, enable_thinking: bool, *,
-                      strength_on: str, strength_off: str) -> dict[str, str | bool]:
-    """The `chat_template_kwargs` that asks for (no) reasoning in `dialect`."""
+                      strength_on: str, strength_off: str,
+                      effort: str | None = None) -> dict[str, str | bool]:
+    """The `chat_template_kwargs` that asks for (no) reasoning in `dialect`.
+    In the boolean dialect a request with thinking on also names its depth
+    when `effort` is set; a request with thinking off never does."""
     if dialect is ReasoningDialect.STRENGTH:
         return {dialect.value: strength_on if enable_thinking else strength_off}
+    if enable_thinking and effort:
+        return {dialect.value: True, "reasoning_effort": effort}
     return {dialect.value: enable_thinking}

@@ -37,6 +37,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_src_tree,
 )
 from pipeline_core.domain.assertion_position import (
+    TestKey,
     TestSource,
     assertion_positions,
     is_oracle_test_path,
@@ -316,7 +317,42 @@ def measure_test_state(
     # legitimate empty baseline (pass_count 0, no failures).
     if not reading.binaries and rc != 0:
         return None
-    return reading
+    return with_crash_positions(reading)
+
+
+# The crash positions the last sweep localized, per (binary, test): the
+# position of the crash's first test-source frame in the test's own body
+# (`assertion_position.crash_positions`) and the fingerprint of the failure
+# text that sweep read for the test. Only the sweep localizes a crash (it
+# re-runs the crashed binaries under the debugger); every keep reading is a
+# plain measurement. Bound at each sweep, read by every measurement.
+_CRASH_POSITIONS: list[Mapping[TestKey, tuple[int, str]]] = [{}]
+
+
+def bind_crash_positions(by_key: Mapping[TestKey, tuple[int, str]]) -> None:
+    """Replace the sweep's crash positions (empty: none known)."""
+    _CRASH_POSITIONS[0] = dict(by_key)
+
+
+def with_crash_positions(reading: TestStateReading) -> TestStateReading:
+    """`reading` with the sweep's crash position on every test this
+    reading saw abort with the failure text the sweep localized.
+
+    The fingerprint match is what makes the position a statement about this
+    reading: an abort whose text differs from the one the debugger ran is a
+    different death, and it gets no position rather than a borrowed one."""
+    bound = _CRASH_POSITIONS[0]
+    if not bound:
+        return reading
+    got: dict[TestKey, int] = {}
+    for b in reading.binaries:
+        for n in b.aborted:
+            k = TestKey(b.key, leaf(n))
+            hit = bound.get(k)
+            fp = reading.fingerprints.get(k, "")
+            if hit is not None and fp and hit[1] == fp:
+                got[k] = hit[0]
+    return replace(reading, crash_positions=got) if got else reading
 
 
 _ORACLE_TEXT: dict[tuple[str, int, int], str] = {}

@@ -622,7 +622,8 @@ def _notify_wave(deps: FillExecutionDeps,
         keeps.append(ReportKeep(
             frozenset(rep.kept),
             None if row is None or row.newly_green is None
-            else frozenset(row.newly_green)))
+            else frozenset(row.newly_green),
+            None if row is None or row.moved is None else dict(row.moved)))
     kept = WaveKept(frozenset(u for r in present for u in r.kept), keeps)
     try:
         deps.on_wave_kept(kept)
@@ -682,7 +683,7 @@ def _pairs(locs: frozenset[FnLocator]) -> tuple[tuple[str, str], ...]:
 
 
 _Kept = tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...],
-             tuple[str, ...] | None]
+             tuple[str, ...] | None, tuple[tuple[str, str], ...] | None]
 
 
 def _row_for(
@@ -699,13 +700,15 @@ def _row_for(
     # opened no judged try, and "unrecorded" must not read as "paid nobody".
     green: tuple[str, ...] | None = None
     still: tuple[str, ...] | None = None
+    moved: tuple[tuple[str, str], ...] | None = None
     if kept is not None:
         green = kept[3]
         still = kept[4]
+        moved = kept[5]
     if report is not None and report.own_delta is not None:
         delta = report.own_delta
     elif kept is not None:
-        delta, red, crashed, _green, _still = kept
+        delta, red, crashed, _green, _still, _moved = kept
     rep = report or RouteRunReport()
     return RouteLedgerRow(
         kind=s.run.kind, label=s.run.label, targets=_pairs(s.run.targets),
@@ -715,7 +718,7 @@ def _row_for(
         started=started, minutes=minutes, model_calls=rep.model_calls,
         net_pass_delta=delta,
         newly_red=red, newly_crashed=crashed, newly_green=green,
-        still_red=still,
+        still_red=still, moved=moved,
         filtered=tuple(sorted((u.file, u.fn_name, why)
                               for u, why in rep.filtered.items())),
         kept=_pairs(rep.kept), reverted=_pairs(rep.reverted),

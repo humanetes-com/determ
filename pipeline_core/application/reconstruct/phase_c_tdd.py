@@ -42,7 +42,10 @@ from pipeline_core.application.reconstruct.body_reseed import (
     restore_prior,
     skeleton_fingerprints,
 )
-from pipeline_core.application.reconstruct.cargo_runner import oracle_test_source
+from pipeline_core.application.reconstruct.cargo_runner import (
+    bind_crash_positions,
+    oracle_test_source,
+)
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
 from pipeline_core.application.reconstruct.crash_settler import (
     CrashSettler,
@@ -79,7 +82,10 @@ from pipeline_core.application.reconstruct.tree_txn import (
     guard_tree_boundary,
 )
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
-from pipeline_core.domain.assertion_position import assertion_positions
+from pipeline_core.domain.assertion_position import (
+    assertion_positions,
+    crash_positions,
+)
 from pipeline_core.domain.attribution import (
     FailureFrontier,
     kind_after_sight_filter,
@@ -93,6 +99,7 @@ from pipeline_core.domain.body_ledger import (
     COMPARATOR_VERSION,
     CRASH_ORIGIN,
     BodyState,
+    LandingBefore,
     LedgerEntry,
     LedgerKey,
     SweepView,
@@ -103,6 +110,7 @@ from pipeline_core.domain.body_ledger import (
     flat_standing_unchanged,
     judgment_attributed,
     kept_green_of,
+    kept_moved_of,
     latest_by_unit,
     latest_crash_refutation,
     raw_bodies_of,
@@ -302,6 +310,7 @@ from pipeline_core.domain.plateau import (
 )
 from pipeline_core.domain.premise_advance import (
     advanced_past,
+    observed_by,
     owning_view,
     stranded,
     without_advanced,
@@ -357,6 +366,7 @@ from pipeline_core.domain.test_outcome import (
 )
 from pipeline_core.domain.test_report import (
     failure_evidence_by_test,
+    failure_fingerprints,
     merge_observations,
     parse_test_output,
 )
@@ -1341,6 +1351,18 @@ def run_phase_c_tdd(
                              if deps.ledger_load is not None else [])
         return _ledger_cache
 
+    def _landing_before(row: LedgerEntry, view: SweepView | None,
+                        elig: Mapping[FnLocator, Any]) -> LandingBefore | None:
+        """The sweep `row`'s body landed on, restricted to the tests that
+        can judge it: its convicting premise and the tests attributed to it
+        at the landing."""
+        if view is None:
+            return None
+        tests = set(row.convicting) | {
+            bare_test_name(t_) for t_ in
+            elig.get(FnLocator(row.key.file, row.key.fn_name), ())}
+        return LandingBefore.of_view(view, tests)
+
     _oracle_fp_cache: dict[int, str] = {}
 
     def _oracle_fp(iter_no: int) -> str:
@@ -1591,6 +1613,10 @@ def run_phase_c_tdd(
             if isinstance(_loaded_asks, AskLedger):
                 _asks = _loaded_asks
     _due: DueReading = DueReading({})
+    # Per still-red test, the units whose standing body's own keep moved it
+    # at the statement that judges it (`premise_advance.observed_by`): read
+    # at each sweep's attribution, owed first by the owed walk.
+    _observed_now: dict[str, frozenset[FnLocator]] = {}
     # Fills an owed function may be offered and land nothing, per (test,
     # fingerprint), before it counts as asked (`candidate_tiers`). 0: only a
     # landing spends it, and a function no route writes holds the cluster
@@ -1839,6 +1865,8 @@ def run_phase_c_tdd(
             reach=_reach, evidence=evidence, held=held, ledger=_asks,
             tree=tree, misses=_owed_misses, withdrawn=withdrawn,
             joint=_joint_now, ladder=_ladder,
+            observed={t_: frozenset(unit_key(u_) for u_ in us_)
+                      for t_, us_ in _observed_now.items()},
             lessons=(_lesson_store.digests() if _lesson_store is not None
                      else None))
     _dispatch_cap = int(os.getenv("PHASE_C_TDD_MAX_DISPATCH",
@@ -3333,6 +3361,16 @@ def run_phase_c_tdd(
         _sweep_view = _sweep_view_of(output, _measure.failed, _oracle.vanished,
                                      _rec.reconciled,
                                      held_=_held_of(output, _oracle.vanished))
+        # A crash this sweep localized, at the test line it died on: what a
+        # keep reading of the same test, failing at its assertion on that
+        # line, is compared with (`observation_move`, `cargo_runner.
+        # with_crash_positions`). Only the sweep runs the debugger.
+        _fps_c = failure_fingerprints(output)
+        bind_crash_positions({
+            k_: (line_, _fps_c[k_])
+            for k_, line_ in crash_positions(_sweep_view.crash_sites,
+                                             _oracle_source).items()
+            if _fps_c.get(k_)})
         # The bodies on this tree that have evidence they are right
         # (`body_standing`): what the prompt readers may show as the crate's
         # own way of doing things, and what a crash settlement never puts
@@ -3406,8 +3444,17 @@ def run_phase_c_tdd(
                 deps.log(f"  {tag} [phase-c/standing] iter {iter_n}: not "
                          f"read ({type(exc).__name__}: {exc})")
         if _ledger_rows and deps.ledger_append is not None:
+            # The before half is the sweep this process saw the body land
+            # on; a row another process landed carries its own
+            # (`LandingBefore`). Only a row with neither is graded against
+            # this sweep alone, as every row was before the field.
             _judged: list[LedgerEntry] = [
-                _grade_landing(_row, _ledger_before or _sweep_view, _sweep_view)
+                _grade_landing(
+                    _row,
+                    _ledger_before if _ledger_before is not None
+                    else (_row.before.view() if _row.before is not None
+                          else _sweep_view),
+                    _sweep_view)
                 for _row in _ledger_rows]
             deps.ledger_append(project_dir, _judged)
             if _ledger_cache is not None:
@@ -4437,12 +4484,18 @@ def run_phase_c_tdd(
         # The standing row is the one about the body ON the tree (the view
         # dispatch reads): an advance graded on a body since rewritten says
         # nothing about this tree.
+        # Every unit that has ANY row carrying a per-test edge gets its
+        # on-tree body hashed: `standing_on_tree` omits a unit absent from
+        # this map, and the latest row about the on-tree body (with or
+        # without the edge) is the one that stands. Both edge kinds are
+        # read through one reader (`premise_advance.edges_on_tree`).
         _adv_body_now: dict[LedgerKey, str] | None = None
         if deps.tree_writer is not None:
             _adv_body_now = {}
             for _row_a in _ledger_entries():
                 if (_row_a.key in _adv_body_now
-                        or not any(k_ == "advanced" for _t, k_ in _row_a.verdict_delta)):
+                        or not any(k_ in ("advanced", "observed")
+                                   for _t, k_ in _row_a.verdict_delta)):
                     continue
                 with suppress(OSError, TypeError, ValueError):
                     _adv_body_now[_row_a.key] = body_sha(deps.tree_writer.bodies(
@@ -4452,6 +4505,18 @@ def run_phase_c_tdd(
             _ledger_entries(), oracle_fp=_oracle_fp(iter_n),
             failing={bare_test_name(t) for t in _owed_red},
             body_now=_adv_body_now)
+        _observed_now = observed_by(
+            _ledger_entries(), oracle_fp=_oracle_fp(iter_n),
+            failing={bare_test_name(t) for t in _owed_red},
+            body_now=_adv_body_now)
+        if _observed_now:
+            deps.log(f"  {tag} [phase-c/attribution] {len(_observed_now)} "
+                     "still-red test(s) whose failure a standing body's own "
+                     "keep moved at the statement that judges it; that body "
+                     "is owed first: " + "; ".join(
+                         f"{t} ← " + ", ".join(
+                             sorted(f"{u.file}::{u.fn_name}" for u in us))
+                         for t, us in sorted(_observed_now.items())[:8]))
         if _advanced:
             _attr = without_advanced(_attr, _advanced)
             deps.log(f"  {tag} [phase-c/attribution] {len(_advanced)} test(s) "
@@ -7622,6 +7687,7 @@ def run_phase_c_tdd(
                 _landing_evidence),
             _recs_prior: list[Any] | None = _recs_before,
             _convicting: Mapping[Any, Any] = convicting,
+            _sweep_before: SweepView | None = _ledger_before,
         ) -> int:
             if (deps.ledger_append is None or deps.enumerate_fns is None
                     or _before is None):
@@ -7668,8 +7734,17 @@ def run_phase_c_tdd(
                     u: tests_creditable_to_locator(
                         _elig.get(u, ()), _convicting, u.file, u.fn_name)
                     for u in kept_hint}
-                rows_w = [replace(r, kept_green=kept_green_of(
-                    kept_hint, FnLocator(r.key.file, r.key.fn_name), _attr_w))
+                # And the still-red tests its own keep saw move
+                # (`credited_moves`), and the sweep it landed on, so the
+                # grade can be taken by whichever process reaches the next
+                # sweep (`LandingBefore`).
+                rows_w = [replace(
+                    r,
+                    kept_green=kept_green_of(
+                        kept_hint, FnLocator(r.key.file, r.key.fn_name), _attr_w),
+                    kept_moved=kept_moved_of(
+                        kept_hint, FnLocator(r.key.file, r.key.fn_name), _attr_w),
+                    before=_landing_before(r, _sweep_before, _elig))
                     for r in rows_w]
                 fresh = [r for r in rows_w
                          if _written.get(FnLocator(r.key.file, r.key.fn_name))
@@ -8331,6 +8406,48 @@ def run_phase_c_tdd(
                 if (_asks.miss(u_, t_, fp_, _miss_why, rung=_rung_m,
                                misses=_owed_misses) == _owed_misses):
                     _spent_now.append(f"{u_} (for {t_}, {_miss_why})")
+            # A unit a route OPENED with a red test's words in its prompt is
+            # asked for that test whether or not the test owed it: a body
+            # that landed is an ask, none a miss, on the rung it was opened
+            # on. The words are checked per prompt, never read off the run's
+            # aim: a session's prompt quotes its target tests, a unit
+            # route's the tests its prompt pool showed (`_showed_words`).
+            _opened_rungs: dict[str, set[str]] = {}
+            _session_aims: dict[str, set[str]] = {}
+            for _row_o in _fill_rows:
+                _rung_o = ("session" if _row_o.kind == RouteKind.SESSION
+                           else "unit")
+                for _a_o, _b_o in _row_o.opened or ():
+                    _u_o = f"{_a_o}::{_b_o}"
+                    _opened_rungs.setdefault(_u_o, set()).add(_rung_o)
+                    if _rung_o == "session":
+                        _session_aims.setdefault(_u_o, set()).update(
+                            bare_test_name(x_) for x_ in _row_o.target_tests)
+
+            def _shown_off_tier(
+                    unit: str, test: str, rung: str, *,
+                    aims: dict[str, set[str]] = _session_aims,
+            ) -> bool:
+                if rung == "session":
+                    return test in aims.get(unit, set())
+                return _showed_words(unit, test, "unit")
+
+            _off_ans, _off_mis = _due.off_tier(
+                _opened_rungs, _landed_fill, _shown_off_tier)
+            for u_, t_, fp_, r_ in _off_ans:
+                _asks.record(u_, t_, fp_, rung=r_)
+                _asks.note_words(u_, t_, fp_)
+            _why_off = miss_reasons({u_ for u_, _t, _f, _r in _off_mis},
+                                    _fill_rows)
+            for u_, t_, fp_, r_ in _off_mis:
+                _asks.note_words(u_, t_, fp_)
+                # Opened, so never `not_planned` (which would mark a session
+                # rung absent): the unit was in a prompt and landed nothing.
+                _why_o = ("compile" if _why_off.get(u_) == "compile"
+                          else "no_landing")
+                if (_asks.miss(u_, t_, fp_, _why_o,
+                               rung=r_, misses=_owed_misses) == _owed_misses):
+                    _spent_now.append(f"{u_} (for {t_}, off-tier)")
             for t_ in sorted(_due.unread):
                 _asks.miss(UNREAD, t_, _due.fingerprints.get(t_, ""))
             if _spent_now:
@@ -8347,6 +8464,10 @@ def run_phase_c_tdd(
                 "owed": len(_due.units),
                 "asked": sorted({u_ for u_, _t, _f in _ans}),
                 "missed": sorted({u_ for u_, _t, _f in _mis}),
+                "off_tier_asked": sorted({f"{u_} for {t_}"
+                                          for u_, t_, _f, _r in _off_ans}),
+                "off_tier_missed": sorted({f"{u_} for {t_}"
+                                           for u_, t_, _f, _r in _off_mis}),
                 "spent_by_misses": _spent_now,
                 "unread": sorted(_due.unread)})
         # A unit no route opened had no turn: put it back on the pass once.
@@ -8550,7 +8671,8 @@ def run_phase_c_tdd(
                 # is not written twice; a body a later wave moved again is a
                 # new row, as it should be.
                 _new_rows = [
-                    r for r in _new_rows
+                    replace(r, before=_landing_before(r, _ledger_before, eligible))
+                    for r in _new_rows
                     if _wave_written.get(FnLocator(r.key.file, r.key.fn_name))
                     != r.body_sha]
                 if _new_rows:

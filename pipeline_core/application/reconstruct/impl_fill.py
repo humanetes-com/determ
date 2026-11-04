@@ -7214,7 +7214,8 @@ def prepare_impl_fill(
                 note_kept(_kc.delta, newly_red=_kc.newly_red,
                           newly_crashed=_kc.newly_crashed,
                           newly_green=_kc.newly_green,
-                          still_failing=_kc.still_failing)
+                          still_failing=_kc.still_failing,
+                          moved=_kc.moved)
             # A joint ask's verdict over its candidate's own tests, read on
             # the tree the session LEFT (`held_green`: after any peel), not
             # on its best reading before the peel — a net-negative seed the

@@ -101,15 +101,15 @@ def test_the_comparison_and_the_keep_record_name_what_stayed_red() -> None:
     mark = fill_reading.kept_mark()
     fill_reading.note_kept_comparison(cmp)
     fill_reading.note_kept(0, newly_green=("b",), still_failing=("b",))
-    *_rest, still = fill_reading.kept_since(mark)
+    *_rest, still, _moved = fill_reading.kept_since(mark)
     assert still == ()
     omitted = fill_reading.kept_mark()
     fill_reading.note_kept(4, newly_green=("paid",))
-    *_rest, blank = fill_reading.kept_since(omitted)
+    *_rest, blank, _moved = fill_reading.kept_since(omitted)
     assert blank is None
     named = fill_reading.kept_mark()
     fill_reading.note_kept(4, newly_green=("paid",), still_failing=("left",))
-    *_rest, left = fill_reading.kept_since(named)
+    *_rest, left, _moved = fill_reading.kept_since(named)
     assert left == ("left",)
     sess = RouteRun(kind=RouteKind.SESSION, label="session",
                     targets=frozenset({_D}), target_tests=frozenset({"left"}))

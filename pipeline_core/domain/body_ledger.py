@@ -54,15 +54,31 @@ from pipeline_core.domain.attribution import container_key
 from pipeline_core.domain.crash_site import CrashSite
 from pipeline_core.domain.impl_routing import norm_src_rel
 from pipeline_core.domain.models import FnLocator, FnSite
+from pipeline_core.domain.observation_move import same_statement_tests
 from pipeline_core.domain.oracle_ledger import bare_test_name
 
-GATE_VERSION = "bl1"
-"""Bumped when the layout gate's meaning changes.
+#: The `verdict_delta` kind of a convicting test the landing's own keep
+#: moved at the statement that judges it and left red
+#: (`observation_move.MoveKind.SAME_STATEMENT`). Written by :func:`classify`,
+#: read by the owed walk (`premise_advance.observed_by`).
+OBSERVED = "observed"
+
+GATE_VERSION = "bl2"
+"""Bumped when the layout gate's meaning changes, or when a grade the gate
+trusts stops being able to state a fact the record now carries.
 
 An entry whose `gate_ver` is not this one is never re-seeded. Bumping costs a
 re-derivation of the affected units and can never cost a bad splice, which is
 the right direction for a gate whose failure mode is a tree that does not
-build."""
+build.
+
+`bl2` (2026-11-04): rows now carry the keep's observation moves
+(`kept_moved`) and the reading the body landed on (`before`). A `bl1` row
+graded `proven` says nothing about the convicting tests its keep moved and
+left red, and its before-reading was never stored, so it cannot be
+re-graded honestly. Run `19493-36a4e056` left seven such rows on oracle
+`2676edb08686`, one of them a body that returns a test's expected value as
+a constant; a task2a restart would have re-seeded all seven."""
 
 COMPARATOR_VERSION = "pos1"
 """The meaning of an earlier-panic comparison a grade was earned under.
@@ -156,6 +172,12 @@ class BodyState(StrEnum):
     `()`) to failing at its second, and the ledger graded the landing
     `flat` beside a byte-identical verdict vector.
 
+    The same state, with delta entries `(test, "observed")`, when no
+    convicting test gained and the landing's own keep saw a still-red
+    convicting test's failure move at the statement that judges it
+    (`observation_move`, `LedgerEntry.kept_moved`): the body is the one the
+    test now reports on. Run `19493-36a4e056` (2026-11-04).
+
     Re-seedable: the attributed tests ran, none regressed, and one of them
     measurably got further — a stronger claim than UNMEASURED."""
 
@@ -198,6 +220,97 @@ class LayoutDep:
                          kind=str(raw.get("kind") or ""),
                          definition=str(raw.get("definition") or ""),
                          file=str(raw.get("file") or ""))
+
+
+@dataclass(frozen=True, slots=True)
+class LandingBefore:
+    """The sweep a body landed on, restricted to the tests that could judge
+    it: what :func:`classify` reads as its before half when the process
+    that wrote the landing is not the one grading it.
+
+    Without it the next process graded every landing it adopted against the
+    after view alone (`_ledger_before or _sweep_view` in `run_phase_c_tdd`):
+    a comparison of a reading with itself, which can mint FLAT and never
+    PROVEN, ADVANCED or REFUTED. Every landing a stop or a relaunch cut
+    before its sweep was graded that way."""
+
+    epoch: int
+    intact: bool
+    passed: frozenset[str] = frozenset()
+    failed: frozenset[str] = frozenset()
+    verdicts: KeyedVerdicts = field(default_factory=KeyedVerdicts)
+
+    @classmethod
+    def of_view(cls, view: SweepView, tests: Iterable[str]) -> LandingBefore:
+        names = frozenset(bare_test_name(t) for t in tests)
+        kv = view.keyed
+
+        def _k(keys: frozenset[TestKey]) -> frozenset[TestKey]:
+            return frozenset(k for k in keys if k.test in names)
+
+        return cls(
+            epoch=view.epoch, intact=view.intact,
+            passed=view.passed & names, failed=view.failed & names,
+            verdicts=KeyedVerdicts(
+                passed=_k(kv.passed), failed=_k(kv.failed),
+                ignored=_k(kv.ignored), aborted=_k(kv.aborted),
+                aborted_silent=_k(kv.aborted_silent),
+                positions={k: v for k, v in kv.positions.items()
+                           if k.test in names},
+                opened=kv.opened))
+
+    def view(self) -> SweepView:
+        kv = self.verdicts
+        return SweepView(passed=self.passed, failed=self.failed,
+                         intact=self.intact, epoch=self.epoch,
+                         positions=dict(kv.positions),
+                         aborted=frozenset(k.test for k in kv.aborted),
+                         aborted_silent=frozenset(
+                             k.test for k in kv.aborted_silent),
+                         verdicts=kv)
+
+    def to_dict(self) -> dict[str, Any]:
+        kv = self.verdicts
+
+        def _l(keys: frozenset[TestKey]) -> list[list[str]]:
+            return [[k.binary, k.test] for k in sorted(keys)]
+
+        return {"epoch": self.epoch, "intact": self.intact,
+                "passed": sorted(self.passed), "failed": sorted(self.failed),
+                "keys": {"passed": _l(kv.passed), "failed": _l(kv.failed),
+                         "ignored": _l(kv.ignored), "aborted": _l(kv.aborted),
+                         "aborted_silent": _l(kv.aborted_silent),
+                         "positions": [[k.binary, k.test, v] for k, v
+                                       in sorted(kv.positions.items())],
+                         "opened": sorted(kv.opened)}}
+
+    @staticmethod
+    def from_dict(raw: Any) -> LandingBefore | None:
+        if not isinstance(raw, dict):
+            return None
+        try:
+            keys = raw.get("keys") or {}
+
+            def _s(name: str) -> frozenset[TestKey]:
+                return frozenset(TestKey(str(p[0]), str(p[1]))
+                                 for p in keys.get(name) or ()
+                                 if isinstance(p, (list, tuple)) and len(p) == 2)
+
+            return LandingBefore(
+                epoch=int(raw.get("epoch") or 0),
+                intact=bool(raw.get("intact", True)),
+                passed=frozenset(str(t) for t in raw.get("passed") or ()),
+                failed=frozenset(str(t) for t in raw.get("failed") or ()),
+                verdicts=KeyedVerdicts(
+                    passed=_s("passed"), failed=_s("failed"),
+                    ignored=_s("ignored"), aborted=_s("aborted"),
+                    aborted_silent=_s("aborted_silent"),
+                    positions={TestKey(str(p[0]), str(p[1])): int(p[2])
+                               for p in keys.get("positions") or ()
+                               if isinstance(p, (list, tuple)) and len(p) == 3},
+                    opened=frozenset(str(x) for x in keys.get("opened") or ())))
+        except (TypeError, ValueError):
+            return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,6 +398,18 @@ class LedgerEntry:
     # re-wrote the refuted double drop three times on a prompt that said
     # only that the fn was a stub. "" on every other row.
     crash_evidence: str = ""
+    # Of the convicting tests the keep that landed this body ran and left
+    # red, those whose failure that keep's own comparison saw move, as
+    # `(bare test, observation_move kind)` (the route row's `moved`,
+    # credited to this unit by `credited_moves`). None = unrecorded.
+    # `classify` copies a `same_statement` move into the delta as
+    # `(test, "observed")`; it never re-derives the kind from two sweeps,
+    # which hold neither the failure text nor the crash's test frame.
+    kept_moved: tuple[tuple[str, str], ...] | None = None
+    # The sweep this body landed on, restricted to its tests
+    # (`LandingBefore`): the grade's before half when another process grades
+    # the landing. None on every row written before the field.
+    before: LandingBefore | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -308,6 +433,10 @@ class LedgerEntry:
                if self.kept_green is not None else {}),
             **({"crash_evidence": self.crash_evidence}
                if self.crash_evidence else {}),
+            **({"kept_moved": [list(p) for p in self.kept_moved]}
+               if self.kept_moved is not None else {}),
+            **({"before": self.before.to_dict()}
+               if self.before is not None else {}),
         }
 
     @staticmethod
@@ -363,6 +492,10 @@ class LedgerEntry:
                 kept_green=(None if raw.get("kept_green") is None else tuple(
                     str(t) for t in raw.get("kept_green") or ())),
                 crash_evidence=str(raw.get("crash_evidence") or ""),
+                kept_moved=(None if raw.get("kept_moved") is None else tuple(
+                    (str(p[0]), str(p[1])) for p in raw.get("kept_moved") or ()
+                    if isinstance(p, (list, tuple)) and len(p) == 2)),
+                before=LandingBefore.from_dict(raw.get("before")),
             )
         except (KeyError, TypeError, ValueError):
             return None
@@ -1044,9 +1177,27 @@ def classify(
         # and moved the rest past itself used to be graded `proven` with the
         # moves dropped (run `1680589-7a6824f8`, fill 11, `src/fmt.rs`).
         advanced = tuple((t, "advanced") for t in outcomes.later_tests)
+        # A convicting test still red whose failure the landing's OWN keep
+        # saw move at the statement that judges it: copied from the keep's
+        # comparison (`kept_moved`), never re-derived here, because a sweep
+        # view holds neither the failure text nor the crash's test frame.
+        # Only a test that is still red at this sweep and not already moved
+        # by position. Run `19493-36a4e056` (2026-11-04): the keep of
+        # `src/wrapper.rs::fmt` turned a SIGSEGV inside that body into a
+        # wrong value it printed at the same test line, and the delta named
+        # only the gains.
+        _moved_by_keep = same_statement_tests(dict(entry.kept_moved or ()))
+        _by_position = set(outcomes.later_tests) | set(outcomes.earlier_tests)
+        observed = tuple(
+            (t, OBSERVED) for t in sorted(
+                {bare_test_name(x) for x in convicting & after.failed}
+                & _moved_by_keep - outcomes.gained - _by_position))
         if not outcomes.gained:
-            if outcomes.later:
-                return BodyState.ADVANCED, delta + advanced
+            if outcomes.later or observed:
+                # Moved, not flat: a FLAT row retires a unit from dispatch,
+                # and the move is the evidence that this body is the one the
+                # test now reports on.
+                return BodyState.ADVANCED, delta + advanced + observed
             return BodyState.FLAT, delta
         if entry.kept_green is None:
             # The keep recorded no comparison (a wave a stop cut, a body
@@ -1055,12 +1206,15 @@ def classify(
             # nor a try that bought nothing; FLAT would be a verdict from
             # the missing reading, and the schedule would rank the body a
             # flat re-buy and re-seed would drop it.
-            return BodyState.UNMEASURED, delta + advanced
+            return BodyState.UNMEASURED, delta + advanced + observed
         if not (outcomes.gained & frozenset(entry.kept_green)):
             # The keep's own comparison did not turn these tests green: a
-            # sibling keep paid them. A graded try that bought nothing.
+            # sibling keep paid them. A graded try that bought nothing,
+            # unless its own keep moved a still-red test.
+            if observed:
+                return BodyState.ADVANCED, delta + observed
             return BodyState.FLAT, delta
-        return BodyState.PROVEN, delta + advanced
+        return BodyState.PROVEN, delta + advanced + observed
     if not (names & after.passed):
         return BodyState.UNMEASURED, delta
     # No attributed test was red when the body landed, and they pass now:
@@ -1077,12 +1231,14 @@ def classify(
 
 @dataclass(frozen=True, slots=True)
 class ReportKeep:
-    """One route report of a wave: the units it kept and the tests its row's
+    """One route report of a wave: the units it kept, the tests its row's
     own comparison turned green (bare names; None when that row recorded no
-    comparison)."""
+    comparison), and the tests that comparison ran and left red whose
+    failure moved (bare name -> `observation_move` kind; None unrecorded)."""
 
     kept: frozenset[FnLocator]
     newly_green: frozenset[str] | None
+    moved: Mapping[str, str] | None = None
 
 
 class WaveKept(frozenset[FnLocator]):
@@ -1169,6 +1325,50 @@ def credited_green(
         for u, got in paid.items():
             out[u] = (out.get(u) or frozenset()) | got
     return out
+
+
+def credited_moves(
+    reports: Iterable[ReportKeep],
+    attributed: Mapping[FnLocator, Collection[str]],
+) -> dict[FnLocator, dict[str, str] | None]:
+    """Per kept unit, the moved still-red tests its own keep can be shown to
+    have moved. The rule :func:`credited_green` applies to gains: a test is
+    credited to the one kept unit of the report attributed to it. One
+    addition: a report that kept exactly one unit measured that unit's write
+    alone, so its moves are that unit's whatever the attribution says (a
+    move is how a test reaches a body attribution did not name). A report
+    with no recorded comparison credits nothing (None)."""
+    attr = {u: frozenset(bare_test_name(t) for t in ts)
+            for u, ts in attributed.items()}
+    out: dict[FnLocator, dict[str, str] | None] = {}
+    for rep in reports:
+        if rep.moved is None:
+            for u in rep.kept:
+                out.setdefault(u, None)
+            continue
+        paid: dict[FnLocator, dict[str, str]] = {u: {} for u in rep.kept}
+        for t, kind in rep.moved.items():
+            bare = bare_test_name(t)
+            owners = [u for u in rep.kept if bare in attr.get(u, frozenset())]
+            if len(owners) != 1 and len(rep.kept) == 1:
+                owners = list(rep.kept)
+            if len(owners) == 1:
+                paid[owners[0]][bare] = str(kind)
+        for u, got in paid.items():
+            out[u] = {**(out.get(u) or {}), **got}
+    return out
+
+
+def kept_moved_of(kept: frozenset[FnLocator], unit: FnLocator,
+                  attributed: Mapping[FnLocator, Collection[str]],
+                  ) -> tuple[tuple[str, str], ...] | None:
+    """The moves the wave's keep can credit to `unit` (:func:`credited_moves`),
+    or None when no report that kept `unit` recorded a comparison."""
+    reports = getattr(kept, "reports", None)
+    if not reports:
+        return None
+    got = credited_moves(reports, attributed).get(unit)
+    return None if got is None else tuple(sorted(got.items()))
 
 
 def kept_green_of(kept: frozenset[FnLocator], unit: FnLocator,

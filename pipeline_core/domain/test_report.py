@@ -1284,7 +1284,30 @@ def reading_of_capture(
     names. `sources` reads the oracle test files; it is required so that no
     reading can be built with positions nobody placed."""
     return TestStateReading(parse_binary_results(out or "", timed_out=timed_out),
-                            positions=assertion_positions(out or "", sources))
+                            positions=assertion_positions(out or "", sources),
+                            fingerprints=failure_fingerprints(out or ""))
+
+
+def failure_fingerprints(capture: str) -> dict[TestKey, str]:
+    """Per (binary, test) of `capture`, the identity of that failure's own
+    text: the panic line and what follows it (`_evidence_of`), with
+    libtest's per-run noise masked (`candidate_tiers.ask_fingerprint`).
+
+    Keyed per binary section, the way `TestStateReading.keyed` keys the
+    verdicts, so one name failing in two binaries is two observations. A
+    failure with no captured body has no fingerprint. Two readings of one
+    test at one assertion with different fingerprints said different
+    things (`observation_move`)."""
+    from pipeline_core.domain.candidate_tiers import ask_fingerprint
+
+    out: dict[TestKey, str] = {}
+    for sec in binary_output_sections(capture or ""):
+        for f in parse_test_output(sec.text).failures:
+            text = _evidence_of(f.body, 480)
+            if text:
+                out[TestKey(sec.label, leaf(f.test_name))] = (
+                    ask_fingerprint(text))
+    return out
 
 
 def cap_at_line_boundary(text: str, cap: int) -> str:

@@ -614,10 +614,18 @@ def test_the_recorded_stable_rows_are_refused_once_and_the_layout_only_rule_took
     empty oracle — nobody recorded which tests graded it — and the layout
     fingerprints all MATCHED the live skeleton, so `file_fp` here is the row's
     own fingerprint: the layout condition passes exactly as it did live."""
-    rows = _recorded_rows()
-    assert all(r.oracle_fp == "" for r in rows), "pre-field rows carry no oracle"
-    keys = [r.key for r in rows]
-    file_fp = {r.key.file: r.layout_fp for r in rows}
+    recorded = _recorded_rows()
+    assert all(r.oracle_fp == "" for r in recorded), "pre-field rows carry no oracle"
+    keys = [r.key for r in recorded]
+    file_fp = {r.key.file: r.layout_fp for r in recorded}
+    # As recorded they are `bl1` rows, which the current gate refuses before
+    # it reads the oracle. The oracle clause is measured on them re-stamped
+    # under the current gate, so this test still reads that clause.
+    as_recorded = plan_reseed(recorded, wanted=keys, file_fp=file_fp,
+                              sig_sha={}, oracle_fp=_LIVE_ORACLE)
+    assert as_recorded.take == [] and {
+        why for _k, why in as_recorded.skipped} == {f"gate bl1 != {GATE_VERSION}"}
+    rows = [replace(r, gate_ver=GATE_VERSION) for r in recorded]
     plan = plan_reseed(rows, wanted=keys, file_fp=file_fp, sig_sha={},
                        oracle_fp=_LIVE_ORACLE)
     assert plan.take == [] and {why for _k, why in plan.skipped} == {"oracle moved"}

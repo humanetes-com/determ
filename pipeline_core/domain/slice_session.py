@@ -723,6 +723,18 @@ def _fit_under_cap(
     every session that needs it. Sessions run sequentially on one tree, so
     the second sees the first's bodies; that is the same unit written twice
     under two judgments, which file-first already does every pass.
+
+    Splitting is preferred only where it buys rendering. A test that fits
+    no session at the widest step still joins one when the join costs no
+    rendering either side does not already pay (:func:`_joins_without_cost`).
+    Run `19493-36a4e056` (2026-11-04), fill 1: every single test of the
+    group already needed `files@4,500`, so no join could pass the widest
+    check, and 17 sessions were planned for 18 tests, among them four
+    pairs of world twins with identical unit sets. Two of the four
+    session slots of that fill asked one question twice, and the second
+    session's first change set was byte-identical to the first's. Over
+    every recorded `phase_c.session.plan` (338 plans), 185 of 1,360
+    sessions had the unit set of an earlier session of the same plan.
     """
     bins: list[tuple[list[str], set[FnSite]]] = []
     over_units: list[str] = []
@@ -732,13 +744,22 @@ def _fit_under_cap(
         if len(units) > max_units:
             over_units.append(test)
             continue
-        if fit is not None and fit.rendering((test,), units) is None:
+        own = None if fit is None else fit.rendering((test,), units)
+        if fit is not None and own is None:
             over_chars.append(test)
             continue
         fits = [i for i, (held_tests, held) in enumerate(bins)
                 if len(held | units) <= max_units
                 and (fit is None
                      or fit.fits_widest([*held_tests, test], held | units))]
+        if not fits and fit is not None and own is not None:
+            by_overlap = sorted(
+                (i for i, (_t, held) in enumerate(bins)
+                 if len(held | units) <= max_units),
+                key=lambda i: (-len(bins[i][1] & units), i))
+            fits = [i for i in by_overlap
+                    if _joins_without_cost(fit, bins[i][0], bins[i][1],
+                                           test, units, own)][:1]
         if not fits:
             bins.append(([test], set(units)))
             continue
@@ -746,6 +767,46 @@ def _fit_under_cap(
         bins[best][0].append(test)
         bins[best][1].update(units)
     return bins, over_units, over_chars
+
+
+def _joins_without_cost(
+    fit: Turn0Fit,
+    held_tests: Sequence[str],
+    held: set[FnSite],
+    test: str,
+    units: frozenset[FnSite],
+    own: Rendering,
+) -> bool:
+    """Whether ``test`` joining the session that holds ``held`` costs a
+    rendering neither side already pays.
+
+    Two cases, one question. The joined turn 0 fits at the narrower of the
+    two steps the session and the test already need alone: the split
+    would render both at least that narrow anyway, so it buys nothing. Or
+    the test adds no unit to the session: then the split's only product is
+    a second session writing the same bodies under a second judgment, and
+    the join is admitted at any step that still carries every optional
+    section (it narrows files, sibling tests or types, never evidence).
+    A join that would need a narrower step than either side, and adds
+    units, is left to a session of its own: there the split does buy
+    rendering, which is what the widest-first preference exists for."""
+    joined_tests = [*held_tests, test]
+    joined = held | units
+    ladder = fit.ladder or (Rendering(),)
+    alone = fit.rendering(held_tests, held)
+    if alone is None:
+        return False
+    narrower = ladder[max(_step_index(ladder, alone), _step_index(ladder, own))]
+    if fit.length_at(joined_tests, joined, narrower) <= fit.capacity:
+        return True
+    if not units <= held:
+        return False
+    step = fit.rendering(joined_tests, joined)
+    return step is not None and step.context_drops == 0
+
+
+def _step_index(ladder: Sequence[Rendering], step: Rendering) -> int:
+    return ladder.index(step) if step in ladder else 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -1240,6 +1301,9 @@ class TurnReading:
     #: has no comparison: the suite was inconclusive, and a missing reading
     #: is not a claim that nothing stayed red.
     still_failing: tuple[str, ...] | None = None
+    #: Of ``still_failing``, the tests whose failure moved
+    #: (`RegressionComparison.still_failing_moved`), as sorted pairs.
+    still_failing_moved: tuple[tuple[str, str], ...] = ()
     #: A completed binary reported fewer verdicts than at baseline — oracle
     #: corruption, never traded away at any price (the sweep's rule).
     executed_shrank: bool = False

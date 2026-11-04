@@ -129,8 +129,12 @@ def test_timed_iter_passes_through_and_raises_on_error() -> None:
 # unknown chat_template_kwargs key is silently dropped, not rejected, so the
 # wrong dialect is a quiet wrong state rather than a failure.
 
-def test_qwen_keeps_the_boolean_thinking_dialect() -> None:
-    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", True) == {"enable_thinking": True}
+def test_qwen_keeps_the_boolean_thinking_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VLLM_REASONING_EFFORT", raising=False)
+    # Thinking on also names the profile's depth (the Qwen3.8 card's
+    # `reasoning_effort`); a template without that variable ignores it.
+    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", True) == {
+        "enable_thinking": True, "reasoning_effort": "xhigh"}
     assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", False) == {"enable_thinking": False}
     # A model absent from MODEL_CAPS gets the dialect every model here used
     # before Muse Glimmer.

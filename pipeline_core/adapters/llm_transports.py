@@ -124,11 +124,14 @@ def reasoning_template_kwargs(model: str, enable_thinking: bool) -> dict[str, An
     In the strength dialect there is no "off": the levels are low / medium /
     high / xhigh, so a request that wants no reasoning asks for the least.
     Both rungs resolve env → profile → default (`VLLM_REASONING_STRENGTH`,
-    `VLLM_REASONING_STRENGTH_OFF`)."""
+    `VLLM_REASONING_STRENGTH_OFF`). In the boolean dialect a thinking
+    request carries the depth `VLLM_REASONING_EFFORT` resolves to, when one
+    does."""
     knobs = resolve_model_knobs(os.environ, model)
     return dict(model_reasoning_payload(
         ReasoningDialect(_model_reasoning_dialect(model)), enable_thinking,
-        strength_on=knobs.strength_on, strength_off=knobs.strength_off))
+        strength_on=knobs.strength_on, strength_off=knobs.strength_off,
+        effort=knobs.reasoning_effort))
 
 
 # ---------------------------------------------------------------------------
@@ -790,7 +793,11 @@ class VLLMTransport(_BaseTransport):
     Environment variables:
       VLLM_BASE_URL, VLLM_MODEL_NAME, VLLM_MAX_MODEL_LEN, VLLM_THINKING_BUDGET,
       VLLM_CONTENT_BUDGET, VLLM_REPETITION_PENALTY, VLLM_REASONING_BUDGET,
-      VLLM_MAX_THINK_CHARS
+      VLLM_MAX_THINK_CHARS, VLLM_REASONING_EFFORT
+
+    VLLM_REPETITION_PENALTY and VLLM_REASONING_EFFORT resolve env → the
+    served model's profile → default, so switching MODEL switches them;
+    leave them out of `.env` unless overriding one model on purpose.
 
     VLLM_REASONING_BUDGET selects the reasoning shape (`llm/budget.py`):
     `fixed` (the default) reserves VLLM_THINKING_BUDGET tokens per call and
@@ -814,7 +821,9 @@ class VLLMTransport(_BaseTransport):
         self._ctx = self._knobs.max_model_len
         self._thinking_budget = self._knobs.thinking_budget
         self._content_budget = int(os.getenv("VLLM_CONTENT_BUDGET", "16384"))
-        self._rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
+        # env → profile → default, like the knobs above: switching MODEL
+        # switches the penalty with it.
+        self._rep_penalty = self._knobs.repetition_penalty
         self._per_call_reasoning = reasoning_budget_is_per_call(self._knobs.reasoning_budget)
 
     def count_input_tokens(self, messages: list[dict[str, Any]], *,

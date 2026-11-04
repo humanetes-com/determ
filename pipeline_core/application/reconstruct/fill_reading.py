@@ -52,7 +52,7 @@ events to the splice results anyway.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from pipeline_core.domain.fill_context import current_fill, current_route
@@ -107,26 +107,36 @@ def reset_last_comparison() -> None:
 # concurrent runs is attributed per run.
 # The fifth element is the tests the keep turned green (bare names), so the
 # ledger can say which aimed test a run paid and not only that it paid; the
-# last is the tests it ran and left red, or None when the keep recorded no
+# sixth is the tests it ran and left red, or None when the keep recorded no
 # comparison. None is not an empty set: an empty set says the binaries
 # completed and nothing stayed red, and a forgotten argument must not say that.
+# The last is, of those still red, the tests whose failure moved (bare name
+# -> `observation_move` kind), None with no comparison.
 _KEPT: list[tuple[str, str, int, tuple[str, ...], tuple[str, ...],
-                  tuple[str, ...], tuple[str, ...] | None]] = []
+                  tuple[str, ...], tuple[str, ...] | None,
+                  Mapping[str, str] | None]] = []
 
 
 def note_kept(delta: int, *, newly_red: tuple[str, ...] = (),
               newly_crashed: tuple[str, ...] = (),
               newly_green: tuple[str, ...] = (),
-              still_failing: tuple[str, ...] | None = None) -> None:
+              still_failing: tuple[str, ...] | None = None,
+              moved: Mapping[str, str] | None = None) -> None:
     route, label = current_route()
     stored: tuple[str, ...] | None = (
         None if still_failing is None
         else tuple(bare_test_name(n) for n in still_failing))
+    # A keep that recorded no move map makes no claim about moves, even with
+    # a still-failing set: an omitted argument must not read as "nothing
+    # moved" (the same rule as `still_failing`).
+    stored_moved: dict[str, str] | None = (
+        None if still_failing is None or moved is None
+        else {bare_test_name(t): str(k) for t, k in moved.items()})
     with _LAST_LOCK:
         _KEPT.append((route, label, int(delta), tuple(newly_red),
                       tuple(newly_crashed),
                       tuple(bare_test_name(n) for n in newly_green),
-                      stored))
+                      stored, stored_moved))
 
 
 def note_kept_comparison(cmp: RegressionComparison | None) -> None:
@@ -137,7 +147,8 @@ def note_kept_comparison(cmp: RegressionComparison | None) -> None:
     note_kept(cmp.net_pass_delta, newly_red=tuple(sorted(cmp.newly_red)),
               newly_crashed=tuple(cmp.newly_crashed),
               newly_green=tuple(sorted(cmp.newly_green)),
-              still_failing=tuple(sorted(cmp.still_failing)))
+              still_failing=tuple(sorted(cmp.still_failing)),
+              moved=cmp.still_failing_moved)
 
 
 def kept_mark() -> int:
@@ -147,16 +158,21 @@ def kept_mark() -> int:
 
 def kept_since(mark: int, label: str | None = None
                ) -> tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...],
-                          tuple[str, ...] | None]:
-    """(delta, newly red, newly crashed, newly green, still failing) over
-    the keeps recorded since `mark` — those whose label is `label`, or every
-    unlabelled one when `label` is None (a single run executing alone).
+                          tuple[str, ...] | None,
+                          tuple[tuple[str, str], ...] | None]:
+    """(delta, newly red, newly crashed, newly green, still failing,
+    moved) over the keeps recorded since `mark` — those whose label is
+    `label`, or every unlabelled one when `label` is None (a single run
+    executing alone).
 
     A test a later keep of the same run turned red again is not green at
     the run's end, so it leaves the green set. Still failing is the last
     keep's reading, less what a later keep of the run turned green. None
     when that keep recorded no comparison: the run makes no claim about
-    which tests stayed red."""
+    which tests stayed red. Moved is each keep's moves, a later keep's
+    kind replacing an earlier one's, restricted to the tests still failing
+    at the run's end; None when still failing is, or when no keep of the
+    run recorded a move map."""
     with _LAST_LOCK:
         rows = list(_KEPT[mark:])
     delta = 0
@@ -164,7 +180,9 @@ def kept_since(mark: int, label: str | None = None
     crashed: set[str] = set()
     green: set[str] = set()
     still: set[str] | None = None
-    for _route, lab, d, r, c, g, s in rows:
+    moved: dict[str, str] = {}
+    moved_recorded = False
+    for _route, lab, d, r, c, g, s, mv in rows:
         if label is not None and lab and lab != label:
             continue
         delta += d
@@ -173,10 +191,15 @@ def kept_since(mark: int, label: str | None = None
         green -= {bare_test_name(n) for n in r}
         green.update(g)
         still = None if s is None else {bare_test_name(n) for n in s}
+        if mv is not None:
+            moved_recorded = True
+            moved.update(mv)
     if still is not None:
         still -= green
     return (delta, tuple(sorted(red)), tuple(sorted(crashed)), tuple(sorted(green)),
-            None if still is None else tuple(sorted(still)))
+            None if still is None else tuple(sorted(still)),
+            None if still is None or not moved_recorded else tuple(
+                sorted((t, k) for t, k in moved.items() if t in still)))
 
 
 def render_fill_reading(cmp: RegressionComparison) -> str:

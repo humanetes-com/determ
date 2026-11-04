@@ -25,6 +25,11 @@ from pipeline_core.domain.last_error import (
     LastErrorKind,
     instruction_for,
 )
+from pipeline_core.domain.observation_move import (
+    MoveKind,
+    collapse_moves,
+    move_of,
+)
 from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.reference_floor import doc_test_keys
 
@@ -1460,6 +1465,19 @@ class TestStateReading:
     #: `24951-a72c4642`: a pair keep moved `test_altdebug` from failing at
     #: `tests/test_fmt.rs:91` to `:90` and was kept).
     positions: Mapping[TestKey, int] = field(default_factory=dict)
+    #: (binary, test) -> the identity of the failing test's own failure
+    #: text in that binary (`test_report.failure_fingerprints`), read off the
+    #: same capture. What tells a test that stopped at the same assertion
+    #: with a different value from one that did not move at all
+    #: (`observation_move`). Empty on a reading built without a capture.
+    fingerprints: Mapping[TestKey, str] = field(default_factory=dict)
+    #: (binary, test) -> the position, in the test's own body, of the first
+    #: test-source frame of the crash its process died in, for a test this
+    #: reading saw abort. A crash is localized by the sweep, never by the
+    #: capture: the measurement attaches it (`cargo_runner.measure_test_state`)
+    #: only when this reading's failure text for the key is the one the sweep
+    #: localized. Empty: no crash position is known.
+    crash_positions: Mapping[TestKey, int] = field(default_factory=dict)
 
     @property
     def pass_count(self) -> int:
@@ -2279,6 +2297,16 @@ class RegressionComparison:
     # crashed binary, one test wide, so both readers ask it the same question.
     newly_red_aborted: frozenset[str] = frozenset()
     abort_lost_pass: int = 0
+    # Of ``still_failing``, the tests whose failure moved between the two
+    # readings, bare name -> `observation_move.MoveKind` value. Decided here,
+    # from the two readings' assertion positions, failure fingerprints and
+    # crash positions, so no keep site can construct the edge itself. A test
+    # with no comparable position on either side is absent, never guessed.
+    # The instance (run `19493-36a4e056`, 2026-11-04): a kept session write
+    # turned a test that had died with SIGSEGV inside the written body into a
+    # wrong value printed by it at the same statement; nothing recorded the
+    # move, and the owed walk asked the producing body last.
+    still_failing_moved: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def lost_by_abort(self) -> bool:
@@ -2422,8 +2450,11 @@ def compare_readings(base: TestStateReading,
     newly_red: set[str] = set()
     newly_green: set[str] = set()
     still_failing: set[str] = set()
+    from pipeline_core.domain.assertion_position import TestKey
+
     newly_red_aborted: set[str] = set()
     base_pass = cur_pass = base_exec = cur_exec = crash_lost = abort_lost = 0
+    moves: list[tuple[str, MoveKind]] = []
     for label, b in base_by.items():
         c = cur_by.get(label)
         if not b.completed:
@@ -2460,6 +2491,18 @@ def compare_readings(base: TestStateReading,
         abort_lost += sum(1 for n in _ab if c_key[n] in b_passed)
         newly_green |= {n for n in c.passed if c_key[n] in b_failed}
         still_failing |= {n for n in c.failed if c_key[n] in b_failed}
+        for n in c.failed:
+            if c_key[n] not in b_failed:
+                continue
+            k = TestKey(label, bare_test_name(n))
+            kind = move_of(
+                before_position=base.positions.get(k),
+                before_fingerprint=base.fingerprints.get(k, ""),
+                before_crash=base.crash_positions.get(k),
+                after_position=cur.positions.get(k),
+                after_fingerprint=cur.fingerprints.get(k, ""))
+            if kind is not None:
+                moves.append((bare_test_name(n), kind))
         base_pass += b.pass_count
         cur_pass += c.pass_count
         base_exec += b.executed
@@ -2480,17 +2523,24 @@ def compare_readings(base: TestStateReading,
         still_failing=frozenset(still_failing),
         per_world=per_world,
         newly_red_aborted=frozenset(newly_red_aborted),
-        abort_lost_pass=abort_lost)
+        abort_lost_pass=abort_lost,
+        still_failing_moved=collapse_moves(moves))
 
 
 def _reading_of_world(reading: TestStateReading, world: str) -> TestStateReading:
     """`reading` restricted to the binaries of one build world."""
     prefix = binary_key(world, "")
+
+    def _mine(k: TestKey) -> bool:
+        return k.binary.startswith(prefix) or (
+            not world and WORLD_KEY_SEP not in k.binary)
+
     return TestStateReading(
         binaries=tuple(b for b in reading.binaries if b.world == world),
-        positions={k: v for k, v in reading.positions.items()
-                   if k.binary.startswith(prefix) or (not world and
-                                                      WORLD_KEY_SEP not in k.binary)})
+        positions={k: v for k, v in reading.positions.items() if _mine(k)},
+        fingerprints={k: v for k, v in reading.fingerprints.items() if _mine(k)},
+        crash_positions={k: v for k, v in reading.crash_positions.items()
+                         if _mine(k)})
 
 
 def regression_detail_kind(cmp: RegressionComparison) -> LastErrorKind:

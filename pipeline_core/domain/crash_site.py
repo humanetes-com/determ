@@ -933,6 +933,14 @@ class CrashSite:
     # every world, so a label alone does not say whose crash this is, and
     # the sanitizer used to rebuild the home world only.
     world: str = ""
+    # The innermost frame of the faulting (access) stack that is a test file
+    # with a line (`first_test_file_on_access`): the statement of the test
+    # that was executing when its process died. Read for every site, not
+    # only when the access window is licensed to name a conversion, because
+    # a later reading of the same test that fails at an assertion on this
+    # line says the crashing body now returns a value there
+    # (`observation_move`). None when no test frame was on the stack.
+    test_line: tuple[str, int] | None = None
 
     @property
     def key(self) -> str:
@@ -1456,9 +1464,30 @@ def bare_fn_name(symbol: str) -> str:
     The last form is why segments are scanned from the right instead of a
     single rsplit: a turbofish tail strips to an EMPTY trailing segment, and
     an empty fn_name silently produces a locator that matches no fn — the
-    crash-blamed frame would drop out of the frontier entirely."""
-    parts = [p for p in _strip_generics(symbol).split("::") if p.strip()]
-    return parts[-1].strip() if parts else ""
+    crash-blamed frame would drop out of the frontier entirely.
+
+    A segment in braces is an item the compiler synthesized inside the
+    named item before it: `trace::make::{closure#0}` → `make` (the v0
+    demangling gdb prints), `trace::make::{{closure}}` → `make` (the legacy
+    form the sanitizer prints). It is never a unit the extractor records or
+    a route can write, and the frame's line lies inside the creator's body,
+    so the creator is the unit the frame names. Run `19493-36a4e056`
+    (2026-11-04, iter 1): a SIGSEGV traced to `src/error.rs::{closure#0}`
+    made a non-unit the crash culprit, the owner map's owner of the crashed
+    test, and the head of the dispatch batch while it could never be
+    served, and `frame_site` resolved the same frame to nothing because the
+    record at that line is named for its creator. A symbol whose every
+    segment is synthesized keeps its last segment, as before."""
+    parts = [p.strip() for p in _strip_generics(symbol).split("::")
+             if p.strip()]
+    named = [p for p in parts if not _synthesized_segment(p)]
+    return (named or parts)[-1] if parts else ""
+
+
+def _synthesized_segment(segment: str) -> bool:
+    """A demangled path segment the compiler made rather than the source
+    named (`{closure#0}`, `{{closure}}`, `{impl#6}`, `{shim:vtable#0}`)."""
+    return segment.startswith("{") and segment.endswith("}")
 
 
 def _crate_frames(
@@ -1649,7 +1678,8 @@ def site_from_frames(
         raw_report=raw_report, origin_capable=origin_capable, cycle=cycle,
         abort=abort, origin_traced=traced,
         origin_traced_at_reader=traced_at_reader,
-        origin_stack_lines=origin_stack_lines)
+        origin_stack_lines=origin_stack_lines,
+        test_line=first_test_file_on_access(raw_frames))
 
 
 def asan_stack_excerpt(report: str, *, max_access: int = 24,

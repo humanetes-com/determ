@@ -48,7 +48,8 @@ CACHED_IDS = [
 
 _MODEL_ENV = ("MODEL", "VLLM_MODEL_NAME", "MODEL_FAMILY", "VLLM_MAX_MODEL_LEN",
               "VLLM_REASONING_BUDGET", "VLLM_THINKING_BUDGET", "VLLM_RUNAWAY_THINK_CHARS",
-              "VLLM_REASONING_STRENGTH", "VLLM_REASONING_STRENGTH_OFF", "VLLM_MAX_THINK_CHARS")
+              "VLLM_REASONING_STRENGTH", "VLLM_REASONING_STRENGTH_OFF", "VLLM_MAX_THINK_CHARS",
+              "VLLM_REPETITION_PENALTY", "VLLM_REASONING_EFFORT")
 
 
 @pytest.fixture
@@ -79,7 +80,45 @@ def test_payloads_per_family(clean_env, profile):
     if profile.dialect is ReasoningDialect.STRENGTH:
         assert (on, off) == ({"reasoning_strength": "high"}, {"reasoning_strength": "low"})
     else:
-        assert (on, off) == ({"enable_thinking": True}, {"enable_thinking": False})
+        # Thinking on names its depth; thinking off never does.
+        assert (on, off) == ({"enable_thinking": True, "reasoning_effort": "xhigh"},
+                             {"enable_thinking": False})
+
+
+def test_each_model_gets_its_own_suggested_sampling(clean_env):
+    """Switching MODEL switches the penalty and the effort with it: the
+    Qwen3.8 card's 1.0 and xhigh, and Muse's 1.05 with no effort (its card
+    recommends no sampling values; 1.05 is what every Muse run sent)."""
+    qwen = resolve_model_knobs({"MODEL": "Qwen/Qwen3.8-27B-FP8"})
+    muse = resolve_model_knobs({"MODEL": MUSE})
+    assert (qwen.repetition_penalty, qwen.reasoning_effort) == (1.0, "xhigh")
+    assert (muse.repetition_penalty, muse.reasoning_effort) == (1.05, None)
+    assert qwen.sources()["VLLM_REPETITION_PENALTY"] == "profile"
+    assert qwen.sources()["VLLM_REASONING_EFFORT"] == "profile"
+    # The startup line names where each came from.
+    assert "VLLM_REPETITION_PENALTY=1.0(profile)" in qwen.summary()
+    assert "VLLM_REASONING_EFFORT=xhigh(profile)" in qwen.summary()
+
+
+def test_an_env_line_overrides_whichever_model_is_loaded(clean_env):
+    env = {"MODEL": "Qwen/Qwen3.8-27B-FP8", "VLLM_REPETITION_PENALTY": "1.1",
+           "VLLM_REASONING_EFFORT": "medium"}
+    k = resolve_model_knobs(env)
+    assert (k.repetition_penalty, k.reasoning_effort) == (1.1, "medium")
+    assert k.sources()["VLLM_REPETITION_PENALTY"] == "env"
+    # `none` is an explicit "do not send" for a profile that sets one.
+    off = resolve_model_knobs({**env, "VLLM_REASONING_EFFORT": "none"})
+    assert off.reasoning_effort is None
+    with pytest.raises(ValueError):
+        resolve_model_knobs({**env, "VLLM_REPETITION_PENALTY": "high"})
+
+
+def test_the_transport_sends_the_resolved_penalty(clean_env, monkeypatch):
+    monkeypatch.setenv("MODEL", QWEN)
+    monkeypatch.setenv("VLLM_MODEL_NAME", QWEN)
+    assert t.VLLMTransport()._rep_penalty == 1.0
+    monkeypatch.setenv("VLLM_MODEL_NAME", MUSE)
+    assert t.VLLMTransport()._rep_penalty == 1.05
 
 
 def test_negative_control_a_muse_id_the_old_exact_table_lacked(clean_env):

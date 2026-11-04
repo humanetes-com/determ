@@ -479,6 +479,11 @@ class RouteLedgerRow:
     #: row that recorded no per-test reading, every row written before
     #: 2026-10-27 included: no claim either way.
     still_red: tuple[str, ...] | None = None
+    #: Of ``still_red``, the tests whose failure moved between the run's
+    #: keep readings, as ``(bare test, observation_move kind)`` pairs
+    #: (`RegressionComparison.still_failing_moved`). None: the row recorded
+    #: no comparison, every row written before 2026-11-04 included.
+    moved: tuple[tuple[str, str], ...] | None = None
     #: The reverted units the revert did not narrow to: restored only
     #: because the transaction they rode in was restored as a whole
     #: (`FillAttempts.note_reverted(collateral=True)`). Empty on every row
@@ -568,6 +573,8 @@ class RouteLedgerRow:
                             if self.newly_green is not None else None),
             "still_red": (list(self.still_red)
                           if self.still_red is not None else None),
+            **({"moved": [list(p) for p in self.moved]}
+               if self.moved is not None else {}),
             "collateral": [list(t) for t in self.collateral],
             "joint_sets": [[list(t) for t in js] for js in self.joint_sets],
             "opened": ([list(t) for t in self.opened]
@@ -601,6 +608,7 @@ class RouteLedgerRow:
         share = raw.get("share_minutes")
         green = raw.get("newly_green")
         still = raw.get("still_red")
+        moved = raw.get("moved")
         first = raw.get("first_turn_minutes")
         return cls(
             kind=kind, label=str(raw.get("label", "")),
@@ -624,6 +632,9 @@ class RouteLedgerRow:
                          if isinstance(green, list) else None),
             still_red=(tuple(str(x) for x in still)
                        if isinstance(still, list) else None),
+            moved=(tuple((str(p[0]), str(p[1])) for p in moved
+                         if isinstance(p, (list, tuple)) and len(p) == 2)
+                   if isinstance(moved, list) else None),
             collateral=_pairs("collateral"),
             joint_sets=tuple(
                 tuple((str(a), str(b)) for a, b in js)
