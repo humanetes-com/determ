@@ -1550,13 +1550,11 @@ class PhaseCFillEngine:
                                         continue
                                     sig_t = sloc[0]
                                     cur_body = cur_text[sloc[2]:sloc[3]]
-                                # The body on disk now, against the ledger.
                                 # A crash settlement's row quotes the body the
-                                # stack ran; this prompt quotes it only while
-                                # the tree holds something else.
+                                # stack ran; the note states only that
+                                # history, whatever body is on disk now.
                                 _refuted = refuted_text_for(
-                                    ledger_entries, oracle_fp, ((rel_f, fn),),
-                                    on_tree={(rel_f, fn): (cur_body,)})
+                                    ledger_entries, oracle_fp, ((rel_f, fn),))
                                 error_excerpt_test = self.cargo.focus_errors(
                                     test_out, rel_f, max_chars=self.config.fix_err_cap)
                                 _ctx = self.prompt.gather(

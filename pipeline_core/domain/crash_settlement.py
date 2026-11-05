@@ -235,12 +235,12 @@ def refuted_crash_note(body: str, evidence: str, iteration: int,
     """What the next writer of a unit is told about the body a crash
     settlement took off it: the body, and the crash as the localizer read it.
 
-    It says only what the row records. The settlement put that body back to
-    a stub (STUB) or to the unit's earlier text (NARROWED). The wording
-    names neither, so it cannot lie about which of the two the tree holds.
-    The caller omits the note when the body on the tree is the quoted one
-    (`refuted_notes`): that equality is a later keep of those bytes, and on
-    the settlement itself the committed text and the quoted body differ.
+    It says only what the row records, as history: the settlement put that
+    body back to a stub (STUB) or to the unit's earlier text (NARROWED),
+    and the wording names neither and claims nothing about the tree now, so
+    it is true in every tree state — including a later keep of the same
+    bytes, where the closing sentence names the body on the tree as the one
+    that crashed.
     Run `757853-e28f1a7d` (2026-10-16): a stub's iter-4 prompt said only
     that the fn was a stub, and the reply wrote the same double drop three
     times. Run `630350-93c5a6ee` (2026-11-05): a filled unit's settled body
@@ -257,7 +257,8 @@ def refuted_crash_note(body: str, evidence: str, iteration: int,
     if evidence.strip():
         lines += ["The crash it caused, as the localizer read it:",
                   evidence.strip()]
-    lines.append("Do not write that body again.")
+    lines.append("If the body you are shown for this fn is that text, it is "
+                 "the one that crashed. Do not write that body again.")
     return "\n".join(lines)
 
 

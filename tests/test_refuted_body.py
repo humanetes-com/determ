@@ -22,7 +22,6 @@ from pipeline_core.domain.crash_site import CrashSites
 from pipeline_core.domain.evidence_premise import evidence_fingerprints
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.refuted_body import (
-    on_tree_bodies,
     refuted_notes,
     refuted_text_for,
     with_refuted_notes,
@@ -174,61 +173,31 @@ def test_the_fingerprint_moves_with_the_note_and_both_stamps_agree() -> None:
     assert crash == {}
 
 
-def test_a_body_still_on_the_tree_is_not_quoted_as_taken_off() -> None:
-    """The lead says the quoted body is not the one on the tree. When it is,
-    there is no note. A different body, a unit the caller did not supply,
-    and an empty read still produce the note: absence of a body is not a
-    claim that the refuted text is what the tree holds."""
+def test_the_note_is_told_whatever_body_is_on_the_tree() -> None:
+    """The note states only history, so no reader compares it with the tree.
+    An earlier version omitted it when the current body equalled the refuted
+    one, against a body the file, per-impl and pair routes read when the
+    fill planned: a body STUBbed by a settlement later in the same fill
+    still compared equal, and the note was hidden while the tree held a
+    stub. The reader has no on-tree argument at all now."""
+    import inspect
+
+    from pipeline_core.domain import refuted_body as rb
     row = _row()
-    quoted = tuple(row.bodies)
-    assert refuted_text_for(
-        [row], _ORACLE, [_UNIT], on_tree={_UNIT: quoted}) == ""
-    # Whitespace is not a different body.
-    assert refuted_text_for(
-        [row], _ORACLE, [_UNIT],
-        on_tree={_UNIT: (quoted[0].replace(" ", "  "),)}) == ""
-    # `./` and a bare `src/` prefix are the same unit.
-    assert refuted_text_for(
-        [row], _ORACLE, [_UNIT],
-        on_tree={("./src/error.rs", _UNIT[1]): quoted}) == ""
-    other = refuted_text_for(
-        [row], _ORACLE, [_UNIT],
-        on_tree={_UNIT: ("unimplemented!()",)})
-    assert "heap-use-after-free" in other and "was taken off the tree" in other
-    assert "heap-use-after-free" in refuted_text_for(
-        [row], _ORACLE, [_UNIT], on_tree={})
-    assert "heap-use-after-free" in refuted_text_for(
-        [row], _ORACLE, [_UNIT], on_tree={_UNIT: ("",)})
-    # Omitting the map is the reservation: it must not under-count.
-    assert "heap-use-after-free" in _note()
-    # One body the writer is editing, when the row quoted more than one
-    # occurrence: matching any of them is the same body. Two current texts
-    # that are not that set are not.
-    two = replace(row, bodies=(quoted[0], "fn other() {}"))
-    assert refuted_text_for(
-        [two], _ORACLE, [_UNIT], on_tree={_UNIT: ("fn other() {}",)}) == ""
-    assert "heap-use-after-free" in refuted_text_for(
-        [two], _ORACLE, [_UNIT],
-        on_tree={_UNIT: (quoted[0], "fn different() {}")})
-    # A name-only record is not a body. The note stays.
-    class _NameOnly:
-        file = _UNIT[0]
-        fn_name = _UNIT[1]
-    assert on_tree_bodies([_NameOnly()]) == {}
-    assert "heap-use-after-free" in refuted_text_for(
-        [row], _ORACLE, [_UNIT], on_tree=on_tree_bodies([_NameOnly()]))
-    # The fingerprint reads the same comparison. A body that is the refuted
-    # one is not new evidence, and the two stamps over that reading agree.
-    loc = FnLocator(*_UNIT)
-    recs = [{"file": _UNIT[0], "fn_name": _UNIT[1], "body_text": quoted[0]}]
-    notes = refuted_notes([row], _ORACLE, on_tree=on_tree_bodies(recs))
-    assert notes == {}
-    crash: dict[FnLocator, str] = {}
-    bare = evidence_fingerprints([loc], recs, crash=crash)
-    stamped = evidence_fingerprints(
-        [loc], recs, crash=with_refuted_notes(crash, notes))
-    assert stamped == bare
-    assert crash == {}
+    for reader in (rb.refuted_notes, rb.refuted_text_for):
+        assert "on_tree" not in inspect.signature(reader).parameters
+    assert not hasattr(rb, "on_tree_bodies")
+    note = _note()
+    # The crashing bytes back on the tree: the note says so, as history.
+    assert "If the body you are shown for this fn is that text, it is the " \
+           "one that crashed." in note
+    assert row.bodies[0].strip()[:40] in note
+    # The lead claims nothing about the tree either.
+    assert "NOT" not in REFUTED_BODY_LEAD
+    assert "is the one that crashed" in REFUTED_BODY_LEAD
+    # Two quoted occurrences are both told.
+    two = replace(row, bodies=(row.bodies[0], "fn other() {}"))
+    assert "fn other() {}" in refuted_text_for([two], _ORACLE, [_UNIT])
 
 
 def test_a_retry_sends_the_note_until_the_conversation_holds_it() -> None:
@@ -243,7 +212,7 @@ def test_a_retry_sends_the_note_until_the_conversation_holds_it() -> None:
         sections=refuted_feedback(note))
     first = render_retry_turn(fb, conversation="")
     assert f"<{REFUTED_BODY_TAG}>" in first
-    assert "NOT the one quoted" in first
+    assert REFUTED_BODY_LEAD.strip() in first
     assert "heap-use-after-free" in first
     assert "was taken off the tree" in first
     again = render_retry_turn(fb, conversation=first)

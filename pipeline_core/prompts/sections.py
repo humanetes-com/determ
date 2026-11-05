@@ -134,10 +134,11 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
 #: the tree crashed, and the quoted body is the one that was taken off.
 REFUTED_BODY_TAG = "REFUTED_BODY"
 REFUTED_BODY_LEAD = (
-    "A body written earlier for a fn you are writing crashed a test process "
-    "and was taken off the tree. The body on the tree now is NOT the one "
-    "quoted here; the crash below is about the quoted body. Read what in it "
-    "was wrong, and do not write it again:\n")
+    "Earlier in this run a body written for a fn you are writing crashed a "
+    "test process and was taken off the tree. The crash below is about the "
+    "quoted body. If the body you are shown for that fn is the same text, "
+    "it is the one that crashed. Read what in it was wrong, and do not "
+    "write it again:\n")
 
 
 def refuted_body_block(text: str) -> str:

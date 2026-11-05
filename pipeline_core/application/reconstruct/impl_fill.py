@@ -290,11 +290,7 @@ from pipeline_core.domain.refine import (
     best_progress_fields,
     best_progress_of,
 )
-from pipeline_core.domain.refuted_body import (
-    on_tree_bodies,
-    refuted_notes,
-    refuted_text_for,
-)
+from pipeline_core.domain.refuted_body import refuted_notes, refuted_text_for
 from pipeline_core.domain.retro_gate import (
     JOINT_BODY_SHA,
     JOINT_MEMBERS,
@@ -2147,8 +2143,7 @@ def prepare_impl_fill(
             _file_refuted = refuted_text_for(
                 ledger_entries, oracle_fp,
                 [*((m.file, m.fn_name) for m in _file_members),
-                 *((file_rel, i.fn_name) for i in _installable)],
-                on_tree=on_tree_bodies(_file_members))
+                 *((file_rel, i.fn_name) for i in _installable)])
             prompt = "" if _conv.opened else build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
                 fill_plan=_plans,
@@ -3993,14 +3988,13 @@ def prepare_impl_fill(
             [(n, block.container) for n in _block_target_names])
 
         def _block_refuted() -> str:
-            """The note for this block's members, against the bodies on the
-            tree. Called at each ask so a settlement earlier in the fill is
-            visible, and omitted when that body is already back."""
+            """The note for this block's members, read on the live ledger at
+            each ask so a settlement earlier in the fill is visible. Told
+            whatever body is on the tree: the note claims only history."""
             members = (*block.stub_members, *block.refill_members)
             return refuted_text_for(
                 ledger_entries, oracle_fp,
-                [(block.file, m.fn_name) for m in members],
-                on_tree=on_tree_bodies(members))
+                [(block.file, m.fn_name) for m in members])
 
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
             nonlocal last_response
@@ -5692,8 +5686,7 @@ def prepare_impl_fill(
                        for m in (*b.stub_members, *b.refill_members)]
             return refuted_text_for(
                 ledger_entries, oracle_fp,
-                [(m.file, m.fn_name) for m in members],
-                on_tree=on_tree_bodies(members))
+                [(m.file, m.fn_name) for m in members])
 
         def _make_pair_prompt(_err: str, _kind: LastErrorKind) -> str:
             return _build_per_impl_prompt(
@@ -6822,8 +6815,7 @@ def prepare_impl_fill(
                         ledger_entries, oracle_fp,
                         [*((u.file, u.fn_name) for u in sl.units
                            if (u.file, u.fn_name) not in sl.frozen),
-                         *((u.file, u.fn_name) for u in (ws.installable or ()))],
-                        on_tree=on_tree_bodies(records.values())),
+                         *((u.file, u.fn_name) for u in (ws.installable or ()))]),
                     behaviour_must=_behaviour_must(*records.values()),
                     unit_notes=unit_notes_text(
                         (locator_of(u) for u in sl.units), _frontier_tests),

@@ -334,11 +334,7 @@ from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
-from pipeline_core.domain.refuted_body import (
-    on_tree_bodies,
-    refuted_notes,
-    with_refuted_notes,
-)
+from pipeline_core.domain.refuted_body import refuted_notes, with_refuted_notes
 from pipeline_core.domain.retro_gate import bind_crate_names
 from pipeline_core.domain.same_failure import SignatureReader
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
@@ -1394,20 +1390,15 @@ def run_phase_c_tdd(
     _oracle_fp_first: list[str] = []
 
     def _crash_premise(crash: Mapping[FnLocator, str],
-                       iter_no: int,
-                       recs: Iterable[Any] = (),
-                       ) -> dict[FnLocator, str]:
+                       iter_no: int) -> dict[FnLocator, str]:
         """The crash excerpt every ask and landing fingerprint reads: the
         sweep's crash text plus each unit's refuted-body note on the live
-        ledger (`refuted_body.with_refuted_notes`). A note whose body is the
-        one `recs` already has on the tree is omitted, the same comparison
-        the prompt makes. Read at stamp time by both stamps, so the
-        dispatch premise and the landing premise compare like with like;
-        never the dict a writer or the rank reads."""
+        ledger (`refuted_body.with_refuted_notes`), the same notes every
+        prompt renders whatever body is on the tree. Read at stamp time by
+        both stamps, so the dispatch premise and the landing premise
+        compare like with like; never the dict a writer or the rank reads."""
         return with_refuted_notes(
-            crash, refuted_notes(
-                _ledger_entries(), _oracle_fp(iter_no),
-                on_tree=on_tree_bodies(recs)))
+            crash, refuted_notes(_ledger_entries(), _oracle_fp(iter_no)))
 
     def _oracle_moved_mid_run(iter_no: int, fp: str) -> None:
         """Stop the run when the oracle changes under a live cluster.
@@ -1772,7 +1763,7 @@ def run_phase_c_tdd(
                  if deps.retro_evidence_texts is not None else {})
         return unit_ask_fingerprints(list(units), recs, words=words,
                                      retro=retro,
-                                     crash=_crash_premise(crash_texts, iter_n, recs))
+                                     crash=_crash_premise(crash_texts, iter_n))
 
     def _read_for_world(world: str) -> SignatureReader:
         if deps.failure_reader is None:
@@ -5911,7 +5902,7 @@ def run_phase_c_tdd(
                 [k for k, _ in ordered], _disp_recs,
                 retro=(deps.retro_evidence_texts(project_dir)
                        if deps.retro_evidence_texts is not None else {}),
-                crash=_crash_premise(crash_texts, iter_n, _disp_recs)).items()}
+                crash=_crash_premise(crash_texts, iter_n)).items()}
         _evidence_of = {
             (_k.file, _k.fn_name): _fp
             for _k, _fp in _evidence_now.items()}
@@ -5941,7 +5932,7 @@ def run_phase_c_tdd(
                     list(units), recs,
                     retro=(deps.retro_evidence_texts(project_dir)
                            if deps.retro_evidence_texts is not None else {}),
-                    crash=_crash_premise(_crash, _iter, recs)).items()}
+                    crash=_crash_premise(_crash, _iter)).items()}
 
         _flat_standing = flat_standing_unchanged(
             _stand, oracle_fp_now=_oracle_fp(iter_n),
