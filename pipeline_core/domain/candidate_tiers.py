@@ -810,12 +810,20 @@ def merge_slices(primary: Mapping[str, frozenset[str]],
                  tests: Sequence[str],
                  *,
                  sight: SightReading,
+                 owners: Mapping[str, Iterable[str]] | None = None,
                  ) -> dict[str, frozenset[str]]:
-    """Each owed test's executed slice: `primary` (the session slicer's map),
-    else what the frontier attributes to it, else the bodies the sweep's
-    observations saw it run (`SightReading.units_of`: measured owners, the
-    recorded set, its crash stack, the crate function its first failure is
-    inside).
+    """Each owed test's executed slice: its `owners` (the owner record's
+    walk view, `file::fn`, `domain/red_test.py`) united with `primary` (the
+    session slicer's map), else what the frontier attributes to it, else the
+    bodies the sweep's observations saw it run (`SightReading.units_of`:
+    measured owners, the recorded set, its crash stack, the crate function
+    its first failure is inside).
+
+    The owners are united, not a fallback. With `primary or attributed`
+    alone, a session slice of one attributed unit hid every owner the
+    sweep observed: run `1604111-bb3716ef` (2026-11-05, iter 9) owed
+    `[[drop]]` to two tests whose six admitted owners the next filter then
+    removed as served with nothing owing them.
 
     An UNSEEN test has no slice. Whatever the frontier attributes to it is a
     guess (no observation names a unit for it), so it goes to the `UNREAD`
@@ -828,7 +836,9 @@ def merge_slices(primary: Mapping[str, frozenset[str]],
     for t in tests:
         if sight.is_unseen(t):
             continue
-        sl = (primary.get(t) or frozenset(attributed.get(t, ()))
+        sl = ((frozenset(primary.get(t, ()))
+               | frozenset((owners or {}).get(t, ())))
+              or frozenset(attributed.get(t, ()))
               or frozenset(unit_key((u.file, u.fn_name))
                            for u in sight.units_of(t)))
         if sl:

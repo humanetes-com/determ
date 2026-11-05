@@ -25,6 +25,7 @@ from pipeline_core.domain.crash_settlement import (
     held_stub_evidence,
     occurrence_of_frame,
     occurrence_of_line,
+    refuted_crash_note,
     settle_step,
 )
 from pipeline_core.domain.crash_site import CrashFrame, CrashSite, site_from_frames
@@ -352,15 +353,16 @@ def test_a_stub_the_settlement_made_is_told_what_its_body_did() -> None:
     # Run `757853-e28f1a7d` (2026-10-16): after iter 3 put
     # `into_boxed_dyn_error` back to a stub, the iter-4 prompt said only that
     # the fn was a stub holding three tests, and the reply wrote the same
-    # double drop three times. The invented body here frees twice.
-    told = held_stub_evidence(3, "let b = self.take();\ndrop(b);\ndrop(b)",
+    # double drop three times. The invented body here frees twice. The note
+    # is its own section now (`refuted_body`), for stubs and filled units
+    # alike; the stub sentence says only that the fn is a stub.
+    told = refuted_crash_note("let b = self.take();\ndrop(b);\ndrop(b)",
                               "free(): double free detected", 3)
-    assert "3 failing test(s) stop" in told
     assert "drop(b)" in told and "double free" in told
     assert "iteration 3" in told and "Do not write that body again." in told
-    # Negative control: a stub no settlement made says only that it is one.
     plain = held_stub_evidence(3)
-    assert "put back" not in plain and plain.endswith("Give it a real body.")
+    assert "3 failing test(s) stop" in plain
+    assert "taken off" not in plain and plain.endswith("Give it a real body.")
 
 
 def test_a_settled_stub_survives_a_restore_of_an_older_pre_image(

@@ -354,10 +354,12 @@ CONTEXT_DROPS: tuple[str, ...] = (
 )
 
 #: Tags a step never omits. FILE and TEST are one block per path.
+#: REFUTED_BODY is the body a crash took off an editable unit: dropping it
+#: reopens the unit on the body the crash already convicted.
 #: FAILING_TESTS stays; its observed lines are the step past
 #: :data:`CONTEXT_DROPS`. TYPES_IN_SCOPE narrows by ``types_cap``.
 KEPT_TAGS: frozenset[str] = frozenset({
-    "FAILING_TESTS", "TYPES_IN_SCOPE", "FILE", "TEST",
+    "FAILING_TESTS", "TYPES_IN_SCOPE", "FILE", "TEST", "REFUTED_BODY",
 })
 
 

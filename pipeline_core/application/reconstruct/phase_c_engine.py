@@ -101,6 +101,7 @@ from pipeline_core.domain.refill_stamp import (
     stamp_reads_dispatch,
 )
 from pipeline_core.domain.refine import FixProgress, FloorStall
+from pipeline_core.domain.refuted_body import refuted_text_for
 from pipeline_core.domain.slice_session import SessionSlice
 from pipeline_core.domain.test_outcome import PremiseEntry
 from pipeline_core.domain.test_results import (
@@ -128,6 +129,7 @@ from pipeline_core.prompts.retry_turn import (
     BODY_OUTPUT,
     AttemptFeedback,
     EvidenceSection,
+    refuted_feedback,
     types_new_to,
 )
 from pipeline_core.threads import context_thread
@@ -601,6 +603,7 @@ class PhaseCFillEngine:
             tdd_frontier_tests=tdd_frontier_tests, tdd_test_cmd=tdd_test_cmd,
             crash_evidence=crash_evidence, crash_blamed=crash_blamed,
             crash_sites=crash_sites,
+            ledger_entries=ledger_entries, oracle_fp=oracle_fp,
             crash_blocked=crash_blocked, culprits_of=culprits_of,
             dispatch_ranks=dispatch_ranks,
             behaviour_specs=behaviour_specs, cfg_dead=_cfg_dead,
@@ -755,6 +758,8 @@ class PhaseCFillEngine:
         take_holders: Callable[[], list[HolderAdmission]] | None = None,
         holders: HolderQueue | None = None,
         admit_measured: Callable[[], None] | None = None,
+        ledger_entries: Sequence[Any] = (),
+        oracle_fp: str = "",
     ) -> ClusterFillResult:
         """The per-fn route: passes of priority levels over the frontier's
         stubs and re-fill targets. `claim` is the fill schedule's gate on
@@ -1078,6 +1083,8 @@ class PhaseCFillEngine:
                 ),
                 behaviour_specs=behaviour_specs,
                 crash_evidence=crash_evidence,
+                ledger_entries=ledger_entries,
+                oracle_fp=oracle_fp,
                 crash_blamed=crash_blamed,
                 crash_sites=crash_sites,
                 crash_blocked=crash_blocked,
@@ -1543,6 +1550,13 @@ class PhaseCFillEngine:
                                         continue
                                     sig_t = sloc[0]
                                     cur_body = cur_text[sloc[2]:sloc[3]]
+                                # The body on disk now, against the ledger.
+                                # A crash settlement's row quotes the body the
+                                # stack ran; this prompt quotes it only while
+                                # the tree holds something else.
+                                _refuted = refuted_text_for(
+                                    ledger_entries, oracle_fp, ((rel_f, fn),),
+                                    on_tree={(rel_f, fn): (cur_body,)})
                                 error_excerpt_test = self.cargo.focus_errors(
                                     test_out, rel_f, max_chars=self.config.fix_err_cap)
                                 _ctx = self.prompt.gather(
@@ -1579,7 +1593,8 @@ class PhaseCFillEngine:
                                             "Types this result names that were "
                                             "not shown above:\n"),
                                         EvidenceSection(
-                                            "MODEL_NOTES", _ctx.notes_section))
+                                            "MODEL_NOTES", _ctx.notes_section),
+                                        *refuted_feedback(_refuted))
                                 ) if _conv.opened else build_per_fn_fix_prompt(
                                     file_text=cur_text, fn_name=fn, sig_text=sig_t,
                                     test_blocks=t_blocks, module_name=module_name,
@@ -1591,6 +1606,7 @@ class PhaseCFillEngine:
                                         invariants=invariants_section,
                                         retrospective_guidance="", siblings="", crate_idioms="",
                                         bound_methods=_ctx.bound_methods_section,
+                                        refuted_body=_refuted,
                                         behaviour_must=behaviour_must_instruction(
                                             behaviour_specs,
                                             units=(IdentityMustUnit(
@@ -1926,6 +1942,8 @@ class _PerFnRoute:
             skip_end_pass_test=kw["skip_end_pass_test"],
             tdd_frontier_tests=run_frontier,
             tdd_test_cmd=kw["tdd_test_cmd"], crash_evidence=kw["crash_evidence"],
+            ledger_entries=kw.get("ledger_entries", ()),
+            oracle_fp=kw.get("oracle_fp", ""),
             crash_blamed=kw["crash_blamed"], crash_blocked=kw["crash_blocked"],
             culprits_of=kw.get("culprits_of"),
             dispatch_ranks=kw["dispatch_ranks"],

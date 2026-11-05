@@ -267,7 +267,7 @@ def test_failing_tests_are_tagged_and_every_other_section_is_a_ladder_drop(
         "notes": "NOTES-BODY", "prior_regression": "REGR-BODY",
         "blueprint": "BLUE-BODY",
         "crash_evidence": "CRASH-BODY", "behaviour_must": "BEHAVE-BODY",
-        "unit_notes": "UNITS-BODY",
+        "unit_notes": "UNITS-BODY", "refuted_body": "REFUTED-BODY",
     }
     full = sp.build_slice_session_prompt(**common)
     named = set(re.findall(

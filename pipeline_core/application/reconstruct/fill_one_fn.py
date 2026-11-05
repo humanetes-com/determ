@@ -123,6 +123,7 @@ from pipeline_core.domain.refine import (
     best_progress_of,
     retro_subject,
 )
+from pipeline_core.domain.refuted_body import refuted_text_for
 from pipeline_core.domain.retro_gate import (
     BlockedOnStubs,
     ConvictionEvidence,
@@ -193,6 +194,7 @@ from pipeline_core.prompts.retry_turn import (
     PER_FN_JOINT_OUTPUT,
     AttemptFeedback,
     EvidenceSection,
+    refuted_feedback,
     types_new_to,
 )
 from pipeline_core.prompts.sections import render_types_section
@@ -786,6 +788,19 @@ class FillOneFn:
                 unit=screening_unit(rel_file, fn_name),
                 pins=_fn_pins, observables=_fn_observables,
                 loop_scope=_loop_scope)
+        def _refuted_body(current: str) -> str:
+            """A body a crash settlement took off this fn, and its crash,
+            read on the live ledger at render time so a settlement earlier
+            in this fill is told (`refuted_body.refuted_text_for`). Not part
+            of `_crash_evidence`: that text is filtered by
+            `CrashSites.evidence_for` and decides the exhaustion skip and
+            the keep, and a previous body's crash is neither. `current` is
+            the body on the tree at this ask; when it is the refuted body
+            the note is omitted, because the lead would say it is not."""
+            return refuted_text_for(
+                ctx.ledger_entries, ctx.oracle_fp, ((rel_file, fn_name),),
+                on_tree={(rel_file, fn_name): (current,)})
+
         def _prior_regression() -> str:
             """What a reverted write by any route over this fn broke and what
             those tests printed (`sibling_regression`), from the store as it
@@ -941,6 +956,17 @@ class FillOneFn:
             _last_abort_owned[0] = False
             _last_own_panics[0] = ()
             cur_text = file_path.read_text(encoding="utf-8")
+            # The body on the tree now, from the same locator the splice
+            # uses, so a settlement that restored this file earlier in the
+            # fill is what the note is compared with. `last_body` is the
+            # reply that was just reverted and must not count as on-tree.
+            _now = self.mut.locate_fn_by_record(
+                file_path, fn_name, container, sig_text, rec.cfg_predicates)
+            _on_tree = (_now.body_text
+                        if _now is not None
+                        and isinstance(getattr(_now, "body_text", None), str)
+                        else "")
+            _refuted = _refuted_body(_on_tree)
             # Strip inactive #[cfg] branches so the model sees only the
             # active variant (e.g. one StdError definition, not three).
             if ctx.cluster_cfg_set is not None:
@@ -987,6 +1013,7 @@ class FillOneFn:
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
+                        refuted_body=_refuted,
                         coupled=_coupled_section(),
                         usage_examples=select_usage_examples(
                             ctx.behaviour_specs, fn_name=fn_name,
@@ -1060,7 +1087,8 @@ class FillOneFn:
                         EvidenceSection("MODEL_NOTES", notes_section),
                         EvidenceSection(
                             "RUST_GOTCHAS_DETAIL",
-                            language_driver().gotchas_for_error(error_excerpt))),
+                            language_driver().gotchas_for_error(error_excerpt)),
+                        *refuted_feedback(_refuted)),
                     moved=_conv.bodies_moved(
                         _read_view, frozenset({fn_name}),
                         normalize=_cluster_view))
@@ -1083,6 +1111,7 @@ class FillOneFn:
                         bound_methods=_fn_ctx.bound_methods_section,
                         blueprint=_fn_ctx.blueprint_section,
                         crash_evidence=_crash_evidence,
+                        refuted_body=_refuted,
                         coupled=_coupled_section(),
                         behaviour_must=behaviour_must_instruction(
                             ctx.behaviour_specs,

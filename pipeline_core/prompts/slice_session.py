@@ -32,7 +32,7 @@ from pipeline_core.domain.slice_session import (
 )
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
 from pipeline_core.prompts.runtime import promoted_error_rules, repo_spec_section
-from pipeline_core.prompts.sections import tag_block
+from pipeline_core.prompts.sections import refuted_body_block, tag_block
 
 # A file over this many chars is rendered condensed: the editable fns in
 # full, every other fn as its signature. Sized so a five-file slice stays
@@ -178,6 +178,7 @@ def build_slice_session_prompt(
     behaviour_must: str = "",
     unit_notes: str = "",
     omit: Collection[str] = (),
+    refuted_body: str = "",
 ) -> str:
     """Turn 0 of a session over `slice_`.
 
@@ -195,6 +196,12 @@ def build_slice_session_prompt(
     members are in this block. Run `118933-877c43bd` (2026-09-27): both
     sessions over a three-member recursion ran six turns without it while
     the file and per-fn prompts of the same fill carried it.
+
+    `refuted_body` is the body a crash settlement took off an editable unit
+    and its crash (`refuted_body.refuted_text_for`). It is never omitted by
+    the fit ladder (`KEPT_TAGS`): the session is that unit's writer, and a
+    fitted turn 0 that lost it would reopen the unit on the body it already
+    convicted.
 
     `unit_notes` is the compiler diagnostic and the task-4 lesson for the
     units this session writes (`refill_evidence.unit_notes_text`), the same
@@ -276,7 +283,7 @@ be shown, after each change set, exactly what the assertions printed.
 
 Crate: {module_name} | Cluster: {cluster_name} | Session budget: {max_turns} turn(s)
 {tag_block("FAILING_TESTS", tests_part, prefix="The targets:\n")}
-{_opt("UNIT_NOTES", unit_notes)}{_opt("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{_opt("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}
+{_opt("UNIT_NOTES", unit_notes)}{_opt("BEHAVIOUR_RULES", behaviour_must, prefix="What the crate's tests require of the editable units — an instruction, not a hint:\n")}{_opt("CRASH_EVIDENCE", crash_evidence, prefix=_CRASH_LEAD)}{refuted_body_block(refuted_body)}
 {_opt("PREVIOUS_SESSION_NOTES", notes, prefix="Your own notes from the previous session on this slice:\n")}{_opt("PRIOR_REGRESSION", regression_body)}
 {_opt("RUST_GOTCHAS", language_driver().gotchas_summary())}
 {_opt("REPOSITORY_SPECIFICATIONS", repo_spec_section(fr_path, file_rel=first_file), prefix="The crate's own specification documents. When your plan conflicts with them, follow the spec.\n")}{_opt("DESIGN_BLUEPRINT", blueprint)}{tag_block("TYPES_IN_SCOPE", types_section)}{_opt("BOUND_METHODS", bound_methods)}{_opt("CLUSTER_INVARIANTS", invariants)}{_opt("RECURRING_ERRORS", promoted_error_rules(fr_path))}{_opt("MACROS", macros)}

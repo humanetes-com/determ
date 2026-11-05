@@ -129,6 +129,23 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
     return f"\n<{tag}>\n{prefix}{content}{suffix}\n</{tag}>\n"
 
 
+#: The tag every builder renders a refuted body under (`refuted_body`). Its
+#: own section, not CRASH_EVIDENCE: that block's lead says the body now on
+#: the tree crashed, and the quoted body is the one that was taken off.
+REFUTED_BODY_TAG = "REFUTED_BODY"
+REFUTED_BODY_LEAD = (
+    "A body written earlier for a fn you are writing crashed a test process "
+    "and was taken off the tree. The body on the tree now is NOT the one "
+    "quoted here; the crash below is about the quoted body. Read what in it "
+    "was wrong, and do not write it again:\n")
+
+
+def refuted_body_block(text: str) -> str:
+    """The REFUTED_BODY section for `text` (`refuted_body.refuted_text_for`),
+    or "" when there is none."""
+    return tag_block(REFUTED_BODY_TAG, text.strip(), prefix=REFUTED_BODY_LEAD)
+
+
 def format_impl_block_for_prompt(
     block: ImplBlock,
     mark_target: bool = True,

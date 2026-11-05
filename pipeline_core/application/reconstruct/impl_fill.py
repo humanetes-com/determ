@@ -290,6 +290,11 @@ from pipeline_core.domain.refine import (
     best_progress_fields,
     best_progress_of,
 )
+from pipeline_core.domain.refuted_body import (
+    on_tree_bodies,
+    refuted_notes,
+    refuted_text_for,
+)
 from pipeline_core.domain.retro_gate import (
     JOINT_BODY_SHA,
     JOINT_MEMBERS,
@@ -395,6 +400,7 @@ from pipeline_core.prompts.retry_turn import (
     AttemptFeedback,
     EvidenceSection,
     fn_output,
+    refuted_feedback,
     types_new_to,
 )
 from pipeline_core.prompts.slice_session import (
@@ -2136,6 +2142,13 @@ def prepare_impl_fill(
                     _plans.append(BlockFillPlan(header="", refills=_missing))
             _targets = tuple(
                 n for p in _plans for n in (*p.stubs, *p.refills))
+            _file_members = [m for b in fblocks
+                             for m in (*b.stub_members, *b.refill_members)]
+            _file_refuted = refuted_text_for(
+                ledger_entries, oracle_fp,
+                [*((m.file, m.fn_name) for m in _file_members),
+                 *((file_rel, i.fn_name) for i in _installable)],
+                on_tree=on_tree_bodies(_file_members))
             prompt = "" if _conv.opened else build_file_fill_prompt(
                 file_rel=file_rel, file_text=snapshot,
                 fill_plan=_plans,
@@ -2161,6 +2174,12 @@ def prepare_impl_fill(
                     prior_error, _crate_type_records),
                 kind=_file_kind,
                 crash_evidence=_file_crash,
+                # Bodies a crash settlement took off the fns this prompt
+                # writes (members and the offered installables), read on the
+                # live ledger now, never every refuted fn of the file.
+                # Compared with the members' current bodies, so a body that
+                # is already back on the tree is not quoted as taken off.
+                refuted_body=_file_refuted,
                 retrospective_guidance=_file_retro,
                 module_name=module_name, cluster_name=cluster_name,
                 gotchas=language_driver().gotchas_summary(), types_section=_file_types,
@@ -2229,7 +2248,8 @@ def prepare_impl_fill(
                                     _conv.text(), prior_error,
                                     _crate_type_records, viewer_file=file_rel),
                                 "Types this result names that were not "
-                                "shown above:\n"),),
+                                "shown above:\n"),
+                                      *refuted_feedback(_file_refuted)),
                             moved=_conv.bodies_moved(
                                 _read_source, frozenset(wanted),
                                 normalize=_cluster_view)),
@@ -3972,6 +3992,16 @@ def prepare_impl_fill(
         _impl_output = fn_output(
             [(n, block.container) for n in _block_target_names])
 
+        def _block_refuted() -> str:
+            """The note for this block's members, against the bodies on the
+            tree. Called at each ask so a settlement earlier in the fill is
+            visible, and omitted when that body is already back."""
+            members = (*block.stub_members, *block.refill_members)
+            return refuted_text_for(
+                ledger_entries, oracle_fp,
+                [(block.file, m.fn_name) for m in members],
+                on_tree=on_tree_bodies(members))
+
         def _attempt_impl_fill(fix_attempt: int) -> FixOutcome:
             nonlocal last_response
             attempts.note_call()
@@ -4030,6 +4060,7 @@ def prepare_impl_fill(
                     dispatch_family=dispatch_family_section, siblings=siblings_section,
                     blueprint=_blueprint_slice,
                     crash_evidence=_block_crash_evidence,
+                    refuted_body=_block_refuted(),
                     # The previous attempt's own errors, as a section the model
                     # reads — not just as TYPES_IN_SCOPE re-selection input.
                     # Without it, an error naming no new types rebuilt attempt
@@ -4082,7 +4113,8 @@ def prepare_impl_fill(
                                     "shown above:\n"),
                                 EvidenceSection(
                                     "RETROSPECTIVE_GUIDANCE", prior_retro,
-                                    "A diagnosis of the attempts so far:\n")),
+                                    "A diagnosis of the attempts so far:\n"),
+                                *refuted_feedback(_block_refuted())),
                             moved=_conv.bodies_moved(
                                 _read_source, frozenset(_block_target_names),
                                 normalize=_cluster_view)),
@@ -5059,7 +5091,8 @@ def prepare_impl_fill(
                                   "every test that references these targets, "
                                   "whole; the file is above."),
                             sections=(EvidenceSection(
-                                "TESTS_VERBATIM", _tests_text),),
+                                "TESTS_VERBATIM", _tests_text),
+                                      *refuted_feedback(_block_refuted())),
                             moved=_conv.bodies_moved(
                                 _read_source, frozenset(_max_target_names),
                                 normalize=_cluster_view)),
@@ -5654,6 +5687,14 @@ def prepare_impl_fill(
                 str(_pair_key), _pair_rec, _pair_verdict)):
             _log(f"  {_rline}")
 
+        def _pair_refuted() -> str:
+            members = [m for b in (*halves, *_pair_extra)
+                       for m in (*b.stub_members, *b.refill_members)]
+            return refuted_text_for(
+                ledger_entries, oracle_fp,
+                [(m.file, m.fn_name) for m in members],
+                on_tree=on_tree_bodies(members))
+
         def _make_pair_prompt(_err: str, _kind: LastErrorKind) -> str:
             return _build_per_impl_prompt(
                 block=pd.dispatcher_block,
@@ -5674,6 +5715,9 @@ def prepare_impl_fill(
                     behaviour_must=_behaviour_must(
                         *(m for b in (*halves, *_pair_extra)
                           for m in (*b.stub_members, *b.refill_members))),
+                    # The pair is a writer of its members like any other
+                    # route: a body a crash took off one of them is told.
+                    refuted_body=_pair_refuted(),
                     last_error=_err,
                     last_error_kind=_kind),
                 fr_path=fr_path,
@@ -5797,7 +5841,8 @@ def prepare_impl_fill(
                                     _crate_type_records,
                                     viewer_file=pd.dispatcher_block.file),
                                 "Types this result names that were not "
-                                "shown above:\n"),),
+                                "shown above:\n"),
+                                      *refuted_feedback(_pair_refuted())),
                             moved=_conv.bodies_moved(
                                 _read_source,
                                 frozenset(n for n, _ in _pair_targets),
@@ -6562,6 +6607,10 @@ def prepare_impl_fill(
                 # little packing, under-reserving a turn 0 over the cap.
                 crash_evidence=crash_evidence_for_units(
                     crash_evidence or {}, None),
+                # Every refuted-body note, for the same reason, and because
+                # the fit ladder never drops that section (`KEPT_TAGS`).
+                refuted_body="\n\n".join(
+                    refuted_notes(ledger_entries, oracle_fp).values()),
                 # The behaviour instruction's bound, for the same reason:
                 # which rules a packed slice carries depends on its units.
                 behaviour_must=" " * BEHAVIOUR_MUST_MAX_CHARS))
@@ -6767,6 +6816,14 @@ def prepare_impl_fill(
                     installable=ws.installable,
                     crash_evidence=crash_evidence_for_units(
                         crash_evidence or {}, sl.units, crash_sites),
+                    # The session writes its editable units and the offered
+                    # installables; a body a crash took off one is told.
+                    refuted_body=refuted_text_for(
+                        ledger_entries, oracle_fp,
+                        [*((u.file, u.fn_name) for u in sl.units
+                           if (u.file, u.fn_name) not in sl.frozen),
+                         *((u.file, u.fn_name) for u in (ws.installable or ()))],
+                        on_tree=on_tree_bodies(records.values())),
                     behaviour_must=_behaviour_must(*records.values()),
                     unit_notes=unit_notes_text(
                         (locator_of(u) for u in sl.units), _frontier_tests),

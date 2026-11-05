@@ -59,6 +59,10 @@ class PerFnSections:
     # tests printed (`block_evidence.render_sibling_regression`). "" when no
     # reverted write stamped this fn's record.
     prior_regression: str = ""
+    # A body a crash settlement took off this fn, and its crash
+    # (`refuted_body.refuted_text_for`). Rendered as REFUTED_BODY, never
+    # inside CRASH_EVIDENCE. "" when no such refutation under this oracle.
+    refuted_body: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +97,9 @@ class PerImplSections:
     # Localized crash backtrace implicating this block's fns (faulting +
     # origin frames). "" when no binary crash points here.
     crash_evidence: str = ""
+    # Bodies a crash settlement took off this block's fns, and their
+    # crashes (`refuted_body.refuted_text_for`). Rendered as REFUTED_BODY.
+    refuted_body: str = ""
     # The PREVIOUS attempt's focused compile/test errors. "" on attempt 1.
     # Until this section existed, the fix loop's only error feedback into the
     # per-impl prompt was TYPES_IN_SCOPE re-selection from the error text — an

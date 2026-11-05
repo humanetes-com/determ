@@ -30,6 +30,7 @@ from pipeline_core.domain.language_driver import language_driver
 from pipeline_core.domain.last_error import LastErrorKind, last_error_prefix, resolve_kind
 from pipeline_core.domain.prompt_holdings import FileView, file_block
 from pipeline_core.domain.refill_evidence import typeid_pin_consequence
+from pipeline_core.prompts.sections import refuted_body_block
 
 # The file/impl view handed to the model can itself contain HTML-escaped Rust —
 # rustdoc comments legitimately write `Vec&lt;T&gt;` inside a `<code>` tag — and
@@ -525,6 +526,7 @@ def build_file_fill_prompt(
     invariants_section: str = "",
     refill_evidence: str = "",
     prior_regression: str = "",
+    refuted_body: str = "",
 ) -> str:
     """File-first fill: everything one file needs in ONE prompt, so the
     model designs the file's impls together (the coherence a fresh reply
@@ -606,6 +608,10 @@ def build_file_fill_prompt(
     crash_part = (f"\n<CRASH_EVIDENCE>\n{CRASH_EVIDENCE_LEAD}"
                   f"{crash_evidence}\n</CRASH_EVIDENCE>\n"
                   if crash_evidence.strip() else "")
+    # A body a crash settlement took off a fn this prompt writes: its own
+    # section, after the crash block, because the quoted body is not the
+    # one in the file above (`refuted_body`).
+    refuted_part = refuted_body_block(refuted_body)
     gotchas_part = (f"\n<RUST_GOTCHAS>\n{gotchas}\n</RUST_GOTCHAS>\n"
                     if gotchas.strip() else "")
     types_part = (f"\n<TYPES_IN_SCOPE>\n{types_section}\n</TYPES_IN_SCOPE>\n"
@@ -627,7 +633,7 @@ signature EXACTLY as written; write bodies only.
 Functions to write (by impl block):
 {plan_lines}
 {file_block(file_rel, file_text, view=FileView.WHOLE)}
-{gotchas_part}{invariants_part}{types_part}{crash_part}{bp_part}{notes_part}{retro_part}{evidence_part}{regression_part}{tests_part}{error_part}
+{gotchas_part}{invariants_part}{types_part}{crash_part}{refuted_part}{bp_part}{notes_part}{retro_part}{evidence_part}{regression_part}{tests_part}{error_part}
 For EACH function, return one block (body statements only — no fn signature
 line, no outer braces). `name` is the BARE function name; the impl header goes
 in `block` and NOWHERE else:

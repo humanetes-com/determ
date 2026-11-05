@@ -112,7 +112,6 @@ from pipeline_core.domain.body_ledger import (
     kept_green_of,
     kept_moved_of,
     latest_by_unit,
-    latest_crash_refutation,
     raw_bodies_of,
     rebuy_by_grade,
     rebuy_hits,
@@ -157,7 +156,6 @@ from pipeline_core.domain.coverage_slice import (
     bind as bind_coverage_slice,
 )
 from pipeline_core.domain.coverage_slice import (
-    records_standing_in,
     red_dead_units,
     screen_unentered_convictions,
     unowned_among,
@@ -322,6 +320,7 @@ from pipeline_core.domain.reasoning_cap import (
     units_all_replies_capped,
 )
 from pipeline_core.domain.red_ledger import RunFacts, red_ledger, render_red_ledger
+from pipeline_core.domain.red_test import owners_off_tiers, read_red_owners
 from pipeline_core.domain.reference_floor import (
     ReferenceMeasurement,
     reference_floor_close_reason,
@@ -335,13 +334,17 @@ from pipeline_core.domain.refine import (
     Attempt,
     LoopState,
 )
+from pipeline_core.domain.refuted_body import (
+    on_tree_bodies,
+    refuted_notes,
+    with_refuted_notes,
+)
 from pipeline_core.domain.retro_gate import bind_crate_names
 from pipeline_core.domain.same_failure import SignatureReader
 from pipeline_core.domain.scaffold_rewrite import find_definition_span
 from pipeline_core.domain.slice_session import (
     SessionSlice,
     attributed_units_for_session,
-    recorded_locator_sites,
     session_slices_for_failing,
 )
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -1390,6 +1393,22 @@ def run_phase_c_tdd(
 
     _oracle_fp_first: list[str] = []
 
+    def _crash_premise(crash: Mapping[FnLocator, str],
+                       iter_no: int,
+                       recs: Iterable[Any] = (),
+                       ) -> dict[FnLocator, str]:
+        """The crash excerpt every ask and landing fingerprint reads: the
+        sweep's crash text plus each unit's refuted-body note on the live
+        ledger (`refuted_body.with_refuted_notes`). A note whose body is the
+        one `recs` already has on the tree is omitted, the same comparison
+        the prompt makes. Read at stamp time by both stamps, so the
+        dispatch premise and the landing premise compare like with like;
+        never the dict a writer or the rank reads."""
+        return with_refuted_notes(
+            crash, refuted_notes(
+                _ledger_entries(), _oracle_fp(iter_no),
+                on_tree=on_tree_bodies(recs)))
+
     def _oracle_moved_mid_run(iter_no: int, fp: str) -> None:
         """Stop the run when the oracle changes under a live cluster.
 
@@ -1752,7 +1771,8 @@ def run_phase_c_tdd(
         retro = (deps.retro_evidence_texts(project_dir)
                  if deps.retro_evidence_texts is not None else {})
         return unit_ask_fingerprints(list(units), recs, words=words,
-                                     retro=retro, crash=crash_texts)
+                                     retro=retro,
+                                     crash=_crash_premise(crash_texts, iter_n, recs))
 
     def _read_for_world(world: str) -> SignatureReader:
         if deps.failure_reader is None:
@@ -1794,13 +1814,14 @@ def run_phase_c_tdd(
     def _owed_now(hold: StubHold,
                   frontier_now: Mapping[FnLocator, Collection[str]],
                   slices: Mapping[str, Collection[FnSite]],
-                  tree: str) -> DueReading:
+                  tree: str,
+                  owners: Mapping[str, Collection[str]]) -> DueReading:
         """This sweep's owed tiers: the red tests (`cur_failed`) less those
-        the original fails too, each one's executed slice (the session
-        slicer's map, else what the frontier attributes to it, else the
-        crate function its first failure is inside), the sweep's own failure
-        text per test, the stub each test dies in, and the tree it was read
-        on."""
+        the original fails too, each one's executed slice (the owner
+        record's walk view united with the session slicer's map, else what
+        the frontier attributes to it, else the crate function its first
+        failure is inside), the sweep's own failure text per test, the stub
+        each test dies in, and the tree it was read on."""
         red = sorted({bare_test_name(t_) for t_ in cur_failed})
         primary = {bare_test_name(t_): v_
                    for t_, v_ in slices_by_key(slices).items()}
@@ -1847,7 +1868,8 @@ def run_phase_c_tdd(
         # candidate for it (positive evidence only; a slice the screen would
         # empty is kept whole).
         _slices, _unentered = screen_unentered(
-            merge_slices(primary, attributed, red, sight=_sight),
+            merge_slices(primary, attributed, red, sight=_sight,
+                         owners=owners),
             lambda u_, t_: unreached_by_test(
                 FnLocator(*u_.rsplit("::", 1)), t_))
         if _unentered:
@@ -2597,6 +2619,7 @@ def run_phase_c_tdd(
     _stub_hold = StubHold({})
     _holds = HeldStubs()
     _session_slices: dict[str, frozenset[FnSite]] = {}
+    _walk_owners: dict[str, frozenset[str]] = {}
     eligible: Frontier = {}
     while True:
         iter_n += 1
@@ -4828,15 +4851,10 @@ def run_phase_c_tdd(
             for _site in sorted(_stub_hold.blockers):
                 _held_tests = _stub_hold.held_by(_site)
                 _loc = locator_of(_site)
-                # A stub a crash settlement made says so: the body it held
-                # and the crash it caused (`latest_crash_refutation`).
-                _refuted = latest_crash_refutation(
-                    _ledger_entries(), _loc.file, _loc.fn_name,
-                    oracle_fp=_oracle_fp(iter_n))
+                # What a crash settlement took off this stub is its own
+                # section (`refuted_body`), not part of this text.
                 crash_texts.setdefault(_loc, held_stub_evidence(
-                    len(_held_tests),
-                    *(("\n\n".join(_refuted.bodies), _refuted.crash_evidence,
-                       _refuted.iteration) if _refuted is not None else ())))
+                    len(_held_tests)))
                 frontier.setdefault(_loc, set()).update(_held_tests)
             deps.log(
                 f"  {tag} [phase-c/crash] iter {iter_n}: "
@@ -5893,7 +5911,7 @@ def run_phase_c_tdd(
                 [k for k, _ in ordered], _disp_recs,
                 retro=(deps.retro_evidence_texts(project_dir)
                        if deps.retro_evidence_texts is not None else {}),
-                crash=crash_texts).items()}
+                crash=_crash_premise(crash_texts, iter_n, _disp_recs)).items()}
         _evidence_of = {
             (_k.file, _k.fn_name): _fp
             for _k, _fp in _evidence_now.items()}
@@ -5901,6 +5919,7 @@ def run_phase_c_tdd(
         def _landing_evidence(
             units: Iterable[FnLocator], recs: list[dict[str, Any]], *,
             _crash: Mapping[FnLocator, str] = crash_texts,
+            _iter: int = iter_n,
         ) -> dict[tuple[str, str], str]:
             """The premise a LANDED body's grade is scoped to: what its
             prompt drew from plus what the attempt itself wrote — the file
@@ -5922,7 +5941,7 @@ def run_phase_c_tdd(
                     list(units), recs,
                     retro=(deps.retro_evidence_texts(project_dir)
                            if deps.retro_evidence_texts is not None else {}),
-                    crash=_crash).items()}
+                    crash=_crash_premise(_crash, _iter, recs)).items()}
 
         _flat_standing = flat_standing_unchanged(
             _stand, oracle_fp_now=_oracle_fp(iter_n),
@@ -6055,35 +6074,25 @@ def run_phase_c_tdd(
                          for c in _cycles_seen))
         _dead_keys: frozenset[FnLocator] = (
             _cov.dead if _cov is not None else frozenset())
-        # The owner sets the ranking and the admission read: measured
-        # where the test completed, recorded where it did not. Sessions
-        # take unique-container sites from the frontier, not this map.
-        # The BOUND slice keeps the measured map only — a recorded set is
-        # not a measurement and must not be re-stamped as one.
-        _owners_read: dict[str, frozenset[FnSite]] = dict(_owners_positive)
-        # Ranking converts sites back to locators, so an empty container
-        # here is a (file, fn) stamp and does not fan out. Sessions do
-        # not read this map: they take unique-container sites below.
-        _recorded_failing = records_standing_in(
-            _recorded, _owners_positive, _owed_red)
-        _recorded_rank = {
-            t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
-            for t, us in _recorded_failing.items()}
-        _owners_read.update(_recorded_rank)
-        # Ownership, not entry: a unit whose own keep moved a still-red
-        # test's failure later no longer owns it (`premise_advance`). One
-        # view for every reader that turns execution into ownership — this
-        # map (ranking, both owner-admission steps) and the session slices
-        # below; the reading itself stays a measurement.
+        # THE OWNER RECORD (`domain/red_test.py`): the one writer of which
+        # units each owed red test runs through. Positive owners are the
+        # coverage map taken BEFORE the withhold (what every run, completed
+        # or not, entered); a recorded set stands in only where none exists.
+        # The rank, the session slicer and the owed walk each take a view of
+        # this record, after `owning_view` (a unit whose own keep moved a
+        # still-red test past it no longer owns it). The BOUND coverage
+        # reading stays the post-withhold one: it is what negative claims
+        # read, and a recorded set is not a measurement.
         _owned_by_attr = frozenset(
             bare_test_name(t) for ts in _attr.frontier.values() for t in ts)
-        _owners_read = owning_view(_owners_read, _advanced,
-                                   owned_elsewhere=_owned_by_attr)
-        _recorded_sites = recorded_locator_sites(
-            _recorded_failing, _attr.site_frontier)
-        for _t, _ks in _stack_sites.items():
-            if _t in _recorded_failing:
-                _recorded_sites[_t] = _recorded_sites.get(_t, frozenset()) | _ks
+        _red_owners = read_red_owners(
+            positive=_owners_positive, recorded=_recorded, owed=_owed_red,
+            advanced=_advanced, owned_elsewhere=_owned_by_attr,
+            frontier_sites=_attr.site_frontier, stack_sites=_stack_sites)
+        _owners_read: dict[str, frozenset[FnSite]] = _red_owners.rank_owners()
+        _recorded_rank = {
+            t: frozenset(FnSite(u.file, u.fn_name, "") for u in us)
+            for t, us in _red_owners.recorded_owners().items()}
         # THE SIGHT (`domain/test_sight.py`): per owed red test, whether this
         # sweep observed it executing, through what, or why not. Read off the
         # measurements only (coverage owners, the recorded set of a run that
@@ -6597,24 +6606,22 @@ def run_phase_c_tdd(
         # same call's other routes.
         _session_slices = {}
         _session_owners: dict[str, frozenset[FnSite]] = {}
+        # The owed walk's view of the same record (`_owed_now`): a test whose
+        # hop pair is withheld takes attributed units only, in the walk as
+        # in the session slicer.
+        _walk_owners = _red_owners.walk_owners(exclude=_paired_tests)
         if os.getenv("SLICE_SESSION", "1") != "0":
-            # Measured owners already carry containers. Recorded locators
-            # join only when the site frontier names exactly one container;
-            # `_owners_read` still has the empty-container stamp for ranking
-            # and must not enter this map (expand_locator_sites would
-            # re-admit Display).
-            _session_from_cov: dict[str, set[FnSite]] = {}
-            if _cov is not None:
-                for t, ks in _cov.owners.items():
-                    _session_from_cov.setdefault(
-                        bare_test_name(t), set()).update(ks)
-            for t, ks in _recorded_sites.items():
-                _session_from_cov.setdefault(
-                    bare_test_name(t), set()).update(ks)
+            # The record's session view: positive owners with the container
+            # the coverage reading carried, INCLUDING a test whose binary did
+            # not complete (the post-withhold map has no such test, which on
+            # run `1604111-bb3716ef` iter 9 left an aborted test's session
+            # one attributed unit wide while the rank admitted its six
+            # owners). Recorded locators join only as sites the frontier
+            # names with exactly one container; the rank view's
+            # empty-container stamps must not enter this map
+            # (expand_locator_sites would re-admit Display).
             _cov_owners = {t: _admission.admit_sites(ks)
-                           for t, ks in owning_view(
-                               _session_from_cov, _advanced,
-                               owned_elsewhere=_owned_by_attr).items()}
+                           for t, ks in _red_owners.session_owners().items()}
             _session_owners = dict(_cov_owners)
             # Eligible is the filter, not the source. Walking eligible and
             # inserting FnSite(file, fn, "") when the site frontier had no
@@ -6786,7 +6793,7 @@ def run_phase_c_tdd(
         if _owed_on:
             try:
                 _due = _owed_now(_stub_hold, eligible, _session_slices,
-                                 _tree_sha)
+                                 _tree_sha, _walk_owners)
             except (KeyError, ValueError, TypeError, AttributeError, OSError) as _owed_exc:
                 # A reading that cannot be taken owes nothing and ends
                 # nothing: the dispatch is today's for this sweep, loudly.
@@ -6931,6 +6938,35 @@ def run_phase_c_tdd(
                 "cluster": cluster.name, "iter": iter_n,
                 "units": {f"{u.file}::{u.fn_name}": r
                           for u, r in sorted(_held_off.items())}})
+        # THE SPLIT CHECK, shadow (`domain/red_test.py`). Two questions about
+        # the one owner record, asked of every sweep: is an owner of an owed
+        # test on none of its tiers (a reader built the walk's slice from
+        # another view), and did a frontier filter remove a unit the walk
+        # owes. Either is the shape of run `1604111-bb3716ef` iter 9, where
+        # the rank admitted six owners the walk could never owe. Logged and
+        # emitted every sweep; it changes no decision.
+        _split_off_tiers = owners_off_tiers(
+            _walk_owners, {t_: r_.tiers for t_, r_ in _due.by_test.items()})
+        _ranked_set = frozenset(_ranked)
+        _split_owed_off = {
+            u_: _not_ranked.reasons.get(u_, "not_on_frontier")
+            for u_ in _due.units if u_ not in _ranked_set}
+        if _split_off_tiers or _split_owed_off:
+            deps.log(
+                f"  HEALTH ‼ RED_TEST_SPLIT iter {iter_n}: "
+                + "; ".join(
+                    [f"{t_}: {len(us_)} owner(s) on none of its tiers ("
+                     + ", ".join(sorted(us_)[:4]) + ")"
+                     for t_, us_ in sorted(_split_off_tiers.items())[:6]]
+                    + [f"owed {u_.file}::{u_.fn_name} off the frontier ({r_})"
+                       for u_, r_ in sorted(_split_owed_off.items())[:6]]))
+        deps.emit("phase_c.red_test.split", data={
+            "cluster": cluster.name, "iter": iter_n,
+            "owners": {t_: sorted(us_) for t_, us_ in sorted(_walk_owners.items())},
+            "owners_off_tiers": {t_: sorted(us_)
+                                 for t_, us_ in sorted(_split_off_tiers.items())},
+            "owed_off_frontier": {f"{u_.file}::{u_.fn_name}": r_
+                                  for u_, r_ in sorted(_split_owed_off.items())}})
         if _pass_cohort is None:
             _pass_cohort = tuple(_ranked)
         _batch = take(_ranked, _held_in, _dispatch_cap,
@@ -9058,7 +9094,8 @@ def run_phase_c_tdd(
         except UnboundLocalError:
             _sha_led = ""
         try:
-            _due = _owed_now(_stub_hold, eligible, _session_slices, _sha_led)
+            _due = _owed_now(_stub_hold, eligible, _session_slices, _sha_led,
+                             _walk_owners)
         except (KeyError, ValueError, TypeError, AttributeError, OSError,
                 UnboundLocalError) as _owed_exc:
             deps.log(f"  HEALTH ‼ OWED_READING exit: the owed tiers could "

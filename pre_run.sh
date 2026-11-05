@@ -171,6 +171,17 @@ elif [[ "$_WALK_RC" -ne 0 ]]; then
     exit 1
 fi
 
+# --- advisory: owner splits on the last recorded run ----------------------- #
+# Not a gate: the recorded run was produced by whatever code ran it, so a split
+# there says nothing about this tree. It moves the next split of an owed red
+# test's owner set (rank, session and owed walk reading different views) from a
+# long live run to this line (run 1604111-bb3716ef, 2026-11-05).
+# scripts/red_test_invariants.py explains every field.
+echo ""
+echo "--- advisory: red-test owner splits on the last recorded run ---"
+"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/scripts/red_test_invariants.py" 2>&1 \
+    | { grep -E "source=|^summary:" || true; } || true
+
 # --- the stamp ------------------------------------------------------------- #
 # Only a FULL pass may vouch for a tree. --walks-only skipped stage 1, so it
 # cannot claim the tree is launchable; it is a fast inner loop for iterating on a

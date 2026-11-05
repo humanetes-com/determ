@@ -34,7 +34,11 @@ from pipeline_core.domain.models import TypeRecord
 from pipeline_core.domain.prompt_holdings import read_holdings
 from pipeline_core.domain.type_refs import types_referenced_in_text
 from pipeline_core.prompts.fix_prompts import FN_LITERAL_RULE
-from pipeline_core.prompts.sections import render_types_section
+from pipeline_core.prompts.sections import (
+    REFUTED_BODY_LEAD,
+    REFUTED_BODY_TAG,
+    render_types_section,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,21 @@ class AttemptFeedback:
 def _held(text: str, conversation: str) -> bool:
     body = text.strip()
     return bool(body) and body in conversation
+
+
+def refuted_feedback(text: str) -> tuple[EvidenceSection, ...]:
+    """The REFUTED_BODY section for a retry, or nothing when `text` is empty.
+
+    The opening prompt carries the note when the conversation starts. A
+    later turn sends it only when the conversation does not already hold
+    the note (`render_retry_turn` drops a section whose text is above):
+    the turn after a settlement that wrote the row under an open
+    conversation. The lead is the opening section's lead, so the retry
+    says the same thing about which body crashed."""
+    body = text.strip()
+    if not body:
+        return ()
+    return (EvidenceSection(REFUTED_BODY_TAG, body, prefix=REFUTED_BODY_LEAD),)
 
 
 def render_retry_turn(fb: AttemptFeedback, *, conversation: str) -> str:

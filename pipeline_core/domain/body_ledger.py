@@ -1662,8 +1662,15 @@ def latest_crash_refutation(
     hit: LedgerEntry | None = None
     for e in entries:
         if (e.key.file == file and e.key.fn_name == fn_name
-                and e.state is BodyState.REFUTED and e.crash_evidence
-                and e.oracle_fp == oracle_fp
-                and any(k == CRASH_ORIGIN for _t, k in e.verdict_delta)):
+                and is_crash_refutation(e, oracle_fp)):
             hit = e
     return hit
+
+
+def is_crash_refutation(e: LedgerEntry, oracle_fp: str) -> bool:
+    """A row a crash settlement refuted its body with, under `oracle_fp`,
+    carrying the crash it was refuted on (`refuted_body.refuted_notes` and
+    :func:`latest_crash_refutation` both select on this)."""
+    return (e.state is BodyState.REFUTED and bool(e.crash_evidence)
+            and e.oracle_fp == oracle_fp
+            and any(k == CRASH_ORIGIN for _t, k in e.verdict_delta))

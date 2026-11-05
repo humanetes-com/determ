@@ -231,21 +231,27 @@ def occurrence_of_line(
 
 
 def refuted_crash_note(body: str, evidence: str, iteration: int,
-                       *, max_body: int = 1500) -> str:
-    """What the next writer of a stub is told about the body a crash
+                       *, unit: str = "", max_body: int = 1500) -> str:
+    """What the next writer of a unit is told about the body a crash
     settlement took off it: the body, and the crash as the localizer read it.
 
-    The settlement's refutation is a ledger row whose only reader was the
-    reseed gate. Run `757853-e28f1a7d` (2026-10-16): iter 3 settled on
-    `into_boxed_dyn_error` and put it back to a stub; the iter-4 prompt's
-    CRASH_EVIDENCE said only that the fn was a stub holding three tests, and
-    the reply wrote the same double drop three times."""
+    It says only what the row records. The settlement put that body back to
+    a stub (STUB) or to the unit's earlier text (NARROWED). The wording
+    names neither, so it cannot lie about which of the two the tree holds.
+    The caller omits the note when the body on the tree is the quoted one
+    (`refuted_notes`): that equality is a later keep of those bytes, and on
+    the settlement itself the committed text and the quoted body differ.
+    Run `757853-e28f1a7d` (2026-10-16): a stub's iter-4 prompt said only
+    that the fn was a stub, and the reply wrote the same double drop three
+    times. Run `630350-93c5a6ee` (2026-11-05): a filled unit's settled body
+    reached no later prompt at all (`refuted_body`)."""
     shown = body.strip()
     if len(shown) > max_body:
         shown = shown[:max_body].rstrip() + "\n// …"
+    who = f"`{unit}`" if unit else "this fn"
     lines = [
-        f"A body of this fn was put back to this stub at iteration "
-        f"{iteration}: a test process crashed on it. That body was:",
+        f"At iteration {iteration} a body of {who} was taken off the tree: "
+        f"a test process crashed on it. That body was:",
         shown,
     ]
     if evidence.strip():
@@ -273,17 +279,14 @@ def with_held_stub_evidence(
     return out
 
 
-def held_stub_evidence(held_tests: int, refuted_body: str = "",
-                       refuted_evidence: str = "",
-                       refuted_iteration: int = 0) -> str:
+def held_stub_evidence(held_tests: int) -> str:
     """CRASH_EVIDENCE for a still-stubbed fn that holds ``held_tests``
-    failing tests at its `unimplemented!()`, and — when a crash settlement
-    made it a stub — what the body it took off did (`refuted_crash_note`)."""
-    text = (f"This fn is still a stub, and {held_tests} failing "
+    failing tests at its `unimplemented!()`. What a crash settlement took
+    off the stub is not here: it is its own section for every unit, filled
+    or stubbed (`refuted_body.refuted_text_for`), because this text reaches
+    a writer through `CrashSites.evidence_for`, which drops it once a frame
+    of the name resolved."""
+    return (f"This fn is still a stub, and {held_tests} failing "
             "test(s) stop at its `unimplemented!()` before they check "
             "anything else. No other body can move those tests until "
             "this one exists. Give it a real body.")
-    if refuted_body.strip():
-        text += "\n\n" + refuted_crash_note(
-            refuted_body, refuted_evidence, refuted_iteration)
-    return text

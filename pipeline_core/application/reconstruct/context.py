@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +55,12 @@ class PerFnPassCtx:
     # CRASH_EVIDENCE prompt section and overrides the fully-exhausted skip
     # (a localized crash is evidence prior attempts never saw).
     crash_evidence: dict[Any, str] | None = None
+    # The body ledger as the fill sees it (the driver's live list, so a
+    # crash settlement written mid-fill is visible) and the oracle it is
+    # read under: the per-fn writer's REFUTED_BODY section reads them
+    # through `refuted_body.refuted_text_for` at render time.
+    ledger_entries: Sequence[Any] = ()
+    oracle_fp: str = ""
     # The ORIGIN blame only (FnLocator set) — where the localizer put the
     # fault. NOT derivable from `crash_evidence`, whose keys include access
     # frames: the innocent caller routing execution into the fault is a key

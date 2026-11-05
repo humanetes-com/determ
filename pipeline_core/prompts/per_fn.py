@@ -23,7 +23,7 @@ from pipeline_core.prompts.runtime import (
     promoted_error_rules,
     repo_spec_section,
 )
-from pipeline_core.prompts.sections import tag_block
+from pipeline_core.prompts.sections import refuted_body_block, tag_block
 
 
 def _joint_clause(on: bool) -> str:
@@ -78,6 +78,7 @@ def build_per_fn_prompt(
         prefix=("A test binary CRASHED and this fn is on the faulting or "
                 "origin stack. This is runtime evidence from the actual "
                 "crash, stronger than any failing-test guess:\n"))
+    refuted_block = refuted_body_block(sections.refuted_body)
     observed_block = tag_block("OBSERVED", sections.observed)
     regression_block = tag_block("PRIOR_REGRESSION", sections.prior_regression)
     # Concrete RIGHT usage examples harvested from the real
@@ -152,7 +153,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{observed_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
+{crash_block}{refuted_block}{observed_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{siblings_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}
 FILE — stubs are annotated. SKELETON STUB = will be filled later (rely on
 the signature). TARGET = implement now.
 
@@ -269,6 +270,7 @@ def build_per_fn_fix_prompt(
         prefix=("A test binary CRASHED and this fn is on the faulting or "
                 "origin stack. This is runtime evidence from the actual "
                 "crash, stronger than any failing-test guess:\n"))
+    refuted_block = refuted_body_block(sections.refuted_body)
     regression_block = tag_block("PRIOR_REGRESSION", sections.prior_regression)
     usage_block = tag_block(
         "USAGE_EXAMPLES", sections.usage_examples,
@@ -405,7 +407,7 @@ Crate: {module_name} | Cluster: {cluster_name} | File: {file_rel} | Fn: {fn_name
 {recipe_part}{identity_part}{coverage_part}<RUST_GOTCHAS>
 {language_driver().gotchas_summary()}
 </RUST_GOTCHAS>
-{crash_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
+{crash_block}{refuted_block}{regression_block}{coupled_block}{repo_spec_block}{blueprint_block}{retro_block}{siblings_block}{gotchas_block}{trait_block}{types_block}{bound_methods_block}{invariants_block}{idioms_block}{recurring_block}{notes_block}{usage_block}{prior_block}
 {_file_head}
 {file_block(file_rel, annotated, view=FileView.WHOLE)}
 {macros_block}
