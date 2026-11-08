@@ -360,6 +360,10 @@ def test_a_stub_the_settlement_made_is_told_what_its_body_did() -> None:
                               "free(): double free detected", 3)
     assert "drop(b)" in told and "double free" in told
     assert "iteration 3" in told and "Do not write that body again." in told
+    # No run recorded, no run named (a row written before the field).
+    assert " of run " not in told
+    assert "At iteration 3 of run r-1 " in refuted_crash_note(
+        "x", "", 3, run_id="r-1")
     plain = held_stub_evidence(3)
     assert "3 failing test(s) stop" in plain
     assert "taken off" not in plain and plain.endswith("Give it a real body.")

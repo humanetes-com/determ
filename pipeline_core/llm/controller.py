@@ -29,6 +29,7 @@ from pipeline_core.domain.reasoning_cap import (
     record_stream_meta,
 )
 from pipeline_core.domain.text import PromptDigest, turns_digest_text
+from pipeline_core.effort import EffortLevel, call_effort
 
 from .budget import BudgetSpec, BudgetState, Plan, plan_for_input, request_max_tokens
 from .detect import StopDetector
@@ -40,6 +41,7 @@ from .events import (
     TransportTimeout,
     TransportUnavailable,
 )
+from .slots import process_slots
 
 _MAX_ATTEMPTS = 3
 
@@ -194,7 +196,7 @@ class LLMController:
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
-        return self._run_messages(
+        return self._in_slot(
             transport, messages, digest_text=prompt, model=model,
             max_tokens=max_tokens, want_think=want_think,
             temperature=temperature, followup_think=followup_think)
@@ -227,10 +229,40 @@ class LLMController:
         answers and results, never raw reasoning. `messages` is copied;
         the caller's list is not mutated by the followup path."""
         turns = [dict(m) for m in messages]
-        return self._run_messages(
+        return self._in_slot(
             transport, turns, digest_text=turns_digest_text(turns),
             model=model, max_tokens=max_tokens, want_think=want_think,
             temperature=temperature, followup_think=followup_think)
+
+    def _in_slot(
+        self,
+        transport: Transport,
+        messages: list[dict[str, Any]],
+        *,
+        digest_text: str,
+        model: str,
+        max_tokens: int,
+        want_think: bool | None,
+        temperature: float | None,
+        followup_think: bool,
+    ) -> str:
+        """One call, stream and follow-up, under one of the process's
+        server slots (`slots.py`). The wait is emitted beside the call's other
+        facts, keyed on the same prompt sha as `llm.request`/`llm.response`,
+        because those are timed by the ask client around this method: a reader
+        that times a call from them subtracts `wait_ms` to get the minutes the
+        call was on the server."""
+        slots = process_slots()
+        with slots.hold() as wait_ms:
+            self._h.emit("llm.slot", {
+                "prompt_sha": PromptDigest.of(digest_text).sha256,
+                "wait_ms": wait_ms,
+                "width": slots.width,
+            })
+            return self._run_messages(
+                transport, messages, digest_text=digest_text, model=model,
+                max_tokens=max_tokens, want_think=want_think,
+                temperature=temperature, followup_think=followup_think)
 
     def _run_messages(
         self,
@@ -244,7 +276,12 @@ class LLMController:
         temperature: float | None,
         followup_think: bool,
     ) -> str:
-        spec = transport.spec()
+        # The call's reasoning level, decided once (`pipeline_core.effort`)
+        # and handed to every transport method that plans or renders it: the
+        # budget's reserve and runaway cap are per level, and the token count
+        # renders the level's word into the template like the request does.
+        effort = call_effort()
+        spec = transport.spec(effort=effort)
         state = transport.budget_state()
         msg_chars = sum(len(m.get("content") or "") for m in messages)
 
@@ -254,7 +291,7 @@ class LLMController:
         # few short ones move it and the next long prompt is under-counted
         # into a 400 whose "at least N" is only the threshold it crossed.
         counted = transport.count_input_tokens(
-            messages, enable_thinking=enable_thinking)
+            messages, enable_thinking=enable_thinking, effort=effort)
         plan = request_max_tokens(
             spec, state,
             input_chars=msg_chars,
@@ -276,13 +313,14 @@ class LLMController:
         # iteration, before the stream runs.
         cap = _Captured()
         for attempt in range(_MAX_ATTEMPTS):
-            self._h.sock_open(f"{transport.served_model} think={enable_thinking} attempt={attempt}")
+            self._h.sock_open(f"{transport.served_model} think={enable_thinking} "
+                              f"effort={effort.value} attempt={attempt}")
             meta = StreamMeta()
             try:
                 cap = self._consume(
                     transport.stream(messages, model=model, max_tokens=plan.request_max,
                                      enable_thinking=enable_thinking, meta=meta,
-                                     temperature=temperature),
+                                     effort=effort, temperature=temperature),
                     plan.thinking_char_cap, model,
                 )
                 break
@@ -298,7 +336,7 @@ class LLMController:
                 # is the measurement when the server gives one.
                 if counted is None:
                     counted = transport.count_input_tokens(
-                        messages, enable_thinking=enable_thinking)
+                        messages, enable_thinking=enable_thinking, effort=effort)
                 real = max(exc.real_tokens or 0, counted or 0) or None
                 if attempt >= _MAX_ATTEMPTS - 1 or real is None:
                     raise
@@ -362,7 +400,8 @@ class LLMController:
         fu = _FollowupOutcome()
         if followup:
             fu = self._followup(transport, messages, reasoning_text, model, max_tokens,
-                                prompt_sha=prompt_sha, followup_think=followup_think)
+                                prompt_sha=prompt_sha, followup_think=followup_think,
+                                effort=effort)
             # A failed followup, or one that closed no element, must not
             # replace the main result — `fu.result or result` used to splice
             # a half-written body as a finished one. A CUT followup still
@@ -414,7 +453,11 @@ class LLMController:
             # What that boolean was sent as: `{"reasoning_strength": "low"}`
             # on Muse is a reasoning call; `{"enable_thinking": false}` on
             # Qwen is not.
-            "reasoning_payload": transport.reasoning_payload(enable_thinking),
+            "reasoning_payload": transport.reasoning_payload(
+                enable_thinking, effort=effort),
+            # The level the call was sent at (`pipeline_core.effort`); the
+            # payload above is the word that level renders as on this model.
+            "effort": effort.value,
             # So a reader replaying events.jsonl (the monitor's live cut-rate
             # gauge) can exclude bookkeeping calls the same way
             # `record_stream_meta` excludes them from the in-process
@@ -435,6 +478,7 @@ class LLMController:
             "request_max": plan.request_max,
             "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
+            "effort": effort.value,
         })
 
         self._h.sock_close()
@@ -475,7 +519,7 @@ class LLMController:
 
     def _followup(self, transport: Transport, messages: list[dict[str, Any]], reasoning_text: str,
                   model: str, max_tokens: int, *, prompt_sha: str,
-                  followup_think: bool) -> _FollowupOutcome:
+                  followup_think: bool, effort: EffortLevel) -> _FollowupOutcome:
         """The forced code-only completion after a cut main stream.
 
         `followup_think` is the one lever this turn has. With it False (every
@@ -498,13 +542,16 @@ class LLMController:
         ORIGINAL prompt's sha so it joins `llm.request` / `llm.response` /
         `llm.stream_meta` exactly. Until this event existed the stream_meta
         row carried the MAIN stream's `finish_reason` beside the FOLLOWUP's
-        `content_chars`, and a followup cut at `length` was unrecordable."""
-        spec = transport.spec()
+        `content_chars`, and a followup cut at `length` was unrecordable.
+
+        `effort` is the main call's level: a followup is the same call's
+        second turn and is sent, planned and counted at it."""
+        spec = transport.spec(effort=effort)
         state = transport.budget_state()
         fu_messages = transport.followup_messages(messages, reasoning_text, model=model)
         fu_chars = sum(len(m.get("content") or "") for m in fu_messages)
         fu_counted = transport.count_input_tokens(
-            fu_messages, enable_thinking=followup_think)
+            fu_messages, enable_thinking=followup_think, effort=effort)
         fu_plan = request_max_tokens(
             spec, state, input_chars=fu_chars, caller_max_tokens=max_tokens,
             default_sentinel=self._sentinel, enable_thinking=followup_think,
@@ -523,7 +570,8 @@ class LLMController:
             try:
                 cap = self._consume(
                     transport.stream(fu_messages, model=model, max_tokens=fu_plan.request_max,
-                                     enable_thinking=followup_think, meta=meta),
+                                     enable_thinking=followup_think, meta=meta,
+                                     effort=effort),
                     fu_plan.thinking_char_cap if followup_think else None, model,
                 )
                 break
@@ -534,7 +582,7 @@ class LLMController:
                     result="", fu_reasoning="", reasoning_text=reasoning_text,
                     messages=messages, fu_messages=fu_messages,
                     request_max=fu_plan.request_max, followup_think=followup_think,
-                    stop=None)
+                    effort=effort, stop=None)
                 return _FollowupOutcome(finish_reason="error")
             except InputTooLong as exc:
                 # The main stream retries this (run() :181); the followup
@@ -542,7 +590,7 @@ class LLMController:
                 # no `llm.followup_meta` row at all.
                 if fu_counted is None:
                     fu_counted = transport.count_input_tokens(
-                        fu_messages, enable_thinking=followup_think)
+                        fu_messages, enable_thinking=followup_think, effort=effort)
                 fu_real = max(exc.real_tokens or 0, fu_counted or 0) or None
                 if attempt >= _MAX_ATTEMPTS - 1 or fu_real is None:
                     self._h.guard("llm/followup_input",
@@ -552,7 +600,7 @@ class LLMController:
                         result="", fu_reasoning="", reasoning_text=reasoning_text,
                         messages=messages, fu_messages=fu_messages,
                         request_max=fu_plan.request_max, followup_think=followup_think,
-                        stop=None)
+                        effort=effort, stop=None)
                     return _FollowupOutcome(finish_reason="error")
                 state.update(fu_chars, fu_real)
                 fu_plan = self._replan_with_input(
@@ -582,7 +630,7 @@ class LLMController:
             result=raw, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
             messages=messages, fu_messages=fu_messages,
             request_max=fu_plan.request_max, followup_think=followup_think,
-            stop=cap.stop, salvaged_chars=len(usable) if was_cut else 0)
+            effort=effort, stop=cap.stop, salvaged_chars=len(usable) if was_cut else 0)
         return _FollowupOutcome(
             result=usable, reasoning=fu_reasoning,
             finish_reason=meta.finish_reason, stop=cap.stop,
@@ -593,7 +641,7 @@ class LLMController:
         result: str, fu_reasoning: str, reasoning_text: str,
         messages: list[dict[str, Any]], fu_messages: list[dict[str, Any]],
         request_max: int | None, followup_think: bool, stop: str | None,
-        salvaged_chars: int = 0, prompt_tokens: int | None = None,
+        effort: EffortLevel, salvaged_chars: int = 0, prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
     ) -> None:
         """`result` is the RAW reply, so `content_chars` measures what the
@@ -614,6 +662,7 @@ class LLMController:
                 reasoning_text, messages, fu_messages),
             "request_max": request_max,
             "enable_thinking": followup_think,
+            "effort": effort.value,
             "stop": stop,
             "fn_blocks": result.count("<FN "),
         }

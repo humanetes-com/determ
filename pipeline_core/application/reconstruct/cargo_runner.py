@@ -22,7 +22,10 @@ from typing import Any
 from pipeline_core.application.reconstruct.assert_probe_runner import (
     bound as bound_write_probe,
 )
-from pipeline_core.application.reconstruct.attribution import make_fn_site_locator
+from pipeline_core.application.reconstruct.attribution import (
+    make_fn_site_locator,
+    make_untouched_arm_probe,
+)
 from pipeline_core.application.reconstruct.cargo_errors import diagnostics_from_json
 from pipeline_core.application.reconstruct.crash_localizer import crash_keys
 from pipeline_core.application.reconstruct.crash_settler import (
@@ -67,10 +70,12 @@ from pipeline_core.domain.test_report import (
     CrashPanics,
     FailureExcerpt,
     FailureKind,
+    HeldTests,
     TestFailure,
     TestRunReport,
     U2Decision,
     U2Verdict,
+    UnitScope,
     crash_panics,
     external_stub_sites_of,
     merge_observations,
@@ -900,13 +905,18 @@ def u2_test_gate(
     """
     if not (enabled and test_cmd):
         return U2Verdict.accept()
-    fn_tests = set(ground.judged)
-    convicting = set(ground.convicting)
-    if not fn_tests:
+    # Every comparison between a name libtest printed and the ground goes
+    # through these two (`HeldTests`): the ground holds leaves, the capture
+    # module paths, and a string compare of the two dropped every failure of
+    # a test in a module (run `3669371-9d5a7361`, 2026-11-06). The names the
+    # verdict carries are the held ones.
+    judged = HeldTests(ground.judged)
+    convicting = HeldTests(ground.convicting)
+    if not ground.judged:
         # Nothing to run is not a passing run: the body is kept on compile
         # alone and the verdict says that (`U2Decision.NO_TESTS`).
         return U2Verdict.no_tests()
-    scoped_cmd = derive_scoped_test_cmd(test_cmd, fn_tests)
+    scoped_cmd = derive_scoped_test_cmd(test_cmd, ground.judged)
     try:
         rc, out = run_cargo_fn(scoped_cmd, target_src_dir, cluster_env or {},
                                timeout=timeout)
@@ -922,12 +932,13 @@ def u2_test_gate(
         # that is not convicting and never returned is read, not charged.
         hung = hung_sections(out or "")
         if (hung and hung[-1].dangling
-                and leaf(hung[-1].dangling) not in {leaf(t) for t in convicting}):
+                and convicting.held_as(hung[-1].dangling) is None):
             return U2Verdict.accept(
-                frozenset(parse_test_output(out or "").passed & fn_tests),
-                ran=True, judged_red=frozenset({hung[-1].dangling}))
+                judged.held_of(parse_test_output(out or "").passed),
+                ran=True, judged_red=frozenset(
+                    {judged.held_as(hung[-1].dangling) or hung[-1].dangling}))
         if hung and hung[-1].dangling:
-            name = hung[-1].dangling
+            name = convicting.held_as(hung[-1].dangling) or hung[-1].dangling
             guard("phase-c/u2_hang",
                   f"scoped run timed out inside `{name}` ({hung[-1].label}) — "
                   "a test that never returns convicts the body under test")
@@ -937,14 +948,10 @@ def u2_test_gate(
                 capture=out or "")
         return U2Verdict.accept()  # build did not finish → INCONCLUSIVE
     report = parse_test_output(out)
-    scoped = TestRunReport(
-        report.passed,
-        tuple(f for f in report.failures if f.test_name in fn_tests))
+    scoped = TestRunReport(report.passed, judged.failures_in(report))
     # The failures that may revert: a convicting test's. A judged test that
     # is not convicting is read, never charged.
-    scoped_c = TestRunReport(
-        report.passed,
-        tuple(f for f in scoped.failures if f.test_name in convicting))
+    scoped_c = TestRunReport(report.passed, convicting.failures_in(scoped))
     # Expected-vs-reported for OUR OWN tests: a crashed/uncompilable scoped
     # binary takes its tests away without a FAILED line, so rc!=0 with no
     # parsed failures used to read as "no failures" here. The verdict stays
@@ -952,7 +959,7 @@ def u2_test_gate(
     # drops, with a baseline this gate lacks) — but the deficit is surfaced,
     # never silently invisible.
     _reported = report.passed | {f.test_name for f in report.failures}
-    _missing = fn_tests - _reported
+    _missing = judged.missing_from(_reported)
     # Cargo's verdict from the build phase of the scoped capture, the same
     # reading the cluster sweep takes — a test that runs a compiler itself
     # prints the same words later in the stream.
@@ -977,9 +984,8 @@ def u2_test_gate(
     # own verdict without one. Before 2026-10-11 only the missing names were
     # read here, and run `2157238-210637e6` kept five self-recursive bodies
     # whose stack overflows read as ordinary self failures.
-    _own = {leaf(t) for t in convicting}
-    _before_dead = {leaf(t) for t in (baseline.aborted_names
-                                      if baseline is not None else ())}
+    _before_dead = HeldTests(frozenset(
+        baseline.aborted_names if baseline is not None else ()))
     # Two destroyed-verdict shapes, charged separately. A name with no
     # section at all (`_missing`) can be an incomplete binary whose only
     # panic is another unit's stub. A silent death is a completed FAILED
@@ -988,16 +994,16 @@ def u2_test_gate(
     # it. Isolation can leave the original incomplete section beside the
     # rebuilt one (the executable was gone, the listing failed, or the
     # deadline cut that binary), which is how one capture holds both.
-    _silent = frozenset(
+    _silent = convicting.held_of(
         n for n in TestStateReading(
             parse_binary_results(out or "")).aborted_silent_names
-        if leaf(n) in _own and leaf(n) not in _before_dead)
+        if _before_dead.held_as(n) is None)
     _judged = (baseline.judged_names if baseline is not None else frozenset())
     _charge = baseline is not None and rc != 0 and not _compile_failed
     _silent_aborted = (self_aborted_tests(_silent, _judged)
                        if _charge else frozenset())
     _missing_aborted = (self_aborted_tests(
-        frozenset(m for m in _missing if leaf(m) in _own), _judged)
+        convicting.held_of(_missing), _judged)
         if _charge else frozenset())
     _aborted = _silent_aborted | _missing_aborted
     if _aborted:
@@ -1017,8 +1023,10 @@ def u2_test_gate(
         # of a test the baseline judged stays a reject, even when the same
         # capture also holds that stub section.
         _locate = make_fn_site_locator(structure, target_src_dir)
+        _scope = UnitScope(frozenset(unit_sites),
+                           make_untouched_arm_probe(structure, target_src_dir))
         _panics = crash_panics(out)
-        _ext = external_stub_sites_of(_panics, frozenset(unit_sites), _locate)
+        _ext = external_stub_sites_of(_panics, _scope, _locate)
         if _ext and not _silent_aborted:
             _names = sorted(f"{s.file}::{s.fn_name}" for s in _ext)
             guard("phase-c/u2_abort_external",
@@ -1054,7 +1062,8 @@ def u2_test_gate(
         def _in_unit(file: str, line: int) -> bool:
             at = _locate(file, line)
             return (at is not None
-                    and FnLocator(at.file, at.fn_name) in _unit_locs)
+                    and FnLocator(at.file, at.fn_name) in _unit_locs
+                    and not _scope.untouched_arm(file, line))
         _attributed = (
             any(is_oracle_path(p.file) or _in_unit(p.file, p.line)
                 for p in _panics.crate_panics)
@@ -1087,12 +1096,13 @@ def u2_test_gate(
             # partition `judge_refill` reads (`U2Verdict.crash_sites`).
             _settled_sites = _settler.localize(out or "", baseline)
         return U2Verdict.reject(
-            frozenset(_aborted) | {f.test_name for f in scoped_c.failures},
+            frozenset(_aborted) | convicting.held_of(
+                f.test_name for f in scoped_c.failures),
             _render_u2_abort(_aborted, scoped_c, err_cap, _panics,
                              localized=_settled_text),
             sites=scoped_c.failures, aborted=frozenset(_aborted), crash=_panics,
             external_stub_sites=stub_sites_outside(
-                _panics.stub_sites, frozenset(unit_sites), _locate),
+                _panics.stub_sites, _scope, _locate),
             capture=out or "",
             positions=assertion_positions(
                 out or "", oracle_test_source(target_src_dir)),
@@ -1108,25 +1118,29 @@ def u2_test_gate(
         # that died with nothing charged, leaves behind; those accepts are
         # kept on compile alone and must not read as tests that ran
         # (review of 2026-10-29).
-        _leaves = {n.rsplit("::", 1)[-1] for n in _reported}
         return U2Verdict.accept(
-            frozenset(report.passed & fn_tests),
-            ran=any(t.rsplit("::", 1)[-1] in _leaves for t in fn_tests))
+            judged.held_of(report.passed),
+            ran=bool(judged.held_of(_reported)))
     locate = make_fn_site_locator(structure, target_src_dir)
-    blame = partition_blame(scoped, frozenset(unit_sites), locate)
-    unjudged = frozenset(f.test_name for f in blame.no_verdict)
+    blame = partition_blame(
+        scoped,
+        UnitScope(frozenset(unit_sites),
+                  make_untouched_arm_probe(structure, target_src_dir)),
+        locate)
+    unjudged = judged.held_of(f.test_name for f in blame.no_verdict)
     if unjudged:
         guard("phase-c/u2_no_verdict",
               f"{sorted(unjudged)} were named FAILED but printed no output "
               "(process aborted) — not charged to this unit")
-    own = tuple(f for f in blame.self_failures if f.test_name in convicting)
+    own = convicting.failures_in(TestRunReport(frozenset(), blame.self_failures))
     if not own:
         if blame.self_failures:
             # Judged tests that are not convicting ran into this write and
             # stayed red: no revert, and a measurement, not "could not run".
             return U2Verdict.accept(
-                frozenset(report.passed & fn_tests), ran=True,
-                judged_red=frozenset(f.test_name for f in blame.self_failures))
+                judged.held_of(report.passed), ran=True,
+                judged_red=judged.held_of(
+                    f.test_name for f in blame.self_failures))
         # Includes the all-inconclusive case: nothing convicts, so the
         # compiling fill stands rather than burning attempts on a verdict the
         # unit cannot influence.
@@ -1134,8 +1148,9 @@ def u2_test_gate(
     blame = replace(blame, self_failures=own)
     detail = _render_u2_reject(blame, err_cap)
     return U2Verdict.reject(
-        frozenset(f.test_name for f in blame.self_failures), detail, unjudged,
-        self_passed=frozenset(report.passed & convicting),
+        convicting.held_of(f.test_name for f in blame.self_failures),
+        detail, unjudged,
+        self_passed=convicting.held_of(report.passed),
         sites=blame.self_failures, capture=out or "",
         positions=assertion_positions(
             out or "", oracle_test_source(target_src_dir)))

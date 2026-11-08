@@ -12,6 +12,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from pipeline_core.domain.context_pull import ContextPull, PullAnswer, PullKind
+from pipeline_core.domain.prompt_holdings import (
+    ANSWER_REPEAT_BODY,
+    ANSWER_UNAVAILABLE_OPEN,
+    answer_block,
+)
 
 _KIND_LINES = {
     PullKind.FILE: ('file — a path inside this crate, e.g. arg="src/helper.rs"; '
@@ -60,9 +65,10 @@ def render_pull_followups(answers: Sequence[tuple[PullAnswer, bool]]) -> str:
     One `<REQUESTED_CONTEXT>` block per answer and ONE closing instruction:
     repeating "now complete the task" after each block reads as several tasks.
 
-    Each answer is paired with whether it repeats a byte-identical answer this
-    task already carries. A repeat is not re-sent — it is already in the
-    conversation — and says so. A cut answer names its window and the exact
+    Each answer is paired with whether it repeats a byte-identical answer the
+    conversation already DELIVERED (`Holdings.delivered`). A repeat is not
+    re-sent and says so. Every block is written by `answer_block`, the shape
+    `read_holdings` reads back. A cut answer names its window and the exact
     tag that continues it: the old `truncated="true"` flag alone left the model
     re-asking for the same head, which is all it could ask for."""
     if not answers:
@@ -70,10 +76,9 @@ def render_pull_followups(answers: Sequence[tuple[PullAnswer, bool]]) -> str:
     blocks = []
     for answer, repeat in answers:
         if not answer.ok:
-            body = f"(not available: {answer.payload})"
+            body = f"{ANSWER_UNAVAILABLE_OPEN}{answer.payload})"
         elif repeat:
-            body = ("(unchanged since it was sent above for this same "
-                    "request — not repeated; read it there)")
+            body = ANSWER_REPEAT_BODY
         else:
             body = answer.payload
         attrs = ' truncated="true"' if answer.truncated else ""
@@ -86,9 +91,7 @@ def render_pull_followups(answers: Sequence[tuple[PullAnswer, bool]]) -> str:
         if nxt is not None:
             tail = (f"\nLines {answer.last_line + 1}-{answer.total_lines} were "
                     f"not sent. To read them, reply {nxt.tag()}")
-        blocks.append(f"\n\nYou requested: {answer.pull.tag()}\n"
-                      f"<REQUESTED_CONTEXT{attrs}>\n{body}\n"
-                      f"</REQUESTED_CONTEXT>{tail}")
+        blocks.append(answer_block(answer.pull.tag(), body, attrs=attrs) + tail)
     return ("".join(blocks)
             + "\nNow complete the ORIGINAL task above and return the FN "
               "block(s).")
@@ -107,10 +110,9 @@ def render_pull_budget_spent(pending: Sequence[ContextPull]) -> str:
     answer; it is waiting for a reply that is never coming and has not been
     told so."""
     asked = " ".join(p.tag() for p in pending)
-    return (f"\n\nYou requested: {asked}\n"
-            "<REQUESTED_CONTEXT>\n(not available: you have no context "
-            "requests left for this task — this is the last exchange)\n"
-            "</REQUESTED_CONTEXT>\n"
+    return (answer_block(asked, f"{ANSWER_UNAVAILABLE_OPEN}you have no context "
+                                "requests left for this task — this is the last "
+                                "exchange)") + "\n"
             "Do NOT request anything further; another request tag ends this "
             "task with nothing written. Answer the ORIGINAL task NOW with the "
             "best FN block(s) you can write from what you already have, and "

@@ -43,6 +43,7 @@ from pipeline_core.application.reconstruct.fill_reading import (
 )
 from pipeline_core.application.reconstruct.fill_rules import (
     AttemptFailure,
+    RestoredState,
     fix_prompt_kind,
     is_unimplemented_body,
     make_failed_attempt_body,
@@ -158,6 +159,7 @@ from pipeline_core.domain.test_report import (
     U2Decision,
     U2Verdict,
     judge_refill,
+    per_fn_reject_kept,
     unmeasured_keep_reason,
 )
 from pipeline_core.domain.type_refs import types_referenced_in_text
@@ -261,9 +263,12 @@ class FillOneFn:
         self, ctx: PerFnPassCtx, salvage: CompilingSalvage, file_path: Path,
         rel_file: str, fn_name: str, container: str, sig_text: str, rec: Stub,
         revert: Callable[[], bool], joint: _JointState | None = None,
+        restores: RestoredState = RestoredState.STUB,
     ) -> bool:
         """Restore the fix loop's best COMPILING body instead of leaving the
-        stub. Call with the stub already reverted in, holding the splice lock.
+        pre-fill body. Call with the pre-fill body already reverted in (the
+        stub, or for a re-fill the filled body it started from; `restores`
+        names which, for the log), holding the splice lock.
 
         The stub panics, which aborts the test binary and un-judges every
         sibling test in it, so a compiling body is what the outer TDD loop wants
@@ -283,7 +288,8 @@ class FillOneFn:
             cfg_predicates=rec.cfg_predicates, allow_nonstub=True)
         if not _sp.ok:
             self.tel.log(f"  [phase-c/per-fn] salvage splice refused for "
-                         f"{rel_file}::{fn_name}: {_sp.reason} — stub kept.")
+                         f"{rel_file}::{fn_name}: {_sp.reason} — "
+                         f"{restores.label} kept.")
             return False
         if best.extras and joint is not None:
             # The best attempt was a joint write: restore it whole or not at
@@ -293,7 +299,8 @@ class FillOneFn:
             if _missed:
                 self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: best "
                              "compiling joint attempt NOT salvaged (extras "
-                             f"not restorable: {_missed}) — reverting to stub.")
+                             f"not restorable: {_missed}) — reverting to the "
+                             f"{restores.label}.")
                 revert()
                 return False
         # Through the check port, where the tree is also built in the other
@@ -310,7 +317,7 @@ class FillOneFn:
                     else f"would regress {_regr[0].summary}")
             self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: best "
                          f"compiling attempt NOT salvaged ({_why}) — "
-                         "reverting to stub.")
+                         f"reverting to the {restores.label}.")
             revert()
             return False
         if joint is not None:
@@ -667,6 +674,14 @@ class FillOneFn:
         # three `filled` constructors back to `unimplemented!()`). Revert only
         # THIS fn, at offsets resolved against the file as it stands now.
         _own_pre_image = _cur_body or "unimplemented!()"
+        # What every revert of this unit puts back, decided once from the
+        # pre-image rather than inferred later from a splice refusal. A re-fill
+        # starts from a filled body that compiles; its revert restores that
+        # body, and an annotated stub must never be written over it (the
+        # scoped splice refuses `target_not_stub`, which was logged as an
+        # ANNOTATE FAILED on every exhausted re-fill: run pid 1210298,
+        # 2026-11-05, `object_drop`).
+        _restores = RestoredState.of(_own_pre_image)
         # The reply may widen the write to other functions of this file
         # when the pass knows the file's records to resolve them against.
         _joint_on = bool(ctx.fn_records) and ctx.joint_max > 0
@@ -1437,15 +1452,18 @@ class FillOneFn:
                     # green and nothing lost, is kept (`judge_refill`, the
                     # abort partition) and judged at the next sweep. Its U2
                     # reject is the silent-death charge, not the verdict.
+                    # Every other reject goes to the next attempt
+                    # (`per_fn_reject_kept` says why a partial gain is not
+                    # kept here).
                     _jr = (judge_refill(_evidence.tests, _attempt_baseline_test,
                                         _v)
                            if (_u2_fail_sig is not None
                                and _attempt_baseline_test is not None
                                and (_crash_evidence or _v.aborted))
                            else None)
-                    if _jr is not None and (
-                            (_crash_evidence and _jr.non_regression)
-                            or (bool(_v.aborted) and _jr.banks)):
+                    if _jr is not None and per_fn_reject_kept(
+                            crash_graded=bool(_crash_evidence),
+                            aborted=bool(_v.aborted), judged=_jr):
                         _written = [FnLocator(rel_file, fn_name), *(
                             FnLocator(u.file, u.fn_name) for u, _pre in joint.live)]
                         if SameCrashJudge(
@@ -2390,8 +2408,15 @@ class FillOneFn:
                 # is the unit's state for this fill.
                 _salvaged = (not _repeated_stop) and self._salvage_compiling_body(
                     ctx, salvage, file_path, rel_file, fn_name, container,
-                    sig_text, rec, _revert_own_body, joint=joint)
-                if not _salvaged and not _repeated_stop:
+                    sig_text, rec, _revert_own_body, joint=joint,
+                    restores=_restores)
+                if (not _salvaged and not _repeated_stop
+                        and _restores is RestoredState.FILLED_BODY):
+                    self.tel.log(f"  [phase-c/per-fn] {rel_file}::{fn_name}: "
+                                 "pre-fill body restored — the unit started "
+                                 "filled, so no annotated stub is written "
+                                 "over it.")
+                elif not _salvaged and not _repeated_stop:
                     annotated_body = make_failed_attempt_body(
                         attempted_body=last_body or first_failed_body or "",
                         error_excerpt=error_excerpt or first_error_excerpt or "",

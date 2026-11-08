@@ -69,11 +69,13 @@ class StubVerdict:
     kind, because the reconstruction's green suite never reaches a body the
     original's suite entered.
 
-    `dead_in_tree` is the one the COMPILER measured on the finished tree: in
-    every baked world that compiles the stub, rustc's dead-code analysis
-    reports it never used (`domain.dead_code`). Nothing the crate exposes can
-    reach it, so no test can enter it and no fill of it could be judged — a
-    private helper the reconstructed bodies do not call. It is not counted;
+    `dead_in_tree` is the one the COMPILER decided on the finished tree: in
+    every baked world that compiles the stub, the crate and every test target
+    still build with the stub's smallest removable item deleted, and the
+    unmodified MIR names no call to it (`domain.stub_removal`). Nothing the
+    crate or its oracle has can call it, so no test can enter it and no fill
+    of it could be judged — a private body the reconstructed callers do not
+    reach, trait-impl methods included. It is not counted;
     the target is the crate's tested behaviour, not the original's call graph.
     A site here that is also in `executed_upstream` is reported loudest: the
     original's suite entered a body this tree cannot reach, which is what a
@@ -102,7 +104,7 @@ def classify_remaining_stubs(
     cfg_sets: Iterable[CfgSet],
     reference_hollow: Iterable[tuple[str, str]] = (),
     fn_records: Sequence[FnCoverageRecord] = (),
-    dead_sites: frozenset[FnSite] = frozenset(),
+    unreached_proofs: Mapping[FnSite, str] | None = None,
 ) -> StubVerdict:
     """Split the fns still holding `unimplemented!()` into un-attempted,
     cfg-unreachable, hollow-upstream-too, unreached-by-tests, and dead in
@@ -138,13 +140,16 @@ def classify_remaining_stubs(
     locator; a locator reads the record's sites for it conservatively
     (`FnCoverageRecord.classify_stub`).
 
-    The fourth filter reads the compiler's dead-code analysis of THIS tree
-    (`dead_sites`, from `dead_stub_reading.read_dead_stub_sites`): a stub the
-    earlier filters leave orphaned, which every world that compiles it reports
-    never used, leaves as `dead_in_tree`. Run `292191-d60a5308` (2026-10-02)
-    exited 1 on two private helpers the filled callers route around. Last in
-    the order on purpose: a stub augmentation measured unreached keeps that
-    better-evidenced bucket.
+    The fourth filter reads the compiler's removal reading of THIS tree
+    (`unreached_proofs`, site -> proof, from
+    `unreached_stub_reading.read_unreached_stub_proofs`): a stub the earlier
+    filters leave orphaned, which nothing can call in any world that compiles
+    it, leaves as `dead_in_tree` and its line carries the proof. Run
+    `292191-d60a5308` (2026-10-02) exited 1 on two private helpers the filled
+    callers route around; run `3323407-984b07f2` (2026-11-08) exited 1 on a
+    trait-impl method rustc's `dead_code` lint, the previous reader, never
+    reports. Last in the order on purpose: a stub augmentation measured
+    unreached keeps that better-evidenced bucket.
     """
     sets = list(cfg_sets)
     unreachable: list[FnLocator] = []
@@ -163,8 +168,9 @@ def classify_remaining_stubs(
     account = classify_stub_sites(candidates, fn_records)
     unreached: dict[FnSite, UnreachedFn] = dict(account.unreached)
     executed = frozenset(account.executed)
+    proofs = {canon_site(k): v for k, v in (unreached_proofs or {}).items()}
     dead = [s for s in candidates
-            if s not in unreached and canon_site(s) in dead_sites]
+            if s not in unreached and canon_site(s) in proofs]
     return StubVerdict(
         orphaned=tuple(FnLocator(s.file, s.fn_name) for s in candidates
                        if s not in unreached and s not in dead),
@@ -172,9 +178,9 @@ def classify_remaining_stubs(
                              if s not in unreached and s not in dead),
         dead_in_tree=tuple(FnLocator(s.file, s.fn_name) for s in dead),
         dead_executed_upstream=tuple(
-            site_label(s) for s in dead if s in executed),
+            f"{site_label(s)} — {proofs[canon_site(s)]}" for s in dead if s in executed),
         dead_unexecuted=tuple(
-            site_label(s) for s in dead if s not in executed),
+            f"{site_label(s)} — {proofs[canon_site(s)]}" for s in dead if s not in executed),
         unreachable=tuple(unreachable),
         upstream_hollow=tuple(FnLocator(s.file, s.fn_name) for s in reachable
                               if (s.file, s.fn_name) not in orphaned_keys),
@@ -199,7 +205,7 @@ def remaining_stub_verdict(
     load_baked_clusters: Callable[[Path], list[Any]],
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]],
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]],
-    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]],
+    unreached_stub_proofs: Callable[[Path, Sequence[Any]], Mapping[FnSite, str]],
 ) -> tuple[StubVerdict, int]:
     """The end gate's verdict on the tree at `project_dir`, and how many baked
     cfg-sets it was judged under. BOTH completion paths call this — the
@@ -207,7 +213,7 @@ def remaining_stub_verdict(
     cannot drift: they once ran different scans, and a fully green crate
     exited 1 on one path and 0 on the other.
 
-    The dead-code reading costs one `cargo check` per cluster, so it is taken
+    The removal reading costs a few `cargo` runs per cluster, so it is taken
     only when the cheaper filters leave an orphan it could move."""
     clusters = load_baked_clusters(project_dir) or []
     cfg_sets = [CfgSet.of(cfg_true=c.cfg_true, cfg_false=c.cfg_false)
@@ -219,10 +225,10 @@ def remaining_stub_verdict(
     records = augmentation_fn_records(project_dir)
     verdict = classify_remaining_stubs(stubs, cfg_sets, hollow, records)
     if verdict.orphaned:
-        dead = dead_stub_sites(project_dir, clusters)
-        if dead:
+        proofs = unreached_stub_proofs(project_dir, clusters)
+        if proofs:
             verdict = classify_remaining_stubs(
-                stubs, cfg_sets, hollow, records, dead)
+                stubs, cfg_sets, hollow, records, proofs)
     return verdict, len(cfg_sets)
 
 
@@ -256,16 +262,17 @@ def report_stub_verdict(verdict: StubVerdict, log: Callable[[str], None],
     # Decided 2026-10-17: a crate-private body no rebuilt caller and no
     # oracle test reaches does not count against green, and one the
     # original's suite executed is said on its own named line, never folded
-    # into the note. "Private" is rustc's: an exported fn is never reported
-    # dead, and the reading counts the in-crate test modules as callers
-    # (`adapters/dead_code.py`), so a public stub or a reached one stays in
-    # `orphaned` and fails the run below.
+    # into the note. "Private" is the public index's: a fn an outside crate
+    # can name or hold is never proved, and the removal build compiles the
+    # in-crate test modules and every test target (`domain.stub_removal`),
+    # so a public stub or a reached one stays in `orphaned` and fails the
+    # run below.
     if verdict.dead_unexecuted:
         log(f"\nNOTE: {len(verdict.dead_unexecuted)} fn(s) remain "
-            "unimplemented!() and the compiler reports them NEVER USED in "
-            "every baked cluster that compiles them, by the crate and by its "
-            "own tests — nothing reaches them, so no fill for them could have "
-            "been judged. Not counted against this run:")
+            "unimplemented!() and NOTHING CAN CALL THEM in any baked cluster "
+            "that compiles them: the crate and its tests build with them "
+            "deleted, and the unmodified MIR names no call — so no fill for "
+            "them could have been judged. Not counted against this run:")
         for label in verdict.dead_unexecuted:
             log(f"    {label}")
     if verdict.dead_executed_upstream:
@@ -303,7 +310,7 @@ def end_verdict(
     load_baked_clusters: Callable[[Path], list[Any]],
     reference_hollow: Callable[[Path], frozenset[tuple[str, str]]],
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]],
-    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]],
+    unreached_stub_proofs: Callable[[Path, Sequence[Any]], Mapping[FnSite, str]],
     log: Callable[[str], None],
 ) -> EndVerdict:
     """The one end gate: classify the remaining stubs, report every bucket,
@@ -317,7 +324,7 @@ def end_verdict(
         load_baked_clusters=load_baked_clusters,
         reference_hollow=reference_hollow,
         augmentation_fn_records=augmentation_fn_records,
-        dead_stub_sites=dead_stub_sites)
+        unreached_stub_proofs=unreached_stub_proofs)
     report_stub_verdict(verdict, log, n_sets)
     return EndVerdict(
         blocking=verdict.orphaned_sites,
@@ -749,10 +756,11 @@ class LockDeps:
     # degrades the gate to the reachability + reference form.
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
         lambda _p: ())
-    # (project_dir, baked clusters) -> the stub sites rustc reports never used
-    # in every cluster that compiles them; empty takes no such reading.
-    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]] = (
-        lambda _p, _c: frozenset())
+    # (project_dir, baked clusters) -> site -> proof for the stub sites
+    # nothing can call in any cluster that compiles them
+    # (`unreached_stub_reading`); empty takes no such reading.
+    unreached_stub_proofs: Callable[[Path, Sequence[Any]], Mapping[FnSite, str]] = (
+        lambda _p, _c: {})
 
 
 def lock_or_complete(
@@ -803,7 +811,7 @@ def lock_or_complete(
                 load_baked_clusters=deps.load_baked_clusters,
                 reference_hollow=deps.reference_hollow,
                 augmentation_fn_records=deps.augmentation_fn_records,
-                dead_stub_sites=deps.dead_stub_sites,
+                unreached_stub_proofs=deps.unreached_stub_proofs,
                 log=deps.log)
             if not verdict.clean:
                 deps.git_commit(
@@ -941,9 +949,9 @@ class RunDeps:
     # `classify_remaining_stubs`); empty degrades to the two-filter form.
     augmentation_fn_records: Callable[[Path], Sequence[FnCoverageRecord]] = (
         lambda _p: ())
-    # Same contract as LockDeps.dead_stub_sites.
-    dead_stub_sites: Callable[[Path, Sequence[Any]], frozenset[FnSite]] = (
-        lambda _p, _c: frozenset())
+    # Same contract as LockDeps.unreached_stub_proofs.
+    unreached_stub_proofs: Callable[[Path, Sequence[Any]], Mapping[FnSite, str]] = (
+        lambda _p, _c: {})
     # The oracle against its strip-time seal, `(project_dir, module) ->
     # OracleDrift | None` (None: unsealed). Defaults to "unguarded" so a
     # caller that wires none behaves as before the seal existed.
@@ -1697,7 +1705,7 @@ def _run_pipeline(deps: RunDeps, plan: RunPlan, root: Path) -> None:
             load_baked_clusters=deps.load_baked_clusters,
             reference_hollow=deps.reference_hollow,
             augmentation_fn_records=deps.augmentation_fn_records,
-            dead_stub_sites=deps.dead_stub_sites,
+            unreached_stub_proofs=deps.unreached_stub_proofs,
             log=deps.log)
         if not _end.clean:
             sys.exit(1)

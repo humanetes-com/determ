@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline_core.adapters.llm_transports import reasoning_budget_is_per_call
 from pipeline_core.domain.model_caps import safe_input_char_limit
+from pipeline_core.domain.model_profile import EffortLevel, reasoning_budget_is_per_call
 from pipeline_core.llm import BudgetSpec, BudgetState, Delta, Hooks, InputTooLong, LLMController
 from pipeline_core.llm.budget import plan_for_input, request_max_tokens
 from tests.test_llm_controller import FakeTransport
@@ -146,7 +146,7 @@ def test_reasoning_budget_knob_refuses_a_typo():
 # ── the model profile's runaway cap under per_call ──────────────────────────
 # The per_call branch returns the profile cap: None for Muse (its uncapped tail
 # finished naturally, MEASURED above), a measured number for a calibrated
-# model, and none while a profile is uncalibrated (Qwen until its reading).
+# model (Qwen3.8, 2026-11-06), and none while a profile is uncalibrated.
 
 RUNAWAY = 90_000
 
@@ -162,15 +162,25 @@ def test_per_call_plan_carries_the_profile_cap(cap, expected):
     assert plan.thinking_char_cap != FIXED_CAP
 
 
-def test_uncalibrated_profile_resolves_to_no_cap_in_the_transport_spec(monkeypatch):
+def test_the_profile_runaway_cap_reaches_the_transport_spec(monkeypatch):
+    import dataclasses
+
+    import pipeline_core.domain.model_profile as mp
     from pipeline_core.adapters.llm_transports import VLLMTransport
     for v in ("VLLM_RUNAWAY_THINK_CHARS", "VLLM_REASONING_BUDGET", "MODEL_FAMILY"):
         monkeypatch.delenv(v, raising=False)
-    monkeypatch.setenv("VLLM_MODEL_NAME", "Qwen/Qwen3.6-27B-FP8")
-    spec = VLLMTransport().spec()
-    assert spec.per_call_reasoning is True and spec.per_call_char_cap is None
+    monkeypatch.setenv("VLLM_MODEL_NAME", "Qwen/Qwen3.8-27B-FP8")
+    # Calibrated: the measured cap is the spec's.
+    spec = VLLMTransport().spec(effort=EffortLevel.MAX)
+    assert spec.per_call_reasoning is True and spec.per_call_char_cap == 335_000
+    # Uncalibrated: no cap, never an invented one.
+    monkeypatch.setattr(mp, "PROFILES", tuple(
+        dataclasses.replace(p, runaway_think_chars=None, runaway_calibrated=False)
+        if p.family == "qwen3" else p for p in mp.PROFILES))
+    assert VLLMTransport().spec(effort=EffortLevel.MAX).per_call_char_cap is None
+    # An env value overrides either.
     monkeypatch.setenv("VLLM_RUNAWAY_THINK_CHARS", str(RUNAWAY))
-    assert VLLMTransport().spec().per_call_char_cap == RUNAWAY
+    assert VLLMTransport().spec(effort=EffortLevel.MAX).per_call_char_cap == RUNAWAY
 
 
 def test_controller_breaks_a_per_call_stream_at_the_plan_cap():

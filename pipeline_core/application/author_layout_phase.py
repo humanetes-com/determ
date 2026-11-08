@@ -267,6 +267,8 @@ def make_layout_phase_runner(
     load_registry: Callable[[Path], dict[str, AuthoredItem]] | None = None,
     save_registry: Callable[[Path, dict[str, AuthoredItem]], Path] | None = None,
     author_private_fields: bool = False,
+    # Components whose attempt-1 authoring is asked ahead (`AuthorLayoutDeps.lanes`).
+    lanes: int = 1,
 ) -> Callable[[Path, str], None]:
     """Assemble the t1.5 phase runner from resident ports (composition helper —
     keeps pipeline.py thin per the shrink goal). Returns a no-op when disabled or
@@ -314,7 +316,8 @@ def make_layout_phase_runner(
                     else (lambda: read_oracle_sources(pd))),
                 frozen_test_sources=(
                     None if read_frozen_tests is None
-                    else (lambda: read_frozen_tests(pd))))
+                    else (lambda: read_frozen_tests(pd))),
+                lanes=lanes)
 
         def _recompute_leaf_order(pd: Path, cluster: str) -> None:
             src = skeleton_src_dir_for(pd, cluster)

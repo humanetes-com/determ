@@ -231,7 +231,8 @@ def occurrence_of_line(
 
 
 def refuted_crash_note(body: str, evidence: str, iteration: int,
-                       *, unit: str = "", max_body: int = 1500) -> str:
+                       *, unit: str = "", run_id: str = "",
+                       max_body: int = 1500) -> str:
     """What the next writer of a unit is told about the body a crash
     settlement took off it: the body, and the crash as the localizer read it.
 
@@ -240,7 +241,10 @@ def refuted_crash_note(body: str, evidence: str, iteration: int,
     and the wording names neither and claims nothing about the tree now, so
     it is true in every tree state — including a later keep of the same
     bytes, where the closing sentence names the body on the tree as the one
-    that crashed.
+    that crashed. The iteration is named with its run: iteration numbers
+    restart in every process, and the reader keeps a row from any process
+    under the same oracle, so a bare iteration names nothing a later run can
+    place.
     Run `757853-e28f1a7d` (2026-10-16): a stub's iter-4 prompt said only
     that the fn was a stub, and the reply wrote the same double drop three
     times. Run `630350-93c5a6ee` (2026-11-05): a filled unit's settled body
@@ -250,7 +254,8 @@ def refuted_crash_note(body: str, evidence: str, iteration: int,
         shown = shown[:max_body].rstrip() + "\n// …"
     who = f"`{unit}`" if unit else "this fn"
     lines = [
-        f"At iteration {iteration} a body of {who} was taken off the tree: "
+        f"At iteration {iteration}{f' of run {run_id}' if run_id else ''} "
+        f"a body of {who} was taken off the tree: "
         f"a test process crashed on it. That body was:",
         shown,
     ]

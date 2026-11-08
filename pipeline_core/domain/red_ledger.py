@@ -20,7 +20,9 @@ refused, or which never compiled. The classes:
 - ``model_limit`` (M): nothing new can be asked for it (every stub and tier
   spent), and the writer was asked: a landing or a planned run on every
   rung, the test's words in that ask, every compile miss repaired, and
-  every gained revert jointly repaired. The test is still red.
+  every gained revert jointly repaired, and, with escalation on, at least
+  one of its functions asked at the maximum reasoning level. The test is
+  still red.
 - ``open`` : the cluster ended (crash, floor, backstop) while something was
   still owed for it; no verdict on the writer.
 
@@ -140,7 +142,8 @@ def _real_unit(ledger: AskLedger, unit: str, test: str) -> bool:
 def red_ledger(red: Iterable[str], *, reading: DueReading, ledger: AskLedger,
                sight: SightReading,
                runs: Iterable[RunFacts] = (),
-               words: Mapping[str, str] | None = None) -> tuple[RedEntry, ...]:
+               words: Mapping[str, str] | None = None,
+               escalate_after: int = 0) -> tuple[RedEntry, ...]:
     """One entry per red test (bare names).
 
     Order: withdrawn, unrepaired refused gain, unseen (the exit sweep held no
@@ -148,7 +151,12 @@ def red_ledger(red: Iterable[str], *, reading: DueReading, ledger: AskLedger,
     with the reason `test_sight` read), never offered (including a session
     route that cannot be built), unrepaired compile loss, evidence missing,
     open while something is owed, model limit only with proof. `sight` is
-    required: an exit that could not judge sight passes one not taken."""
+    required: an exit that could not judge sight passes one not taken.
+
+    `escalate_after` > 0 (`TDD_ESCALATE_AFTER`): model limit also needs a
+    maximum-level try of one of the test's functions; a test spent only
+    below the maximum is open, never the writer's limit at a level it was
+    not asked at."""
     runs = tuple(runs)
     out: list[RedEntry] = []
     for t in sorted({_bare(x) for x in red}):
@@ -236,6 +244,16 @@ def red_ledger(red: Iterable[str], *, reading: DueReading, ledger: AskLedger,
             out.append(RedEntry(t, RedClass.OPEN,
                                 "the cluster ended while something was owed",
                                 facts))
+        elif escalate_after > 0 and not any(
+                ledger.max_spent(u, t) for u in units):
+            # Spent below the maximum and never asked at it: the walk at
+            # the maximum (`candidate_tiers._with_levels`) still owes it,
+            # or the test never reached the escalation count. Either way no
+            # verdict on the writer at its maximum.
+            out.append(RedEntry(
+                t, RedClass.OPEN,
+                "spent below the maximum reasoning level and never asked at "
+                "it", {**facts, "low_asks": ledger.low_asks.get(t, 0)}))
         else:
             out.append(RedEntry(
                 t, RedClass.MODEL_LIMIT,

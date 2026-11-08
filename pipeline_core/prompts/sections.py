@@ -130,11 +130,13 @@ def tag_block(tag: str, content: str, *, prefix: str = "", suffix: str = "") -> 
 
 
 #: The tag every builder renders a refuted body under (`refuted_body`). Its
-#: own section, not CRASH_EVIDENCE: that block's lead says the body now on
-#: the tree crashed, and the quoted body is the one that was taken off.
+#: own section, not CRASH_EVIDENCE. The lead states history only: an earlier
+#: body crashed and was taken off, and the quoted text is that body when the
+#: writer is shown it. It does not say which process, because the row is
+#: kept across processes on the oracle alone.
 REFUTED_BODY_TAG = "REFUTED_BODY"
 REFUTED_BODY_LEAD = (
-    "Earlier in this run a body written for a fn you are writing crashed a "
+    "A body written earlier for a fn you are writing crashed a "
     "test process and was taken off the tree. The crash below is about the "
     "quoted body. If the body you are shown for that fn is the same text, "
     "it is the one that crashed. Read what in it was wrong, and do not "

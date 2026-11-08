@@ -85,6 +85,9 @@ CONTRACTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "due_rungs": ("planner", (
         "test_owed_functions_reach_a_writer.py::test_a_function_owed_on_the_session_rung_opens_a_session_writer",
     )),
+    "max_units": ("planner", (
+        "test_effort_escalation.py::test_a_test_escalated_by_its_asks_puts_its_owed_unit_in_an_escalated_run",
+    )),
     "budget_minutes": ("config", ("TDD_FILL_BUDGET_MINUTES",)),
     "today_order": ("config", ("the fixed route order constant",)),
     "readmit_after": ("config", ("RETRO_RESET_MAX_ATTEMPTS-style bound, read at entry",)),

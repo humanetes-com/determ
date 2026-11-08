@@ -61,6 +61,7 @@ def build_layout_phase_runner(
     fn_name_counts: Callable[[Path], dict[str, int]],
     log: Callable[[str], None],
     author_private_fields: bool = False,
+    lanes: int = 1,
 ) -> Callable[[Path, str], None]:
     """The t1.5 phase runner, bound to the resident adapters."""
     return make_layout_phase_runner(
@@ -81,6 +82,7 @@ def build_layout_phase_runner(
         read_oracle_sources=read_oracle_sibling_sources,
         read_frozen_tests=read_frozen_test_sources,
         author_private_fields=author_private_fields,
+        lanes=lanes,
     )
 
 

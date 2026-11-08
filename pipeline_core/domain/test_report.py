@@ -89,7 +89,9 @@ class TestFailure:
     # copy was the one measured. The primary fields stay the first copy's,
     # so every reader that asks "where did this name fail" answers as before;
     # the readers that must see every copy (the evidence a prompt quotes,
-    # the premise, the truncation reading) read these too.
+    # the premise, the truncation reading, the keep's blame partition)
+    # read these too. The partition quotes a copy that is this write's
+    # own failure when one exists, rather than the first section.
     others: tuple[TestFailure, ...] = ()
 
 
@@ -106,6 +108,66 @@ class TestRunReport:
     @property
     def failed_names(self) -> frozenset[str]:
         return frozenset(f.test_name for f in self.failures)
+
+
+@dataclass(frozen=True, slots=True)
+class HeldTests:
+    """Tests a write is judged on, as the frontier holds them, matched
+    against names as libtest printed them.
+
+    The frontier keys a test by its leaf (`bare_test_name` at the sweep);
+    libtest prints a test that lives in a module with its path
+    (`counter::gen_tests_1::counter_bumps`). A printed name is a held test
+    when the two leaves are equal, the identity `TestKey` already uses. On
+    run `3669371-9d5a7361` (hardcrate, 2026-11-06) the keep gate compared
+    the two forms as strings: six fill-1 keeps whose own inline-module test
+    FAILED were logged `reported no verdict (binary crashed)` and kept
+    unjudged.
+
+    `names` stays readable for the scoped command (libtest's filter matches
+    the leaf as a substring) and for display. A comparison between a
+    printed name and held names goes through `held_as` / `held_of` /
+    `missing_from` / `failures_in`, and the names they return are the held
+    ones, the form every frontier-keyed reader downstream expects.
+    `tests/test_held_tests.py` refuses a raw membership or set operation
+    between the two forms inside the keep gate."""
+
+    names: frozenset[str]
+
+    def held_as(self, printed: str) -> str | None:
+        """The held name `printed` is a report of, or None. Two held names
+        with one leaf (a qualified and a bare spelling of one test) resolve
+        to the first in sorted order."""
+        want = leaf(printed)
+        hits = sorted(n for n in self.names if leaf(n) == want)
+        return hits[0] if hits else None
+
+    def held_of(self, printed: Iterable[str]) -> frozenset[str]:
+        """The held names some printed name reports on: every spelling of
+        each reported test, because a test is its leaf.
+
+        The ground can hold one test twice, bare and module-qualified
+        (`counter_bumps` and `counter::gen_tests_1::counter_bumps`). Until
+        2026-11-06 this resolved each printed name to `held_as`'s one pick,
+        so the other spelling was never reported and `missing_from` called
+        it a test with no verdict. On run `79280-8bd7cb71` (hardcrate, fill
+        1) all seven `u2_missing_verdict … (binary crashed)` guards were
+        that: every judged lib binary completed, and each keep was charged
+        as an abort and kept on crash-evidence non-regression instead of
+        judged on its own failure."""
+        leaves = {leaf(p) for p in printed}
+        return frozenset(n for n in self.names if leaf(n) in leaves)
+
+    def missing_from(self, printed: Iterable[str]) -> frozenset[str]:
+        """The held names no printed name reports on (no printed name has
+        their leaf)."""
+        return self.names - self.held_of(printed)
+
+    def failures_in(self, report: TestRunReport) -> tuple[TestFailure, ...]:
+        """The report's failures of held tests, as printed (their bodies
+        are the evidence)."""
+        return tuple(f for f in report.failures
+                     if self.held_as(f.test_name) is not None)
 
 
 # `unimplemented!()` panics with "not implemented"; `todo!()` with "not yet
@@ -438,8 +500,13 @@ def self_aborted_tests(missing: frozenset[str],
     else the unit can be scored on outranks that — an abort takes every later
     test in the binary down with it, so a gate that stays silent here reverts
     on two unrelated assertions while the body it is scoring quietly removes
-    dozens of verdicts from the run."""
-    return frozenset(missing & judged_at_baseline)
+    dozens of verdicts from the run.
+
+    `missing` are held names (the gate's ground, leaves); the baseline's
+    names are as libtest printed them. They meet through `HeldTests`: a
+    string intersection never charged a module test (run
+    `3669371-9d5a7361`, 2026-11-06)."""
+    return HeldTests(frozenset(missing)).held_of(judged_at_baseline)
 
 
 def _site_key(s: FnSite) -> tuple[str, str, str]:
@@ -451,45 +518,121 @@ def _site_key(s: FnSite) -> tuple[str, str, str]:
     return (s.file, s.fn_name, canon_container(s.container))
 
 
+def _no_untouched_arm(_file: str, _line: int) -> bool:
+    return False
+
+
+@dataclass(frozen=True, slots=True)
+class UnitScope:
+    """What a write owns, for every reader that splits a crate panic into
+    the write's own and another unit's.
+
+    A site is `(file, name, canonical container)`, and two definitions of
+    one name under complementary `#[cfg]`s are one site. A write fills one
+    of them (per-fn locates the admitted stub by its `cfg_predicates`), so
+    a stub panic in the OTHER definition, which still holds the skeleton's
+    whole-body stub, is a still-stubbed sibling body, not this write's
+    failure. `untouched_arm(file, line)` answers that from the extractor's
+    records (`attribution.make_untouched_arm_probe`). On run
+    `3669371-9d5a7361` (2026-11-06) `src/lib.rs::cap_limit`'s stable arm
+    stayed a stub after fill 1 wrote the `extra_cap` arm; once the gate
+    matched module test names, that stub would have convicted the written
+    arm on every attempt the splice could not aim at the other one.
+
+    Built by the keep gate; `partition_blame`, `stub_sites_outside` and
+    `external_stub_sites_of` take it (a bare site set means no arm is
+    untouched)."""
+
+    sites: frozenset[FnSite]
+    untouched_arm: Callable[[str, int], bool] = _no_untouched_arm
+
+    def outside(self, loc: FnSite, file: str, line: int) -> bool:
+        """`loc`, located from `file:line`, is not a body this write owns."""
+        own = {_site_key(s) for s in self.sites}
+        return _site_key(loc) not in own or self.untouched_arm(file, line)
+
+
+def _scope_of(unit: frozenset[FnSite] | UnitScope) -> UnitScope:
+    return unit if isinstance(unit, UnitScope) else UnitScope(frozenset(unit))
+
+
+def _copy_site_outside(
+    copy: TestFailure, scope: UnitScope,
+    locate: Callable[[str, int], FnSite | None],
+) -> FnSite | None:
+    """The site a stub panic in `copy` fired in, when that site is not a
+    body this write owns. None when the copy is not such a panic: an
+    empty section, an assertion, or a stub that resolves into the write
+    (or to no fn). Those are decided by the caller."""
+    if (copy.body and copy.kind is FailureKind.STUB_PANIC
+            and copy.panic_file and copy.panic_line is not None):
+        loc = locate(copy.panic_file, copy.panic_line)
+        if loc is not None and scope.outside(
+                loc, copy.panic_file, copy.panic_line):
+            return loc
+    return None
+
+
 def partition_blame(
     report: TestRunReport,
-    unit_sites: frozenset[FnSite],
+    unit_sites: frozenset[FnSite] | UnitScope,
     locate: Callable[[str, int], FnSite | None],
 ) -> BlameVerdict:
-    """Split `report.failures` into self vs external. A failure is EXTERNAL iff
-    it is a STUB_PANIC whose panic location resolves (via `locate`) to a fn NOT
-    in `unit_sites` — matched on (file, name, CANONICAL container), so a panic
-    in a same-named SIBLING (the free `fn not(cond)` vs a `Bool` impl's `fn
-    not`; one `From` impl's `fn from` vs another) is correctly external, not
-    charged to this unit. ASSERTION/OTHER failures always stay self — an
-    assertion can be another unit's wrong body, but that is behavioral
-    attribution, out of scope here (do not over-subtract).
+    """Split `report.failures` into self vs external.
 
-    A failure with an EMPTY body is NO_VERDICT, never self. libtest always
-    prints a `---- name stdout ----` section for a test that fails normally, so
-    a bare `test NAME ... FAILED` with nothing captured means the process died
-    before the summary (a panic while unwinding out of a stubbed `Drop` aborts,
-    taking every section with it). Which tests printed before the abort varies
-    run to run, so such a failure carries no information about the unit under
-    test: charging it convicts the unit of a crash somewhere else, with no
-    diagnostic to act on. Same rule the regression gate applies to already-
-    crashed binaries — evidence-free means it can neither convict nor
-    exonerate."""
-    own = {_site_key(s) for s in unit_sites}
+    A name that failed in more than one binary is one failure: the first
+    section is the primary, and every later section of that name is
+    `TestFailure.others`. Each copy is classified on its own. A copy is
+    external only when it is a STUB_PANIC whose panic resolves (via
+    `locate`) to a fn NOT in `unit_sites` — matched on (file, name,
+    CANONICAL container), so a panic in a same-named SIBLING (the free
+    `fn not(cond)` vs a `Bool` impl's `fn not`; one `From` impl's `fn
+    from` vs another) and a stub panic in the untouched arm of a cfg
+    pair are not this write's failure. An ASSERTION or any other
+    non-stub stays self — an assertion can be another unit's wrong body,
+    but that is behavioral attribution, out of scope here (do not
+    over-subtract).
+
+    The name is this write's failure when any copy is. The verdict quotes
+    that copy, not whichever section the capture stored first. A stub
+    panic in the home world used to be the whole decision: the assertion
+    of the same name in another world sat on `others`, the name was read
+    as external, and the keep never judged the assertion. The name is
+    external only when every copy that has a body is a stub panic outside
+    the write.
+
+    A copy with an EMPTY body neither convicts nor exonerates. libtest
+    always prints a `---- name stdout ----` section for a test that fails
+    normally, so a bare `test NAME ... FAILED` with nothing captured means
+    the process died before the summary (a panic while unwinding out of a
+    stubbed `Drop` aborts, taking every section with it). Which tests
+    printed before the abort varies run to run, so such a copy carries no
+    information about the unit under test. Same rule the regression gate
+    applies to already-crashed binaries."""
+    scope = _scope_of(unit_sites)
     self_f: list[TestFailure] = []
     external: list[tuple[TestFailure, FnSite]] = []
     no_verdict: list[TestFailure] = []
     for f in report.failures:
-        if not f.body:
-            no_verdict.append(f)
+        # One level, the same walk as the stub hold: the parse attaches
+        # later sections on `others` and does not nest them.
+        copies = (replace(f, others=()), *f.others)
+        outside = [_copy_site_outside(c, scope, locate) for c in copies]
+        selves = [c for c, loc in zip(copies, outside, strict=True)
+                  if c.body and loc is None]
+        if selves:
+            lead = selves[0]
+            self_f.append(replace(
+                lead, others=tuple(c for c in copies if c is not lead)))
             continue
-        if (f.kind is FailureKind.STUB_PANIC
-                and f.panic_file and f.panic_line is not None):
-            loc = locate(f.panic_file, f.panic_line)
-            if loc is not None and _site_key(loc) not in own:
-                external.append((f, loc))
-                continue
-        self_f.append(f)
+        seen: set[FnSite] = set()
+        for c, loc in zip(copies, outside, strict=True):
+            if loc is not None and loc not in seen:
+                seen.add(loc)
+                external.append((c, loc))
+        if seen:
+            continue
+        no_verdict.append(f)
     return BlameVerdict(tuple(self_f), tuple(external), tuple(no_verdict))
 
 
@@ -695,24 +838,24 @@ def stub_only_crash(
 
 def stub_sites_outside(
     sites: Iterable[tuple[str, int]],
-    unit_sites: frozenset[FnSite],
+    unit_sites: frozenset[FnSite] | UnitScope,
     locate: Callable[[str, int], FnSite | None],
 ) -> frozenset[tuple[str, int]]:
     """The subset of stub-panic ``sites`` that resolve to a fn OUTSIDE
     `unit_sites` — the hollow siblings, as `(file, line)`. A site that does
     not locate or that resolves into the unit is dropped."""
-    own = {_site_key(s) for s in unit_sites}
+    scope = _scope_of(unit_sites)
     out: set[tuple[str, int]] = set()
     for pf, pl in sites:
         loc = locate(pf, pl)
-        if loc is not None and _site_key(loc) not in own:
+        if loc is not None and scope.outside(loc, pf, pl):
             out.add((pf, pl))
     return frozenset(out)
 
 
 def external_stub_sites_of(
     panics: CrashPanics,
-    unit_sites: frozenset[FnSite],
+    unit_sites: frozenset[FnSite] | UnitScope,
     locate: Callable[[str, int], FnSite | None],
 ) -> frozenset[FnSite]:
     """The still-stubbed fns OUTSIDE `unit_sites` whose stub panics are the
@@ -722,11 +865,11 @@ def external_stub_sites_of(
     cases the abort may be the unit's own doing and must stay charged."""
     if not panics.stub_only:
         return frozenset()
-    own = {_site_key(s) for s in unit_sites}
+    scope = _scope_of(unit_sites)
     out: set[FnSite] = set()
     for pf, pl in panics.stub_sites:
         loc = locate(pf, pl)
-        if loc is None or _site_key(loc) in own:
+        if loc is None or not scope.outside(loc, pf, pl):
             return frozenset()
         out.add(loc)
     return frozenset(out)
@@ -734,7 +877,7 @@ def external_stub_sites_of(
 
 def external_stub_crash_sites(
     raw_output: str,
-    unit_sites: frozenset[FnSite],
+    unit_sites: frozenset[FnSite] | UnitScope,
     locate: Callable[[str, int], FnSite | None],
     crashed: Iterable[str] | None = None,
 ) -> frozenset[FnSite]:
@@ -1034,12 +1177,14 @@ def unmeasured_keep_reason(verdict: U2Verdict | None) -> str:
 
 @dataclass(frozen=True)
 class JointImprovement:
-    """Comparative banking assessment for JOINT fill routes only (file-first,
-    impl-block). Per-fn acceptance stays absolute — a single fn that reddens
-    its own test is simply wrong — but where one prompt rewrites a coupled
-    family, the only REACHABLE step may be FEWER self-failures, and an
-    absolute gate discards exactly the improvements the iter-level ratchet
-    exists to bank. A test whose baseline process ran to its own verdict and
+    """Comparative banking assessment the file-first, impl-block and pair
+    routes' rejects read. Per-fn reads it only on a crash-graded or
+    aborted attempt (`per_fn_reject_kept`); its plain reject stays
+    absolute, because a single fn that reddens its own test is wrong and
+    the fix loop's next attempt carries that assertion. Where one prompt
+    rewrites a coupled family, the only REACHABLE step may be FEWER
+    self-failures, and an absolute gate discards exactly the improvements
+    the iter-level ratchet exists to bank. A test whose baseline process ran to its own verdict and
     whose process the attempt killed without a panic is `aborted`, and
     refuses (`TestOutcomes.refuses`) whatever its prior state: until
     2026-10-11 this read "a test that was failing and now aborts is still
@@ -1261,17 +1406,52 @@ def judge_refill(
     return JointImprovement(baseline_failing=failing, outcomes=outcomes)
 
 
+def per_fn_reject_kept(*, crash_graded: bool, aborted: bool,
+                       judged: JointImprovement | None) -> bool:
+    """Whether the per-fn route keeps an attempt its keep gate rejected.
+
+    Two shapes only. An attempt dispatched on localized crash evidence is
+    kept when nothing regressed (`non_regression`): a correct fix of a
+    latent fault moves no test at baseline. The keep site still asks
+    `SameCrashJudge` before it keeps; this only says which rejects reach
+    that question. An attempt whose aimed test died without a panic is kept
+    when it banks (something attributed turned green, nothing refuses).
+
+    A plain reject is not kept, even when it banks. `banks` is also every
+    multi-test unit whose body turned one attributed test green and fails
+    another on an assertion inside it, and keeping that ends the unit's
+    in-fill attempts that would carry the assertion and its observed value,
+    while the exhaustion salvage (`CompilingSalvage`, fewer failing tests
+    wins) already keeps the best compiling attempt. Measured 2026-11-06 on
+    one `unittests src/lib.rs` capture, held `{a_case, b_case}`, both red
+    before, `a_case ok` and `b_case` failing `left: 7` after: the gate
+    rejects on `b_case`, `banks` is True, and a rule keyed on `banks` alone
+    kept it.
+
+    Left open: a held leaf matches every binary's copy of a test, so a copy
+    in another binary that was red before and after convicts a per-fn body
+    that turned its own copy green. Telling that copy from the unit's own
+    needs the binary in the ground's test identity, not a keep rule."""
+    if judged is None:
+        return False
+    return ((crash_graded and judged.non_regression)
+            or (aborted and judged.banks))
+
+
 def turned_green(
     baseline: TestStateReading | None, verdict: U2Verdict | None,
 ) -> frozenset[str]:
     """The tests a keep's scoped run saw passing that the in-lock baseline
     did not (neither passing nor ignored): what the keep turned green. A test
     green before the keep is observed passing after any body, so it is not
-    in this set. Either side missing is no observation: empty."""
+    in this set. Either side missing is no observation: empty.
+
+    `self_passed` holds the gate's ground names, the baseline what libtest
+    printed; they meet through `HeldTests`."""
     if baseline is None or verdict is None:
         return frozenset()
-    return frozenset(verdict.self_passed - baseline.passed_names
-                     - baseline.ignored_names)
+    return HeldTests(verdict.self_passed).missing_from(
+        baseline.passed_names | baseline.ignored_names)
 
 
 def reading_of_capture(

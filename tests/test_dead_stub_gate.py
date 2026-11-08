@@ -1,4 +1,6 @@
-"""The end gate's fifth bucket: a stub the finished tree cannot reach.
+"""The end gate's fifth bucket: a stub the finished tree cannot reach — the
+free-fn and inherent-method half, read through rustc's dead-code lint (the
+trait-impl half, decided by removal, is `tests/test_stub_removal.py`).
 
 Run `292191-d60a5308` (2026-10-02) passed 401 tests and exited 1 on two
 private helpers the filled callers route around. rustc's dead-code analysis of
@@ -15,10 +17,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from pipeline_core.application.dead_stub_reading import (
-    DeadStubDeps,
-    read_dead_stub_sites,
-)
 from pipeline_core.application.orchestrator import (
     LockDeps,
     classify_remaining_stubs,
@@ -26,14 +24,18 @@ from pipeline_core.application.orchestrator import (
     remaining_stub_verdict,
     report_stub_verdict,
 )
+from pipeline_core.application.unreached_stub_reading import (
+    UnreachedStubDeps,
+    read_unreached_stub_proofs,
+)
 from pipeline_core.domain.dead_code import (
     WorldDeadCode,
     dead_code_spans,
-    dead_stub_sites,
 )
 from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.models import FnLocator, FnRecord, FnSite
 from pipeline_core.domain.stub_inventory import StubInventory, StubSite
+from pipeline_core.domain.stub_removal import WorldUnreached, unreached_stub_proofs
 
 _HELPER = FnSite("src/probe.rs", "lookup", "")
 _LIVE = FnSite("src/probe.rs", "fetch", "")
@@ -68,6 +70,17 @@ def test_spans_are_read_from_dead_code_diagnostics_only_and_all_of_them() -> Non
 
 def _everywhere(_rec: FnRecord, _cluster: str) -> bool:
     return True
+
+
+def dead_stub_sites(recs, worlds, compiled_in) -> frozenset[FnSite]:
+    """The free-fn / inherent half of the one rule (`unreached_stub_proofs`):
+    the lint's dead set, every compiling world agreeing."""
+    return frozenset(unreached_stub_proofs(
+        recs, (), [WorldUnreached(w.cluster, w) for w in worlds], compiled_in))
+
+
+def _proofs(*sites: FnSite) -> dict[FnSite, str]:
+    return dict.fromkeys(sites, "rustc reports it never used in a")
 
 
 def test_a_stub_named_by_a_span_in_its_signature_is_dead() -> None:
@@ -115,12 +128,13 @@ def _inventory(*sites: FnSite) -> StubInventory:
 
 def test_a_dead_stub_is_its_own_bucket_and_not_counted() -> None:
     stubs = _inventory(_HELPER).site_preds()
-    verdict = classify_remaining_stubs(stubs, [], (), (), frozenset({_HELPER}))
+    verdict = classify_remaining_stubs(stubs, [], (), (), _proofs(_HELPER))
     assert verdict.dead_in_tree == (FnLocator("src/probe.rs", "lookup"),)
     assert verdict.orphaned == ()
     log: list[str] = []
     assert report_stub_verdict(verdict, log.append, 2) is True
-    assert "NEVER USED in every baked cluster that compiles them" in "\n".join(log)
+    assert "NOTHING CAN CALL THEM in any baked cluster" in "\n".join(log)
+    assert "src/probe.rs::lookup — rustc reports it never used in a" in "\n".join(log)
     assert "‼" not in "\n".join(log)
 
     # NEGATIVE CONTROL: the same stub with no dead-code reading is orphaned
@@ -132,7 +146,7 @@ def test_a_dead_stub_is_its_own_bucket_and_not_counted() -> None:
 
 def test_a_live_stub_beside_a_dead_one_still_fails_the_run() -> None:
     verdict = classify_remaining_stubs(
-        _inventory(_HELPER, _LIVE).site_preds(), [], (), (), frozenset({_HELPER}))
+        _inventory(_HELPER, _LIVE).site_preds(), [], (), (), _proofs(_HELPER))
     assert verdict.dead_in_tree == (FnLocator("src/probe.rs", "lookup"),)
     assert verdict.orphaned == (FnLocator("src/probe.rs", "fetch"),)
     assert report_stub_verdict(verdict, [].append, 2) is False
@@ -141,9 +155,10 @@ def test_a_live_stub_beside_a_dead_one_still_fails_the_run() -> None:
 def test_a_dead_stub_the_original_executed_is_excused_and_said_loudly() -> None:
     record = FnCoverageRecord(measured=True, candidates=3, executed=(_HELPER,))
     verdict = classify_remaining_stubs(
-        _inventory(_HELPER).site_preds(), [], (), [record], frozenset({_HELPER}))
+        _inventory(_HELPER).site_preds(), [], (), [record], _proofs(_HELPER))
     assert verdict.orphaned == ()
-    assert verdict.dead_executed_upstream == ("src/probe.rs::lookup",)
+    assert verdict.dead_executed_upstream == (
+        "src/probe.rs::lookup — rustc reports it never used in a",)
     log: list[str] = []
     assert report_stub_verdict(verdict, log.append, 1) is True
     text = "\n".join(log)
@@ -155,15 +170,15 @@ def test_a_dead_stub_the_original_executed_is_excused_and_said_loudly() -> None:
 
 def _verdict_deps(inventory: StubInventory, dead: frozenset[FnSite],
                   calls: list[int]) -> dict[str, object]:
-    def _dead(_p: Path, _clusters: object) -> frozenset[FnSite]:
+    def _dead(_p: Path, _clusters: object) -> dict[FnSite, str]:
         calls.append(1)
-        return dead
+        return _proofs(*dead)
     return {
         "scan_unimplemented_functions": lambda *a, **k: inventory,
         "load_baked_clusters": lambda _p: [],
         "reference_hollow": lambda _p: frozenset(),
         "augmentation_fn_records": lambda _p: (),
-        "dead_stub_sites": _dead,
+        "unreached_stub_proofs": _dead,
     }
 
 
@@ -187,7 +202,7 @@ def test_the_single_module_completion_exits_zero_on_dead_stubs_only() -> None:
             lock_module=lambda *a: None, git_commit=lambda *a: True,
             log=lambda _m: None, sys_exit=_exit,
             scan_unimplemented_functions=lambda *a, **k: _inventory(_HELPER),
-            dead_stub_sites=lambda _p, _c: dead)
+            unreached_stub_proofs=lambda _p, _c: _proofs(*dead))
         try:
             verdict = lock_or_complete(
                 Path("/p"), "m", Path("/p"), Path("/p/.gen"), is_multi_module=False,
@@ -230,6 +245,22 @@ def _mods() -> list[object]:
                                  "declared_in": "lib.rs", "cfg_predicates": ["alt"]})]
 
 
+def _deps(fns: list[FnRecord], measure, log, mods=None) -> UnreachedStubDeps:
+    """The use case with no trait-impl stub: the compiler view and the
+    removal build must never be asked."""
+    def _no_view(_p: Path, _c: object):
+        raise AssertionError("no trait impl holds only stubs: no MIR is read")
+
+    def _no_removal(*_a: object):
+        raise AssertionError("no trait impl holds only stubs: nothing is deleted")
+
+    return UnreachedStubDeps(
+        enumerate_fns=lambda _p: fns,
+        enumerate_mods=lambda _p: _mods() if mods is None else mods,  # type: ignore[arg-type,return-value]
+        measure_dead=measure, read_compiler_view=_no_view,
+        measure_removal=_no_removal, log=log)
+
+
 def test_only_the_worlds_that_compile_a_stub_are_measured_and_must_agree(
         tmp_path: Path) -> None:
     root = _tree(tmp_path)
@@ -241,10 +272,8 @@ def test_only_the_worlds_that_compile_a_stub_are_measured_and_must_agree(
         asked.append(cluster.name)
         return WorldDeadCode(cluster.name, frozenset({("src/gated.rs", 44)}))
 
-    deps = DeadStubDeps(enumerate_fns=lambda _p: [gated],
-                        enumerate_mods=lambda _p: _mods(),  # type: ignore[arg-type,return-value]
-                        measure_world=_measure, log=lambda _m: None)
-    dead = read_dead_stub_sites(root, _clusters(), deps)
+    deps = _deps([gated], _measure, lambda _m: None)
+    dead = frozenset(read_unreached_stub_proofs(root, _clusters(), deps))
     assert dead == frozenset({FnSite("src/gated.rs", "lookup", "")})
     assert asked == ["alt"]            # `base` does not compile `mod gated`
 
@@ -259,10 +288,8 @@ def test_a_shared_stub_needs_every_world_and_a_failed_check_is_logged(
             return WorldDeadCode("alt", reason="cargo check rc=101: error")
         return WorldDeadCode("base", frozenset({("src/probe.rs", 47)}))
 
-    deps = DeadStubDeps(enumerate_fns=lambda _p: [_REC_HELPER],
-                        enumerate_mods=lambda _p: _mods(),  # type: ignore[arg-type,return-value]
-                        measure_world=_measure, log=log.append)
-    assert read_dead_stub_sites(root, _clusters(), deps) == frozenset()
+    deps = _deps([_REC_HELPER], _measure, log.append)
+    assert read_unreached_stub_proofs(root, _clusters(), deps) == {}
     assert any("no dead-code reading" in line and "alt" in line for line in log)
 
 
@@ -272,8 +299,6 @@ def test_no_stub_or_no_cluster_takes_no_reading(tmp_path: Path) -> None:
 
     filled = FnRecord(file="src/probe.rs", fn_name="fetch", body_text=" 1 ",
                       sig_byte_start=1, body_byte_start=9)
-    deps = DeadStubDeps(enumerate_fns=lambda _p: [filled],
-                        enumerate_mods=lambda _p: [], measure_world=_never,
-                        log=lambda _m: None)
-    assert read_dead_stub_sites(_tree(tmp_path), _clusters(), deps) == frozenset()
-    assert read_dead_stub_sites(tmp_path, [], deps) == frozenset()
+    deps = _deps([filled], _never, lambda _m: None, mods=[])
+    assert read_unreached_stub_proofs(_tree(tmp_path), _clusters(), deps) == {}
+    assert read_unreached_stub_proofs(tmp_path, [], deps) == {}

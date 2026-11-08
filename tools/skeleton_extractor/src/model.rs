@@ -55,6 +55,16 @@ pub struct FnRecord {
     // no reference data at all, and four Python modules each re-read callees
     // from body text their own way.
     pub refs: Vec<FnRef>,
+    // The whole fn item as written, outer attributes and doc comments
+    // included, through its closing brace: what the end gate deletes on a
+    // scratch copy to ask rustc whether anything needs the fn.
+    pub item_byte_start: usize,
+    pub item_byte_end: usize,
+    // The enclosing impl block, the same way; 0..0 when the fn is not an
+    // impl method. A trait-impl method is removable only with its whole
+    // impl, so the gate needs the block's extent and which records share it.
+    pub impl_byte_start: usize,
+    pub impl_byte_end: usize,
 }
 
 /// One reference a fn body spells: `Q::name(…)` / `Q::name::<T>` (kind

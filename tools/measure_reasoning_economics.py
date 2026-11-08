@@ -195,8 +195,15 @@ def main() -> int:
     if not model:
         print("Set MODEL or VLLM_MODEL_NAME (the served model id).")
         return 2
-    current_cap = int(os.getenv("VLLM_MAX_THINK_CHARS", "60000"))
-    rep_penalty = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
+    # The served model's resolved knobs (env → profile → default), the values
+    # the transport sends; this tool's own defaults (60000 / 1.05) had
+    # drifted from both the transport's and the profile's.
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from pipeline_core.domain.model_profile import resolve_model_knobs
+    knobs = resolve_model_knobs(os.environ, model)
+    current_cap = knobs.max_think_chars
+    rep_penalty = knobs.repetition_penalty
 
     prompts = select_prompts(args.events, args.prompts_dir, n=args.n,
                              min_chars=args.min_prompt_chars)

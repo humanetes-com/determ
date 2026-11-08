@@ -888,14 +888,19 @@ def run_slice_session(
                 admitted = _admit_from_file_requests(
                     reply, records, all_records, files, baseline_texts,
                     baseline_bodies, target_src_dir, ports)
-                if admitted:
-                    followup += render_admitted_units(admitted)
                 # An answer that would carry the transcript past its bound
                 # is not sent: sending it ends the session (`TranscriptBound`)
-                # with turns left, and the request was only retrieval.
+                # with turns left, and the request was only retrieval. The
+                # admission sentence is not retrieval: the write set grew
+                # whether or not the file is sent, so it rides on whichever
+                # follow-up goes out. Run `3323407-984b07f2` (2026-11-08)
+                # admitted `src/fmt.rs::debug` and replaced the follow-up that
+                # carried the sentence, so the model never learned it could
+                # write that unit.
+                admission = render_admitted_units(admitted) if admitted else ""
                 _left = max_transcript_chars - conv.chars()
                 _over = (max_transcript_chars > 0
-                         and len(followup) + _RESULT_ROOM > _left)
+                         and len(followup) + len(admission) + _RESULT_ROOM > _left)
                 if _over:
                     ports.log(
                         f"  [phase-c/session] {label}: requested context "
@@ -904,6 +909,7 @@ def run_slice_session(
                         f"{max_transcript_chars:,}) — not sent, the session "
                         "continues")
                     followup = render_request_over_bound(len(followup), _left)
+                followup += admission
                 ports.emit("phase_c.session.turn", data={
                     "cluster": cluster_name, "turn": turns, "kind": "request",
                     "request": requests, "charged": charged,

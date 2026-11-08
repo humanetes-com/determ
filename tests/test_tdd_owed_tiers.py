@@ -55,8 +55,12 @@ def _run(tmp_path: Path, monkeypatch, *, owed: bool,
          cargo: tuple[int, str] | None = None,
          reference: Any = None, rows: Any = None,
          compile_errors: Any = None, score_only: bool = False,
-         sweeps: list[str] | None = None) -> ClusterFillResult:
+         sweeps: list[str] | None = None,
+         escalate_after: int = 0) -> ClusterFillResult:
     monkeypatch.setenv("PHASE_C_TDD_BATCH_RATCHET", "0")
+    # 0 pins the close below the maximum level; the escalation's own close
+    # is `test_a_red_test_is_asked_at_the_maximum_before_the_cluster_closes`.
+    monkeypatch.setenv("TDD_ESCALATE_AFTER", str(escalate_after))
     monkeypatch.setenv("TDD_FLAT_SCORE_REPEATS", "0")
     monkeypatch.setenv("TDD_MAX_STALLS", "0" if owed else "3")
     monkeypatch.setenv("PHASE_C_TDD_BACKSTOP", "20")
@@ -375,5 +379,64 @@ def test_a_compile_miss_is_repaired_once_and_the_diagnostic_reaches_the_next_ask
     assert asked[k + 1]["missed"] == ["src/a.rs::fmt"]
     assert any("no_landing" in s for s in asked[k + k]["spent_by_misses"])
     assert not any("compile" in s for s in asked[k + k]["spent_by_misses"])
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert [e["class"] for e in ledger[0]["entries"]] == ["model_limit"]
+
+
+def _escalation_run(tmp_path: Path, monkeypatch, after: int
+                    ) -> tuple[list[tuple[str, dict]], list[dict]]:
+    """Nothing ever lands. Each fill is rowed at the level the schedule
+    input asked for: a target in the fill's `max_units` at the maximum,
+    the rest at medium (`RouteLedgerRow.effort`)."""
+    from pipeline_core.domain.fill_schedule import (
+        RouteKind,
+        RouteLedgerRow,
+        RunOutcome,
+    )
+    monkeypatch.setenv("SLICE_SESSION", "0")
+    events: list[tuple[str, dict]] = []
+    fills: list[dict] = []
+
+    def _rows(_name: str, _cluster: str) -> list[RouteLedgerRow]:
+        out: list[RouteLedgerRow] = []
+        for i, kw in enumerate(fills, start=1):
+            top = frozenset(kw.get("max_units") or ())
+            for u in sorted(kw.get("due") or (), key=lambda x: (x.file, x.fn_name)):
+                out.append(RouteLedgerRow(
+                    kind=RouteKind.PER_FN, label=f"per-fn {u.fn_name}",
+                    targets=((u.file, u.fn_name),), bodies_sha="b",
+                    oracle_fp="o", outcome=RunOutcome.DECLINED, iteration=i,
+                    cluster="stable", model_calls=1, classes={"wrong": 1},
+                    effort="max" if u in top else "medium",
+                    escalated=u in top))
+        return out
+
+    _run(tmp_path, monkeypatch, owed=True, events=events, fills=fills,
+         rows=_rows, escalate_after=after)
+    return events, fills
+
+
+def test_a_red_test_is_asked_at_the_maximum_before_the_cluster_closes(
+        tmp_path: Path, monkeypatch) -> None:
+    """Reachability, not a score: after two owed asks below the maximum the
+    fill is handed the owed function as `max_units`, and the cluster closes
+    only once a maximum try of the test's functions was spent, so the red
+    ledger's model limit is a claim about the writer at its maximum."""
+    events, fills = _escalation_run(tmp_path, monkeypatch, after=2)
+    tops = [frozenset(kw.get("max_units") or ()) for kw in fills]
+    first = next(i for i, t in enumerate(tops) if t)
+    assert first == 2, tops
+    assert _TARGET in tops[first]
+    assert not any(tops[:first])
+    failed = [d for ev, d in events if ev == "phase_c.tdd.cluster_failed"]
+    assert failed and failed[-1]["kind"] == "exhausted"
+    ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
+    assert [e["class"] for e in ledger[0]["entries"]] == ["model_limit"]
+
+
+def test_negative_control_with_escalation_off_no_fill_is_asked_at_the_maximum(
+        tmp_path: Path, monkeypatch) -> None:
+    events, fills = _escalation_run(tmp_path, monkeypatch, after=0)
+    assert not any(kw.get("max_units") for kw in fills)
     ledger = [d for ev, d in events if ev == "phase_c.tdd.red_ledger"]
     assert [e["class"] for e in ledger[0]["entries"]] == ["model_limit"]

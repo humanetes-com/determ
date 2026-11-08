@@ -8,6 +8,7 @@ use crate::skeleton::*;
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::path::Path;
+use syn::spanned::Spanned;
 use syn::{Expr, ImplItem, Item, ItemImpl, Stmt, TraitItem, parse_file};
 
 pub(crate) struct FnEnumerator<'a> {
@@ -15,6 +16,9 @@ pub(crate) struct FnEnumerator<'a> {
     file_rel: String,
     cfg_stack: Vec<String>,
     container_stack: Vec<String>,
+    // Byte range of each impl block being walked (outer attributes included),
+    // innermost last; a method's record carries the top one.
+    impl_stack: Vec<(usize, usize)>,
     records: Vec<FnRecord>,
 }
 
@@ -25,6 +29,7 @@ impl<'a> FnEnumerator<'a> {
             file_rel,
             cfg_stack: Vec::new(),
             container_stack: Vec::new(),
+            impl_stack: Vec::new(),
             records: Vec::new(),
         }
     }
@@ -83,6 +88,12 @@ impl<'a> FnEnumerator<'a> {
         let is_test = attrs_have_test(attrs);
         let cfgs = self.cfg_stack.clone();
         let container = self.container_stack.last().cloned().unwrap_or_default();
+        let item_span = fn_item_span(attrs, vis, sig, block);
+        let impl_span = if container.starts_with("impl") {
+            self.impl_stack.last().copied().unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
         self.records.push(FnRecord {
             file: self.file_rel.clone(),
             fn_name: fn_name.to_string(),
@@ -105,6 +116,10 @@ impl<'a> FnEnumerator<'a> {
             has_unimplemented_body: body_looks_unimplemented(&body_text),
             is_test,
             refs: collect_fn_refs(block),
+            item_byte_start: item_span.0,
+            item_byte_end: item_span.1,
+            impl_byte_start: impl_span.0,
+            impl_byte_end: impl_span.1,
         });
     }
 
@@ -173,6 +188,7 @@ impl<'a> FnEnumerator<'a> {
                     let container = render_impl_header(item_impl);
                     let impl_self_generic = impl_self_ty_is_own_generic(item_impl);
                     self.container_stack.push(container);
+                    self.impl_stack.push(span_of(item_impl));
                     for impl_item in &item_impl.items {
                         let ii_cfgs = extract_cfg_predicates(impl_item_attrs(impl_item));
                         for c in &ii_cfgs {
@@ -192,6 +208,7 @@ impl<'a> FnEnumerator<'a> {
                             self.cfg_stack.pop();
                         }
                     }
+                    self.impl_stack.pop();
                     self.container_stack.pop();
                 }
                 Item::Trait(item_trait) => {
@@ -261,6 +278,40 @@ pub(crate) fn attrs_have_test(attrs: &[syn::Attribute]) -> bool {
                 || id == "serial"
         })
     })
+}
+
+/// The byte range of a whole item as written: outer attributes and doc
+/// comments first, the closing brace last. The end gate deletes exactly this
+/// range on a scratch copy to ask the compiler whether anything needs the
+/// item, so a range that left an attribute behind would attach it to the
+/// next item. `Spanned` joins the item's first and last token (doc comments
+/// are `#[doc]` tokens carrying their own span); proc-macro2's
+/// `span-locations` makes the join and the byte offsets real outside a
+/// proc macro.
+pub(crate) fn span_of<T: Spanned>(node: &T) -> (usize, usize) {
+    let r = node.span().byte_range();
+    (r.start, r.end)
+}
+
+/// A fn item's range from its parts: the first outer attribute (or the
+/// visibility, or the signature) through the body's closing brace. The parts
+/// are what every fn shape the walk records shares (a free fn, an impl
+/// method, a trait's provided method). A `default` keyword (specialization)
+/// before the signature is not covered.
+pub(crate) fn fn_item_span(
+    attrs: &[syn::Attribute],
+    vis: &syn::Visibility,
+    sig: &syn::Signature,
+    block: &syn::Block,
+) -> (usize, usize) {
+    let mut start = span_of(sig).0;
+    if !matches!(vis, syn::Visibility::Inherited) {
+        start = start.min(span_of(vis).0);
+    }
+    if let Some(a) = attrs.first() {
+        start = start.min(span_of(a).0);
+    }
+    (start, block.brace_token.span.close().byte_range().end)
 }
 
 pub(crate) fn impl_item_attrs(it: &ImplItem) -> &[syn::Attribute] {

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from pipeline_core.adapters import llm_transports as t
+from pipeline_core.domain.model_profile import EffortLevel
 from pipeline_core.llm.controller import Hooks, LLMController
 from pipeline_core.llm.events import StreamMeta
 from tests.test_llm_controller import SENTINEL, FakeTransport
@@ -65,7 +66,8 @@ def test_openai_protocol_transports_read_usage(monkeypatch, make) -> None:
     tr = make()
     meta = StreamMeta()
     out = list(tr.stream([{"role": "user", "content": "x"}], model="qwen3.6:27b-q8",
-                         max_tokens=10, enable_thinking=False, meta=meta))
+                         max_tokens=10, enable_thinking=False, meta=meta,
+                         effort=EffortLevel.MAX))
     assert "".join(d.content for d in out) == "fn a() {}"
     assert (meta.prompt_tokens, meta.completion_tokens) == (900, 37)
     assert seen["stream_options"] == {"include_usage": True}
@@ -81,7 +83,8 @@ def test_ollama_native_reads_the_done_part(monkeypatch) -> None:
     meta = StreamMeta()
     list(t.OllamaTransport().stream([{"role": "user", "content": "x"}],
                                     model="qwen3.6:27b", max_tokens=None,
-                                    enable_thinking=False, meta=meta))
+                                    enable_thinking=False, meta=meta,
+                                    effort=EffortLevel.MAX))
     assert (meta.prompt_tokens, meta.completion_tokens) == (512, 64)
 
 
@@ -89,16 +92,17 @@ def test_a_server_that_sends_no_usage_leaves_the_counts_unset(monkeypatch) -> No
     monkeypatch.setitem(sys.modules, "openai", _fake_openai([_chunk("x")], {}))
     meta = StreamMeta()
     list(t.VLLMTransport().stream([{"role": "user", "content": "x"}], model="m",
-                                  max_tokens=10, enable_thinking=False, meta=meta))
+                                  max_tokens=10, enable_thinking=False, meta=meta,
+                         effort=EffortLevel.MAX))
     assert (meta.prompt_tokens, meta.completion_tokens) == (None, None)
 
 
 class _CountingTransport(FakeTransport):
     def stream(self, messages, *, model, max_tokens, enable_thinking, meta,
-               temperature=None):
+               effort=None, temperature=None):
         yield from super().stream(messages, model=model, max_tokens=max_tokens,
                                   enable_thinking=enable_thinking, meta=meta,
-                                  temperature=temperature)
+                                  effort=effort, temperature=temperature)
         meta.completion_tokens = 41
 
 

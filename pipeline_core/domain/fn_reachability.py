@@ -69,8 +69,12 @@ _BLANKET_DISPATCH: Mapping[str, frozenset[str]] = {
     "Extend": frozenset({"Iterator"}),
 }
 
-# Never proved: the call is the compiler's, at every scope exit.
-_NEVER_PROVED_TRAITS = frozenset({"Drop"})
+# Never proved: the call is the compiler's, at every scope exit. No MIR line
+# names it (drop glue is a `drop(_n)` terminator on the value, not a call of
+# the impl), so no reader of uses can see it; `domain.stub_removal` reads the
+# same set for the same reason.
+NEVER_PROVED_TRAITS = frozenset({"Drop"})
+_NEVER_PROVED_TRAITS = NEVER_PROVED_TRAITS
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +86,9 @@ class WorldReading:
     mir: str = ""
     rustdoc: str = ""
     reason: str = ""
+    # The same library's MIR compiled under `cfg(test)` (its in-crate test
+    # modules included), when the caller asked for it; "" otherwise.
+    mir_test: str = ""
 
     @property
     def measured(self) -> bool:
@@ -537,6 +544,11 @@ class _World:
                 named.add(begin)
         before = [x for x in starts if x <= first_line]
         return bool(before) and max(before) in named
+
+
+#: The per-world MIR index, for readers outside this module
+#: (`domain.stub_removal` reads the same uses this oracle reads).
+MirIndex = _World
 
 
 def header_name(header: str) -> str:

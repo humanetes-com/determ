@@ -86,6 +86,18 @@ class Holdings:
     files: tuple[HeldFile, ...] = ()
     tests: tuple[str, ...] = ()
     types: tuple[str, ...] = ()
+    # (request tag, body) of every request answer the text DELIVERED, in
+    # order (`answer_block`); a refused or "not repeated" answer delivered
+    # nothing and is not here.
+    answers: tuple[tuple[str, str], ...] = ()
+
+    def delivered(self, tag: str) -> str | None:
+        """The LAST body this text delivered for the request `tag` (window
+        included: the tag carries `from_line`), or None."""
+        for t, body in reversed(self.answers):
+            if t == tag:
+                return body
+        return None
 
     def whole_view(self, path: str) -> HeldFile | None:
         """The LAST whole view of `path` (a later view is the fresher one)."""
@@ -138,7 +150,46 @@ def read_holdings(text: str) -> Holdings:
     types: list[str] = []
     for block in _TYPES_RE.findall(text):
         types.extend(m.group(2) for m in _TYPE_LINE_RE.finditer(block))
-    return Holdings(tuple(files), tests, tuple(dict.fromkeys(types)))
+    answers = tuple((m.group(1), m.group(2)) for m in _ANSWER_RE.finditer(text)
+                    if delivers(m.group(2)))
+    return Holdings(tuple(files), tests, tuple(dict.fromkeys(types)), answers)
+
+
+# ── the request-answer grammar: one writer, one reader ──────────────────────
+#
+# Whether a request's answer is already in the conversation is a fact about
+# what the conversation DELIVERED. Until 2026-11-08 it was a side map the
+# resolver wrote when it RESOLVED a request, and two callers drop a resolved
+# answer: the slice session replaces a follow-up that would cross its
+# transcript bound with a refusal, and a unit conversation raises at its bound
+# (or pops the turn on a model error) before the follow-up is appended. Run
+# `3323407-984b07f2`, fill 3: `src/fmt.rs` was refused as part of a 43,477-char
+# follow-up, then asked alone (3,009 chars) and answered "unchanged since it
+# was sent above … not repeated" — it had never been sent. Reading the
+# conversation's own blocks makes that unrepresentable: a dropped follow-up is
+# not in the text, so nothing can claim it was.
+
+ANSWER_UNAVAILABLE_OPEN = "(not available: "
+ANSWER_REPEAT_BODY = ("(unchanged since it was sent above for this same "
+                      "request — not repeated; read it there)")
+
+_ANSWER_RE = re.compile(
+    r"You requested: (<REQUEST [^>]*/>)\n<REQUESTED_CONTEXT[^>]*>\n(.*?)\n"
+    r"</REQUESTED_CONTEXT>", re.S)
+
+
+def delivers(body: str) -> bool:
+    """A block body that put the answer in the conversation: not a refusal,
+    not a pointer to an earlier copy."""
+    return body != ANSWER_REPEAT_BODY and not body.startswith(ANSWER_UNAVAILABLE_OPEN)
+
+
+def answer_block(tag: str, body: str, *, attrs: str = "") -> str:
+    """The one way a request answer is written into a conversation:
+    `You requested: <tag>`, then `<REQUESTED_CONTEXT…>` around `body`.
+    `read_holdings` reads exactly this shape back (`Holdings.delivered`)."""
+    return (f"\n\nYou requested: {tag}\n"
+            f"<REQUESTED_CONTEXT{attrs}>\n{body}\n</REQUESTED_CONTEXT>")
 
 
 CONTENTS_OPEN = "<PROMPT_CONTENTS>"

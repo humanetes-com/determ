@@ -425,6 +425,9 @@ class PhaseCFillEngine:
         # owed on the session rung is covered only by an opened session run.
         # None: every owed function is owed on the unit rung.
         due_rungs: Mapping[FnLocator, str] | None = None,
+        # The owed functions some red test owes at the maximum reasoning
+        # level (`DueReading.max_units`): a run holding one is sent at it.
+        max_units: Collection[FnLocator] = (),
         # The body ledger's per-unit verdicts, built by the TDD driver at
         # dispatch (`fill_schedule.unit_evidence_from`). None keeps the
         # schedule's route-row reading.
@@ -644,6 +647,7 @@ class PhaseCFillEngine:
                 owner_starved=frozenset(owner_starved),
                 due=frozenset(due),
                 due_rungs=dict(due_rungs or {}),
+                max_units=frozenset(max_units),
                 unit_evidence=unit_evidence,
                 body_rows=body_rows,
                 max_per_kind=({RouteKind.SESSION: max_sessions_per_fill}

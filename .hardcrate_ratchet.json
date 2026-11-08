@@ -1,4 +1,6 @@
 {
-  "recovered_audits": 4,
-  "_comment": "max C1/C2/C3/C4/C6 PASS on the hardcrate; raise the traps once this hits 5"
+  "per_complexity": {
+    "7": 2
+  },
+  "_comment": "max C1/C2/C3/C4/C6 PASS per complexity level; raise the traps once a level hits 5"
 }

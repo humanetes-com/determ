@@ -27,16 +27,33 @@ export PIPELINE_PARALLELISM="${PIPELINE_PARALLELISM:-4}"
 # 0 = baseline (microcrate-equivalent), 1 = current traps, 2..10 = harder (future).
 COMPLEXITY=""
 FROM_STAGE=""
+DROP_FILLS=false
 for arg in "$@"; do
     case "$arg" in
         --complexity=*) COMPLEXITY="${arg#--complexity=}" ;;
         --from=*)       FROM_STAGE="${arg#--from=}" ;;
-        *) echo "unknown arg: $arg  (usage: run_hardcrate.sh [--complexity=N] [--from=STAGE])"
+        --drop-fills)   DROP_FILLS=true ;;
+        *) echo "unknown arg: $arg  (usage: run_hardcrate.sh [--complexity=N] [--from=STAGE [--drop-fills]])"
            echo "  --from=STAGE  resume the EXISTING tmp/hardcrate run from that step"
            echo "                (preserves fills); STAGE ∈ t1|t2|t2a|t2b|t2c|t3|t4"
+           echo "  --drop-fills  with --from=t2|t2a: first remove what task 2a wrote"
+           echo "                (filled tree, best tree, floor, ask/red/conviction"
+           echo "                ledgers) and move logs/body_ledger/hardcrate aside,"
+           echo "                so the fill starts on stubs"
            exit 2 ;;
     esac
 done
+# --drop-fills re-runs the per-cluster fill on stubs: only a t2/t2a resume
+# does that (a later stage never refills; without --from the workspace is
+# rebuilt anyway). Checked before the process and vLLM guards.
+if [[ "$DROP_FILLS" == true ]]; then
+    # shellcheck source=lib/restart_from_lib.sh
+    source "$SCRIPT_DIR/lib/restart_from_lib.sh"
+    if [[ -z "$FROM_STAGE" ]] || ! restart_from_drops_t2a "$FROM_STAGE"; then
+        echo "ERROR: --drop-fills needs --from=t2 or --from=t2a (got '${FROM_STAGE:-no --from}')"
+        exit 2
+    fi
+fi
 FIXTURE="$SCRIPT_DIR/tests/fixtures/hardcrate"
 STAGED="$SCRIPT_DIR/tmp/hardcrate_src/hardcrate"   # --repo basename → workspace tmp/hardcrate
 LEVEL="${COMPLEXITY:-$(.venv/bin/python -c 'import tools.hardcrate_select as h; print(h.max_level())')}"
@@ -66,6 +83,24 @@ if [[ -n "$FROM_STAGE" ]]; then
         echo "ERROR: unknown stage '$FROM_STAGE' (t1|t2|t2a|t2b|t2c|t3|t4)"; exit 2
     fi
     read -ra KEYS <<< "$KEYS_STR"
+    # --drop-fills: the same product drop restart_from.sh task2a applies to
+    # anyhow. Without it a resume re-enters on the filled tree, and a tree
+    # the last run left green closes task 2a on its first sweep with nothing
+    # filled (run `3669371-9d5a7361`, 2026-11-06: 168/168, so a keep-gate
+    # change could not be read on fill 1).
+    # The proven-body ledger lives outside the workspace and re-seeds every
+    # body it vouches for at cluster entry, so after the drop alone the fill
+    # would open on the same proven tree. It is moved aside, not deleted: it
+    # is the provenance cache, and the moved copy stays on disk.
+    if [[ "$DROP_FILLS" == true ]]; then
+        restart_from_drop_t2a_products "$WS"
+        BODY_LEDGER="$SCRIPT_DIR/logs/body_ledger/hardcrate"
+        if [[ -d "$BODY_LEDGER" ]]; then
+            ASIDE="$BODY_LEDGER.set-aside-$(date -u +%Y%m%dT%H%M%SZ)"
+            mv "$BODY_LEDGER" "$ASIDE"
+            echo "[hard] body ledger moved aside → $ASIDE (no re-seed of proven bodies)"
+        fi
+    fi
     echo "[hard] resume from $FROM_STAGE → clearing phase entries: ${KEYS[*]}"
     restart_from_clear "$WS" "${KEYS[@]}"
     echo "[hard] resuming hardcrate pipeline (from $FROM_STAGE) → $LOG"

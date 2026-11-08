@@ -356,6 +356,7 @@ from pipeline_core.adapters.structure import (
     source_hash as _structure_source_hash,
 )
 from pipeline_core.adapters.structure_cache import StructureCache
+from pipeline_core.adapters.stub_removal import measure_world_removal
 from pipeline_core.adapters.task2_roles import (
     CargoBackendAdapter,
     ClustersAdapter,
@@ -429,10 +430,6 @@ from pipeline_core.application import test_count as _tc_app
 from pipeline_core.application.behaviour_agreement import AgreementDeps, measure_agreement
 from pipeline_core.application.behaviour_book_build import BookBudget
 from pipeline_core.application.cluster_augment import ClusterAugmentor
-from pipeline_core.application.dead_stub_reading import (
-    DeadStubDeps,
-    read_dead_stub_sites,
-)
 from pipeline_core.application.doc_example_tests import (
     DocExampleDeps,
     emit_doc_example_tests,
@@ -710,6 +707,10 @@ from pipeline_core.application.test_worlds import (
     gate_line,
     settle_test_gate,
     world_is_measurable,
+)
+from pipeline_core.application.unreached_stub_reading import (
+    UnreachedStubDeps,
+    read_unreached_stub_proofs,
 )
 from pipeline_core.application.validate import Task2CheckerDeps
 from pipeline_core.application.validate import (
@@ -1874,6 +1875,7 @@ def build_app(
         load_baked_clusters=_load_baked_clusters,
         fn_name_counts=_fn_name_counts, log=ports.log,
         author_private_fields=cfg.layout_author_private_fields,
+        lanes=settings.layout_lanes,
     )
     retrigger_layout = build_retrigger_layout(
         ask=ask_client.ask, task2_model=settings.task_models.task2,
@@ -2045,6 +2047,7 @@ def build_app(
         PROBE_EDGES_PER_CLUSTER=settings.task0d_probe_edges,
         RULE_PROBES_MAX=settings.behaviour_rule_probes,
         RULE_PROBE_PROGRAMS=settings.behaviour_rule_probe_programs,
+        LANES=settings.behaviour_book_lanes,
         HELD_OUT_SHARE=settings.behaviour_held_out_share,
         save_held_out=save_held_out, load_held_out=load_held_out,
         BOOK_BUDGET=BookBudget(
@@ -2199,15 +2202,21 @@ def build_app(
         measured = _reference(project_dir)
         return measured.hollow if measured is not None else frozenset()
 
-    _dead_stub_deps = DeadStubDeps(
+    _unreached_stub_deps = UnreachedStubDeps(
         enumerate_fns=enumerate_fns, enumerate_mods=enumerate_mods,
-        measure_world=functools.partial(
+        measure_dead=functools.partial(
             measure_world_dead_code, cluster_env=cluster_cargo_env,
+            timeout=cfg.test_timeout),
+        read_compiler_view=functools.partial(
+            measure_world_reachability, cluster_env=cluster_cargo_env,
+            timeout=cfg.test_timeout, test_profile_mir=True),
+        measure_removal=functools.partial(
+            measure_world_removal, cluster_env=cluster_cargo_env,
             timeout=cfg.test_timeout),
         log=ports.log)
 
-    def _dead_stub_sites(project_dir: Path, clusters: Any) -> frozenset[FnSite]:
-        return read_dead_stub_sites(project_dir, clusters, _dead_stub_deps)
+    def _unreached_stub_proofs(project_dir: Path, clusters: Any) -> dict[FnSite, str]:
+        return read_unreached_stub_proofs(project_dir, clusters, _unreached_stub_deps)
 
     def _reference_excused(project_dir: Path, test_output: str) -> frozenset[str]:
         """Bare names of the failures in task 3's aggregated output that the
@@ -2530,7 +2539,7 @@ def build_app(
         load_baked_clusters=_load_baked_clusters,
         reference_hollow=_reference_hollow,
         augmentation_fn_records=augment_store.all_fn_records,
-        dead_stub_sites=_dead_stub_sites,
+        unreached_stub_proofs=_unreached_stub_proofs,
     )
     reattach_deps = ReattachDeps(
         log=ports.log, emit=ports.emit, derive_gentest_prelude=helpers.derive_gentest_prelude,
@@ -3021,7 +3030,7 @@ def build_app(
         scan_unimplemented_functions=scan_unimplemented_functions,
         reference_hollow=_reference_hollow,
         augmentation_fn_records=augment_store.all_fn_records,
-        dead_stub_sites=_dead_stub_sites,
+        unreached_stub_proofs=_unreached_stub_proofs,
     )
 
     _crash_localizer_deps = CrashLocalizerDeps(

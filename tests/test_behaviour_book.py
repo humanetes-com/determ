@@ -51,6 +51,7 @@ from pipeline_core.domain.behaviour_book import (
     AimedUnit,
     ChunkJudgment,
     CreditedRule,
+    Grade,
     RuleDraft,
     SiblingVisit,
     draft_refusal,
@@ -61,6 +62,7 @@ from pipeline_core.domain.behaviour_book import (
     judge_visit,
     parse_predictions,
     parse_rule_drafts,
+    predicted,
     private_names,
     render_feature,
     rules_for_units,
@@ -322,7 +324,7 @@ def test_a_rule_the_checker_can_ignore_is_dropped_and_one_it_needs_is_kept() -> 
 
     # NEGATIVE CONTROL: the plan's check ("predicts with the rule") keeps it.
     def plan_check(d: RuleDraft, with_rule: dict[str, str]) -> bool:
-        return all(outcome_matches(with_rule.get(i, ""), pool[i].then) for i in d.covers)  # type: ignore[arg-type]
+        return all(predicted(with_rule, i, pool[i]) is Grade.RIGHT for i in d.covers)
     assert plan_check(vacuous, {"e2": "true"})
 
     # An ablation that did not answer is not a miss: the set matched, and
@@ -332,8 +334,9 @@ def test_a_rule_the_checker_can_ignore_is_dropped_and_one_it_needs_is_kept() -> 
     assert not unanswered.kept and unanswered.dropped[0].startswith("ablation did not answer")
 
     def absence_counts_as_a_miss(with_set: dict[str, str], ablation: dict[str, str]) -> bool:
-        return any(outcome_matches(with_set.get(i, "\0"), pool[i].then)  # type: ignore[arg-type]
-                   and not outcome_matches(ablation.get(i, "\0"), pool[i].then)  # type: ignore[arg-type]
+        # A missing id read as a wrong answer: "not RIGHT" on the ablation.
+        return any(predicted(with_set, i, pool[i]) is Grade.RIGHT
+                   and predicted(ablation, i, pool[i]) is not Grade.RIGHT
                    for i in informative.covers)
 
     assert absence_counts_as_a_miss({"e1": msg}, {})
@@ -385,8 +388,8 @@ def test_a_base_and_a_suffix_rule_that_predict_only_together_are_both_kept() -> 
     alone = [judge_rule_set([d], pool, predict=_Checker(_base_suffix_answer(pool)))
              for d in (BASE, SUFFIX)]
     all_or_nothing_base = all(
-        outcome_matches(_base_suffix_answer(pool)(frozenset({BASE.sentence}), i), pool[i].then)  # type: ignore[arg-type]
-        for i in BASE.covers)
+        predicted({i: _base_suffix_answer(pool)(frozenset({BASE.sentence}), i)}, i, pool[i])
+        is Grade.RIGHT for i in BASE.covers)
     assert not all_or_nothing_base
     assert not alone[1].kept
     assert [c.credited for c in alone[0].kept] == [("p1",)]  # credit, not a veto
@@ -543,7 +546,7 @@ def test_a_pair_drafted_in_one_chunk_is_credited_on_a_sibling_chunk_whose_draft_
     assert rules == {BASE.sentence: ("s0", "s1", "s2", "s3", "s4", "s5"),
                      SUFFIX.sentence: ("s0", "s1", "s3", "s4")}
     assert reading.covered_examples == 6 and reading.sibling_examples == 3 and reading.kept == 2
-    assert "6/6 checkable examples covered (3 by a sibling chunk's rule; 0 predicted with no rule)" \
+    assert "6/6 checkable examples covered (3 by a sibling chunk's rule; 0 predicted with no rule, 0 undetermined with no rule)" \
         in reading.line()
     assert reading.unaided_examples == 0 and book.features[0].unaided_ids == ()
     assert reading.dropped == {"refuted on": 1}

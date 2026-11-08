@@ -19,24 +19,29 @@ siblings its file holds.
 
 **Dead in every world that compiles it, or not dead.** A stub one world
 reaches is a hole in that world. So a stub leaves the gate only when at least
-one baked world compiles it and every world that compiles it measured it dead.
+one baked world compiles it and every world that compiles it measured it dead
+(`domain.stub_removal.unreached_stub_proofs`, the one rule the gate reads).
 A world whose analysis did not run (the tree does not build there) measured
 nothing, and nothing it compiles is excused.
 
-**What the reading cannot see.** The analysis is of the library target, so a
-body only a unit test calls reads as dead; a stub there would have failed
-that test. And a dead stub is not proof that no behaviour is missing — the
-call path that used to reach it may be what was lost — which is why the gate
-keeps the original's execution record beside this reading and says so.
+**What the lint never reports.** A method of a trait impl: the impl is live
+as soon as its trait and its self type are. Run `3323407-984b07f2`
+(2026-11-08) exited 1 on such a stub nothing could call. Those stubs are
+decided by removal in `domain.stub_removal`, which reads this module's dead
+set for the callers.
+
+**What the reading cannot see.** A dead stub is not proof that no behaviour
+is missing — the call path that used to reach it may be what was lost — which
+is why the gate keeps the original's execution record beside this reading and
+says so. The adapter reads the library and its test profile, so an in-crate
+test module counts as a caller.
 """
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
-from pipeline_core.domain.attribution import record_site
-from pipeline_core.domain.models import FnRecord, FnSite
+from pipeline_core.domain.models import FnRecord
 
 # `(file, byte offset)` where one dead-code diagnostic's span starts; `file`
 # is relative to the crate root, as rustc prints it and as the extractor keys
@@ -92,26 +97,7 @@ def dead_code_spans(cargo_json: str) -> frozenset[DeadSpan]:
     return frozenset(out)
 
 
-def _named_by(rec: FnRecord, spans: frozenset[DeadSpan]) -> bool:
+def names_record(rec: FnRecord, spans: frozenset[DeadSpan]) -> bool:
+    """A dead-code span starts inside `rec`'s signature: the lint names it."""
     return any(f == rec.file and rec.sig_byte_start <= b < rec.body_byte_start
                for f, b in spans)
-
-
-def dead_stub_sites(
-    stub_records: Iterable[FnRecord],
-    worlds: Sequence[WorldDeadCode],
-    compiled_in: Callable[[FnRecord, str], bool],
-) -> frozenset[FnSite]:
-    """The stub sites the tree cannot reach in any world that compiles them.
-
-    `compiled_in(record, cluster_name)` is whether that world compiles the
-    record. A site several records share (cfg-divergent copies of one fn) is
-    dead only when each of its records is."""
-    verdict: dict[FnSite, bool] = {}
-    for rec in stub_records:
-        mine = [w for w in worlds if compiled_in(rec, w.cluster)]
-        dead = bool(mine) and all(
-            w.measured and _named_by(rec, w.spans) for w in mine)
-        site = record_site(rec)
-        verdict[site] = verdict.get(site, True) and dead
-    return frozenset(s for s, d in verdict.items() if d)

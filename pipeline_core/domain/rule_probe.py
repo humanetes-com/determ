@@ -24,7 +24,11 @@ is then judged on those captures, ONE rule at a time:
   companions are in the first call because a rule can state part of an
   observable another completes (a base and a suffix sentence predict only
   together), and judged alone such a rule would be refuted on everything.
-- Silence is neither.
+- Silence is neither. An abstention (`Grade.UNDETERMINED`) by the
+  checker with no rule counts as not predicted, like a wrong value, so a
+  rule that decides a capture nothing else decides is confirmed on it; by
+  the kept sentences it is neither a confirmation nor a refutation. Both
+  readings are `behaviour_book.predicted`, the grade the set judge uses.
 
 A rule refuted on EVERY new capture, with at least one, is dropped. Its
 captures stay: the crate printed them, and they are true whatever the
@@ -32,11 +36,11 @@ sentence said.
 """
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 
-from pipeline_core.domain.behaviour import BehaviourSpec, Feature, Rule, outcome_matches
-from pipeline_core.domain.behaviour_book import Predict
+from pipeline_core.domain.behaviour import BehaviourSpec, Feature, Rule
+from pipeline_core.domain.behaviour_book import Grade, Predict, Prediction, predicted
 
 DROP_REASON = "refuted on every new capture"
 
@@ -86,31 +90,39 @@ def judge_rule_on_captures(
     examples: Mapping[str, BehaviourSpec],
     *,
     predict: Predict,
+    both: Callable[[Callable[[], Mapping[str, Prediction]], Callable[[], Mapping[str, Prediction]]],
+                   tuple[Mapping[str, Prediction], Mapping[str, Prediction]]] | None = None,
 ) -> RuleTrial:
     """Judge `sentence` on `examples` (its new captures). `companions` are
-    the other kept sentences of its feature."""
+    the other kept sentences of its feature.
+
+    The ablation and the together call read nothing of each other; `both`,
+    when given, runs the two and returns their replies in that order (the
+    caller's lanes). The `alone` call reads together's misses, so it is
+    asked after both. Absent, the two run one after the other."""
     ids = list(examples)
     if not ids:
         return RuleTrial()
 
-    def right(reply: Mapping[str, str], bid: str) -> bool | None:
-        then = examples[bid].then
-        if bid not in reply or then is None:
-            return None
-        return outcome_matches(reply[bid], then)
+    def grade(reply: Mapping[str, Prediction], bid: str) -> Grade:
+        return predicted(reply, bid, examples[bid])
 
     everyone = tuple(dict.fromkeys((sentence, *companions)))
-    ablation = predict((), ids)
-    together = predict(everyone, ids)
+    if both is None:
+        ablation = predict((), ids)
+        together = predict(everyone, ids)
+    else:
+        ablation, together = both(lambda: predict((), ids), lambda: predict(everyone, ids))
     calls = 2
-    confirmed = tuple(i for i in ids if right(together, i) is True and right(ablation, i) is False)
-    missed = [i for i in ids if right(together, i) is False]
+    confirmed = tuple(i for i in ids
+                      if grade(together, i) is Grade.RIGHT and grade(ablation, i).not_predicted)
+    missed = [i for i in ids if grade(together, i) is Grade.WRONG]
     if missed and len(everyone) > 1:
         alone = predict((sentence,), missed)
         calls += 1
     else:
         alone = together
-    refuted = tuple(i for i in missed if right(alone, i) is False)
+    refuted = tuple(i for i in missed if grade(alone, i) is Grade.WRONG)
     return RuleTrial(confirmed, refuted, len(ids), calls)
 
 

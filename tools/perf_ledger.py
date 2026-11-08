@@ -149,7 +149,9 @@ def _fmt_row(r: dict[str, Any]) -> str:
     wall = m.get("wall_min")
     return (f"{(r.get('date') or '?')[:10]}  {r['run_id']:>18s}  "
             f"{r.get('crate', '?'):9s} {model:22s} "
-            f"{env.get('VLLM_REASONING_STRENGTH', '?'):5s} "
+            # The level the run's calls defaulted to; rows recorded before
+            # the level existed carry the one word every call was sent at.
+            f"{(env.get('LLM_EFFORT') or env.get('VLLM_REASONING_STRENGTH') or '?'):6s} "
             f"{str(env.get('PHASE_C_ROUTE_ORDER', '?')):12s} "
             f"{(f'{wall:6.1f}m' if wall is not None else '     ?'):>7s} "
             f"calls={m.get('llm_calls', '?'):>4} contract={cpct}  "

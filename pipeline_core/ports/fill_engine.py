@@ -419,6 +419,7 @@ class FillPassPort(Protocol):
         owner_starved: Collection[FnLocator] = ...,
         due: Collection[FnLocator] = ...,
         due_rungs: Mapping[FnLocator, str] | None = ...,
+        max_units: Collection[FnLocator] = ...,
         unit_evidence: UnitEvidence | None = ...,
         body_rows: int | None = ...,
         dispatch_ranks: dict[FnLocator, int] | None = ...,

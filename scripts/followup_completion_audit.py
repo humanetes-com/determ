@@ -177,8 +177,12 @@ def main() -> int:
     ap.add_argument("--events", type=Path, default=REPO / "logs" / "events.jsonl")
     ap.add_argument("--guards", type=Path, default=REPO / "logs" / "pipeline_guards.log")
     ap.add_argument("--thinking-dir", type=Path, default=REPO / "logs" / "thinking")
+    # Default: the content budget the transport resolves (env → default),
+    # not a constant of this script's own.
+    sys.path.insert(0, str(REPO))
+    from pipeline_core.domain.model_profile import resolve_model_knobs
     ap.add_argument("--content-budget", type=int,
-                    default=int(os.getenv("VLLM_CONTENT_BUDGET", "8192")))
+                    default=resolve_model_knobs(os.environ).content_budget)
     ap.add_argument("--prose-cpt", type=float, default=4.5)
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()

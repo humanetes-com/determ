@@ -175,6 +175,19 @@ with one block per rule and nothing else:
 """
 
 
+# The prediction prompt's second legal answer, read by
+# `behaviour_book.parse_predictions` as `UNDETERMINED`. A constant so a
+# replay can tell a prompt of the builder before it from one of this builder
+# (`scripts/book_judge_replay.py`).
+UNDETERMINED_SLOT = """
+When what is shown above (the vocabulary, the rules, the example's own code)
+does not determine the value — it depends on a constant, a computation or a
+choice nothing here states — do not guess. Answer that example as:
+
+<THEN id="<example id>" undetermined/>
+"""
+
+
 def build_then_prediction_prompt(
     *,
     crate: str,
@@ -185,7 +198,16 @@ def build_then_prediction_prompt(
 ) -> str:
     """Ask for the Then of each example; with `rules`, the sentences the
     predictor may rely on, numbered, all at once — a rule may state part of
-    an observable another rule completes."""
+    an observable another rule completes.
+
+    Every example has two legal answers: the value, or the undetermined
+    tag `parse_predictions` reads as `UNDETERMINED`. Without the second, an
+    example whose value nothing in the prompt states can only be guessed:
+    on run `3198683-b5e39b06` (2026-11-06) the checker reasoned 161,572
+    chars over 17.1 minutes on two such examples (a constant one glossary
+    line calls only "larger" in one build) and guessed 33 / 32 for 255 / 64.
+    The judges grade an abstention as not predicted on the no-rule side and
+    as neither right nor refuted with rules (`behaviour_book.predicted`)."""
     blocks = _examples_text(examples, with_then=False, worlds=worlds)
     numbered = "\n".join(f"{n}. {r}" for n, r in enumerate(rules, 1))
     rule_part = (f"\nRULES (hold together for the examples below; rely on them):\n{numbered}\n"
@@ -201,7 +223,7 @@ For EACH example answer the ASKED value exactly — no quotes around it unless
 they are part of the value, no explanation — as:
 
 <THEN id="<example id>">the value</THEN>
-"""
+{UNDETERMINED_SLOT}"""
 
 
 def build_given_phrase_prompt(*, crate: str, file: str, roots: Sequence[GivenRoot]) -> str:

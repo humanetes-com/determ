@@ -56,6 +56,23 @@ evidence than one on every slice. Without that split an empty suite owed
 every function on every slice at once, the wide set the tiers exist to
 avoid (35 of 35 on the `14141-9a904822` fill-8 map).
 
+**The maximum level is owed per test, once per function per red episode.**
+Every ask is sent at the policy's level (`pipeline_core.effort`, medium by
+default). A red test that has had `escalate_after` owed asks below the
+maximum since it was last green (landings and planned misses, any function,
+any fingerprint) owes the functions it owes from then on at the maximum,
+each (function, test) once until the test is green again
+(:meth:`AskLedger.level_for`). The count is the test's, not a pair's: on
+the anyhow record of 2026-10-09 → 11-07 (51 runs, 10,263 owed landings) a
+landing moved the test's text 7,942 times and the walk then rarely owed the
+same function again, so only 201 of 3,666 red-at-end tests ever had a
+function with two owed landings (`scripts/owed_landing_text_moves.py`).
+Misses count, so a test whose medium replies never compile is escalated
+too. When a test's walk is spent at the lower level while it still owes
+maximum tries, its tiers are walked once more at the maximum under the
+fingerprint folded with ``max``, so "nothing new can be asked" includes
+those tries.
+
 `culprits` (the functions only one feature's examples exercise) is the
 rule-aiming set: a feature's kept rules reach those functions' prompts
 (`behaviour_book.rules_for_units`). It is never the due set — a feature whose
@@ -71,6 +88,7 @@ from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from pipeline_core.domain.model_profile import EffortLevel
 from pipeline_core.domain.models import FnLocator
 from pipeline_core.domain.test_sight import SightReading
 
@@ -118,6 +136,11 @@ DEFAULT_MISSES = 3
 #: multi-turn, the test re-run between turns). A rung is spent when a body
 #: landed through it, or after `misses` offers it landed nothing.
 LADDER: tuple[str, ...] = ("unit", "session")
+
+#: The fingerprint channel a walk re-taken at the maximum level is asked
+#: under (`_fold(fp, MAX_FOLD)`): the same evidence asked at a new level is
+#: a new question, once.
+MAX_FOLD = "max"
 
 #: The ledger key an unread red test (no function attributed at all) is
 #: counted under: its misses are the sweeps it stayed unread.
@@ -245,6 +268,74 @@ class AskLedger:
     #: own body + its red tests' words) a route OPENED it under. Read by the
     #: rank for served units nothing owes (`dispatch_rank.asked_unchanged`).
     unit_asks: dict[str, set[str]] = field(default_factory=dict)
+    #: test -> owed asks sent below the maximum level since the test was
+    #: last green: landings and planned misses, any function, any
+    #: fingerprint (:meth:`count_ask`).
+    low_asks: dict[str, int] = field(default_factory=dict)
+    #: (unit, test) -> its maximum-level try in this red episode: -1 a body
+    #: landed at the maximum, n >= 0 the planned misses at the maximum.
+    max_tries: dict[str, int] = field(default_factory=dict)
+
+    def count_ask(self, unit: str, test: str, level: EffortLevel | None, *,
+                  landed: bool, planned: bool = True,
+                  owed_max: bool = False) -> None:
+        """Count one owed ask of `(unit, test)` by the level it was sent at.
+
+        Below the maximum, a landing or a planned miss adds to the test's
+        `low_asks`. At the maximum it is the pair's maximum try only when
+        the reading the fill planned on owed the pair at the maximum
+        (`owed_max`): a maximum-level run that wrote a unit nothing owed at
+        that level (a holder it claimed mid-fill, a co-target of a unit
+        route) spends no pair's try, or that pair's own escalation would be
+        suppressed. `level` None: the level is unknown; nothing is counted.
+        An unplanned miss (no route planned a run) is no ask at any level."""
+        if level is None or not (landed or planned):
+            return
+        if level is not EffortLevel.MAX:
+            self.low_asks[test] = self.low_asks.get(test, 0) + 1
+            return
+        if not owed_max:
+            return
+        key = self._key(unit, test)
+        if landed:
+            self.max_tries[key] = -1
+        elif self.max_tries.get(key, 0) >= 0:
+            self.max_tries[key] = self.max_tries.get(key, 0) + 1
+
+    def max_spent(self, unit: str, test: str,
+                  misses: int = DEFAULT_MISSES) -> bool:
+        """The pair's maximum try of this red episode is spent: a body
+        landed at the maximum, or `misses` planned offers at it landed
+        nothing."""
+        n = self.max_tries.get(self._key(unit, test))
+        return n is not None and (n < 0 or (misses > 0 and n >= misses))
+
+    def escalated(self, test: str, after: int) -> bool:
+        """`test` has had `after` owed asks below the maximum since it was
+        last green. `after` <= 0 never escalates."""
+        return after > 0 and self.low_asks.get(test, 0) >= after
+
+    def level_for(self, unit: str, test: str, *, after: int,
+                  misses: int = DEFAULT_MISSES) -> EffortLevel | None:
+        """MAX when `test` is escalated and the pair's maximum try is not
+        spent, else None (the policy's level)."""
+        if self.escalated(test, after) and not self.max_spent(unit, test, misses):
+            return EffortLevel.MAX
+        return None
+
+    def green(self, tests: Iterable[str]) -> int:
+        """Close the red episode of every test in `tests` (it passed on
+        this sweep): its low-level count and its pairs' maximum tries reset,
+        so a later red episode is escalated on its own asks. Returns how
+        many tests had something to reset."""
+        names = set(tests)
+        gone = {t for t in names if t in self.low_asks}
+        dead = [k for k in self.max_tries if k.rsplit("\t", 1)[-1] in names]
+        for k in dead:
+            del self.max_tries[k]
+        for t in gone:
+            del self.low_asks[t]
+        return len(gone | {k.rsplit("\t", 1)[-1] for k in dead})
 
     def record_unit(self, unit: str, fp: str) -> bool:
         """Record that a route opened `unit` under its own fingerprint
@@ -457,7 +548,9 @@ class AskLedger:
                 "absent": {k: sorted(v) for k, v in sorted(self.absent.items())},
                 "pending": {k: sorted(v) for k, v in sorted(self.pending.items())},
                 "unit_asks": {k: sorted(v)
-                              for k, v in sorted(self.unit_asks.items())}}
+                              for k, v in sorted(self.unit_asks.items())},
+                "low_asks": dict(sorted(self.low_asks.items())),
+                "max_tries": dict(sorted(self.max_tries.items()))}
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> AskLedger:
@@ -471,6 +564,8 @@ class AskLedger:
         absent = raw.get("absent") or {}
         pending = raw.get("pending") or {}
         unit_asks = raw.get("unit_asks") or {}
+        low_asks = raw.get("low_asks") or {}
+        max_tries = raw.get("max_tries") or {}
         return cls(oracle_fp=str(raw.get("oracle_fp", "")),
                    seen={str(k): {str(x) for x in v} for k, v in seen.items()},
                    misses={str(k): {str(f): int(n) for f, n in v.items()}
@@ -488,7 +583,9 @@ class AskLedger:
                    absent={str(k): {str(x) for x in v} for k, v in absent.items()},
                    pending={str(k): {str(x) for x in v} for k, v in pending.items()},
                    unit_asks={str(k): {str(x) for x in v}
-                              for k, v in unit_asks.items()})
+                              for k, v in unit_asks.items()},
+                   low_asks={str(k): int(v) for k, v in low_asks.items()},
+                   max_tries={str(k): int(v) for k, v in max_tries.items()})
 
 
 @dataclass(frozen=True, slots=True)
@@ -508,6 +605,9 @@ class TestTiers:
     #: this test at the statement that judges it (`due_reading`'s
     #: `observed`). Empty when the owed set came from anything else.
     observed: frozenset[str] = frozenset()
+    #: owed function -> the level it is owed at, for the functions owed at
+    #: the maximum (:meth:`AskLedger.level_for`); absent: the policy's.
+    levels: Mapping[str, EffortLevel] = field(default_factory=dict)
 
     @property
     def exhausted(self) -> bool:
@@ -550,6 +650,19 @@ class DueReading:
     def tests_for(self, unit: FnLocator) -> frozenset[str]:
         k = unit_key(unit)
         return frozenset(t for t, r in self.by_test.items() if k in r.owed)
+
+    def owes_max(self, unit: str, test: str) -> bool:
+        """`test` owes `unit` (a `file::fn` key) at the maximum level."""
+        r = self.by_test.get(test)
+        return r is not None and r.levels.get(unit) is EffortLevel.MAX
+
+    @property
+    def max_units(self) -> frozenset[FnLocator]:
+        """Every function some red test owes at the maximum level: a run
+        whose targets hold one is sent at the maximum
+        (`fill_schedule.carve_levels`)."""
+        return frozenset(_locator(u) for r in self.by_test.values()
+                         for u, lv in r.levels.items() if lv is EffortLevel.MAX)
 
     @property
     def exhausted(self) -> bool:
@@ -638,6 +751,7 @@ def due_reading(
     ladder: Sequence[str] = ("unit",),
     lessons: Mapping[tuple[str, str], str] | None = None,
     observed: Mapping[str, Collection[str]] | None = None,
+    escalate_after: int = 0,
 ) -> DueReading:
     """What each red test owes this sweep.
 
@@ -661,7 +775,11 @@ def due_reading(
     reset its walk to tier 0, so without this rung the body the test now
     reports on is asked last (run `19493-36a4e056`, 2026-11-04, tier 4 of 8
     behind three misses on each tier before it). Reads the ledger; `settle`
-    is the one write (the tree each fingerprint was read on)."""
+    is the one write (the tree each fingerprint was read on).
+
+    `escalate_after` (`TDD_ESCALATE_AFTER`; 0 disables) is the count of
+    owed asks below the maximum after which a red test owes at the maximum
+    (:func:`_with_levels`)."""
     out_ = frozenset(withdrawn)
     red = sorted(set(red_tests) - out_)
     joint_list = tuple(joint)
@@ -725,8 +843,55 @@ def due_reading(
                 rung_of = {u: nxt[u] for u in fresh}
                 break
         by_test[t] = TestTiers(t, tiers, owed_tier, owed, rungs=rung_of)
+    if escalate_after > 0:
+        by_test = {t: _with_levels(r, fps[t], ledger, escalate_after,
+                                   misses, ladder)
+                   for t, r in by_test.items()}
     return DueReading(by_test, frozenset(unread), frozenset(unread_spent),
                       frozenset(out_ & set(red_tests)), fps)
+
+
+def _with_levels(r: TestTiers, fp: str, ledger: AskLedger, after: int,
+                 misses: int, ladder: Sequence[str]) -> TestTiers:
+    """`r` with the level each owed function is owed at.
+
+    An escalated test owes at the maximum every function it owes whose
+    maximum try of this red episode is unspent. When the walk below the
+    maximum is spent (nothing owed), escalated or not, the held stubs, else
+    the tiers in order, are walked once more at the maximum under the
+    fingerprint folded with :data:`MAX_FOLD`: the first group holding a
+    function with an unspent maximum try is owed. A walk spent below the
+    maximum is the plainest form of "this level cannot write it", so the
+    count is not waited for, and "nothing new can be asked" is reached only
+    after those tries."""
+    t = r.test
+    if r.owed:
+        if not ledger.escalated(t, after):
+            return r
+        levels = {u: lv for u in r.owed
+                  if (lv := ledger.level_for(u, t, after=after, misses=misses))
+                  is not None}
+        return _replace_levels(r, levels) if levels else r
+    fp_max = _fold(fp, MAX_FOLD)
+    groups: list[tuple[int, frozenset[str]]] = (
+        [(-1, r.held_by)] if r.held_by
+        else list(enumerate(r.tiers)))
+    for i, group in groups:
+        fresh = sorted(u for u in group
+                       if not ledger.max_spent(u, t, misses)
+                       and not ledger.spent(u, t, fp_max, misses))
+        if fresh:
+            rung = ladder[0] if ladder else "unit"
+            return TestTiers(
+                t, r.tiers, i, dict.fromkeys(fresh, fp_max),
+                held_by=r.held_by, rungs=dict.fromkeys(fresh, rung),
+                levels=dict.fromkeys(fresh, EffortLevel.MAX))
+    return r
+
+
+def _replace_levels(r: TestTiers, levels: Mapping[str, EffortLevel]) -> TestTiers:
+    return TestTiers(r.test, r.tiers, r.owed_tier, r.owed, held_by=r.held_by,
+                     rungs=r.rungs, observed=r.observed, levels=dict(levels))
 
 
 def render_failed(reading: DueReading, *, limit: int = 30) -> list[str]:
@@ -762,6 +927,8 @@ def tiers_event(reading: DueReading) -> dict[str, Any]:
                 "held_by": sorted(r.held_by),
                 "rungs": dict(sorted(r.rungs.items())),
                 **({"observed": sorted(r.observed)} if r.observed else {}),
+                **({"levels": {u: lv.value for u, lv in sorted(r.levels.items())}}
+                   if r.levels else {}),
                 "fingerprint": reading.fingerprints.get(t, "")}
             for t, r in sorted(reading.by_test.items())}
 

@@ -14,7 +14,8 @@ pure orchestration over domain VOs.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from concurrent.futures import Future
+from dataclasses import dataclass, field, replace
 from enum import Enum, auto
 
 from pipeline_core.domain.authored_layout import (
@@ -82,6 +83,7 @@ from pipeline_core.domain.type_header import (
     parse_type_header,
 )
 from pipeline_core.prompts.layout_authoring import build_layout_authoring_prompt
+from pipeline_core.threads import ContextPool
 
 # Item kinds that can carry a `#[derive(...)]`. A trait, a type alias or a fn
 # signature whose name a test happens to call is not a derive target, and
@@ -138,6 +140,12 @@ class AuthorLayoutDeps:
     # legitimately not carry its every derive, so the initial pass leaves
     # this False.
     guard_replaced_layout: bool = False
+    # Components whose attempt-1 authoring (every chunk, with its coverage
+    # retries) is asked ahead of their turn, side by side (`_Prefetch`). The
+    # prompt reads no tree state, so the replies are the ones the component's
+    # turn would get; every compile, calibration, adoption and retry still runs
+    # in surface order. 1 asks nothing ahead (the serial pass).
+    lanes: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +217,104 @@ class _PeerSide:
     defs: tuple[tuple[str, str], ...] = ()
     items: tuple[tuple[str, AuthoredItem], ...] = ()
     seen_diags: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _SideChoice:
+    """A peer world's component chosen for the shared ask, before anything
+    is compiled in that peer."""
+
+    world: str
+    comp: tuple[PrivateSurfaceItem, ...]
+    uids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _AskShape:
+    """What one component is asked: the items (its own plus the peers'), the
+    worlds label, the prompt builder, and the peer choices that survived the
+    union check."""
+
+    ask_comp: tuple[PrivateSurfaceItem, ...]
+    label: str
+    prompt: Callable[[tuple[PrivateSurfaceItem, ...], tuple[str, ...], str, str], str]
+    choices: list[_SideChoice]
+    anchors: dict[str, str]
+
+
+class _Prefetch:
+    """Attempt-1 authoring of components ahead of their turn, side by side.
+
+    A component's prompt is built from inputs no commit changes (`_shape`), so
+    its attempt-1 replies can be asked before the components ahead of it have
+    compiled. Each component is rehearsed whole (`_author_component`, every
+    chunk and coverage retry, with the real model and a silent log) on a lane,
+    recording prompt -> replies. At its turn the component's attempt 1 asks
+    through `replaying`, which hands back a recorded reply for a prompt it
+    recorded and asks the model for any other. So the pass at any width is the
+    serial pass: a reply is only ever used for the exact prompt it answered,
+    and every compile, calibration, adoption and retry stays in surface order
+    on the calling thread. `lanes <= 1` asks nothing ahead."""
+
+    def __init__(self, lanes: int) -> None:
+        self.enabled = lanes > 1
+        self._pool = (ContextPool(max_workers=lanes, thread_name_prefix="layout-ahead")
+                      if self.enabled else None)
+        self._runs: dict[int, Future[dict[str, list[str]]]] = {}
+        self.asked = 0
+        self.used = 0
+
+    def submit(self, key: int, shape: _AskShape, deps: AuthorLayoutDeps) -> None:
+        if self._pool is None:
+            return
+
+        def _rehearse() -> dict[str, list[str]]:
+            rec: dict[str, list[str]] = {}
+
+            def _ask(prompt: str) -> str:
+                reply = deps.run_model(prompt)
+                rec.setdefault(prompt, []).append(reply)
+                return reply
+
+            _author_component(shape.ask_comp, shape.label, shape.prompt, "",
+                              replace(deps, run_model=_ask, log=lambda _m: None))
+            return rec
+
+        self._runs[key] = self._pool.submit(_rehearse)
+
+    def replaying(self, key: int, deps: AuthorLayoutDeps) -> AuthorLayoutDeps:
+        fut = self._runs.pop(key, None)
+        if fut is None:
+            return deps
+        try:
+            rec = fut.result()
+        except Exception as e:
+            deps.log(f"  [t1.5] asked-ahead authoring failed ({type(e).__name__}: {e}); "
+                     "this component asks at its turn.")
+            return deps
+        self.asked += sum(len(v) for v in rec.values())
+
+        def _ask(prompt: str) -> str:
+            got = rec.get(prompt)
+            if got:
+                self.used += 1
+                return got.pop(0)
+            return deps.run_model(prompt)
+
+        return replace(deps, run_model=_ask)
+
+    def close(self, deps: AuthorLayoutDeps) -> None:
+        if self._pool is None:
+            return
+        for fut in self._runs.values():
+            fut.cancel()
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        unused = sum(1 for f in self._runs.values() if not f.cancelled())
+        if self.asked or unused:
+            deps.log(f"  [t1.5] asked ahead: {self.used} of {self.asked} reply(ies) used at "
+                     f"their component's turn"
+                     + (f"; {unused} component(s) asked ahead never reached their turn"
+                        if unused else ""))
 
 
 class LayoutOutcome(Enum):
@@ -419,7 +525,13 @@ def author_layout(
     # t1.5 (nothing is filled yet), which is what makes the requirements note
     # below cost the initial authoring nothing.
     filled_now = deps.filled_bodies() if deps.filled_bodies is not None else ""
-    for comp in surface.components:
+
+    def _settle(idx: int, comp: tuple[PrivateSurfaceItem, ...]) -> ComponentResult | None:
+        """The component's turn: every skeleton read, calibration, adoption,
+        commit and retry, in surface order, as the serial pass ran them. Its
+        attempt-1 authoring replies come from `prefetch` when they were asked
+        ahead under the same prompts; any prompt not asked ahead is asked
+        here."""
         names = tuple(i.name for i in comp)
         done = handled.get(frozenset(component_uids(comp))) if handled else None
         if done is not None:
@@ -429,76 +541,27 @@ def author_layout(
                         f"left frozen — the one ask with {done.asked_with} found no "
                         "layout that compiles here; not asked again: "
                         f"{first_diagnostic(done.reason) or done.reason}"))
-            results.append(done)
-            continue
+            return done
         pins = select_pins(comp)
         if not pins and surface.component_is_layout_sensitive(comp):
             reason = ("layout-sensitive (feeds a public type's size) but NO "
                       "layout pins harvested — refusing to author blind")
             deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: GATED — {reason}")
-            results.append(ComponentResult(names, False, reason, gated=True))
-            continue
-        anchors = _public_anchors(surface, comp)
+            return ComponentResult(names, False, reason, gated=True)
         uids = component_uids(comp)
-        matched = select_component_behaviours(
-            behaviour_specs, component_names=names,
-            public_types=_pinned_public_types(surface, comp), cap=None)
-        behaviours = matched[:COMPONENT_BEHAVIOUR_CAP]
-        if behaviour_specs:
-            omitted = _omitted_behaviour_classes(matched, behaviours)
-            extra = (f"; cap omitted {omitted} of {len(matched)}"
-                     if omitted else "")
-            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
-                     f"{len(behaviours)} behaviour(s) in the authoring "
-                     f"prompt ({_behaviour_breakdown(behaviours)}){extra}")
-            # The cap ranks MUST-classes first, so it truncates the tail —
-            # and the tail is a design choice only while IDENTITY survives
-            # it. An identity behaviour dropped by the cap is the ONE loss
-            # this section cannot absorb: the wrap-the-payload-and-key-the-
-            # wrapper layout satisfies every pin and every format string and
-            # is refuted only by an identity Then. Computed on the live
-            # stable Error/vtable component (34 names, 92 matched, cap 40):
-            # identity 24 all kept. A component that ever exceeds the cap in
-            # identity alone needs COMPONENT_BEHAVIOUR_CAP raised, not a
-            # quieter log — so say so at the point it happens.
-            if (_dropped_ident := _dropped_in_class(
-                    matched, behaviours, IDENTITY_CLASS)) > 0:
-                deps.log(f"  [t1.5] ⚠️  {surface.cfg_cluster}/{names}: the "
-                         f"behaviour cap ({COMPONENT_BEHAVIOUR_CAP}) dropped "
-                         f"{_dropped_ident} IDENTITY behaviour(s) — the class "
-                         f"that refutes a payload-wrapping layout. Raise "
-                         f"COMPONENT_BEHAVIOUR_CAP for this component.")
         # snapshot the pristine skeleton files this component touches, so a
         # failed candidate is reverted exactly (no cross-attempt bleed).
         touched = {i.file for i in comp}
         pristine = {f: deps.read_skeleton(f) for f in touched}
-        paths = _component_field_paths(comp, oracle)
         # Two probes, two authorities, two homes — one compile per attempt. The
         # pins are calibrated by having to HOLD on the frozen scaffold and ride
         # in the crate root; the member paths are calibrated by their diagnostic
         # and ride in the file that declares each root type.
+        paths = _component_field_paths(comp, oracle)
         pin_probe = _calibrated_pin_probe(surface, comp, pins, deps)
         gate = LayoutGate(
             root=pin_probe,
             in_file=_calibrated_field_path_probes(surface, comp, paths, deps))
-        paths_note = field_path_requirements_text(paths)
-        # Third note, same slot and same rationale as the two around it: the
-        # member-eviction veto can only reject, and the rejection budget is
-        # three. Sourced from the bodies rather than from the tests, so it says
-        # what `dropped_members_in_use` will measure the reply against.
-        members_note = members_in_use_text({
-            i.name: members_in_use(i.definition, filled_now) for i in comp
-        }) if filled_now else ""
-        # Same shape as the member paths above and for the same reason: the
-        # tests are the specification, the prompt does not contain them, and a
-        # trait the tests reach for is otherwise left to inference. A general
-        # rule was tried first and is not enough on a large component — the
-        # hardcrate authors ~100 items and dropped `Default` on `Counter`
-        # anyway, where the microcrate with a handful of items did not.
-        # Restricted to the types this component actually declares, so the note
-        # names items the reply is expected to emit.
-        derives_note = _confirmed_derives_note(surface.cfg_cluster, names, comp, frozen_tests, deps)
-
         # ADOPTION BEFORE AUTHORING. A private type authored by an earlier
         # cfg-cluster is already this crate's definition of that type, and this
         # cluster is seeded with the earlier cluster's filled bodies. Authoring
@@ -517,12 +580,11 @@ def author_layout(
                          "layout already fixed by an earlier cluster "
                          "(no model call).")
                 kept = dict(tried.authored)
-                results.append(ComponentResult(
+                return ComponentResult(
                     names, True, "",
                     authored_defs=authored_locate_keys(comp, kept),
                     authored_items=tuple((u, kept[u]) for u in uids),
-                    adopted=True))
-                continue
+                    adopted=True)
             # Two failures wear one message otherwise, and they call for
             # opposite treatment of the crate-wide registry. WITH diagnostics
             # the stored layout was compiled here and rustc refused it, so it
@@ -540,76 +602,11 @@ def author_layout(
                      f"existing layout could not be INSTALLED here ({why}) — "
                      "re-authoring, but the crate-wide definition stands: "
                      "nothing compiled, so nothing about it was disproved.")
-        sides = _peer_sides(comp, uids, peers, claimed, registry or {}, deps)
-        peer_only: dict[str, PrivateSurfaceItem] = {}
-        for s in sides:
-            for u, i in zip(s.uids, s.comp, strict=True):
-                if u not in uids:
-                    peer_only.setdefault(u, i)
-        ask_comp = comp + tuple(peer_only.values())
-        # The reply is keyed by the ids the union's own numbering gives; each
-        # world reads it by its own. The ordinal strings must agree, and a
-        # shared ordinal must be the same declaration: duplicate names are
-        # numbered by position in each component, so a different order still
-        # produces the same ids and would splice the block into the other item.
-        renames = bool(sides) and component_uids(ask_comp) != uids + tuple(peer_only)
-        disagrees = bool(sides) and not renames and not shared_item_ids_agree(
-            [(uids, comp)] + [(s.uids, s.comp) for s in sides])
-        if renames or disagrees:
-            detail = ("the union of the worlds' items renames an item id"
-                      if renames else
-                      "a shared item id denotes a different item in the other world")
-            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {detail} "
-                     "— asked for this world alone.")
-            for s in sides:
-                claimed[s.world].discard(frozenset(s.uids))
-            sides, ask_comp = [], comp
-        label = "+".join([surface.cfg_cluster] + [s.world for s in sides])
-        if sides:
-            union_specs = list({b.behaviour_id: b for b in (
-                list(behaviour_specs) + [b for p in peers for b in p.behaviour_specs])}.values())
-            pins = list({b.behaviour_id: b for b in (
-                pins + [b for s, p in _side_peers(sides, peers) for b in p.select_pins(s.comp)])
-                         }.values())
-            behaviours = select_component_behaviours(
-                union_specs, component_names=tuple(i.name for i in ask_comp),
-                public_types=_pinned_public_types(surface, comp),
-                cap=None)[:COMPONENT_BEHAVIOUR_CAP]
-            for s, p in _side_peers(sides, peers):
-                for u, a in _public_anchors(p.surface, s.comp).items():
-                    anchors.setdefault(u, a)
-            paths_note = field_path_requirements_text(_component_field_paths(ask_comp, oracle))
-            derives_note = _confirmed_derives_note(label, names, ask_comp, frozen_tests, deps)
-            deps.log(f"  [t1.5] {label}/{names}: one ask over "
-                     f"{len(ask_comp)} item(s) for {len(sides) + 1} world(s); each "
-                     "attempt's reply is compiled in every world.")
-        # Partly covered: the model must EXTEND the fixed definitions (adding
-        # what this cluster's cfg needs), never redesign them — so it gets their
-        # exact current text and an instruction to reproduce it verbatim.
-        fixed = [registry[u] for u in component_uids(ask_comp) if registry and u in registry]
-        shared = ("\n\nThese definitions are ALREADY FIXED for this crate by "
-                  "another cfg-cluster. Reproduce each one EXACTLY as given and "
-                  "design only the remaining items around them:\n"
-                  + shared_definitions_text(fixed)) if fixed and adopted is None else ""
-
-        def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
-                    chunk_uids: tuple[str, ...], scheme: str, hint: str,
-                    *, _pins: list[BehaviourSpec] = pins,
-                    _behaviours: list[BehaviourSpec] = behaviours,
-                    _anchors: dict[str, str] = anchors,
-                    _shared: str = shared, _paths: str = paths_note,
-                    _derives: str = derives_note,
-                    _members: str = members_note,
-                    _label: str = label) -> str:
-            return build_layout_authoring_prompt(
-                module_name=module_name, cfg_cluster=_label,
-                items=chunk_items, public_surface=public_surface,
-                layout_pins=_pins, symbol_inventory=symbol_inventory,
-                extra_guidance=(extra_guidance + _shared + _paths + _derives
-                                + _members),
-                authored_scheme=scheme,
-                item_uids=chunk_uids, item_anchors=_anchors,
-                behaviours=_behaviours) + hint
+        choices = _choose_peer_sides(comp, uids, peers, claimed, registry or {})
+        shape = _shape(comp, names, pins, uids, choices, claimed,
+                       adopted_none=adopted is None, deps=deps)
+        sides = [_calibrate_side(c, peers) for c in shape.choices]
+        ask_comp, label, _prompt = shape.ask_comp, shape.label, shape.prompt
         committed = False
         reason = "no attempt"
         committed_defs: tuple[tuple[str, str], ...] = ()
@@ -650,7 +647,8 @@ def author_layout(
         for attempt in range(1, deps.max_attempts + 1):
             hint = _retry_hint(violations) if violations else ""
             authored, reason = _author_component(
-                ask_comp, label, _prompt, hint, deps)
+                ask_comp, label, _prompt, hint,
+                prefetch.replaying(idx, deps) if attempt == 1 and not hint else deps)
             if authored is None:
                 deps.log(f"  [t1.5] {label}/{names}: {reason} "
                          f"(attempt {attempt})")
@@ -723,9 +721,9 @@ def author_layout(
                 break
             if diag:
                 seen_diags.append(diag)
-        results.append(ComponentResult(
+        result = ComponentResult(
             names, committed, reason, authored_defs=committed_defs,
-            authored_items=committed_items, refuted_uids=refuted))
+            authored_items=committed_items, refuted_uids=refuted)
         for s in sides:
             # A peer this world's commit leaves uncommitted keeps its own path
             # (adopt, or extend around the fixed definitions): the question it
@@ -737,13 +735,180 @@ def author_layout(
                     authored_defs=s.defs, authored_items=s.items,
                     adopted=s.committed and committed and _same_text(s.items, committed_items),
                     asked_with=surface.cfg_cluster)
+        return result
+
+    def _shape(
+        comp: tuple[PrivateSurfaceItem, ...], names: tuple[str, ...],
+        pins: list[BehaviourSpec], uids: tuple[str, ...],
+        choices: list[_SideChoice], claim: dict[str, set[frozenset[str]]],
+        *, adopted_none: bool, deps: AuthorLayoutDeps,
+    ) -> _AskShape:
+        """What this component is asked, from the surface, the suite, the
+        oracle, the registry and the peers' surfaces only: nothing here reads
+        or writes the skeleton, so the same component asked ahead of its turn
+        (`_Prefetch`) builds the same prompt its turn builds. `claim` is the
+        peers' claimed components, from which a refused union is released."""
+        anchors = _public_anchors(surface, comp)
+        matched = select_component_behaviours(
+            behaviour_specs, component_names=names,
+            public_types=_pinned_public_types(surface, comp), cap=None)
+        behaviours = matched[:COMPONENT_BEHAVIOUR_CAP]
+        if behaviour_specs:
+            omitted = _omitted_behaviour_classes(matched, behaviours)
+            extra = (f"; cap omitted {omitted} of {len(matched)}"
+                     if omitted else "")
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: "
+                     f"{len(behaviours)} behaviour(s) in the authoring "
+                     f"prompt ({_behaviour_breakdown(behaviours)}){extra}")
+            # The cap ranks MUST-classes first, so it truncates the tail —
+            # and the tail is a design choice only while IDENTITY survives
+            # it. An identity behaviour dropped by the cap is the ONE loss
+            # this section cannot absorb: the wrap-the-payload-and-key-the-
+            # wrapper layout satisfies every pin and every format string and
+            # is refuted only by an identity Then. Computed on the live
+            # stable Error/vtable component (34 names, 92 matched, cap 40):
+            # identity 24 all kept. A component that ever exceeds the cap in
+            # identity alone needs COMPONENT_BEHAVIOUR_CAP raised, not a
+            # quieter log — so say so at the point it happens.
+            if (_dropped_ident := _dropped_in_class(
+                    matched, behaviours, IDENTITY_CLASS)) > 0:
+                deps.log(f"  [t1.5] ⚠️  {surface.cfg_cluster}/{names}: the "
+                         f"behaviour cap ({COMPONENT_BEHAVIOUR_CAP}) dropped "
+                         f"{_dropped_ident} IDENTITY behaviour(s) — the class "
+                         f"that refutes a payload-wrapping layout. Raise "
+                         f"COMPONENT_BEHAVIOUR_CAP for this component.")
+        paths = _component_field_paths(comp, oracle)
+        paths_note = field_path_requirements_text(paths)
+        # Third note, same slot and same rationale as the two around it: the
+        # member-eviction veto can only reject, and the rejection budget is
+        # three. Sourced from the bodies rather than from the tests, so it says
+        # what `dropped_members_in_use` will measure the reply against.
+        members_note = members_in_use_text({
+            i.name: members_in_use(i.definition, filled_now) for i in comp
+        }) if filled_now else ""
+        # Same shape as the member paths above and for the same reason: the
+        # tests are the specification, the prompt does not contain them, and a
+        # trait the tests reach for is otherwise left to inference. A general
+        # rule was tried first and is not enough on a large component — the
+        # hardcrate authors ~100 items and dropped `Default` on `Counter`
+        # anyway, where the microcrate with a handful of items did not.
+        # Restricted to the types this component actually declares, so the note
+        # names items the reply is expected to emit.
+        derives_note = _confirmed_derives_note(surface.cfg_cluster, names, comp, frozen_tests, deps)
+        peer_only: dict[str, PrivateSurfaceItem] = {}
+        for s in choices:
+            for u, i in zip(s.uids, s.comp, strict=True):
+                if u not in uids:
+                    peer_only.setdefault(u, i)
+        ask_comp = comp + tuple(peer_only.values())
+        # The reply is keyed by the ids the union's own numbering gives; each
+        # world reads it by its own. The ordinal strings must agree, and a
+        # shared ordinal must be the same declaration: duplicate names are
+        # numbered by position in each component, so a different order still
+        # produces the same ids and would splice the block into the other item.
+        renames = bool(choices) and component_uids(ask_comp) != uids + tuple(peer_only)
+        disagrees = bool(choices) and not renames and not shared_item_ids_agree(
+            [(uids, comp)] + [(s.uids, s.comp) for s in choices])
+        if renames or disagrees:
+            detail = ("the union of the worlds' items renames an item id"
+                      if renames else
+                      "a shared item id denotes a different item in the other world")
+            deps.log(f"  [t1.5] {surface.cfg_cluster}/{names}: {detail} "
+                     "— asked for this world alone.")
+            for s in choices:
+                claim[s.world].discard(frozenset(s.uids))
+            choices, ask_comp = [], comp
+        label = "+".join([surface.cfg_cluster] + [s.world for s in choices])
+        if choices:
+            union_specs = list({b.behaviour_id: b for b in (
+                list(behaviour_specs) + [b for p in peers for b in p.behaviour_specs])}.values())
+            pins = list({b.behaviour_id: b for b in (
+                pins + [b for s, p in _side_peers(choices, peers) for b in p.select_pins(s.comp)])
+                         }.values())
+            behaviours = select_component_behaviours(
+                union_specs, component_names=tuple(i.name for i in ask_comp),
+                public_types=_pinned_public_types(surface, comp),
+                cap=None)[:COMPONENT_BEHAVIOUR_CAP]
+            for s, p in _side_peers(choices, peers):
+                for u, a in _public_anchors(p.surface, s.comp).items():
+                    anchors.setdefault(u, a)
+            paths_note = field_path_requirements_text(_component_field_paths(ask_comp, oracle))
+            derives_note = _confirmed_derives_note(label, names, ask_comp, frozen_tests, deps)
+            deps.log(f"  [t1.5] {label}/{names}: one ask over "
+                     f"{len(ask_comp)} item(s) for {len(choices) + 1} world(s); each "
+                     "attempt's reply is compiled in every world.")
+        # Partly covered: the model must EXTEND the fixed definitions (adding
+        # what this cluster's cfg needs), never redesign them — so it gets their
+        # exact current text and an instruction to reproduce it verbatim.
+        fixed = [registry[u] for u in component_uids(ask_comp) if registry and u in registry]
+        shared = ("\n\nThese definitions are ALREADY FIXED for this crate by "
+                  "another cfg-cluster. Reproduce each one EXACTLY as given and "
+                  "design only the remaining items around them:\n"
+                  + shared_definitions_text(fixed)) if fixed and adopted_none else ""
+
+        def _prompt(chunk_items: tuple[PrivateSurfaceItem, ...],
+                    chunk_uids: tuple[str, ...], scheme: str, hint: str,
+                    *, _pins: list[BehaviourSpec] = pins,
+                    _behaviours: list[BehaviourSpec] = behaviours,
+                    _anchors: dict[str, str] = anchors,
+                    _shared: str = shared, _paths: str = paths_note,
+                    _derives: str = derives_note,
+                    _members: str = members_note,
+                    _label: str = label) -> str:
+            return build_layout_authoring_prompt(
+                module_name=module_name, cfg_cluster=_label,
+                items=chunk_items, public_surface=public_surface,
+                layout_pins=_pins, symbol_inventory=symbol_inventory,
+                extra_guidance=(extra_guidance + _shared + _paths + _derives
+                                + _members),
+                authored_scheme=scheme,
+                item_uids=chunk_uids, item_anchors=_anchors,
+                behaviours=_behaviours) + hint
+        return _AskShape(ask_comp, label, _prompt, list(choices), anchors)
+
+    comps = list(surface.components)
+    prefetch = _Prefetch(deps.lanes)
+    planned_until = 0
+
+    def _plan_ahead(start: int) -> int:
+        """Ask ahead, in surface order from `start`, every component whose
+        turn will ask: up to the first that may be adopted (whether that
+        commits decides which peer components it claims, so what follows it
+        is planned after its turn). Returns where planning stopped."""
+        claim = {w: set(v) for w, v in claimed.items()}
+        quiet = replace(deps, log=lambda _m: None)
+        for j in range(start, len(comps)):
+            comp = comps[j]
+            if handled and handled.get(frozenset(component_uids(comp))) is not None:
+                continue
+            pins = select_pins(comp)
+            if not pins and surface.component_is_layout_sensitive(comp):
+                continue
+            uids = component_uids(comp)
+            if adopt_component(uids, registry or {}) is not None:
+                return j
+            choices = _choose_peer_sides(comp, uids, peers, claim, registry or {})
+            shape = _shape(comp, tuple(i.name for i in comp), pins, uids, choices, claim,
+                           adopted_none=True, deps=quiet)
+            prefetch.submit(j, shape, deps)
+        return len(comps)
+
+    try:
+        for idx, comp in enumerate(comps):
+            if prefetch.enabled and idx >= planned_until:
+                planned_until = max(idx + 1, _plan_ahead(idx))
+            result = _settle(idx, comp)
+            if result is not None:
+                results.append(result)
+    finally:
+        prefetch.close(deps)
     return AuthorLayoutResult(surface.cfg_cluster, tuple(results),
                               peer_results=peer_results)
 
 
-def _side_peers(
-    sides: Sequence[_PeerSide], peers: Sequence[PeerWorld],
-) -> list[tuple[_PeerSide, PeerWorld]]:
+def _side_peers[S: (_PeerSide, _SideChoice)](
+    sides: Sequence[S], peers: Sequence[PeerWorld],
+) -> list[tuple[S, PeerWorld]]:
     by_world = {p.surface.cfg_cluster: p for p in peers}
     return [(s, by_world[s.world]) for s in sides]
 
@@ -756,19 +921,20 @@ def _same_text(
     return all(other[u].definition == it.definition for u, it in a if u in other)
 
 
-def _peer_sides(
+def _choose_peer_sides(
     comp: tuple[PrivateSurfaceItem, ...],
     uids: tuple[str, ...],
     peers: Sequence[PeerWorld],
     claimed: dict[str, set[frozenset[str]]],
     registry: Mapping[str, AuthoredItem],
-    deps: AuthorLayoutDeps,
-) -> list[_PeerSide]:
+) -> list[_SideChoice]:
     """Each peer's component that shares the most item ids with `comp`, when
     that component would be authored in its own pass: not gated there for a
     harvest gap, and not fully covered by the registry (adoption comes first
-    there, as it does here). A peer component is claimed once."""
-    sides: list[_PeerSide] = []
+    there, as it does here). A peer component is claimed once. Reads only the
+    peers' surfaces and pins: the calibration that compiles in the peer's
+    skeleton is `_calibrate_side`, at the component's turn."""
+    sides: list[_SideChoice] = []
     mine = set(uids)
     for p in peers:
         world = p.surface.cfg_cluster
@@ -788,14 +954,22 @@ def _peer_sides(
         if adopt_component(pu, registry) is not None:
             continue
         claimed[world].add(frozenset(pu))
-        poracle = _oracle_sources(p.deps)
-        gate = LayoutGate(
-            root=_calibrated_pin_probe(p.surface, pc, ppins, p.deps),
-            in_file=_calibrated_field_path_probes(
-                p.surface, pc, _component_field_paths(pc, poracle), p.deps))
-        sides.append(_PeerSide(world, p.deps, pc, pu, gate,
-                               {f: p.deps.read_skeleton(f) for f in {i.file for i in pc}}))
+        sides.append(_SideChoice(world, pc, pu))
     return sides
+
+
+def _calibrate_side(choice: _SideChoice, peers: Sequence[PeerWorld]) -> _PeerSide:
+    """The chosen peer component's gate, calibrated on the peer's skeleton
+    as it stands at this component's turn, and its pristine files."""
+    p = next(x for x in peers if x.surface.cfg_cluster == choice.world)
+    pc = choice.comp
+    poracle = _oracle_sources(p.deps)
+    gate = LayoutGate(
+        root=_calibrated_pin_probe(p.surface, pc, p.select_pins(pc), p.deps),
+        in_file=_calibrated_field_path_probes(
+            p.surface, pc, _component_field_paths(pc, poracle), p.deps))
+    return _PeerSide(choice.world, p.deps, pc, choice.uids, gate,
+                     {f: p.deps.read_skeleton(f) for f in {i.file for i in pc}})
 
 
 def _restore_side(side: _PeerSide) -> None:

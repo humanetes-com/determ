@@ -105,7 +105,7 @@ Pick one lever from "Pick the restart lever by the phase your fix lives in" by t
 
 - driver-half on the existing filled tree (dispatch, hop, attribution, charging, keep/revert, schedule, pair fill, session): `bash pre_run.sh` then `bash continue.sh --y --no-tail`. `bash restart_from.sh task2a` deletes the filled tree, the best-tree snapshot, and that phase's floor, convictions, ask ledger and red ledger, then re-seeds stubs under the current layout. When the phase is already marked done and the filled tree is the measurement, `bash restart_from.sh task2a --force --keep-fills` instead (anyhow).
 - construction of the tree (t1.5 layout, bake, strip, FR synthesis): `bash pre_run.sh` then `bash redo.sh --full --force`. A tree built by the old code cannot measure this class.
-- hardcrate recovery smoke: `bash pre_run.sh` then `bash run_hardcrate.sh`. Add `--from=STAGE` only when the fills in tmp/hardcrate are the state the reading needs.
+- hardcrate recovery smoke: `bash pre_run.sh` then `bash run_hardcrate.sh`. Add `--from=STAGE` only when the fills in tmp/hardcrate are the state the reading needs. A fill-phase change read on fill 1 needs stubs: `bash run_hardcrate.sh --from=t2a --drop-fills` (a resume without `--drop-fills` on a tree the last run left green closes task 2a on its first sweep).
 - stop only, no relaunch: `touch /tmp/pipeline_graceful_stop`.
 
 Never wrap any of these in timeout. `--no-tail` is required on continue.sh. The launch command is the last fact of the implementation reply, after last_commit_message.txt.
@@ -311,6 +311,45 @@ plan named as a target; a walk script that gets an empty join and moves on
 (records enumerated from `src/` carry `error.rs`, the loop's carry
 `src/error.rs` — an empty intersection is a rooting bug, not a no-op). On
 any of them, run the fixture.
+
+## A reading taken to check reasoning goes into the debt entry it bears on
+
+A reading is any measurement that confirms or refutes a claim: a dry or
+live replay, a fixture computed on live records, a query over events or
+ledgers, a test binary run against a checkpoint, a mutation check, a
+negative control. Whenever one is taken, the debt entry it bears on gets the
+reading, in the same turn that took it. If the reading changes nothing in
+the plan, it still goes in, as evidence.
+
+**The rule, checkable.** The entry gains three things. First, the command,
+exactly as run. Second, its output, quoted: the lines the conclusion rests
+on, not a paraphrase. Third, the verdict: on-theory, off-theory, or a
+refutation of a named sentence of the plan or of an addendum. The reading is
+appended under the entry. The plan text and the scheduled Reading are never
+edited to absorb it. A reading quoted only in the chat does not count. The
+chat scrolls away; the tracker is what the next session and the user's
+review read.
+
+**Why.** A reading that lives only in the conversation has to be taken
+again by the next session. Without it, a review cannot tell a claim that
+was computed from one that was described, which is the failure the fixture
+section above exists to stop. The entry is where the class is judged, so the
+evidence for and against it belongs there.
+
+**The instance, 2026-11-06, run `3198683-b5e39b06`.** Validating the
+undetermined-slot change took several readings. The replay's dry run filed 8
+chunks and 0 unfiled predictions. The set judge on the recorded replies
+reproduced the logged 1 kept and 2 of 38 covered. The rebuilt prompts
+matched the recorded ones up to the new slot. Two mutation checks failed the
+expected tests. The dry run, the reproduction and the mutation results went
+into the entry. The prompt-prefix check ran from a scratchpad script, and
+its result reached the tracker only as one line of the replay's output. The
+user asked for this rule.
+
+**The tells.** "Verified" or "the replay confirms" in the chat with no
+quoted output in the entry; a reading taken from a scratchpad script whose
+command is not in the tracker; an addendum that cites a number nobody can
+re-derive from a command in the entry.
 
 ## The most correct fix, never the cheapest — this project is pre-launch and exists to validate a theory
 
@@ -1726,7 +1765,9 @@ to in `.skeleton/<cluster>/src`.
   in `tmp/hardcrate`, same t1…t4 vocabulary via the shared
   `lib/restart_from_lib.sh`. Without `--from` it re-assembles the crate and
   `rm -rf`s the workspace; with `--from` it clears phase entries only and
-  keeps the fills. It does not call the anyhow task2a product drop. Requires
+  keeps the fills. `--drop-fills` (only with `--from=t2` / `--from=t2a`) first
+  runs the same task2a product drop `restart_from.sh task2a` runs on anyhow,
+  and moves `logs/body_ledger/hardcrate` aside (renamed, never deleted), so the cluster-entry re-seed cannot put the proven bodies back and the fill starts on stubs. Requires
   vLLM already up on :8000.
 - **`bash redo.sh [--force] [--full]`** — wipes `.skeleton-filled` and
   re-runs strip, task1 and the layout bake: it relaunches

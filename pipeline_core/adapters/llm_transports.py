@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from pipeline_core.domain.model_profile import (
+    EffortLevel,
     ModelKnobs,
     ReasoningDialect,
     profile_for,
@@ -118,20 +119,21 @@ def _model_reasoning_dialect(model: str) -> str:
     return (prof.dialect if prof is not None else ReasoningDialect.ENABLE_THINKING).value
 
 
-def reasoning_template_kwargs(model: str, enable_thinking: bool) -> dict[str, Any]:
-    """The `chat_template_kwargs` payload that asks `model` for (no) reasoning.
+def reasoning_template_kwargs(model: str, enable_thinking: bool, *,
+                              effort: EffortLevel) -> dict[str, Any]:
+    """The `chat_template_kwargs` payload that asks `model` for (no) reasoning
+    at `effort`.
 
-    In the strength dialect there is no "off": the levels are low / medium /
-    high / xhigh, so a request that wants no reasoning asks for the least.
-    Both rungs resolve env → profile → default (`VLLM_REASONING_STRENGTH`,
-    `VLLM_REASONING_STRENGTH_OFF`). In the boolean dialect a thinking
-    request carries the depth `VLLM_REASONING_EFFORT` resolves to, when one
-    does."""
+    The level's word resolves env → profile → default
+    (`VLLM_EFFORT_WORD_<LEVEL>`, `ModelProfile.effort_words`). In the
+    strength dialect there is no "off": a request that wants no reasoning
+    asks for `VLLM_REASONING_STRENGTH_OFF`, the least. In the boolean
+    dialect a thinking request carries the level's word as
+    `reasoning_effort`."""
     knobs = resolve_model_knobs(os.environ, model)
     return dict(model_reasoning_payload(
         ReasoningDialect(_model_reasoning_dialect(model)), enable_thinking,
-        strength_on=knobs.strength_on, strength_off=knobs.strength_off,
-        effort=knobs.reasoning_effort))
+        effort_word=knobs.effort_word(effort), strength_off=knobs.strength_off))
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +155,7 @@ class _BaseTransport:
 
     def __init__(self) -> None:
         self._state = BudgetState()
+        self._told_level: set[EffortLevel] = set()
 
     def budget_state(self) -> BudgetState:
         return self._state
@@ -161,11 +164,26 @@ class _BaseTransport:
         return False
 
     def count_input_tokens(self, messages: list[dict[str, Any]], *,
-                           enable_thinking: bool) -> int | None:
+                           enable_thinking: bool,
+                           effort: EffortLevel) -> int | None:
         return None
 
-    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
+    def reasoning_payload(self, enable_thinking: bool, *,
+                          effort: EffortLevel) -> dict[str, Any]:
         return {}
+
+    def _level_inexpressible(self, effort: EffortLevel) -> None:
+        """A transport with no request field for the level says so once per
+        level and streams at the server's own depth. Only a level below MAX
+        is a difference worth naming: MAX is what these servers did before
+        the level existed."""
+        if effort is EffortLevel.MAX or effort in self._told_level:
+            return
+        self._told_level.add(effort)
+        _guard("llm/effort_inexpressible",
+               f"{type(self).__name__} has no request field for a reasoning "
+               f"level; calls asked at {effort.value} run at the server's "
+               "own depth")
 
     def followup_messages(self, base_messages: list[dict[str, Any]], reasoning_text: str,
                           *, model: str) -> list[dict[str, Any]]:
@@ -283,21 +301,6 @@ VLLM_CEILING_TRUNCATIONS_MAX_TOKENS = 32_768
 # Natural finishes of prompts that the 120,000 cap had cut (2026-09-21):
 VLLM_UNCAPPED_NATURAL_FINISHES_CHARS: tuple[int, ...] = (
     155_176, 96_368, 93_740, 127_950, 101_209, 140_765, 159_457)
-
-
-def reasoning_budget_is_per_call(value: str) -> bool:
-    """`VLLM_REASONING_BUDGET` → True for `per_call`, False for `fixed`.
-
-    Anything else raises: a typo silently falling back to `fixed` would put the
-    run back under the character cap the operator meant to remove, and the
-    only symptom is the cut rate the knob was set to end."""
-    v = value.strip().lower()
-    if v in ("per_call", "per-call"):
-        return True
-    if v in ("fixed", ""):
-        return False
-    raise ValueError(
-        f"VLLM_REASONING_BUDGET={value!r}: expected 'fixed' or 'per_call'")
 
 
 
@@ -444,7 +447,7 @@ class OllamaTransport(_BaseTransport):
         self._num_ctx = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
         self.served_model = MODEL
 
-    def spec(self) -> BudgetSpec:
+    def spec(self, *, effort: EffortLevel) -> BudgetSpec:
         return BudgetSpec(
             ctx_len=self._num_ctx, content_budget=0, thinking_budget=0, margin=256,
             cpt_floor=3.5, adaptive_cpt=False, add_thinking_to_request=False,
@@ -456,7 +459,11 @@ class OllamaTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
+               meta: StreamMeta, effort: EffortLevel,
+               temperature: float | None = None) -> Iterator[Delta]:
+        # Ollama's native `think` is a boolean and the compat path sends no
+        # template kwargs: neither can carry a level.
+        self._level_inexpressible(effort)
         if _model_use_native_ollama(model):
             yield from self._stream_native(messages, model, enable_thinking, meta, temperature)
         else:
@@ -594,7 +601,7 @@ class HuggingFaceTransport(_BaseTransport):
         self._model: Any = None
         self._tokenizer: Any = None
 
-    def spec(self) -> BudgetSpec:
+    def spec(self, *, effort: EffortLevel) -> BudgetSpec:
         return BudgetSpec(
             ctx_len=_UNBOUNDED_CTX, content_budget=0, thinking_budget=0, margin=0,
             cpt_floor=3.0, adaptive_cpt=False, add_thinking_to_request=False,
@@ -636,7 +643,10 @@ class HuggingFaceTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
+               meta: StreamMeta, effort: EffortLevel,
+               temperature: float | None = None) -> Iterator[Delta]:
+        # The chat template is applied locally with no template variables.
+        self._level_inexpressible(effort)
         self._load()
         import torch
 
@@ -681,7 +691,7 @@ class SGLangTransport(_BaseTransport):
         self.served_model = self._model_name
         self._thinking_budget = int(os.getenv("SGLANG_THINKING_BUDGET", "8192"))
 
-    def spec(self) -> BudgetSpec:
+    def spec(self, *, effort: EffortLevel) -> BudgetSpec:
         return BudgetSpec(
             ctx_len=_UNBOUNDED_CTX, content_budget=0, thinking_budget=0, margin=0,
             cpt_floor=3.0, adaptive_cpt=False, add_thinking_to_request=False,
@@ -693,7 +703,10 @@ class SGLangTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
+               meta: StreamMeta, effort: EffortLevel,
+               temperature: float | None = None) -> Iterator[Delta]:
+        # SGLang is sent a thinking budget, no template kwargs.
+        self._level_inexpressible(effort)
         from openai import APIConnectionError, OpenAI
         client = OpenAI(base_url=self._base_url, api_key="sglang", timeout=120)
         extra_body: dict[str, Any] = {}
@@ -793,11 +806,13 @@ class VLLMTransport(_BaseTransport):
     Environment variables:
       VLLM_BASE_URL, VLLM_MODEL_NAME, VLLM_MAX_MODEL_LEN, VLLM_THINKING_BUDGET,
       VLLM_CONTENT_BUDGET, VLLM_REPETITION_PENALTY, VLLM_REASONING_BUDGET,
-      VLLM_MAX_THINK_CHARS, VLLM_REASONING_EFFORT
+      VLLM_MAX_THINK_CHARS, VLLM_EFFORT_WORD_MEDIUM, VLLM_EFFORT_WORD_MAX
 
-    VLLM_REPETITION_PENALTY and VLLM_REASONING_EFFORT resolve env → the
-    served model's profile → default, so switching MODEL switches them;
-    leave them out of `.env` unless overriding one model on purpose.
+    VLLM_REPETITION_PENALTY and the level words resolve env → the served
+    model's profile → default, so switching MODEL switches them; leave them
+    out of `.env` unless calibrating a word on purpose. Which level a call is
+    sent at is `pipeline_core.effort`'s decision, passed to every method
+    that plans or renders the call.
 
     VLLM_REASONING_BUDGET selects the reasoning shape (`llm/budget.py`):
     `fixed` (the default) reserves VLLM_THINKING_BUDGET tokens per call and
@@ -820,16 +835,18 @@ class VLLMTransport(_BaseTransport):
         self._knobs: ModelKnobs = resolve_model_knobs(os.environ, self._model_name)
         self._ctx = self._knobs.max_model_len
         self._thinking_budget = self._knobs.thinking_budget
-        self._content_budget = int(os.getenv("VLLM_CONTENT_BUDGET", "16384"))
+        self._content_budget = self._knobs.content_budget
         # env → profile → default, like the knobs above: switching MODEL
         # switches the penalty with it.
         self._rep_penalty = self._knobs.repetition_penalty
-        self._per_call_reasoning = reasoning_budget_is_per_call(self._knobs.reasoning_budget)
+        self._per_call_reasoning = self._knobs.per_call
 
     def count_input_tokens(self, messages: list[dict[str, Any]], *,
-                           enable_thinking: bool) -> int | None:
+                           enable_thinking: bool,
+                           effort: EffortLevel) -> int | None:
         """vLLM's own `/tokenize` over the chat messages with the same
-        template kwargs the request sends, so the count is the one the
+        template kwargs the request sends — the level's word included, which
+        the template renders into the prompt — so the count is the one the
         server validates against the context.
 
         Why: a 400 is the only other source and it carries no count. vLLM
@@ -849,7 +866,7 @@ class VLLMTransport(_BaseTransport):
             "model": self._model_name, "messages": messages,
             "add_generation_prompt": True,
             "chat_template_kwargs": reasoning_template_kwargs(
-                self._model_name, enable_thinking),
+                self._model_name, enable_thinking, effort=effort),
         }
         try:
             r = httpx.post(f"{root}/tokenize", json=payload, timeout=30.0)
@@ -859,22 +876,28 @@ class VLLMTransport(_BaseTransport):
             return None
         return int(count) if isinstance(count, int) and count > 0 else None
 
-    def spec(self) -> BudgetSpec:
+    def spec(self, *, effort: EffortLevel) -> BudgetSpec:
+        # The reserve and the runaway cap are the level's own calibration
+        # when one was measured at it, else the profile's base values
+        # (measured at MAX); `ModelKnobs.thinking_budget_at`.
         return BudgetSpec(
             ctx_len=self._ctx, content_budget=self._content_budget,
-            thinking_budget=self._thinking_budget, margin=512, cpt_floor=3.0,
+            thinking_budget=self._knobs.thinking_budget_at(effort),
+            margin=512, cpt_floor=3.0,
             adaptive_cpt=True, add_thinking_to_request=True, cap_by_ctx=True,
             send_max_tokens=True, thinking_char_cap=self._knobs.max_think_chars,
             per_call_reasoning=self._per_call_reasoning,
-            per_call_char_cap=self._knobs.runaway_think_chars,
+            per_call_char_cap=self._knobs.runaway_think_chars_at(effort),
         )
 
     def resolve_thinking(self, model: str, want_think: bool | None) -> bool:
         base = _model_uses_think(self._model_name) if want_think is None else want_think
         return base and self._thinking_budget > 0
 
-    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
-        return reasoning_template_kwargs(self._model_name, enable_thinking)
+    def reasoning_payload(self, enable_thinking: bool, *,
+                          effort: EffortLevel) -> dict[str, Any]:
+        return reasoning_template_kwargs(self._model_name, enable_thinking,
+                                         effort=effort)
 
     def _reasoning_delta(self, reasoning: str, enable_thinking: bool) -> Delta:
         """Which channel this server's reasoning-field text belongs on.
@@ -909,7 +932,8 @@ class VLLMTransport(_BaseTransport):
 
     def stream(self, messages: list[dict[str, Any]], *, model: str,
                max_tokens: int | None, enable_thinking: bool,
-               meta: StreamMeta, temperature: float | None = None) -> Iterator[Delta]:
+               meta: StreamMeta, effort: EffortLevel,
+               temperature: float | None = None) -> Iterator[Delta]:
         # `Timeout` comes from the SDK, not from our own `httpx` import: openai
         # re-exports whichever httpx flavour it was built against, and the two are
         # not interchangeable. An SDK resolved on the httpx 2.x distribution
@@ -922,7 +946,8 @@ class VLLMTransport(_BaseTransport):
         client = OpenAI(base_url=self._base_url, api_key="vllm",
                         timeout=Timeout(connect=30, read=900, write=30, pool=30))
         extra_body: dict[str, Any] = {
-            "chat_template_kwargs": reasoning_template_kwargs(self._model_name, enable_thinking),
+            "chat_template_kwargs": reasoning_template_kwargs(
+                self._model_name, enable_thinking, effort=effort),
             "repetition_penalty": self._rep_penalty,
         }
         try:

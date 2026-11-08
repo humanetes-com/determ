@@ -50,6 +50,7 @@ from pipeline_core.domain.models import (
 from pipeline_core.domain.oracle_immutability import is_oracle_path
 from pipeline_core.domain.rust_idents import (
     ascii_word_tokens,
+    canon_container,
     impl_self_type,
     impl_trait_name,
     is_compile_fail_test_source,
@@ -151,6 +152,46 @@ def make_fn_locator(
         return None if hit is None else FnLocator(hit[0], hit[1]["fn_name"])
 
     return locate
+
+
+def make_untouched_arm_probe(
+    structure: Any, src_dir: Path,
+) -> Callable[[str, int], bool]:
+    """``(panic_file, panic_line) -> bool`` — the line lies in a definition
+    that still holds the skeleton's whole-body stub (the extractor's
+    `has_unimplemented_body`) while another definition of the same site
+    (file, name, container; complementary `#[cfg]` arms share one) holds a
+    real body. That definition is a body no write of the site has produced
+    yet, so the keep gate's partition counts its stub panic as a still-stubbed
+    sibling's (`test_report.UnitScope`). A site with one definition never
+    answers True, so a reply that is itself a stub stays the unit's own
+    failure. Read on the tree after the splice, like the site locator."""
+    core = _make_record_locator(structure, src_dir)
+    by_site: dict[tuple[str, str, str], list[dict[str, Any]]] | None = None
+
+    def _sites() -> dict[tuple[str, str, str], list[dict[str, Any]]]:
+        nonlocal by_site
+        if by_site is None:
+            by_site = {}
+            for r in structure.enumerate_fns(src_dir) or []:
+                key = (r.get("file", ""), r.get("fn_name", ""),
+                       canon_container(r.get("container", "") or ""))
+                by_site.setdefault(key, []).append(r)
+        return by_site
+
+    def probe(panic_file: str, panic_line: int) -> bool:
+        hit = core(panic_file, panic_line)
+        if hit is None:
+            return False
+        rel, rec = hit
+        if not rec.get("has_unimplemented_body"):
+            return False
+        arms = _sites().get(
+            (rel, rec["fn_name"],
+             canon_container(rec.get("container", "") or "")), [])
+        return any(not a.get("has_unimplemented_body") for a in arms)
+
+    return probe
 
 
 def make_fn_site_locator(

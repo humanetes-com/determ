@@ -55,7 +55,8 @@ class FakeTransport:
         self._thinking = thinking
         self.calls: list[dict] = []
 
-    def spec(self):
+    def spec(self, *, effort=None):
+        self.spec_effort = effort
         return self._spec
 
     def budget_state(self):
@@ -64,18 +65,20 @@ class FakeTransport:
     def resolve_thinking(self, model, want_think):
         return self._thinking if want_think is None else want_think
 
-    def count_input_tokens(self, messages, *, enable_thinking):
+    def count_input_tokens(self, messages, *, enable_thinking, effort=None):
         self.count_calls += 1
         return self._counted
 
-    def reasoning_payload(self, enable_thinking):
-        return {"enable_thinking": enable_thinking}
+    def reasoning_payload(self, enable_thinking, *, effort=None):
+        return {"enable_thinking": enable_thinking,
+                **({"effort": effort.value} if effort is not None else {})}
 
     def stream(self, messages, *, model, max_tokens, enable_thinking, meta: StreamMeta,
-               temperature: float | None = None) -> Iterator[Delta]:
+               effort=None, temperature: float | None = None) -> Iterator[Delta]:
         idx = len(self.calls)
         self.calls.append({"messages": messages, "max_tokens": max_tokens,
-                           "enable_thinking": enable_thinking, "temperature": temperature})
+                           "enable_thinking": enable_thinking, "temperature": temperature,
+                           "effort": effort})
         resp = self._responses[idx]
         if isinstance(resp, Exception):
             raise resp
@@ -267,14 +270,14 @@ class _ThresholdServer(FakeTransport):
         self._true = true_input
 
     def stream(self, messages, *, model, max_tokens, enable_thinking,
-               meta: StreamMeta, temperature: float | None = None):
+               meta: StreamMeta, effort=None, temperature: float | None = None):
         ctx = self._spec.ctx_len
         if max_tokens is not None and self._true + max_tokens > ctx:
             self.calls.append({"max_tokens": max_tokens})
             raise InputTooLong(ctx - max_tokens + 1)
         return super().stream(messages, model=model, max_tokens=max_tokens,
                               enable_thinking=enable_thinking, meta=meta,
-                              temperature=temperature)
+                              effort=effort, temperature=temperature)
 
 
 def test_the_first_request_is_planned_on_the_servers_exact_count():

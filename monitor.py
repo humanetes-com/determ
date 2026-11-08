@@ -371,7 +371,11 @@ def _phase_c_panel_rows(state: dict[str, Any], width: int) -> list[str]:
             _mark = (cyan("▶") if _cn == _active
                      else green("✓") if _cn in _done else dim("·"))
             _short = _cn.replace("anyhow_", "")[:14].ljust(14)
-            _line = (f"             {_mark} {_short} {green(f'pass={_p}')}{_tr}  "
+            _ahead = state.get("tdd_fill_pass") if _cn == _active else None
+            _pass_txt = f"pass={_p}"
+            if isinstance(_ahead, int) and _ahead != _p:
+                _pass_txt += f"(…{_ahead})"
+            _line = (f"             {_mark} {_short} {green(_pass_txt)}{_tr}  "
                      f"{red(f'fail={_f}')}  iter={_cs.get('iter')}  "
                      f"stall={_cs.get('stall')}")
             if len(_h) >= 2:

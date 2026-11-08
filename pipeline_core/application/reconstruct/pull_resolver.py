@@ -29,7 +29,7 @@ from pipeline_core.domain.context_pull import (
     extract_context_pulls,
     window_lines,
 )
-from pipeline_core.domain.prompt_holdings import held_file_answer, read_holdings
+from pipeline_core.domain.prompt_holdings import Holdings, held_file_answer, read_holdings
 from pipeline_core.prompts.pull_menu import (
     render_pull_budget_spent,
     render_pull_followups,
@@ -174,15 +174,8 @@ def resolve_pull(pull: ContextPull, sources: PullSources) -> PullAnswer:
         return PullAnswer(pull, f"lookup failed: {e}", ok=False)
 
 
-#: What one task has already been sent, by request (window included): the
-#: payload bytes. Every caller keeps every answer in the conversation it
-#: re-asks with (the accumulated prompt, the ladder's augmented prompt, the
-#: session transcript), so a byte-identical answer is already above.
-ServedAnswers = dict[ContextPull, str]
-
-
 def _held_whole(pull: ContextPull, sources: PullSources,
-                conversation: str) -> PullAnswer | None:
+                conversation: str, holdings: Holdings) -> PullAnswer | None:
     """The answer to a whole-file request for a file `conversation` already
     carries as a declared whole view: where it is, what was rewritten on disk
     since, and an outline — never the file again. None when the request is
@@ -195,7 +188,7 @@ def _held_whole(pull: ContextPull, sources: PullSources,
     lines, all inactive — so the ask bought the same code plus noise."""
     if pull.kind is not PullKind.FILE or pull.from_line > 1 or not conversation:
         return None
-    held = read_holdings(conversation).whole_view(pull.arg)
+    held = holdings.whole_view(pull.arg)
     if held is None:
         return None
     try:
@@ -207,7 +200,8 @@ def _held_whole(pull: ContextPull, sources: PullSources,
     return PullAnswer(pull, held_file_answer(pull.arg, held, disk))
 
 
-def _note_shown_type(answer: PullAnswer, conversation: str) -> PullAnswer:
+def _note_shown_type(answer: PullAnswer, conversation: str,
+                     holdings: Holdings) -> PullAnswer:
     """A type_def answer for a type the conversation's TYPES_IN_SCOPE already
     defines says so first. The definition is still sent — it is short, and
     the model asked because it did not find it — but the next ask for a
@@ -216,7 +210,7 @@ def _note_shown_type(answer: PullAnswer, conversation: str) -> PullAnswer:
     type the prompt had rendered."""
     if (answer.pull.kind is not PullKind.TYPE_DEF or not answer.ok
             or not conversation
-            or answer.pull.arg not in read_holdings(conversation).types):
+            or answer.pull.arg not in holdings.types):
         return answer
     return replace(answer, payload=(
         f"({answer.pull.arg} is already defined in TYPES_IN_SCOPE above; "
@@ -228,7 +222,6 @@ def _answer_affordable(
     pulls: Sequence[ContextPull],
     budget: PullBudget,
     sources: PullSources,
-    served: ServedAnswers,
     *,
     log: Callable[[str], None],
     emit: Callable[..., None],
@@ -237,26 +230,28 @@ def _answer_affordable(
     """Answer `pulls` in document order for as long as `budget` lasts.
 
     Returns the answers each paired with whether it REPEATS a byte-identical
-    answer already served in this task, the reduced budget, and the requests
+    answer `conversation` already delivered, the reduced budget, and the requests
     the budget could not reach. Every ANSWERED request costs one unit, repeats
     included, so the cap stays a cap on round-trips: batching several into one
     reply buys the model fewer round-trips, never more context, and a model
     re-asking the same thing cannot loop.
 
     `conversation` is everything the model has been sent in this task; a
-    whole-file request for a file it holds whole is answered by `_held_whole`."""
+    whole-file request for a file it holds whole is answered by `_held_whole`.
+    A repeat is read off the same text (`Holdings.delivered`), never off what
+    an earlier call resolved: a caller may drop a resolved follow-up (the
+    session's transcript bound), and only the conversation knows."""
+    holdings = read_holdings(conversation) if conversation else Holdings()
     answers: list[tuple[PullAnswer, bool]] = []
     for i, pull in enumerate(pulls):
         spent = budget.spend()
         if spent is None:
             return answers, budget, tuple(pulls[i:])
         budget = spent
-        held = _held_whole(pull, sources, conversation)
+        held = _held_whole(pull, sources, conversation, holdings)
         answer = held if held is not None else resolve_pull(pull, sources)
-        answer = _note_shown_type(answer, conversation)
-        repeat = answer.ok and served.get(pull) == answer.payload
-        if answer.ok:
-            served[pull] = answer.payload
+        answer = _note_shown_type(answer, conversation, holdings)
+        repeat = answer.ok and holdings.delivered(pull.tag()) == answer.payload
         window = (f", lines {answer.first_line}-{answer.last_line} of "
                   f"{answer.total_lines}" if answer.total_lines else "")
         log(f"  [pull] {pull.tag()} → "
@@ -301,10 +296,10 @@ class ConversationRequests:
     which says nothing about the spent budget, so the model asks again.
 
     `open_turn` restores the budget for the next turn the caller opens (a
-    fill's retry is a new question and may ask again); answers already
-    served stay served for the conversation's lifetime, so a byte-identical
-    answer is flagged as a repeat instead of re-sent unnoticed. A session
-    never calls it: its budget is the session's."""
+    fill's retry is a new question and may ask again). Whether an answer is
+    a repeat is read from the `conversation` each call is handed, so it
+    holds whatever the caller did with an earlier follow-up. A session
+    never calls `open_turn`: its budget is the session's."""
 
     def __init__(self, sources: PullSources, *, log: Callable[[str], None],
                  emit: Callable[..., None], max_pulls: int = 2) -> None:
@@ -314,7 +309,6 @@ class ConversationRequests:
         self._max = max_pulls
         self._budget = PullBudget(max_pulls)
         self._warned = False
-        self._served: ServedAnswers = {}
 
     @property
     def sources(self) -> PullSources:
@@ -329,7 +323,7 @@ class ConversationRequests:
         if not pulls:
             return None
         answers, self._budget, unanswered = _answer_affordable(
-            pulls, self._budget, self._sources, self._served,
+            pulls, self._budget, self._sources,
             log=self._log, emit=self._emit, conversation=conversation)
         if answers:
             return render_pull_followups(answers)

@@ -414,6 +414,16 @@ class FnRecord:
     # `domain.reference_graph` resolves them. Empty for records written
     # before the extractor emitted them.
     refs: tuple[FnRef, ...] = ()
+    # The whole fn item as written (outer attributes and docs through the
+    # closing brace), and its enclosing impl block the same way (0..0 when
+    # not an impl method). The end gate deletes these ranges on a scratch copy
+    # to ask rustc whether anything needs the item (`domain.stub_removal`).
+    # 0..0 on records written before the extractor emitted them: no range,
+    # nothing removable.
+    item_byte_start: int = 0
+    item_byte_end: int = 0
+    impl_byte_start: int = 0
+    impl_byte_end: int = 0
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> FnRecord:
@@ -435,6 +445,10 @@ class FnRecord:
             is_test=bool(d.get("is_test", False)),
             refs=tuple(FnRef.from_dict(r) for r in d.get("refs") or ()
                        if isinstance(r, dict)),
+            item_byte_start=int(d.get("item_byte_start", 0) or 0),
+            item_byte_end=int(d.get("item_byte_end", 0) or 0),
+            impl_byte_start=int(d.get("impl_byte_start", 0) or 0),
+            impl_byte_end=int(d.get("impl_byte_end", 0) or 0),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -455,6 +469,10 @@ class FnRecord:
             "has_unimplemented_body": self.has_unimplemented_body,
             "is_test": self.is_test,
             "refs": [r.to_dict() for r in self.refs],
+            "item_byte_start": self.item_byte_start,
+            "item_byte_end": self.item_byte_end,
+            "impl_byte_start": self.impl_byte_start,
+            "impl_byte_end": self.impl_byte_end,
         }
 
 

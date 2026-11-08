@@ -79,6 +79,7 @@ from pipeline_core.domain.test_outcome import (
     standing_in,
     test_leaf,
 )
+from pipeline_core.effort import EffortLevel, call_effort, effort_scope
 
 __all__ = ["FillExecution", "FillExecutionDeps", "execute_fill"]
 
@@ -149,6 +150,11 @@ class FillExecutionDeps:
     #: function owed on the session rung is covered only by an opened
     #: session run. Empty: every owed function is owed on the unit rung.
     due_rungs: Mapping[FnLocator, str] = field(default_factory=dict)
+    #: The owed functions some red test owes at the maximum reasoning level
+    #: (`DueReading.max_units`): a run holding one is sent at the maximum
+    #: (`fill_schedule.carve_levels`). Applied whether or not the fill is
+    #: scheduled: the level is the ask's, not the ranking's.
+    max_units: frozenset[FnLocator] = frozenset()
     #: The body ledger's per-unit verdicts (`fill_schedule.UnitEvidence`):
     #: every unit-writing run is ranked on its units' own graded landings.
     #: None keeps the route-row reading (no body ledger on this driver).
@@ -682,6 +688,15 @@ def _pairs(locs: frozenset[FnLocator]) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((loc.file, loc.fn_name) for loc in locs))
 
 
+def run_effort(run: RouteRun) -> EffortLevel:
+    """The level `run`'s calls are sent at: the maximum when a target is
+    owed at it (`RouteRun.escalated`), else the policy's level for the phase
+    the fill runs in. The same rule `_run_one` scopes the run's calls by, so
+    the row says what the calls were sent at."""
+    with effort_scope(EffortLevel.MAX if run.escalated else None):
+        return call_effort()
+
+
 _Kept = tuple[int, tuple[str, ...], tuple[str, ...], tuple[str, ...],
              tuple[str, ...] | None, tuple[tuple[str, str], ...] | None]
 
@@ -734,7 +749,8 @@ def _row_for(
         joint_outcome=(rep.joint_outcome
                        or (UNJUDGED_WRITE_REASON if s.run.joint and unjudged
                            else "")),
-        joint_repaired=rep.joint_repaired)
+        joint_repaired=rep.joint_repaired,
+        effort=run_effort(s.run).value, escalated=s.run.escalated)
 
 
 def _finished_keys(
@@ -1016,6 +1032,7 @@ def _schedule_inputs(deps: FillExecutionDeps,
         "max_per_kind": (
             {k.value: v for k, v in (deps.max_per_kind or {}).items()}
             if scheduled else {}),
+        "max_units": sorted(f"{u.file}::{u.fn_name}" for u in deps.max_units),
     }
     if scheduled and any((deps.owner_admitted, deps.owner_ordered,
                           deps.owner_batch, deps.owner_starved)):
@@ -1147,7 +1164,8 @@ def execute_fill(
         bodies_sha=bodies_sha,
         unit_evidence=deps.unit_evidence if deps.scheduled else None,
         due=deps.due if deps.scheduled else (),
-        due_rungs=deps.due_rungs if deps.scheduled else None)
+        due_rungs=deps.due_rungs if deps.scheduled else None,
+        max_units=deps.max_units)
     deps.log(
         f"  [phase-c/schedule] fill {deps.iteration}: {len(sched.ordered)} "
         f"run(s) — {sched.render()}"
@@ -1537,8 +1555,11 @@ def execute_fill(
             # The targets' bodies as THIS run opens on them — not the plan's
             # sha, which an earlier run of the same fill may have moved.
             _before[w.run.key] = bodies_sha(w.run.targets)
+            # Every call of the run, its pooled units' included (they
+            # continue this context), is sent at the run's level.
             with route_scope(w.run.kind.value, w.run.label,
-                             cluster=deps.cluster, iteration=deps.iteration):
+                             cluster=deps.cluster, iteration=deps.iteration), \
+                    effort_scope(EffortLevel.MAX if w.run.escalated else None):
                 # The stream rows of the calls THIS run makes, so a run
                 # whose every fill reply was cut mid-deliberation is graded
                 # UNMEASURED rather than FLAT. The observer is bound here

@@ -456,10 +456,7 @@ def score_row(state: dict[str, Any]) -> str | None:
     # fill measures the tree too (`phase_c.fill.reading`), and on run
     # `24951-a72c4642` (2026-09-29) that read 182 for an hour while the row
     # said 175; the sweep that makes it official is a fill away.
-    ahead = state.get("tdd_fill_pass")
-    if isinstance(ahead, int) and ahead != passed:
-        note = f"(on next sweep {ahead})"
-        seg.append(green(note) if ahead > passed else red(note))
+    # The in-fill reading is shown beside pass= on the cluster row (monitor.py).
     hist = state.get("tdd_pass_hist") or []
     if len(hist) >= 2:
         delta = hist[-1] - hist[-2]

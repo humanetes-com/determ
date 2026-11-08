@@ -32,6 +32,7 @@ from pipeline_core.adapters.llm_transports import (
     VLLM_UNCAPPED_NATURAL_FINISHES_CHARS,
     VLLMTransport,
 )
+from pipeline_core.domain.model_profile import EffortLevel
 from pipeline_core.llm import BudgetState, Delta, Hooks, LLMController, StreamMeta
 from pipeline_core.llm.budget import request_max_tokens
 from tests.test_llm_controller import SENTINEL, FakeTransport, _spec
@@ -186,7 +187,7 @@ def test_a_clean_short_reasoning_call_is_untouched(caplog) -> None:
 # 4. the value itself
 # --------------------------------------------------------------------------- #
 def test_vllm_ships_a_cap_at_all() -> None:
-    spec = VLLMTransport().spec()
+    spec = VLLMTransport().spec(effort=EffortLevel.MAX)
     assert spec.thinking_char_cap is not None, \
         "vLLM is uncapped again — this is the 08-08 configuration"
 
@@ -308,7 +309,8 @@ def test_real_stream_leaves_finish_reason_none_on_a_client_side_break(monkeypatc
     ctl, _ = _controller_with_guards()
     captured = ctl._consume(
         VLLMTransport().stream([], model="m", max_tokens=SENTINEL,
-                               enable_thinking=True, meta=meta),
+                               enable_thinking=True, meta=meta,
+                               effort=EffortLevel.MAX),
         CAP, "m")
 
     assert captured.stop == "think_cap"
@@ -330,7 +332,8 @@ def test_real_stream_uncapped_reaches_the_length_finish_reason(monkeypatch) -> N
     ctl, _ = _controller_with_guards()
     captured = ctl._consume(
         VLLMTransport().stream([], model="m", max_tokens=SENTINEL,
-                               enable_thinking=True, meta=meta),
+                               enable_thinking=True, meta=meta,
+                               effort=EffortLevel.MAX),
         None, "m")
 
     assert captured.stop is None
@@ -353,7 +356,8 @@ def test_real_stream_reads_both_reasoning_field_names(monkeypatch) -> None:
     ctl, _ = _controller_with_guards()
     captured = ctl._consume(
         VLLMTransport().stream([], model="m", max_tokens=SENTINEL,
-                               enable_thinking=True, meta=StreamMeta()),
+                               enable_thinking=True, meta=StreamMeta(),
+                               effort=EffortLevel.MAX),
         CAP, "m")
 
     assert captured.stop == "think_cap"

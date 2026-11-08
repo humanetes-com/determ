@@ -14,6 +14,10 @@ from typing import Any
 
 from pipeline_core.application.reconstruct.context import PerFnPassCtx
 from pipeline_core.application.reconstruct.fill_one_fn import FillCaps, FillOneFn
+from pipeline_core.application.reconstruct.fill_rules import (
+    FAILED_ATTEMPT_SENTINEL,
+    RestoredState,
+)
 from pipeline_core.application.reconstruct.phase_c_engine import (
     EngineConfig,
     PhaseCFillEngine,
@@ -68,6 +72,8 @@ class FakeFill:
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def splice_body_scoped(self, *a: Any, **k: Any) -> SpliceOutcome:
         self.s["last_allow_nonstub"] = k.get("allow_nonstub", False)
+        if k.get("allow_stub_body"):
+            self.s.setdefault("annotations", []).append(a)
         return self.s.get("splice", SpliceOutcome(True, "ok", 4))
     def parse_validator(self) -> Any:
         return self.s.get("parse_ok")
@@ -484,6 +490,65 @@ def test_fill_one_empty_response_stops(tmp_path: Path) -> None:
     # No usable body on every attempt → exhausted → annotated stub, not filled.
     assert not res.filled
     assert "phase_c.fn.fill.fail" in fake.events
+
+
+def test_exhausted_refill_restores_its_filled_body_and_writes_no_stub(
+        tmp_path: Path) -> None:
+    # A re-fill starts from a filled body that compiles. When its fix loop
+    # exhausts, the revert restores that body; writing an annotated stub over
+    # it would destroy a kept body, and the scoped splice refuses it
+    # `target_not_stub`. Run pid 1210298 (2026-11-05) logged that refusal as
+    # `ANNOTATE FAILED … exhausted fn not re-stubbed` for `object_drop`, after
+    # "reverting to stub", while the tree held the restored body.
+    ws = _mk_ws(tmp_path)
+    (ws / "src" / "lib.rs").write_text("pub fn answer() {\n 0\n}\n")
+    fake = FakeFill(loc_rec=FnLocation(0, 0, 5, "pub fn answer()", " 0 "),
+                    body=(None, ""))
+    res = _fill_one(fake).run(
+        1, Stub(file="lib.rs", fn_name="answer", refill=True), ctx=_ctx(ws))
+    assert not res.filled
+    assert "phase_c.fn.fill.fail" in fake.events
+    assert fake.s.get("annotations", []) == []
+    assert not any("ANNOTATE FAILED" in m for m in fake.logs)
+    assert any("pre-fill body restored" in m for m in fake.logs)
+    assert not any("stub" in m and "revert" in m for m in fake.logs)
+
+
+def test_exhausted_stub_fill_still_writes_the_annotated_stub(
+        tmp_path: Path) -> None:
+    # Control: a unit that started as a stub goes back to one and carries the
+    # annotated failed attempt, exactly as before.
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(loc_rec=FnLocation(0, 0, 5, "pub fn answer()",
+                                       "unimplemented!()"),
+                    body=(None, ""))
+    res = _fill_one(fake).run(1, Stub(file="lib.rs", fn_name="answer"),
+                              ctx=_ctx(ws))
+    assert not res.filled
+    assert len(fake.s.get("annotations", [])) == 1
+    assert not any("pre-fill body restored" in m for m in fake.logs)
+
+
+def test_restored_state_reads_the_splicers_stub_predicate() -> None:
+    assert RestoredState.of("unimplemented!()") is RestoredState.STUB
+    assert RestoredState.of(
+        f"{FAILED_ATTEMPT_SENTINEL}\n unimplemented!()") is RestoredState.STUB
+    assert RestoredState.of(" Box::from_raw(e); ") is RestoredState.FILLED_BODY
+    assert RestoredState.FILLED_BODY.label == "pre-fill body"
+
+
+def test_salvage_refusal_names_the_restored_filled_body(tmp_path: Path) -> None:
+    ws = _mk_ws(tmp_path)
+    fake = FakeFill(run=(0, ""), regr=_regressed())
+    salvage = CompilingSalvage()
+    salvage.offer("Ok(())", FixProgress(0, 2))
+    ok = _fill_one(fake)._salvage_compiling_body(
+        _ctx(ws), salvage, ws / "src" / "lib.rs", "lib.rs", "answer", "", "",
+        Stub(file="lib.rs", fn_name="answer", refill=True), lambda: True,
+        restores=RestoredState.FILLED_BODY)
+    assert ok is False
+    assert any("reverting to the pre-fill body" in m for m in fake.logs)
+    assert not any("reverting to the stub" in m for m in fake.logs)
 
 
 # ---- PhaseCFillEngine shells ----

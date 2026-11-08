@@ -444,6 +444,15 @@ runs it steered (SILENT: an honoured line on such a unit) and where the
      (`slice_session._joins_without_cost`) a hit is a join whose joined
      turn 0 would have dropped an optional section.
 
+  P57 undelivered repeat — a request answered "repeat — not re-sent" for a
+     tag whose answer was resolved only inside a follow-up the session's
+     transcript bound refused (`requested context … not sent`), with no
+     delivered answer for that tag in between. Run `3323407-984b07f2`
+     (2026-11-08) fill 3: `src/fmt.rs` refused in a 43,477-char follow-up,
+     then asked alone and answered as already sent. Post-fix (the repeat is
+     read off the conversation, `prompt_holdings.Holdings.delivered`) a hit
+     is a new caller that drops a follow-up without the transcript showing it.
+
   P51 unjudged write — a fill's gates judged from a tree no verdict left.
      Two readings. After the fill ground shipped (2026-10-22): any
      `phase_c.fill.unjudged_write` event (the lock restored bytes written
@@ -814,6 +823,7 @@ REACTIONS: dict[str, list[tuple[str, str]]] = {
     "P53": [],
     "P55": [],
     "P56": [],
+    "P57": [],
     "P54": [
         # The packer built the turn 0 and reported the test instead of
         # planning a session that cannot send it.
@@ -3805,6 +3815,55 @@ def detect_p56(run: Run, iters: list[dict]) -> list[dict]:
              "refs": [run.start_ref]}]
 
 
+RE_PULL_LINE = re.compile(r"\[pull\] (<REQUEST [^>]*/>) → (?:ok|unavailable) \((.*)\)$")
+RE_REQUEST_REFUSED = re.compile(r"\[phase-c/session\] [^\n]*: requested context [\d,]+ chars "
+                                r"would carry the transcript past its bound")
+
+
+def p57_undelivered_repeats(texts: list[str]) -> list[str]:
+    """Tags answered as a repeat whose only earlier answer sat in a refused
+    follow-up. The pull lines of one reply are logged together, before the
+    session decides; other lines (the admission line, other lanes) may sit
+    between them and the refusal. So a batch stays open until the refusal
+    line (refused) or the first pull line of the next reply (delivered). A
+    session opening resets."""
+    refused: set[str] = set()
+    delivered: set[str] = set()
+    batch: list[str] = []
+    in_batch = False
+    hits: list[str] = []
+    for text in texts:
+        m = RE_PULL_LINE.search(text)
+        if m:
+            if not in_batch:
+                delivered.update(batch)
+                batch = []
+            in_batch = True
+            tag, detail = m.group(1), m.group(2)
+            if "repeat — not re-sent" in detail and tag in refused \
+                    and tag not in delivered:
+                hits.append(tag)
+            batch.append(tag)
+            continue
+        in_batch = False
+        if RE_REQUEST_REFUSED.search(text):
+            refused.update(batch)
+            batch = []
+        elif RE_SESSION_OPEN.search(text):
+            refused, delivered, batch = set(), set(), []
+    return hits
+
+
+def detect_p57(run: Run, iters: list[dict]) -> list[dict]:
+    """A repeat answer for a request only a refused follow-up carried."""
+    hits = p57_undelivered_repeats([t for _r, t in run.lines])
+    if not hits:
+        return []
+    return [{"evidence": f"{len(hits)} request(s) answered as already sent after "
+                         f"the bound refused them: {', '.join(hits[:4])}",
+             "refs": [run.start_ref]}]
+
+
 def _p26_now() -> float:
     import time
     return time.time()
@@ -3828,7 +3887,7 @@ DETECTORS = {"P1": detect_p1, "P2": detect_p2, "P3": detect_p3,
              "P46": detect_p46, "P47": detect_p47, "P48": detect_p48,
              "P49": detect_p49, "P50": detect_p50, "P51": detect_p51,
              "P52": detect_p52, "P53": detect_p53, "P54": detect_p54,
-             "P55": detect_p55, "P56": detect_p56}
+             "P55": detect_p55, "P56": detect_p56, "P57": detect_p57}
 CLASS_NAMES = {
     "P1": "destroyed-baseline lock", "P2": "blocked-majority spend",
     "P3": "futile aim", "P4": "poisoned evidence", "P5": "limit cycle",
@@ -3876,6 +3935,7 @@ CLASS_NAMES = {
     "P50": "clean gain reverted (a joint route reverted on no strict improvement, bare or naming newly red, right after a positive reading that regressed none and did not itself list newly red; a panics-earlier or aborted clause alone is not this class, nor is a reading that already listed newly red; pre-fix the keep compared bare names, run 14495-a26ad4ea fill 6)",
     "P52": "unseen red test (an owed red test with no observation of it executing on the tree: no measured owner set, no recorded set of a run that started, no crate frame on any crash site, no first failure inside a crate body; pre-fix the loop guessed from the recently-filled ring, run 1947461-b4eb65c3 iters 13-14)",
     "P55": "non-unit crash blame (a crash site blamed a frame named by a segment the compiler synthesized, such as `{closure#0}`, which no record carries and no route can write; pre-fix bare_fn_name took the last path segment, run 19493-36a4e056 iter 1)",
+    "P57": "undelivered repeat (a request answered as already sent whose only earlier answer was in a follow-up the session's transcript bound refused; pre-fix the resolver marked an answer served on resolve, run 3323407-984b07f2 fill 3: src/fmt.rs)",
     "P56": "split equal slices (a session plan held two sessions on the same unit set, asking one question twice under the per-fill session cap; pre-fix the packer joined only at the widest rendering, run 19493-36a4e056 fill 1: four twin pairs)",
     "P54": "unopenable session (a planned session whose turn 0, built when it opened, was over capacity at the narrowest rendering and sent nothing, holding a session slot; pre-fix the packer charged an estimate of the planned units, run 3203804-8c6a0066 fills 3-5: 13 of 19)",
     "P53": "opened run kept untested (a body a run opened on a measured blocker wrote was kept with no scoped test: the gate was handed none of the tests the run carried; pre-fix the run was judged on the sweep's owner sets, run 2129106-ead996ab fill 1: 28 of 28)",

@@ -240,6 +240,12 @@ class RouteRun:
     #: by that try is the flat re-buy the rank would have said had it seen
     #: the move (`fill_scheduler._GroundGate`). Empty for every other run.
     left_red: tuple[tuple[FnLocator, frozenset[str]], ...] = ()
+    #: Every call of this run is sent at the maximum reasoning level: a
+    #: target is owed at it (`DueReading.max_units`, set by
+    #: :func:`carve_levels`). False: the policy's level. Part of the run's
+    #: identity, so a maximum try of bodies a medium run left flat is a new
+    #: try, not a re-buy of that run.
+    escalated: bool = False
 
     def __post_init__(self) -> None:
         if self.held_tests and self.kind is not RouteKind.PER_FN:
@@ -306,6 +312,7 @@ class RouteRun:
             **({"left_red": {f"{u.file}::{u.fn_name}": sorted(ts)
                              for u, ts in self.left_red}}
                if self.left_red else {}),
+            **({"escalated": True} if self.escalated else {}),
         }
 
 
@@ -348,7 +355,8 @@ def bodies_sha_on_tree(targets: Collection[FnLocator],
 
 def rebuy_identity(kind: RouteKind, targets: Collection[FnLocator],
                    bodies_sha: str, oracle_fp: str, *,
-                   target_tests: Collection[str] = ()) -> str:
+                   target_tests: Collection[str] = (),
+                   escalated: bool = False) -> str:
     """The key under which a run is the SAME try as an earlier one.
 
     A session's work is the slice, so the aimed tests are part of the
@@ -357,11 +365,18 @@ def rebuy_identity(kind: RouteKind, targets: Collection[FnLocator],
     the leftover attributed set and shrink as tests cash — putting those
     names in the identity would make a flat file look never-served every
     fill, so only ``SESSION`` includes them.
+
+    A run sent at the maximum reasoning level (``escalated``) is a different
+    try from the same bodies asked at the policy's level: the question is
+    the same, the answer it can buy is not. Rows of the policy's level keep
+    their identity unchanged.
     """
     names = ",".join(sorted(f"{f}::{fn}" for f, fn in targets))
     ident = f"{kind.value}|{names}|{bodies_sha}|{oracle_fp}"
     if kind is RouteKind.SESSION:
         ident = f"{ident}|{','.join(sorted(target_tests))}"
+    if escalated:
+        ident = f"{ident}|max"
     return ident
 
 
@@ -539,6 +554,13 @@ class RouteLedgerRow:
     #: True is a session that routed, refused, compiled or judged a body,
     #: including one whose bodies did not compile.
     carried_body: bool | None = None
+    #: The reasoning level the run's calls were sent at (`EffortLevel`
+    #: value). Empty on every row written before 2026-11-07, when every call
+    #: ran at the maximum.
+    effort: str = ""
+    #: The run was sent at the maximum because a target was owed at it
+    #: (`RouteRun.escalated`); part of the identity.
+    escalated: bool = False
 
     @property
     def holds_jointly(self) -> bool:
@@ -550,7 +572,7 @@ class RouteLedgerRow:
         return rebuy_identity(
             self.kind, [FnLocator(f, fn) for f, fn in self.targets],
             self.bodies_sha, self.oracle_fp,
-            target_tests=self.target_tests)
+            target_tests=self.target_tests, escalated=self.escalated)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -592,6 +614,8 @@ class RouteLedgerRow:
                if self.joint_outcome else {}),
             **({"carried_body": self.carried_body}
                if self.carried_body is not None else {}),
+            **({"effort": self.effort} if self.effort else {}),
+            **({"escalated": True} if self.escalated else {}),
         }
 
     @classmethod
@@ -654,6 +678,8 @@ class RouteLedgerRow:
             joint_outcome=str(raw.get("joint_outcome", "") or ""),
             carried_body=(bool(raw["carried_body"])
                           if isinstance(raw.get("carried_body"), bool) else None),
+            effort=str(raw.get("effort", "") or ""),
+            escalated=bool(raw.get("escalated", False)),
         )
 
     def to_json(self) -> str:
@@ -783,6 +809,8 @@ class FillSchedule:
                 bits.append("after " + ", ".join(s.blocked_by))
             if s.floor_note:
                 bits.append(s.floor_note)
+            if s.run.escalated:
+                bits.append("at max: a target is owed at the maximum level")
             share = (f" share {s.share_minutes:.0f}m"
                      if s.share_minutes is not None else "")
             parts.append(f"{i}. {s.run.label} ({'; '.join(bits)}){share}")
@@ -1751,6 +1779,44 @@ def carve_rebuys(run: RouteRun, units: UnitService, *,
             _piece(frozenset(rebuy), "re-buy unit(s)"))
 
 
+def carve_levels(run: RouteRun, max_units: Collection[FnLocator],
+                 ) -> tuple[RouteRun, ...]:
+    """`run` with the reasoning level its calls are sent at.
+
+    A target owed at the maximum (`DueReading.max_units`) puts the run at
+    the maximum. A transaction (a file, an impl block, a pair, a session) is
+    one call over all its targets and goes whole. A route that writes each
+    target on its own (``unit_tests``) is split, like a re-buy
+    (:func:`carve_rebuys`): the targets owed at the maximum become their
+    own escalated piece, so the units nothing owes at that level are not
+    sent at it. Returns `(run,)` when nothing is owed at the maximum."""
+    owed = frozenset(max_units) & run.targets
+    if not owed:
+        return (run,)
+    if not run.unit_tests or owed == run.targets:
+        return (replace(run, escalated=True),)
+    tests_of = dict(run.unit_tests)
+
+    def _piece(targets: frozenset[FnLocator], what: str,
+               escalated: bool) -> RouteRun:
+        return replace(
+            run, label=f"{run.label} [{len(targets)} {what}]",
+            targets=targets,
+            stubs_in_targets=run.stubs_in_targets & targets,
+            target_tests=frozenset().union(
+                *(tests_of.get(t, frozenset()) for t in targets)),
+            files=tuple(sorted({t.file for t in targets})),
+            unit_tests=tuple((t, tests_of.get(t, frozenset()))
+                             for t in sorted(targets,
+                                             key=lambda u: (u.file, u.fn_name))),
+            held_tests=tuple((st, ts) for st, ts in run.held_tests
+                             if FnLocator(st.file, st.fn_name) in targets),
+            bodies_sha="", parent=run.plan_key, escalated=escalated)
+
+    return (_piece(owed, "owed at max", True),
+            _piece(run.targets - owed, "unit(s)", False))
+
+
 def carve_coverage_split(run: RouteRun, attributed: Collection[FnLocator],
                          ) -> tuple[RouteRun, ...]:
     """A coverage-split run whose route writes each target on its own, split
@@ -1946,7 +2012,7 @@ def _rank_of(run: RouteRun, oracle_fp: str,
     UNITS have had (:class:`UnitService`)."""
     ident = rebuy_identity(
         run.kind, run.targets, run.bodies_sha, oracle_fp,
-        target_tests=run.target_tests)
+        target_tests=run.target_tests, escalated=run.escalated)
     rows = history.get(ident) or []
     # Rows that RAN (not deferred, not empty): the latest decides the
     # class. Deferrals since it are counted for the bounded re-admission;
@@ -2596,8 +2662,15 @@ def schedule(
     unit_evidence: UnitEvidence | None = None,
     due: Collection[FnLocator] = (),
     due_rungs: Mapping[FnLocator, str] | None = None,
+    max_units: Collection[FnLocator] = (),
 ) -> FillSchedule:
     """Order the candidate runs and allot the budget. Pure; deterministic.
+
+    ``max_units`` are the functions some red test owes at the maximum
+    reasoning level (`DueReading.max_units`): every run holding one is sent
+    at the maximum, a per-unit route split so only those units are
+    (:func:`carve_levels`), before ranking, so the level is part of the
+    identity the ledger ranks on.
 
     ``due`` is what the red tests owe this fill (:mod:`candidate_tiers`):
     functions on a tier no prompt has asked under the current evidence.
@@ -2741,11 +2814,12 @@ def schedule(
 
     carved: list[RouteRun] = []
     for planned in runs:
-        for part in carve_coverage_split(planned, attributed):
-            for piece in carve_rebuys(part, units, readmit_after=readmit_after):
-                if piece.parent and bodies_sha is not None:
-                    piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
-                carved.append(piece)
+        for leveled in carve_levels(planned, max_units):
+            for part in carve_coverage_split(leveled, attributed):
+                for piece in carve_rebuys(part, units, readmit_after=readmit_after):
+                    if piece.parent and bodies_sha is not None:
+                        piece = replace(piece, bodies_sha=bodies_sha(piece.targets))
+                    carved.append(piece)
 
     ranked: list[RankedRun] = []
     for run in carved:

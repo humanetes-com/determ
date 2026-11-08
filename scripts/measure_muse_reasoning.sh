@@ -80,7 +80,6 @@ fi
 
 MODEL_LINE="$(grep -E '^MODEL=' .env | head -1 | cut -d= -f2-)"
 CAP_LINE="$(grep -E '^VLLM_MAX_THINK_CHARS=' .env | head -1 | cut -d= -f2-)"
-STRENGTH_LINE="$(grep -E '^VLLM_REASONING_STRENGTH=' .env | head -1 | cut -d= -f2-)"
 if [ -z "$MODEL_LINE" ]; then
     echo "measure_muse_reasoning: no MODEL= line in .env" >&2
     exit 2
@@ -107,7 +106,6 @@ echo "measure_muse_reasoning: $(wc -l < "$SLICE") request event(s) from ${RUNS[*
 
 MODEL="$MODEL_LINE" \
 VLLM_MAX_THINK_CHARS="${CAP_LINE:-60000}" \
-VLLM_REASONING_STRENGTH="${STRENGTH_LINE:-high}" \
 .venv/bin/python tools/measure_reasoning_economics.py \
     --events "$SLICE" \
     --prompts-dir logs/prompts \

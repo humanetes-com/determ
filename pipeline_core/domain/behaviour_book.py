@@ -46,6 +46,7 @@ on the examples' own text.
 """
 from __future__ import annotations
 
+import enum
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -567,6 +568,12 @@ class RuleDraft:
 
 _RULE_RE = re.compile(r"<RULE\s+covers\s*=\s*\"([^\"]*)\"\s*>(.*?)</RULE>", re.S | re.I)
 _THEN_RE = re.compile(r"<THEN\s+id\s*=\s*\"([^\"]*)\"\s*>(.*?)</THEN>", re.S | re.I)
+# The abstention `build_then_prediction_prompt` offers: `<THEN id="…"
+# undetermined/>`. The value pattern above needs `>` straight after the id,
+# so it never reads this tag; the slash is optional so an
+# `<THEN id="…" undetermined></THEN>` pair abstains the same way.
+_THEN_UNDETERMINED_RE = re.compile(
+    r"<THEN\s+id\s*=\s*\"([^\"]*)\"\s+undetermined\s*/?\s*>", re.I)
 
 
 def parse_rule_drafts(reply: str) -> list[RuleDraft]:
@@ -581,15 +588,80 @@ def parse_rule_drafts(reply: str) -> list[RuleDraft]:
     return out
 
 
-def parse_predictions(reply: str) -> dict[str, str]:
-    """`id → predicted Then text` from `<THEN id="…">…</THEN>` blocks. The
-    text is kept exact except one leading and one trailing newline (a model
-    that puts the value on its own line)."""
-    out: dict[str, str] = {}
-    for bid, body in _THEN_RE.findall(strip_think_blocks(reply)):
+class Undetermined(enum.Enum):
+    """The checker's answer "nothing in the prompt determines this value".
+
+    One member, `UNDETERMINED`. It is a type of its own, not a reserved
+    string, so no observed Then can equal it, and a parsed prediction is
+    `str | Undetermined`: `outcome_matches` takes `str`, so a caller that
+    compares a parsed prediction as text does not type-check and has to go
+    through `predicted`."""
+
+    UNDETERMINED = "undetermined"
+
+
+UNDETERMINED = Undetermined.UNDETERMINED
+
+Prediction = str | Undetermined
+
+
+class Grade(enum.Enum):
+    """How one prediction reply answered one example (`predicted`).
+
+    RIGHT / WRONG: it gave a value, and the value does / does not satisfy
+    the example's Then. UNDETERMINED: it said nothing in the prompt
+    determines the value. UNANSWERED: it said nothing about the example (no
+    block for the id, an empty reply), or the example has no checkable
+    Then — silence, which is evidence of nothing."""
+
+    RIGHT = "right"
+    WRONG = "wrong"
+    UNDETERMINED = "undetermined"
+    UNANSWERED = "unanswered"
+
+    @property
+    def not_predicted(self) -> bool:
+        """The reply answered the example and did not predict it: a wrong
+        value or an abstention. The one reading of "the checker could not
+        produce this Then" every judge uses, on the side that must NOT
+        know (the ablation, a leave-one-out). Silence is excluded: a reply
+        that said nothing is not a reading, and taking it as "not
+        predicted" credits a rule the ablation never judged."""
+        return self in (Grade.WRONG, Grade.UNDETERMINED)
+
+
+def predicted(reply: Mapping[str, Prediction], bid: str, spec: BehaviourSpec) -> Grade:
+    """The one grade of a prediction reply on one example. Every judge of a
+    parsed prediction (`judge_rule_set`, the rule-probe trial, the book's
+    unaided count, the replay) reads through this function, so the meaning
+    of an abstention and of silence is decided here once."""
+    then = spec.then
+    if then is None or bid not in reply:
+        return Grade.UNANSWERED
+    value = reply[bid]
+    if isinstance(value, Undetermined):
+        return Grade.UNDETERMINED
+    return Grade.RIGHT if outcome_matches(value, then) else Grade.WRONG
+
+
+def parse_predictions(reply: str) -> dict[str, Prediction]:
+    """`id → predicted Then` from `<THEN id="…">…</THEN>` blocks, and
+    `UNDETERMINED` for an `<THEN id="…" undetermined/>` tag.
+
+    A value's text is kept exact except one leading and one trailing
+    newline (a model that puts the value on its own line). The first value
+    block of an id wins. The undetermined tag wins over a value for the
+    same id: a reply that guessed and also said the prompt does not decide
+    it has not predicted it. A value block whose TEXT is the word
+    `undetermined` is a value — only the tag shape abstains."""
+    clean = strip_think_blocks(reply)
+    out: dict[str, Prediction] = {}
+    for bid, body in _THEN_RE.findall(clean):
         text = body[1:] if body.startswith("\n") else body
         text = text[:-1] if text.endswith("\n") else text
         out.setdefault(bid.strip(), text)
+    for bid in _THEN_UNDETERMINED_RE.findall(clean):
+        out[bid.strip()] = UNDETERMINED
     return out
 
 
@@ -696,7 +768,7 @@ def draft_refusal(
 
 # `predict(rule sentences, example ids) -> {id: predicted Then}`: one call of
 # the checker. An empty sentence list is the ablation.
-Predict = Callable[[Sequence[str], Sequence[str]], Mapping[str, str]]
+Predict = Callable[[Sequence[str], Sequence[str]], Mapping[str, Prediction]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -730,13 +802,13 @@ def judge_rule_set(
 
     Calls: the ablation (no rule) and the set (every draft) over every
     example of `examples`; then, only when the set GAINED an example (the
-    set answers it right, the ablation answers it wrong), one leave-one-out
-    call per draft citing a gained example, over those gained examples,
-    carrying the set without that draft. A draft alone in its set needs no
+    set answers it right, the ablation answers it wrong or undetermined),
+    one leave-one-out call per draft citing a gained example, over those
+    gained examples, carrying the set without that draft. A draft alone in its set needs no
     leave-one-out: the set without it is the ablation.
 
     Credit. A draft is NECESSARY for a gained example when its leave-one-out
-    answered that example and got it wrong; every necessary draft is
+    answered that example wrong or undetermined; every necessary draft is
     credited. A gained example no citing draft is necessary for (two drafts
     that say the same thing) is credited to its first citing draft in draft
     order — only when every citing draft's leave-one-out answered it and got
@@ -751,6 +823,17 @@ def judge_rule_set(
     the set or a leave-one-out is not a gain, not a refutation and not a
     necessity.
 
+    An abstention is a reading (`Grade.not_predicted`). On the side that
+    must not know — the ablation, a leave-one-out — UNDETERMINED counts as
+    not predicted, like a wrong value, so a rule that turns an undetermined
+    example RIGHT is gained and is necessary for it. On the set side it is
+    neither a refutation (the rule was not shown wrong) nor a gain. Before
+    the prompt offered it, the checker could only guess: on run
+    `3198683-b5e39b06` (2026-11-06) three prediction calls on values no
+    glossary line or rule states took 28.1, 10.1 and 17.1 minutes, and the
+    guesses (33 / 32 for captures 255 / 64) were scored like any wrong
+    answer.
+
     Why a set. On run `72627-751534fe` (2026-09-30) the largest feature's
     drafts split one message into a base sentence and a suffix sentence
     ("the base message above"); each was checked alone, each predicted
@@ -763,18 +846,15 @@ def judge_rule_set(
     if not drafts:
         return SetVerdict((), (), 0)
 
-    def right(reply: Mapping[str, str], bid: str) -> bool | None:
-        """True/False when `reply` answered `bid`, None when it did not."""
-        then = examples[bid].then
-        if bid not in reply or then is None:
-            return None
-        return outcome_matches(reply[bid], then)
+    def grade(reply: Mapping[str, Prediction], bid: str) -> Grade:
+        return predicted(reply, bid, examples[bid])
 
     ablation = predict((), order)
     with_set = predict(sentences, order)
     calls = 2
-    gained = [i for i in order if right(with_set, i) is True and right(ablation, i) is False]
-    refuted = [tuple(i for i in c if right(with_set, i) is False) for c in cited]
+    gained = [i for i in order
+              if grade(with_set, i) is Grade.RIGHT and grade(ablation, i).not_predicted]
+    refuted = [tuple(i for i in c if grade(with_set, i) is Grade.WRONG) for c in cited]
     gained_set = set(gained)
     necessary: list[set[str]] = [set() for _ in drafts]
     judged_right: list[set[str]] = [set() for _ in drafts]
@@ -784,15 +864,15 @@ def judge_rule_set(
         if not mine:
             continue
         if len(drafts) == 1:
-            without: Mapping[str, str] = ablation
+            without: Mapping[str, Prediction] = ablation
         else:
             without = predict(sentences[:k] + sentences[k + 1:], mine)
             calls += 1
         for i in mine:
-            verdict = right(without, i)
-            if verdict is False:
+            verdict = grade(without, i)
+            if verdict.not_predicted:
                 necessary[k].add(i)
-            elif verdict is True:
+            elif verdict is Grade.RIGHT:
                 judged_right[k].add(i)
             else:
                 loo_silent[k].add(i)
@@ -811,8 +891,10 @@ def judge_rule_set(
             continue
         dropped.append(_no_credit_reason(
             cited[k], gained_set, refuted[k], loo_silent[k],
-            set_silent=[i for i in cited[k] if right(with_set, i) is None],
-            ablation_silent=[i for i in cited[k] if right(ablation, i) is None]))
+            set_undetermined=[i for i in cited[k]
+                              if grade(with_set, i) is Grade.UNDETERMINED],
+            set_silent=[i for i in cited[k] if grade(with_set, i) is Grade.UNANSWERED],
+            ablation_silent=[i for i in cited[k] if grade(ablation, i) is Grade.UNANSWERED]))
     return SetVerdict(tuple(kept), tuple(dropped), calls)
 
 
@@ -822,10 +904,14 @@ def _no_credit_reason(
     refuted: Sequence[str],
     loo_silent: Collection[str],
     *,
+    set_undetermined: Sequence[str] = (),
     set_silent: Sequence[str],
     ablation_silent: Sequence[str],
 ) -> str:
-    """Why a draft earned no credit, most specific first."""
+    """Why a draft earned no credit, most specific first. A cited example
+    the set marked undetermined has its own reason: falling through to
+    "adds nothing" would record that the ablation already predicted an
+    example the checker said it could not decide even with the rule."""
     n = len(cited)
     mine = [i for i in cited if i in gained]
     if mine and loo_silent:
@@ -834,6 +920,8 @@ def _no_credit_reason(
         return f"not necessary for its {len(mine)} gained example(s)"
     if refuted:
         return f"refuted on {len(refuted)} of its {n} example(s)"
+    if set_undetermined:
+        return f"set left {len(set_undetermined)} of its {n} example(s) undetermined"
     if set_silent:
         return f"set did not answer {len(set_silent)} of its {n} example(s)"
     if ablation_silent:
@@ -941,6 +1029,9 @@ class BookReading:
     think: bool = True
     sibling_examples: int = 0
     unaided_examples: int = 0
+    # The checkable examples the checker, with no rule, marked undetermined
+    # (`Grade.UNDETERMINED`): the ones only a rule can decide.
+    undetermined_examples: int = 0
     # The roots the examples are given, the phrases kept for them, and why
     # the others have none (`given_phrase_drops`).
     given_roots: int = 0
@@ -957,7 +1048,8 @@ class BookReading:
                 f"{self.skipped_features} over the cap), {self.proposed} rules "
                 f"({self.kept} kept), {self.covered_examples}/{self.checkable_examples} "
                 f"checkable examples covered ({self.sibling_examples} by a sibling chunk's rule; "
-                f"{self.unaided_examples} predicted with no rule); "
+                f"{self.unaided_examples} predicted with no rule, "
+                f"{self.undetermined_examples} undetermined with no rule); "
                 f"dropped: {drop}; lanes={self.lanes}; "
                 f"predict-temp={self._temp()}; think={'on' if self.think else 'off'}"
                 f"{where}{self._givens()}")
@@ -987,6 +1079,7 @@ class BookReading:
             "think": self.think,
             "sibling_examples": self.sibling_examples,
             "unaided_examples": self.unaided_examples,
+            "undetermined_examples": self.undetermined_examples,
             "given_roots": self.given_roots, "given_setups": self.given_setups,
             "given_phrases": self.given_phrases,
             "given_refused": dict(self.given_refused),
@@ -996,7 +1089,7 @@ class BookReading:
 def drop_reason_class(reason: str) -> str:
     """The histogram bucket of a drop reason (its text before any id)."""
     for prefix in ("names the private item", "quotes", "refuted on", "not necessary",
-                   "leave-one-out did not answer", "set did not answer",
+                   "leave-one-out did not answer", "set left", "set did not answer",
                    "ablation did not answer", "adds nothing", "cites no checkable",
                    "more than one sentence"):
         if reason.startswith(prefix):

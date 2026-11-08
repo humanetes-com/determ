@@ -194,6 +194,10 @@ def test_the_note_is_told_whatever_body_is_on_the_tree() -> None:
     assert row.bodies[0].strip()[:40] in note
     # The lead claims nothing about the tree either.
     assert "NOT" not in REFUTED_BODY_LEAD
+    assert "this run" not in REFUTED_BODY_LEAD
+    # The iteration is placed by its run: numbers restart every process.
+    assert f"At iteration 2 of run {row.run_id} a body of" in note
+    assert row.run_id == "630350-93c5a6ee"
     assert "is the one that crashed" in REFUTED_BODY_LEAD
     # Two quoted occurrences are both told.
     two = replace(row, bodies=(row.bodies[0], "fn other() {}"))

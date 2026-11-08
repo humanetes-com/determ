@@ -24,6 +24,7 @@ three defect-observable flags use the same patterns the census script does.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -32,6 +33,7 @@ from typing import Any, Protocol
 
 from pipeline_core.application.behaviour_book_build import BookBudget, build_behaviour_book, feature_files
 from pipeline_core.application.emit_behaviour_tests import FailingAlone, Recapture, Settle, Verify
+from pipeline_core.application.lanes import on_lanes
 from pipeline_core.application.test_repair import repair_until_built
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
@@ -40,7 +42,12 @@ from pipeline_core.domain.behaviour import (
     example_code,
     merge_suites,
 )
-from pipeline_core.domain.behaviour_book import glossary_entries, parse_predictions, private_names
+from pipeline_core.domain.behaviour_book import (
+    Prediction,
+    glossary_entries,
+    parse_predictions,
+    private_names,
+)
 from pipeline_core.domain.behaviour_census import (
     defect_observable_flags,
     klass_histogram,
@@ -246,6 +253,14 @@ class Task0dDeps:
     # stage does not run.
     RULE_PROBES_MAX: int = 0
     RULE_PROBE_PROGRAMS: int = 3
+    # Model calls of one stage that read no other call's reply (the probe
+    # rounds, the reach batches, the rule asks, the rule judges) run on this
+    # many lanes (`application/lanes.py`), results in item order, so 1 is the
+    # serial run byte for byte. The server's own bound is the process slot set
+    # every call takes (`llm/slots.py`). Bound to `BEHAVIOUR_BOOK_LANES`, else
+    # `PIPELINE_PARALLELISM`. Cargo stays serial: every capture of a world
+    # builds into that world's one target directory.
+    LANES: int = 1
     HELD_OUT_SHARE: int = 0
     # (project_dir, cluster name) -> the ORIGINAL crate's construction facts
     # for that world (`domain.fn_routes`), None without them: the reach
@@ -435,7 +450,8 @@ def _ask_probe_rounds(
         who = tuple(p.cluster.name for p in active
                     if any(e in edge_batch for e in p.edges))
         rounds.append(((), (), tuple(edge_batch), who))
-    asked: list[_AskedProbe] = []
+    built: list[tuple[tuple[tuple[str, str], ...], tuple[str, ...],
+                      tuple[UseCaseEdge, ...], tuple[str, ...], str]] = []
     for asks, batch, edge_batch, who in rounds:
         if not who:
             continue
@@ -456,7 +472,12 @@ def _ask_probe_rounds(
             symbol_inventory=_union_text([(p.cluster.name, p.inventory) for p in involved]),
             example_usages=_union_text([(p.cluster.name, p.example) for p in involved]),
             target_classes=asks, target_edges=tuple(edge_arg))
-        asked.append(_AskedProbe(asks, batch, edge_batch, deps.ask(prompt), frozenset(who)))
+        built.append((asks, batch, edge_batch, who, prompt))
+    # Every round's prompt reads only the plans, never another round's reply,
+    # so the rounds are asked side by side; replies come back in round order.
+    replies = on_lanes(lambda b: deps.ask(b[4]), built, deps.LANES, name="t0d-probe")
+    asked = [_AskedProbe(asks, batch, edge_batch, reply, frozenset(who))
+             for (asks, batch, edge_batch, who, _prompt), reply in zip(built, replies, strict=True)]
     if len({p.cluster.name for p in active}) > 1:
         deps.log(f"  [task0d] worlds {_cluster_label(tuple(p.cluster.name for p in active))}: "
                  "probes asked once")
@@ -806,9 +827,17 @@ def _run_reach(
     outcomes: dict[str, ReachOutcome] = {}
     cargo_runs = 0
     size = max(1, deps.PROBE_BLOCKS_PER_REPLY)
-    for start in range(0, len(targets), size):
+    starts = list(range(0, len(targets), size))
+    # A batch's prompt reads its targets, the surface and the style example,
+    # never a capture: every batch is asked first, side by side, and the
+    # captures then run in batch order exactly as before (the `tag` numbering
+    # and each target's outcome do not depend on when its reply arrived).
+    replies = on_lanes(
+        lambda st: deps.ask(build_reach_prompt(
+            module_name, cluster.name, targets[st:st + size], surface, example)),
+        starts, deps.LANES, name="t0d-reach")
+    for start, reply in zip(starts, replies, strict=True):
         batch = targets[start:start + size]
-        reply = deps.ask(build_reach_prompt(module_name, cluster.name, batch, surface, example))
         by_name = {p.name: p for p in parse_behaviour_specs(reply)}
         for i, tgt in enumerate(batch, 1):
             probe = by_name.get(reach_name(i))
@@ -884,10 +913,20 @@ def run_rule_probes(
     if not asks:
         return book
 
+    memo_lock = threading.Lock()
+
     def asked(call: Callable[[str], str], prompt: str) -> str:
-        if prompt not in memo:
-            memo[prompt] = call(prompt)
-        return memo[prompt]
+        # Shared with other lanes of this stage. Two lanes never build the
+        # same prompt inside one world (each capture belongs to one rule's
+        # pool, and the program asks differ by sentence), so no single-flight
+        # is needed: the lock only keeps the dict's reads and writes whole.
+        with memo_lock:
+            if prompt in memo:
+                return memo[prompt]
+        reply = call(prompt)
+        with memo_lock:
+            memo.setdefault(prompt, reply)
+            return memo[prompt]
 
     by_id = {s.behaviour_id: s for s in book.specs}
     ids = set(by_id)
@@ -895,15 +934,21 @@ def run_rule_probes(
     captures: dict[str, list[BehaviourSpec]] = {}
     misses: list[dict[str, str]] = []
     proposed = cargo_runs = 0
-    for ask in asks:
+
+    def _program_reply(ask: RuleAsk) -> str:
         if prepared is not None and ask.rule_id in prepared:
-            reply = prepared[ask.rule_id]
-        else:
-            reply = asked(deps.ask, build_rule_probe_prompt(
-                crate=module_name, cfg_cluster=cluster.name, sentence=ask.sentence,
-                glossary=book.glossary, shown=[by_id[i] for i in ask.shown if i in by_id],
-                near=[by_id[i] for i in ask.near if i in by_id],
-                programs=deps.RULE_PROBE_PROGRAMS))
+            return prepared[ask.rule_id]
+        return asked(deps.ask, build_rule_probe_prompt(
+            crate=module_name, cfg_cluster=cluster.name, sentence=ask.sentence,
+            glossary=book.glossary, shown=[by_id[i] for i in ask.shown if i in by_id],
+            near=[by_id[i] for i in ask.near if i in by_id],
+            programs=deps.RULE_PROBE_PROGRAMS))
+
+    # The program asks read only the book: asked side by side. The captures
+    # stay in rule order below, because a capture's number `n` and the
+    # `programs` dedup are first-come.
+    replies = on_lanes(_program_reply, list(asks), deps.LANES, name="t0d-rule")
+    for ask, reply in zip(asks, replies, strict=True):
         for probe in parse_behaviour_specs(reply)[:deps.RULE_PROBE_PROGRAMS]:
             proposed += 1
             unit = probe.name or "rule"
@@ -932,7 +977,7 @@ def run_rule_probes(
     new = {s.behaviour_id: s for s in kept}
     predict = deps.book_predict or deps.ask
 
-    def check(rules: Sequence[str], want: Sequence[str]) -> Mapping[str, str]:
+    def check(rules: Sequence[str], want: Sequence[str]) -> Mapping[str, Prediction]:
         return parse_predictions(asked(predict, build_then_prediction_prompt(
             crate=module_name, glossary=book.glossary, examples=[new[i] for i in want],
             rules=rules)))
@@ -940,14 +985,29 @@ def run_rule_probes(
     sentences = {f.item: [r.sentence for r in f.rules] for f in book.features}
     trials: dict[str, RuleTrial] = {}
     mine: dict[str, list[str]] = {}
+    judged: list[tuple[RuleAsk, dict[str, BehaviourSpec]]] = []
     for ask in asks:
         pool = {s.behaviour_id: s for s in captures.get(ask.rule_id, ()) if s.behaviour_id in new}
-        if not pool:
-            continue
-        mine[ask.rule_id] = list(pool)
-        trials[ask.rule_id] = judge_rule_on_captures(
-            ask.sentence, [x for x in sentences.get(ask.feature, ()) if x != ask.sentence],
-            pool, predict=check)
+        if pool:
+            mine[ask.rule_id] = list(pool)
+            judged.append((ask, pool))
+
+    def _both(first: Callable[[], Mapping[str, Prediction]],
+              second: Callable[[], Mapping[str, Prediction]],
+              ) -> tuple[Mapping[str, Prediction], Mapping[str, Prediction]]:
+        a, b = on_lanes(lambda f: f(), [first, second], min(2, deps.LANES), name="t0d-judge-pair")
+        return a, b
+
+    # Each rule is judged on its own pool against the frozen book, and its
+    # ablation and together calls read nothing of each other: every rule on a
+    # lane, both first calls of each together, `alone` after `together`.
+    verdicts = on_lanes(
+        lambda j: judge_rule_on_captures(
+            j[0].sentence, [x for x in sentences.get(j[0].feature, ()) if x != j[0].sentence],
+            j[1], predict=check, both=_both),
+        judged, deps.LANES, name="t0d-judge")
+    for (ask, _pool), trial in zip(judged, verdicts, strict=True):
+        trials[ask.rule_id] = trial
     features, dropped = apply_trials(book.features, mine, trials)
     suite = replace(book, specs=(*book.specs, *kept), features=features)
     withdrawn: tuple[str, ...] = ()
@@ -1446,7 +1506,7 @@ def _rule_replies(
             grouped[ask.rule_id].append((c.name, ask))
     if not order:
         return {}
-    out: dict[str, str] = {}
+    prompts: list[tuple[str, str]] = []
     asked: list[str] = []
     for rule_id in order:
         pairs = grouped[rule_id]
@@ -1473,7 +1533,10 @@ def _rule_replies(
             near=[by_id[i] for i in near_ids if i in by_id],
             programs=deps.RULE_PROBE_PROGRAMS,
         )
-        out[rule_id] = deps.ask(prompt)
+        prompts.append((rule_id, prompt))
+    # Each prompt reads only the books: asked side by side, in rule order.
+    replies = on_lanes(lambda rp: deps.ask(rp[1]), prompts, deps.LANES, name="t0d-rule")
+    out = {rule_id: reply for (rule_id, _p), reply in zip(prompts, replies, strict=True)}
     if len(asked) > 1:
         deps.log(f"  [task0d] worlds {_cluster_label(asked)}: rule probes asked once")
     return out

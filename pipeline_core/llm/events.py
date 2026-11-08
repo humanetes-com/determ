@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
+    from pipeline_core.domain.model_profile import EffortLevel
+
     from .budget import BudgetSpec, BudgetState
 
 
@@ -56,8 +58,10 @@ class Transport(Protocol):
     served_model: str
     supports_followup: bool   # can re-feed reasoning as an assistant turn to recover code
 
-    def spec(self) -> BudgetSpec:
-        """This transport's budget shape (ctx, content/thinking budgets, cap mode)."""
+    def spec(self, *, effort: EffortLevel) -> BudgetSpec:
+        """This transport's budget shape (ctx, content/thinking budgets, cap
+        mode) for a call at `effort`: the thinking reserve and the runaway cap
+        are calibrated per level (`ModelKnobs.thinking_budget_at`)."""
         ...
 
     def budget_state(self) -> BudgetState:
@@ -69,17 +73,20 @@ class Transport(Protocol):
         ...
 
     def count_input_tokens(self, messages: list[dict[str, Any]], *,
-                           enable_thinking: bool) -> int | None:
+                           enable_thinking: bool,
+                           effort: EffortLevel) -> int | None:
         """The server's exact token count of these messages as the request
-        will render them (chat template included), or None when the server
-        cannot say. The budget plans from it instead of a chars-per-token
-        estimate; None falls back to the estimate."""
+        will render them (chat template included, at `effort`, whose word the
+        template renders into the prompt), or None when the server cannot
+        say. The budget plans from it instead of a chars-per-token estimate;
+        None falls back to the estimate."""
         ...
 
-    def reasoning_payload(self, enable_thinking: bool) -> dict[str, Any]:
-        """The template kwargs a request sends for this thinking mode — what
-        "off" actually is on the served model (Muse: the `low` rung, Qwen: a
-        real off). Empty when the transport sends none."""
+    def reasoning_payload(self, enable_thinking: bool, *,
+                          effort: EffortLevel) -> dict[str, Any]:
+        """The template kwargs a request sends for this thinking mode at
+        `effort` — what "off" actually is on the served model (Muse: the
+        `low` rung, Qwen: a real off). Empty when the transport sends none."""
         ...
 
     def stream(
@@ -90,9 +97,13 @@ class Transport(Protocol):
         max_tokens: int | None,
         enable_thinking: bool,
         meta: StreamMeta,
+        effort: EffortLevel,
         temperature: float | None = None,
     ) -> Iterator[Delta]:
         """Yield normalized deltas. Raise InputTooLong / TransportUnavailable / TransportTimeout.
+
+        `effort` is the call's reasoning level (`pipeline_core.effort`); a
+        transport that cannot express it says so once and streams anyway.
 
         `temperature` overrides the server default sampling temperature when not
         None; when None the request omits it so the payload stays byte-identical

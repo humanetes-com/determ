@@ -36,6 +36,7 @@ from pipeline_core.adapters.llm_transports import (
     _parse_input_token_overflow,
     reasoning_template_kwargs,
 )
+from pipeline_core.domain.model_profile import EffortLevel, resolve_model_knobs
 
 _BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 _ROOT = _BASE.rstrip("/").removesuffix("/v1")
@@ -61,11 +62,13 @@ pytestmark = [
 _MESSAGES = [{"role": "user", "content": "hello world hello world"}]
 
 
-def _complete(model: str, max_tokens: int) -> httpx.Response:
+def _complete(model: str, max_tokens: int, *, thinking: bool = False,
+              effort: EffortLevel = EffortLevel.MAX) -> httpx.Response:
     return httpx.post(
         f"{_BASE.rstrip('/')}/chat/completions", timeout=120.0,
         json={"model": model, "messages": _MESSAGES, "max_tokens": max_tokens,
-              "chat_template_kwargs": reasoning_template_kwargs(model, False)})
+              "chat_template_kwargs": reasoning_template_kwargs(
+                  model, thinking, effort=effort)})
 
 
 def _transport(monkeypatch: pytest.MonkeyPatch, model: str,
@@ -82,8 +85,31 @@ def test_the_count_is_the_prompt_the_server_serves(
     model, ctx = _SERVED
     served = _complete(model, 1).json()["usage"]["prompt_tokens"]
     counted = _transport(monkeypatch, model, ctx).count_input_tokens(
-        _MESSAGES, enable_thinking=False)
+        _MESSAGES, enable_thinking=False, effort=EffortLevel.MAX)
     assert counted == served
+
+
+def test_premise_the_template_renders_each_levels_word(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """The level's word is in the prompt the server serves, so the count
+    must be taken at the call's level (`count_input_tokens(effort=)`): one
+    count for both levels is the count of a different prompt. When the
+    served profile sends one word for both levels there is nothing to tell
+    apart."""
+    assert _SERVED is not None
+    model, ctx = _SERVED
+    knobs = resolve_model_knobs(dict(os.environ), model)
+    if knobs.effort_word(EffortLevel.MEDIUM) == knobs.effort_word(EffortLevel.MAX):
+        pytest.skip("the served profile sends one word for both levels")
+    tr = _transport(monkeypatch, model, ctx)
+    counts = {lv: tr.count_input_tokens(_MESSAGES, enable_thinking=True, effort=lv)
+              for lv in EffortLevel}
+    served = {lv: _complete(model, 1, thinking=True, effort=lv).json()["usage"][
+        "prompt_tokens"] for lv in EffortLevel}
+    # Equal counts per level, not distinct ones: two words can tokenize to
+    # the same length. Whether the template reads the word at all is the
+    # launch conformance check's (`check_levels`, token ids).
+    assert counts == served
 
 
 def test_premise_the_rejection_reports_the_threshold_not_the_prompt() -> None:
@@ -105,4 +131,4 @@ def test_negative_control_an_unreachable_server_falls_back_to_the_estimate(
     monkeypatch.setenv("VLLM_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.setenv("VLLM_MODEL_NAME", model)
     assert VLLMTransport().count_input_tokens(
-        _MESSAGES, enable_thinking=False) is None
+        _MESSAGES, enable_thinking=False, effort=EffortLevel.MAX) is None

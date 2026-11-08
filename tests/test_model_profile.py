@@ -25,11 +25,13 @@ from pipeline_core.domain.model_profile import (
     MUSE_GLIMMER,
     PROFILES,
     QWEN3,
+    EffortLevel,
     ReasoningDialect,
     UnknownModelError,
     profile_for,
     require_profile,
     resolve_model_knobs,
+    retired_knob_lines,
 )
 from pipeline_core.domain.phase_cost import RunConfig
 from scripts.model_profile_shell import shell_lines
@@ -49,7 +51,8 @@ CACHED_IDS = [
 _MODEL_ENV = ("MODEL", "VLLM_MODEL_NAME", "MODEL_FAMILY", "VLLM_MAX_MODEL_LEN",
               "VLLM_REASONING_BUDGET", "VLLM_THINKING_BUDGET", "VLLM_RUNAWAY_THINK_CHARS",
               "VLLM_REASONING_STRENGTH", "VLLM_REASONING_STRENGTH_OFF", "VLLM_MAX_THINK_CHARS",
-              "VLLM_REPETITION_PENALTY", "VLLM_REASONING_EFFORT")
+              "VLLM_REPETITION_PENALTY", "VLLM_REASONING_EFFORT",
+              "VLLM_EFFORT_WORD_MEDIUM", "VLLM_EFFORT_WORD_MAX")
 
 
 @pytest.fixture
@@ -73,44 +76,72 @@ def test_tier_and_route_order_read_the_profile(model, profile):
 
 
 @pytest.mark.parametrize("profile", PROFILES)
-def test_payloads_per_family(clean_env, profile):
+def test_payloads_per_family_and_level(clean_env, profile):
+    """Each level renders the profile's own word; thinking off is the off
+    form at both levels (below every level)."""
     model = MUSE if profile is MUSE_GLIMMER else QWEN
-    on = t.reasoning_template_kwargs(model, True)
-    off = t.reasoning_template_kwargs(model, False)
+    med = t.reasoning_template_kwargs(model, True, effort=EffortLevel.MEDIUM)
+    top = t.reasoning_template_kwargs(model, True, effort=EffortLevel.MAX)
+    offs = {str(t.reasoning_template_kwargs(model, False, effort=lv))
+            for lv in EffortLevel}
     if profile.dialect is ReasoningDialect.STRENGTH:
-        assert (on, off) == ({"reasoning_strength": "high"}, {"reasoning_strength": "low"})
+        # Muse's xhigh is uncalibrated on this box: MAX is sent as high.
+        assert (med, top) == ({"reasoning_strength": "medium"},
+                              {"reasoning_strength": "high"})
+        assert offs == {str({"reasoning_strength": "low"})}
     else:
-        # Thinking on names its depth; thinking off never does.
-        assert (on, off) == ({"enable_thinking": True, "reasoning_effort": "xhigh"},
-                             {"enable_thinking": False})
+        assert (med, top) == ({"enable_thinking": True, "reasoning_effort": "medium"},
+                              {"enable_thinking": True, "reasoning_effort": "xhigh"})
+        assert offs == {str({"enable_thinking": False})}
+
+
+def test_negative_control_one_word_cannot_name_two_levels(clean_env):
+    """The retired single knob pinned both levels to its word; it is now
+    ignored and named, and the levels keep their own words."""
+    env = {"MODEL": "Qwen/Qwen3.8-27B-FP8", "VLLM_REASONING_EFFORT": "xhigh",
+           "VLLM_REASONING_STRENGTH": "high"}
+    k = resolve_model_knobs(env)
+    assert (k.effort_word(EffortLevel.MEDIUM), k.effort_word(EffortLevel.MAX)) == (
+        "medium", "xhigh")
+    lines = retired_knob_lines(env)
+    assert len(lines) == 2 and all("is ignored" in x for x in lines)
 
 
 def test_each_model_gets_its_own_suggested_sampling(clean_env):
-    """Switching MODEL switches the penalty and the effort with it: the
-    Qwen3.8 card's 1.0 and xhigh, and Muse's 1.05 with no effort (its card
-    recommends no sampling values; 1.05 is what every Muse run sent)."""
+    """Switching MODEL switches the penalty and the level words with it:
+    the Qwen3.8 card's 1.0 and medium/xhigh, and Muse's 1.05 with
+    medium/high (its xhigh named pending on the startup line)."""
     qwen = resolve_model_knobs({"MODEL": "Qwen/Qwen3.8-27B-FP8"})
     muse = resolve_model_knobs({"MODEL": MUSE})
-    assert (qwen.repetition_penalty, qwen.reasoning_effort) == (1.0, "xhigh")
-    assert (muse.repetition_penalty, muse.reasoning_effort) == (1.05, None)
+    assert (qwen.repetition_penalty, qwen.effort_word(EffortLevel.MAX)) == (1.0, "xhigh")
+    assert (muse.repetition_penalty, muse.effort_word(EffortLevel.MAX)) == (1.05, "high")
     assert qwen.sources()["VLLM_REPETITION_PENALTY"] == "profile"
-    assert qwen.sources()["VLLM_REASONING_EFFORT"] == "profile"
-    # The startup line names where each came from.
+    assert qwen.sources()["VLLM_EFFORT_WORD_MAX"] == "profile"
     assert "VLLM_REPETITION_PENALTY=1.0(profile)" in qwen.summary()
-    assert "VLLM_REASONING_EFFORT=xhigh(profile)" in qwen.summary()
+    assert "max→xhigh(profile)" in qwen.effort_line()
+    assert "xhigh uncalibrated on muse-glimmer: max → high" in muse.effort_line()
 
 
 def test_an_env_line_overrides_whichever_model_is_loaded(clean_env):
     env = {"MODEL": "Qwen/Qwen3.8-27B-FP8", "VLLM_REPETITION_PENALTY": "1.1",
-           "VLLM_REASONING_EFFORT": "medium"}
+           "VLLM_EFFORT_WORD_MAX": "medium"}
     k = resolve_model_knobs(env)
-    assert (k.repetition_penalty, k.reasoning_effort) == (1.1, "medium")
+    assert (k.repetition_penalty, k.effort_word(EffortLevel.MAX)) == (1.1, "medium")
     assert k.sources()["VLLM_REPETITION_PENALTY"] == "env"
-    # `none` is an explicit "do not send" for a profile that sets one.
-    off = resolve_model_knobs({**env, "VLLM_REASONING_EFFORT": "none"})
-    assert off.reasoning_effort is None
+    # `none` is an explicit "send no word".
+    off = resolve_model_knobs({**env, "VLLM_EFFORT_WORD_MAX": "none"})
+    assert off.effort_word(EffortLevel.MAX) is None
     with pytest.raises(ValueError):
         resolve_model_knobs({**env, "VLLM_REPETITION_PENALTY": "high"})
+
+
+def test_a_level_without_its_own_calibration_inherits_the_measured_one(clean_env):
+    """The reserve and the runaway cap reach the budget per level; medium
+    inherits max's measured values until a reading at medium sets its own."""
+    k = resolve_model_knobs({"MODEL": "Qwen/Qwen3.8-27B-FP8"})
+    for lv in EffortLevel:
+        assert k.thinking_budget_at(lv) == QWEN3.thinking_budget
+        assert k.runaway_think_chars_at(lv) == QWEN3.runaway_think_chars
 
 
 def test_the_transport_sends_the_resolved_penalty(clean_env, monkeypatch):
@@ -125,7 +156,8 @@ def test_negative_control_a_muse_id_the_old_exact_table_lacked(clean_env):
     # Not a key of the pre-profile MODEL_CAPS, so the old lookup fell through
     # to the boolean dialect — the payload the Muse fixture renders as `high`.
     model = "SomeOrg/Muse-Glimmer-30B-AWQ"
-    assert t.reasoning_template_kwargs(model, False) == {"reasoning_strength": "low"}
+    assert t.reasoning_template_kwargs(model, False, effort=EffortLevel.MAX) == {
+        "reasoning_strength": "low"}
 
 
 @pytest.mark.parametrize(("model", "dialect"), [(MUSE, "strength"), (QWEN, "boolean")])
@@ -196,7 +228,29 @@ def test_resolver_precedence_env_profile_default():
     assert k.family is None
 
 
-def test_qwen_runaway_cap_is_uncalibrated_not_invented():
+def _uncalibrated_qwen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The registry with Qwen's runaway cap unmeasured: the state every
+    profile starts in, and the one the run-start warning exists for."""
+    import dataclasses
+
+    import pipeline_core.domain.model_profile as mp
+    monkeypatch.setattr(mp, "PROFILES", tuple(
+        dataclasses.replace(p, runaway_think_chars=None, runaway_calibrated=False)
+        if p is QWEN3 else p for p in mp.PROFILES))
+
+
+def test_qwen_runaway_cap_is_the_measured_value():
+    # Measured 2026-11-06 on Qwen3.8-27B-FP8: healthy max 267,255 chars + 25%.
+    k = resolve_model_knobs({"MODEL": QWEN})
+    assert k.runaway_think_chars == 335_000
+    assert k.get("VLLM_RUNAWAY_THINK_CHARS").source == "profile"
+    muse = resolve_model_knobs({"MODEL": MUSE})
+    assert (muse.runaway_think_chars, muse.get("VLLM_RUNAWAY_THINK_CHARS").source) == (
+        None, "profile")
+
+
+def test_an_uncalibrated_runaway_cap_is_none_not_invented(monkeypatch):
+    _uncalibrated_qwen(monkeypatch)
     k = resolve_model_knobs({"MODEL": QWEN})
     assert k.runaway_think_chars is None
     assert k.get("VLLM_RUNAWAY_THINK_CHARS").source == "uncalibrated"
@@ -212,6 +266,92 @@ def test_transport_settings_and_launcher_agree_on_the_context(clean_env):
     launcher = dict(line.split("=", 1) for line in shell_lines({"MODEL": QWEN}))
     assert ctx == tr._ctx == int(launcher["VLLM_MAX_LEN"]) == QWEN3.max_model_len
     assert thinking == tr._thinking_budget == QWEN3.thinking_budget
+    assert tr._content_budget == resolve_model_knobs({"MODEL": QWEN}).content_budget
+
+
+# ── the thinking reserve the input caps are sized against ────────────────────
+
+# The 20 healthy re-asks of `measure_runaway_cap.py ask --tag
+# qwen3.8-2026-11-06` (logs/reasoning_econ/runaway/calls.jsonl, Qwen3.8-27B-FP8,
+# effort xhigh): (reasoning_chars, content_chars), all finish=stop.
+QWEN38_HEALTHY = (
+    (6447, 728), (7794, 477), (3899, 611), (75978, 27291), (19096, 2247),
+    (11401, 855), (28526, 1754), (267255, 6084), (34282, 266), (114383, 2296),
+    (174137, 3090), (134177, 96), (69155, 393), (8229, 75), (201381, 52),
+    (110828, 1832), (63736, 1332), (76951, 1787), (141978, 43), (128261, 3730),
+)
+# Completion chars per token over hardcrate run 2871410-20138abd's 39
+# completions above 2,000 tokens (same model, same effort, 2026-11-06).
+QWEN38_CPT = 3.53
+
+
+def _qwen38_rows() -> list[dict]:
+    return [{"route": "x", "finish": "stop", "reasoning_chars": r, "content_chars": c}
+            for r, c in QWEN38_HEALTHY]
+
+
+def test_qwen_reserve_is_the_calibration_p90():
+    from scripts.measure_runaway_cap import reserve_proposal
+    reserve, _why = reserve_proposal(_qwen38_rows(), QWEN38_CPT)
+    assert reserve == QWEN3.thinking_budget == resolve_model_knobs({"MODEL": QWEN}).thinking_budget
+    # Rows with no completion tokens and no --cpt propose nothing.
+    assert reserve_proposal(_qwen38_rows(), None)[0] is None
+
+
+@pytest.mark.parametrize("reserve,fits", [(QWEN3.thinking_budget, True), (32768, False)])
+def test_the_largest_admitted_prompt_leaves_the_healthy_p90(reserve, fits):
+    """At the planner's own chars-per-token floor, a prompt at the single-call
+    cap still leaves room for the calibration's healthy p90 reasoning. The
+    inherited 32,768 (the negative control) did not."""
+    from pipeline_core.domain.model_caps import safe_input_char_limit
+    from scripts.measure_runaway_cap import reasoning_tokens
+    toks = sorted(reasoning_tokens(r, QWEN38_CPT) or 0.0 for r in _qwen38_rows())
+    p90 = toks[17]   # ceil(0.9 * 20) - 1, the script's percentile
+    ctx = QWEN3.max_model_len
+    admitted = safe_input_char_limit(ctx, reserve, 16384) / 3.0
+    assert (ctx - admitted - 512 >= p90) is fits
+
+
+# ── the budget line on every iteration's health reading ──────────────────────
+
+
+def test_budget_line_renders_the_resolved_shape_not_the_raw_env():
+    """Run 2871410-20138abd printed `VLLM_REASONING_BUDGET=fixed
+    VLLM_MAX_THINK_CHARS=200000` from the raw env while every call ran
+    per_call with no character cap."""
+    env = {"MODEL": "Qwen/Qwen3.8-27B-FP8", "VLLM_MAX_THINK_CHARS": "200000"}
+    line = resolve_model_knobs(env).budget_line()
+    assert "reasoning-budget=per_call(profile)" in line
+    assert "runaway-cap=335000(profile)" in line
+    assert f"thinking-reserve={QWEN3.thinking_budget}(profile)" in line
+    assert "content-budget=16384(default)" in line
+    assert "think-char-cap" not in line   # per_call never consults it
+    # The fixed shape consults the character cap and not the runaway cap.
+    fixed = resolve_model_knobs({**env, "VLLM_REASONING_BUDGET": "fixed"}).budget_line()
+    assert "reasoning-budget=fixed(env)" in fixed
+    assert "think-char-cap=200000(env)" in fixed and "runaway-cap" not in fixed
+    # Negative control: the old rendering's default disagrees with the resolver.
+    assert env.get("VLLM_REASONING_BUDGET", "fixed") != resolve_model_knobs(env).reasoning_budget
+
+
+def test_no_pipeline_module_reads_a_resolved_knob_from_the_raw_env():
+    """Every reader of a resolver knob goes through `resolve_model_knobs`; a
+    raw read carries its own default, which is how the health line came to
+    report `fixed` for a per_call run. The one exception tests presence only
+    and then resolves (`llm_transports._default_max_tokens`)."""
+    import re
+
+    from pipeline_core.domain.model_profile import GLOBAL_DEFAULTS
+    names = "|".join(GLOBAL_DEFAULTS)
+    pat = re.compile(r"(getenv|environ\.get|environ\[)\(?\s*['\"](" + names + r")['\"]")
+    allowed = {("pipeline_core/adapters/llm_transports.py", 'vllm_ctx = os.getenv("VLLM_MAX_MODEL_LEN")')}
+    hits = []
+    for path in [ROOT / "pipeline.py", *sorted((ROOT / "pipeline_core").rglob("*.py"))]:
+        rel = path.relative_to(ROOT).as_posix()
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if pat.search(line) and (rel, line.strip()) not in allowed:
+                hits.append(f"{rel}: {line.strip()}")
+    assert hits == []
 
 
 # ── RunConfig: same resolver, today's fingerprint kept ───────────────────────
@@ -223,6 +363,9 @@ TODAY_ENV = {
     "VLLM_REASONING_STRENGTH": "high", "VLLM_MAX_MODEL_LEN": "131072",
     "VLLM_MAX_THINK_CHARS": "200000", "VLLM_REASONING_BUDGET": "per_call",
     "VLLM_THINKING_BUDGET": "32768",
+    # Every call at the maximum, nothing escalated: what "today" ran under
+    # before the reasoning level existed.
+    "LLM_EFFORT": "max", "TDD_ESCALATE_AFTER": "0",
 }
 
 
@@ -235,6 +378,15 @@ def test_run_config_keeps_todays_fingerprint_with_and_without_the_lines():
     assert rc.fingerprint == "c093e8cd8cfb"
     assert rc.model_family == "muse-glimmer"
     assert dict(rc.knob_sources)["VLLM_MAX_MODEL_LEN"] == "profile"
+
+
+def test_a_run_at_the_medium_default_does_not_share_the_max_baseline():
+    base = RunConfig.from_env(TODAY_ENV)
+    medium = RunConfig.from_env({k: v for k, v in TODAY_ENV.items()
+                                 if k not in ("LLM_EFFORT", "TDD_ESCALATE_AFTER")})
+    assert medium.fingerprint != base.fingerprint
+    assert dict(medium.values)["LLM_EFFORT"] == "medium"
+    assert "LLM_EFFORT" not in dict(base.values)
 
 
 def test_run_config_hashes_a_later_knob_only_when_it_is_set():
@@ -313,11 +465,20 @@ def test_report_at_run_start_emits_the_saved_verdict(tmp_path):
     mc.report_at_run_start({"MODEL": QWEN}, log=lines.append,
                            emit=lambda e, **f: events.append((e, f)), report_path=report)
     assert "family=qwen3" in lines[0] and "VLLM_MAX_MODEL_LEN=131072(profile)" in lines[0]
-    assert any("no measured runaway cap" in ln for ln in lines)
+    assert not any("no measured runaway cap" in ln for ln in lines)   # calibrated
     assert events == [("model.conformance", {"status": "pass", "model": QWEN, "family": "qwen3",
                                              "payload_on": {}, "payload_off": {},
+                                             "payload_levels": None,
                                              "checks": [], "checked_at": "t"})]
     events.clear()
     mc.report_at_run_start({"MODEL": MUSE}, log=lines.append,
                            emit=lambda e, **f: events.append((e, f)), report_path=report)
     assert events[0][1]["status"] == "absent"    # the saved report names another model
+
+
+def test_report_at_run_start_warns_on_an_uncalibrated_runaway_cap(tmp_path, monkeypatch):
+    _uncalibrated_qwen(monkeypatch)
+    lines: list[str] = []
+    mc.report_at_run_start({"MODEL": QWEN}, log=lines.append, emit=lambda e, **f: None,
+                           report_path=tmp_path / "absent.json")
+    assert any("qwen3 has no measured runaway cap" in ln for ln in lines)

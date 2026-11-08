@@ -57,6 +57,28 @@ def is_unimplemented_body(body_text: str, fn_name: str = "") -> bool:
             and len(stripped) < 60)
 
 
+class RestoredState(Enum):
+    """What a fill unit's revert puts back: the body it held before the fill.
+
+    Decided from the pre-image by the same predicate the scoped splice refuses
+    `target_not_stub` on, so the exhaustion path and the splicer cannot
+    disagree about whether an annotated stub may be written. A unit that
+    started as a stub goes back to a stub and may carry the annotated failed
+    attempt; a behavioural re-fill started from a filled body and goes back to
+    that body, over which no stub is ever written."""
+
+    STUB = "stub"
+    FILLED_BODY = "pre-fill body"
+
+    @classmethod
+    def of(cls, pre_image: str) -> RestoredState:
+        return cls.STUB if is_unimplemented_body(pre_image) else cls.FILLED_BODY
+
+    @property
+    def label(self) -> str:
+        return self.value
+
+
 def extract_fn_blocks(response: str) -> dict[str, str]:
     """Parse `<FN sig="...">body</FN>` blocks from the LLM response.
 

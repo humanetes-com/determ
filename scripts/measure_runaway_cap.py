@@ -21,6 +21,18 @@ USAGE
   .venv/bin/python scripts/measure_runaway_cap.py ask --tag qwen-2026-10-xx
   # Muse on the same selection, for the comparison:
   .venv/bin/python scripts/measure_runaway_cap.py ask --tag muse-2026-10-xx
+  # one reasoning level (default max), and a word the profile does not send
+  # yet, for calibrating it (Muse's xhigh before Muse is sent MAX as xhigh):
+  VLLM_EFFORT_WORD_MAX=xhigh .venv/bin/python scripts/measure_runaway_cap.py \
+      ask --tag muse-xhigh-2026-11-xx --effort max
+
+  --effort LEVEL  (ask) the `EffortLevel` every call is sent at: `max`
+           (default; what the profile's cap and reserve are measured at) or
+           `medium`, to give that level its own `level_calibration`. The
+           word the level is sent as is the profile's, or
+           `VLLM_EFFORT_WORD_<LEVEL>` from the environment; the first line
+           prints the payload, so check it names the word being calibrated.
+           Each row carries `effort` and the word in `payload`.
 
   select   picks complete requests per route — book (t0d.book), file
            (`_ask_fill`), impl (`_fill_turns`), session (`_make_session_route`)
@@ -30,9 +42,16 @@ USAGE
            FIRST turn (system + opening user, `turns == 2`) is taken, so every
            route is measured on the request that opens it.
            Writes logs/reasoning_econ/runaway/selection.json.
-  ask      re-asks every selected prompt serially with max_tokens = context
-           - prompt tokens - 512 (the per_call request), the served model's
-           profile ON payload, and no client cap. Appends calls.jsonl.
+  ask      re-asks every selected prompt serially through the pipeline's
+           own vLLM transport (the one model_interact builds): its template
+           kwargs (reasoning dialect and effort), repetition penalty, input
+           count from the server's /tokenize, and max_tokens from the same
+           budget planner the LLM controller calls (per_call: context -
+           prompt tokens - 512). Only the controller's recovery is left out:
+           no runaway char cap, no followup, no retry, so each row is one
+           uncapped call. The first line prints the payload and penalty the
+           transport sends; check them against the run's "model profile:"
+           line. Appends calls.jsonl.
 
   Cost: serial calls on the GPU; a long healthy call runs 15-40 min. 20
   prompts is several hours. Do not run beside a live pipeline on another
@@ -48,6 +67,23 @@ HOW TO INTERPRET THE OUTPUT
   uncalibrated. Copy the proposal into the family's profile
   (pipeline_core/domain/model_profile.py: runaway_think_chars,
   runaway_calibrated=True, and the tag in `calibration`).
+
+  The second PROPOSAL line is the planner thinking reserve (the profile's
+  `thinking_budget`, tokens): the healthy p90 reasoning in tokens, rounded up
+  to 1,024. It sizes the input caps (`safe_input_char_limit`): the largest
+  admitted prompt still leaves this much room, so a reserve under the healthy
+  tail admits prompts that cannot finish a healthy call. Rows carry
+  completion_tokens since 2026-11-06; older rows need --cpt (completion
+  chars per token, e.g. measured over a run's llm.stream_meta rows) or the
+  line says "no reserve". Copy it into `thinking_budget` with the tag.
+
+  report   --tag T [--cpt X]: recompute both proposals from calls.jsonl
+           without the GPU.
+
+  The selection is newest-first per route, so it may hold no prompt near the
+  input cap; the region between the largest selected prompt and the cap is
+  where the reserve decides whether a healthy call fits, and is unmeasured
+  until such prompts are selected.
 """
 
 from __future__ import annotations
@@ -63,12 +99,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline_core.domain.model_profile import (  # noqa: E402
-    reasoning_payload,
-    require_profile,
-    resolve_model_knobs,
-    served_model,
-)
+ROOT = Path(__file__).resolve().parent.parent
 
 OUT = Path("logs/reasoning_econ/runaway")
 ROUTES = ("book", "file", "impl", "session")
@@ -130,36 +161,46 @@ def transcript_messages(digest: str) -> list[dict[str, str]]:
     return out
 
 
-def _env() -> dict[str, str]:
-    from dotenv import dotenv_values
-    env = {k: v for k, v in dotenv_values(".env").items() if v is not None}
-    env.update(os.environ)
-    return env
+def _pipeline_transport() -> Any:
+    """The transport the pipeline would build for this .env: `.env` loaded
+    without override, as model_interact does before importing the transports
+    (they read MODEL and the knobs at construction), then the same factory.
+    Building our own client is what let this script send Muse's repetition
+    penalty and no reasoning effort to Qwen3.8 (2026-11-06)."""
+    from dotenv import load_dotenv
+    load_dotenv(ROOT / ".env")
+    from pipeline_core.adapters.llm_transports import VLLMTransport, _backend_factory
+    transport = _backend_factory()
+    if not isinstance(transport, VLLMTransport):
+        raise SystemExit(f"BACKEND resolves to {type(transport).__name__}; "
+                         "the per_call runaway cap is a vLLM measurement")
+    return transport
 
 
-def ask_one(client: Any, *, model: str, messages: list[dict[str, str]], max_tokens: int,
-            payload: dict[str, Any], rep: float) -> dict[str, Any]:
+def ask_one(transport: Any, messages: list[dict[str, str]], effort: Any) -> dict[str, Any]:
+    """One call planned and streamed exactly as the controller's first
+    attempt is at `effort`, minus its char cap and recovery."""
+    from pipeline_core.adapters.llm_transports import MAX_TOKENS
+    from pipeline_core.llm.budget import request_max_tokens
+    from pipeline_core.llm.events import StreamMeta
+    plan = request_max_tokens(
+        transport.spec(effort=effort), transport.budget_state(),
+        input_chars=sum(len(m.get("content") or "") for m in messages),
+        caller_max_tokens=MAX_TOKENS, default_sentinel=MAX_TOKENS, enable_thinking=True,
+        input_tokens=transport.count_input_tokens(messages, enable_thinking=True,
+                                                  effort=effort))
+    meta = StreamMeta()
     t0 = time.monotonic()
-    reasoning = content = ""
-    finish = None
-    with client.chat.completions.create(
-        model=model, messages=messages, max_tokens=max_tokens, stream=True,
-        stream_options={"include_usage": True},
-        extra_body={"chat_template_kwargs": payload, "repetition_penalty": rep, "seed": 17},
-    ) as stream:
-        for chunk in stream:
-            if not chunk.choices:
-                continue
-            if chunk.choices[0].finish_reason:
-                finish = chunk.choices[0].finish_reason
-            d = chunk.choices[0].delta
-            r = getattr(d, "reasoning", None) or getattr(d, "reasoning_content", None)
-            if r:
-                reasoning += r
-            if d.content:
-                content += d.content
-    return {"reasoning_chars": len(reasoning), "content_chars": len(content),
-            "finish": finish, "seconds": round(time.monotonic() - t0, 1)}
+    reasoning = content = 0
+    for d in transport.stream(messages, model=transport.served_model,
+                              max_tokens=plan.request_max, enable_thinking=True, meta=meta,
+                              effort=effort):
+        reasoning += len(d.reasoning)
+        content += len(d.content)
+    return {"reasoning_chars": reasoning, "content_chars": content,
+            "finish": meta.finish_reason, "prompt_tokens": meta.prompt_tokens,
+            "completion_tokens": meta.completion_tokens,
+            "max_tokens": plan.request_max, "seconds": round(time.monotonic() - t0, 1)}
 
 
 def _pct(xs: list[int], q: float) -> int:
@@ -178,6 +219,51 @@ def proposal(rows: list[dict[str, Any]]) -> tuple[int | None, str]:
     return cap, f"cap {cap:,} = healthy max {max(healthy):,} + 25% ({len(healthy)}/{len(rows)} healthy)"
 
 
+def reasoning_tokens(row: dict[str, Any], cpt: float | None) -> float | None:
+    """The row's reasoning in tokens: its completion tokens split by the
+    reasoning share of its characters, else its reasoning chars over `cpt`
+    (rows written before completion tokens were recorded). None when neither
+    is known."""
+    done = row.get("completion_tokens")
+    chars = row["reasoning_chars"] + row["content_chars"]
+    if isinstance(done, int) and done > 0 and chars > 0:
+        return done * row["reasoning_chars"] / chars
+    return row["reasoning_chars"] / cpt if cpt else None
+
+
+def reserve_proposal(rows: list[dict[str, Any]], cpt: float | None) -> tuple[int | None, str]:
+    """The family's planner thinking reserve (`thinking_budget`, tokens): the
+    healthy p90 reasoning in tokens, rounded up to 1,024.
+
+    Under per_call the reserve is not what a call may spend; it is what the
+    input cap keeps free, so it is the room the LARGEST admitted prompt still
+    leaves for reasoning (`safe_input_char_limit`). A reserve below the
+    healthy tail admits prompts that cannot finish a healthy call: Qwen3.8's
+    inherited 32,768 against this sample's p90 of 174,137 chars (2026-11-06).
+    p90 rather than the max because the max sizes the runaway cap and, as a
+    reserve, would shrink every prompt to give one call in twenty its room."""
+    healthy = [r for r in rows if r["finish"] == "stop" and r["content_chars"]]
+    toks = [t for t in (reasoning_tokens(r, cpt) for r in healthy) if t is not None]
+    if not healthy or len(toks) < len(healthy):
+        return None, (f"no reserve: {len(healthy) - len(toks)}/{len(healthy)} healthy row(s) "
+                      "carry no completion tokens; pass --cpt (completion chars per token)")
+    p90 = sorted(toks)[min(len(toks) - 1, int(math.ceil(0.9 * len(toks))) - 1)]
+    reserve = int(math.ceil(p90 / 1024.0) * 1024)
+    return reserve, f"reserve {reserve:,} = healthy p90 reasoning {p90:,.0f} tok rounded up to 1,024"
+
+
+def report(rows: list[dict[str, Any]], family: str, tag: str, cpt: float | None) -> None:
+    for route in ROUTES:
+        rr = [r for r in rows if r["route"] == route]
+        h = [r["reasoning_chars"] for r in rr if r["finish"] == "stop" and r["content_chars"]]
+        print(f"{route:8s} healthy {len(h)}/{len(rr)} p50 {_pct(h, .5):,} p90 {_pct(h, .9):,} "
+              f"max {max(h, default=0):,} length {sum(1 for r in rr if r['finish'] == 'length')}")
+    _cap, why = proposal(rows)
+    print(f"PROPOSAL ({family}, tag {tag}): {why}")
+    _res, why = reserve_proposal(rows, cpt)
+    print(f"PROPOSAL ({family}, tag {tag}): {why}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -188,6 +274,14 @@ def main() -> int:
     a = sub.add_parser("ask")
     a.add_argument("--tag", required=True, help="names this reading in calls.jsonl and the profile")
     a.add_argument("--prompts-dir", type=Path, default=Path("logs/prompts"))
+    a.add_argument("--cpt", type=float, default=None,
+                   help="completion chars per token, for rows without completion tokens")
+    a.add_argument("--effort", default="max", choices=("medium", "max"),
+                   help="the reasoning level every call is sent at")
+    rp = sub.add_parser("report", help="recompute both proposals from calls.jsonl, no GPU")
+    rp.add_argument("--tag", required=True)
+    rp.add_argument("--cpt", type=float, default=None,
+                    help="completion chars per token, for rows without completion tokens")
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     sel_path = OUT / "selection.json"
@@ -199,18 +293,32 @@ def main() -> int:
             print(f"{r:8s} {len(v)} prompts from runs {sorted({x['run'] for x in v})}")
         return 0
 
-    from openai import OpenAI
-    env = _env()
-    model = served_model(env)
-    prof = require_profile(model, env.get("MODEL_FAMILY"))
-    knobs = resolve_model_knobs(env)
-    payload = reasoning_payload(prof.dialect, True, strength_on=knobs.strength_on,
-                                strength_off=knobs.strength_off)
+    if args.cmd == "report":
+        rows = [json.loads(line) for line in (OUT / "calls.jsonl").read_text().splitlines()
+                if line.strip()]
+        rows = [r for r in rows if r.get("tag") == args.tag]
+        if not rows:
+            print(f"no rows tagged {args.tag!r} in {OUT / 'calls.jsonl'}")
+            return 2
+        report(rows, str(rows[0].get("family")), args.tag, args.cpt)
+        return 0
+
+    transport = _pipeline_transport()
+    from pipeline_core.domain.model_profile import (
+        EffortLevel,
+        require_profile,
+        resolve_model_knobs,
+    )
+    effort = EffortLevel(args.effort)
+    model = transport.served_model
+    prof = require_profile(model, os.environ.get("MODEL_FAMILY"))
+    knobs = resolve_model_knobs(os.environ, model)
     picked = json.loads(sel_path.read_text())
-    client = OpenAI(base_url=env.get("VLLM_BASE_URL", "http://localhost:8000/v1"),
-                    api_key="vllm", timeout=7200)
-    rep = float(env.get("VLLM_REPETITION_PENALTY", "1.05"))
-    print(f"model={model} family={prof.family} payload={payload} ctx={knobs.max_model_len}")
+    payload = transport.reasoning_payload(True, effort=effort)
+    spec = transport.spec(effort=effort)
+    print(f"model={model} family={prof.family} effort={effort.value} payload={payload} "
+          f"repetition_penalty={knobs.repetition_penalty} ctx={spec.ctx_len} "
+          f"per_call={spec.per_call_reasoning}")
     rows: list[dict[str, Any]] = []
     with (OUT / "calls.jsonl").open("a", encoding="utf-8") as sink:
         for route, items in picked.items():
@@ -226,24 +334,18 @@ def main() -> int:
                         messages.append({"role": "system",
                                          "content": sp.read_text(encoding="utf-8")})
                     messages.append({"role": "user", "content": prompt})
-                max_tokens = knobs.max_model_len - len(prompt) // 3 - 512
-                r = ask_one(client, model=model, messages=messages, max_tokens=max_tokens,
-                            payload=payload, rep=rep)
+                res = ask_one(transport, messages, effort)
                 row = {"tag": args.tag, "model": model, "family": prof.family,
-                       "route": route, "sha": it["sha"], "prompt_chars": len(prompt), **r}
+                       "effort": effort.value, "payload": payload,
+                       "route": route, "sha": it["sha"], "prompt_chars": len(prompt), **res}
                 rows.append(row)
                 sink.write(json.dumps(row) + "\n")
                 sink.flush()
                 print(f"  {route:8s} {it['sha'][:12]} prompt={len(prompt):,} "
-                      f"reasoning={r['reasoning_chars']:,} content={r['content_chars']:,} "
-                      f"finish={r['finish']} {r['seconds']}s", flush=True)
-    for route in ROUTES:
-        rr = [r for r in rows if r["route"] == route]
-        h = [r["reasoning_chars"] for r in rr if r["finish"] == "stop" and r["content_chars"]]
-        print(f"{route:8s} healthy {len(h)}/{len(rr)} p50 {_pct(h, .5):,} p90 {_pct(h, .9):,} "
-              f"max {max(h, default=0):,} length {sum(1 for r in rr if r['finish'] == 'length')}")
-    cap, why = proposal(rows)
-    print(f"PROPOSAL ({prof.family}, tag {args.tag}): {why}")
+                      f"reasoning={res['reasoning_chars']:,} content={res['content_chars']:,} "
+                      f"finish={res['finish']} max_tokens={res['max_tokens']:,} "
+                      f"{res['seconds']}s", flush=True)
+    report(rows, prof.family, args.tag, args.cpt)
     return 0
 
 

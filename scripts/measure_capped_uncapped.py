@@ -28,7 +28,7 @@ USAGE
   --since    only calls whose llm.request ts >= this date (UTC).
   --n        prompts to re-ask (most recent cut prompts first, distinct sha).
   Knobs: VLLM_BASE_URL (default http://localhost:8000/v1), MODEL from .env,
-  VLLM_REASONING_STRENGTH (default high), VLLM_REPETITION_PENALTY (1.05),
+  VLLM_EFFORT_WORD_MAX (default high, the strength word sent), VLLM_REPETITION_PENALTY (1.05),
   MAX_MODEL_LEN (default 131072). Each call gets max_tokens = MAX_MODEL_LEN
   - (prompt chars / 3) - 2048, so reasoning is bounded only by context.
 
@@ -168,7 +168,10 @@ def main() -> int:
 
     from openai import OpenAI
     model = os.getenv("VLLM_MODEL_NAME") or _env_line("MODEL")
-    strength = os.getenv("VLLM_REASONING_STRENGTH") or _env_line("VLLM_REASONING_STRENGTH") or "high"
+    # The word MAX is sent as on the strength dialect: the profile's (`high`)
+    # unless calibrating another one through VLLM_EFFORT_WORD_MAX.
+    strength = (os.getenv("VLLM_EFFORT_WORD_MAX") or _env_line("VLLM_EFFORT_WORD_MAX")
+                or "high")
     rep = float(os.getenv("VLLM_REPETITION_PENALTY", "1.05"))
     ctx = int(os.getenv("MAX_MODEL_LEN", "131072"))
     cap = int(_env_line("VLLM_MAX_THINK_CHARS") or "120000")

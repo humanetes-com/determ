@@ -154,17 +154,46 @@ def test_dropping_t2a_products_leaves_the_layout_and_the_augmentation(tmp_path):
     assert (ws / ".skeleton-filled" / "kept.rs").read_text(encoding="utf-8") == "fn kept() {}\n"
 
 
-def test_anyhow_launcher_drops_t2a_and_hardcrate_resume_does_not():
+def test_anyhow_launcher_drops_t2a_and_hardcrate_resume_drops_only_on_request():
     """The wipe is gated on the anyhow launcher's task2/task2a path.
-    run_hardcrate.sh --from calls restart_from_clear only, so a hardcrate
-    resume cannot inherit the deletion."""
+    run_hardcrate.sh --from keeps the fills unless --drop-fills is given, and
+    then drops through the same lib function, only for a t2/t2a stage."""
     root = Path(__file__).resolve().parents[1]
     restart = (root / "restart_from.sh").read_text(encoding="utf-8")
     hard = (root / "run_hardcrate.sh").read_text(encoding="utf-8")
     assert 'restart_from_drops_t2a "$_STAGE" && [[ "$_KEEP_FILLS" != true ]]' in restart
     assert "restart_from_drop_t2a_products" in restart
-    assert "restart_from_drop_t2a_products" not in hard
     assert "restart_from_clear" in hard
+    stage = hard.index('restart_from_drops_t2a "$FROM_STAGE"')
+    guards = hard.index('pgrep -f')
+    drop = hard.index('restart_from_drop_t2a_products "$WS"')
+    gate = hard.rindex('if [[ "$DROP_FILLS" == true ]]', 0, drop)
+    assert stage < guards < gate < drop
+    # The body ledger re-seeds proven bodies at cluster entry; the same
+    # gated branch moves it aside (never removes it).
+    aside = hard.index('mv "$BODY_LEDGER" "$ASIDE"')
+    assert drop < aside < hard.index("fi\n    fi\n", aside) + 20
+    assert 'rm -rf "$BODY_LEDGER"' not in hard
+    assert 'DROP_FILLS=false' in hard
+
+
+def _hardcrate_args(*args: str) -> subprocess.CompletedProcess[str]:
+    root = Path(__file__).resolve().parents[1]
+    return subprocess.run(["bash", str(root / "run_hardcrate.sh"), *args],
+                          capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.parametrize("args", [("--drop-fills",),
+                                  ("--from=t2b", "--drop-fills"),
+                                  ("--from=t3", "--drop-fills")])
+def test_hardcrate_refuses_drop_fills_outside_a_fill_stage(args):
+    """--drop-fills means "re-run the per-cluster fill on stubs"; a later
+    stage would never refill, and without --from the workspace is rebuilt.
+    The refusal runs before the process and vLLM guards, so it needs
+    neither."""
+    r = _hardcrate_args(*args)
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "--drop-fills needs --from=t2 or --from=t2a" in r.stdout
 
 
 def test_restart_from_and_redo_pass_no_tail_to_continue():

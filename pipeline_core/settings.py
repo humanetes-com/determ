@@ -204,6 +204,11 @@ class Settings:
     # `72627-751534fe` (2026-09-30). `BEHAVIOUR_BOOK_LANES`, else the
     # pipeline's `PIPELINE_PARALLELISM`, else 1. 1 is the serial build.
     behaviour_book_lanes: int = 1
+    # t1.5: components whose attempt-1 authoring is asked ahead of their turn
+    # (`author_layout._Prefetch`). Every commit, calibration and retry still
+    # runs one at a time in surface order. `LAYOUT_LANES`, else
+    # `PIPELINE_PARALLELISM`, else 1. 1 is the serial pass.
+    layout_lanes: int = 1
     # Sampling temperature of the book judge's calls (ablation, set,
     # leave-one-out); drafting keeps the server default. None (unset or
     # empty `BEHAVIOUR_BOOK_PREDICT_TEMPERATURE`) forwards no temperature.
@@ -313,6 +318,8 @@ class Settings:
             behaviour_book_drafts_per_reply=int(os.getenv("BEHAVIOUR_BOOK_DRAFTS_PER_REPLY", "6")),
             behaviour_book_lanes=max(1, int(
                 os.getenv("BEHAVIOUR_BOOK_LANES") or os.getenv("PIPELINE_PARALLELISM") or "1")),
+            layout_lanes=max(1, int(
+                os.getenv("LAYOUT_LANES") or os.getenv("PIPELINE_PARALLELISM") or "1")),
             behaviour_book_predict_temperature=_optional_float(
                 os.getenv("BEHAVIOUR_BOOK_PREDICT_TEMPERATURE")),
             behaviour_book_think=os.getenv("BEHAVIOUR_BOOK_THINK", "1").strip() == "1",

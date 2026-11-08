@@ -28,16 +28,15 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, Sequence
-from concurrent.futures import as_completed
 from dataclasses import dataclass, replace
 
+from pipeline_core.application.lanes import on_lanes
 from pipeline_core.domain.behaviour import (
     BehaviourSpec,
     BehaviourSuite,
     Feature,
     GlossaryEntry,
     Rule,
-    outcome_matches,
 )
 from pipeline_core.domain.behaviour_book import (
     GIVENS_INDEX_NAME,
@@ -46,7 +45,9 @@ from pipeline_core.domain.behaviour_book import (
     ChunkJudgment,
     CreditedRule,
     GivenRoot,
+    Grade,
     Predict,
+    Prediction,
     RuleDraft,
     SiblingVisit,
     draft_refusal,
@@ -62,6 +63,7 @@ from pipeline_core.domain.behaviour_book import (
     parse_given_phrases,
     parse_predictions,
     parse_rule_drafts,
+    predicted,
     render_feature,
     render_givens_index,
     rule_checkable,
@@ -74,7 +76,6 @@ from pipeline_core.prompts.behaviour_rules import (
     build_rule_authoring_prompt,
     build_then_prediction_prompt,
 )
-from pipeline_core.threads import ContextPool
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,9 @@ class _ChunkResult:
     # The examples the ablation answered right (empty when no draft
     # survived: the ablation was then never asked).
     unaided: tuple[str, ...] = ()
+    # The checkable examples the ablation marked undetermined: no glossary
+    # line decides them, so only a rule can.
+    undetermined: tuple[str, ...] = ()
     # Model calls this chunk spent: the draft, plus the judge's calls when
     # any draft survived.
     calls: int = 0
@@ -184,7 +188,7 @@ def build_behaviour_book(
 
     if tasks:
         note_work(done=0, total=len(tasks), calls=0, lanes=lanes, wave="chunks")
-    results = _on_lanes(run, tasks, lanes, on_done=_chunk_done)
+    results = _book_lanes(run, tasks, lanes, on_done=_chunk_done)
     per_feature: dict[str, list[_ChunkResult]] = {}
     for (f, _chunk_specs), r in zip(tasks, results, strict=True):
         per_feature.setdefault(f.item, []).append(r)
@@ -206,13 +210,14 @@ def build_behaviour_book(
     if visits:
         note_work(done=0, total=len(visits), calls=spent, lanes=lanes, wave="siblings")
     for (item, _r, _v), (credit, _n) in zip(
-            visits, _on_lanes(_visit, visits, lanes, on_done=_visit_done), strict=True):
+            visits, _book_lanes(_visit, visits, lanes, on_done=_visit_done), strict=True):
         for sentence, ids in credit.items():
             travelled.setdefault(item, {}).setdefault(sentence, []).extend(ids)
     dropped: Counter[str] = Counter()
     proposed = kept = 0
     sibling: set[str] = set()
     unaided = 0
+    undetermined = 0
     built: list[Feature] = []
     for f in features:
         if f.item not in asked:
@@ -236,6 +241,7 @@ def build_behaviour_book(
         kept += len(rules)
         plain = tuple(i for r in per_feature.get(f.item, []) for i in r.unaided)
         unaided += len(plain)
+        undetermined += sum(len(r.undetermined) for r in per_feature.get(f.item, []))
         built.append(replace(f, rules=tuple(rules), unaided_ids=plain))
         log(f"    [behaviour-book] {f.item}: {len(checkable_of[f.item])} checkable "
             f"example(s), {len(rules)} rule(s) kept")
@@ -258,6 +264,7 @@ def build_behaviour_book(
         predict_temperature=budget.predict_temperature, think=budget.think,
         sibling_examples=len(sibling),
         unaided_examples=unaided,
+        undetermined_examples=undetermined,
         given_roots=len(_roots), given_setups=len(_setups),
         given_phrases=len(phrases),
         given_refused=dict(Counter(drop_reason_class(why) for why in without.values())))
@@ -284,38 +291,16 @@ def _given_phrases(
     for r in roots:
         by_file.setdefault(r.file, []).append(r)
     tasks = sorted(by_file.items())
-    replies = _on_lanes(
+    replies = _book_lanes(
         lambda t: parse_given_phrases(ask(build_given_phrase_prompt(crate=crate, file=t[0], roots=t[1]))),
         tasks, max(1, min(lanes, len(tasks) or 1)))
     answered = {k: v for reply in replies for k, v in reply.items()}
     return keep_given_phrases(roots, answered, examples, private)
 
 
-def _on_lanes[T, R](fn: Callable[[T], R], items: Sequence[T], lanes: int,
-                    on_done: Callable[[R], None] | None = None) -> list[R]:
-    """`fn` over `items`, results in item order, on up to `lanes` threads.
-
-    `on_done` runs on this thread as each result arrives, so a progress
-    count moves when a unit finishes rather than when the whole wave does."""
-    if not items:
-        return []
-    if lanes > 1 and len(items) > 1:
-        with ContextPool(max_workers=lanes, thread_name_prefix="behaviour-book") as pool:
-            pending = {pool.submit(fn, item): i for i, item in enumerate(items)}
-            done: dict[int, R] = {}
-            for fut in as_completed(pending):
-                i = pending[fut]
-                done[i] = fut.result()
-                if on_done is not None:
-                    on_done(done[i])
-        return [done[i] for i in range(len(items))]
-    out: list[R] = []
-    for item in items:
-        result = fn(item)
-        out.append(result)
-        if on_done is not None:
-            on_done(result)
-    return out
+def _book_lanes[T, R](fn: Callable[[T], R], items: Sequence[T], lanes: int,
+                      on_done: Callable[[R], None] | None = None) -> list[R]:
+    return on_lanes(fn, items, lanes, on_done, name="behaviour-book")
 
 
 def _chunk(
@@ -348,9 +333,9 @@ def _chunk(
             surviving.append(d)
         else:
             dropped[drop_reason_class(why)] += 1
-    ablation: list[dict[str, str]] = []
+    ablation: list[dict[str, Prediction]] = []
 
-    def check(rules: Sequence[str], ids: Sequence[str]) -> Mapping[str, str]:
+    def check(rules: Sequence[str], ids: Sequence[str]) -> Mapping[str, Prediction]:
         """One checker call. The ablation (no rule) is asked once, over the
         whole chunk, and answered from that reply afterwards: a sibling
         judgment of this chunk measures gain against the same reading."""
@@ -384,12 +369,13 @@ def _chunk(
                                | set(feature_spellings(f.item, glossary)))),
             refuted_on=c.refuted_on)
         for n, c in enumerate(verdict.kept))
-    unaided = tuple(
-        i for i, spec in pool.items()
-        if spec.then is not None and i in ablation[0] and outcome_matches(ablation[0][i], spec.then)
-    ) if ablation else ()
+    unaided = tuple(i for i, spec in pool.items()
+                    if predicted(ablation[0], i, spec) is Grade.RIGHT) if ablation else ()
+    undetermined = tuple(i for i, spec in pool.items()
+                         if predicted(ablation[0], i, spec) is Grade.UNDETERMINED
+                         ) if ablation else ()
     return _ChunkResult(proposed, kept, dropped, pool, judged, check, unaided,
-                        calls=1 + verdict.calls)
+                        undetermined=undetermined, calls=1 + verdict.calls)
 
 
 def feature_files(suite: BehaviourSuite) -> dict[str, str]:

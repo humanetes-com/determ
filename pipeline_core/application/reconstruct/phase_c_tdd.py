@@ -286,6 +286,7 @@ from pipeline_core.domain.measurement import (
     qualified_verdicts,
     tree_content_sha,
 )
+from pipeline_core.domain.model_profile import EffortLevel, resolve_model_knobs
 from pipeline_core.domain.models import (
     BuildCluster,
     ClusterFillResult,
@@ -400,6 +401,8 @@ from pipeline_core.domain.zero_payoff import (
     unpaid_streak,
     zero_payoff_streak,
 )
+from pipeline_core.effort import call_effort
+from pipeline_core.effort import policy as effort_policy
 from pipeline_core.ports.fill_engine import FillPassPort, LocalizeCrashesPort
 from pipeline_core.ports.measurement import AttributeFailuresPort, MeasureCoveragePort
 
@@ -1020,6 +1023,18 @@ def run_phase_c_tdd(
     # pass increase. On run `1947461-b4eb65c3` (2026-10-24) it would have
     # fired at iter 13, before the 88-minute fill 13. 0 disables.
     _unseen_stop_after = int(os.getenv("TDD_UNSEEN_STOP", "1"))
+    # Not a stop: how many owed asks below the maximum reasoning level a red
+    # test takes (landings and planned misses, any function, any
+    # fingerprint, since it was last green) before what it owes is owed at
+    # the maximum, once per function per red episode
+    # (`candidate_tiers.AskLedger.level_for`). Read off the record, not
+    # chosen: `scripts/owed_landing_text_moves.py --product anyhow --since
+    # 2026-10-09` (51 runs, all at the maximum) put 81% of the greens that
+    # followed an owed ask at or before a test's 12th ask, and greens kept
+    # arriving past every count, so no count is one past which another ask
+    # at the same level stopped paying. Re-read on the first medium lane.
+    # 0 disables (every call at the policy's level).
+    _escalate_after = int(os.getenv("TDD_ESCALATE_AFTER", "12"))
     _reset_cap = int(os.getenv("RETRO_RESET_MAX_ATTEMPTS", "2"))
     # Wall-clock bound on one TDD fill phase (file-first + impl + per-fn).
     # `stall` is written only when cargo test finishes an iteration, so a
@@ -1166,7 +1181,10 @@ def run_phase_c_tdd(
          + f", followup-think={'on' if followup_think_env_on() else 'off'}"
          + f", replan-on-premise={'on' if _replan_on_premise else 'off'}"
          + f", asked-unchanged={'on' if _asked_unchanged_on else 'off'}"
-         + f", {_cut_knobs.describe()}")
+         + f", {_cut_knobs.describe()}"
+         + f", {effort_policy().describe()}"
+         + (f", escalate-after={_escalate_after} owed ask(s)"
+            if _escalate_after > 0 else ", escalate=off"))
 
     if deps.migrate_retro_evidence is not None:
         _mig_cleared, _mig_retired = deps.migrate_retro_evidence(project_dir)
@@ -1881,7 +1899,8 @@ def run_phase_c_tdd(
             observed={t_: frozenset(unit_key(u_) for u_ in us_)
                       for t_, us_ in _observed_now.items()},
             lessons=(_lesson_store.digests() if _lesson_store is not None
-                     else None))
+                     else None),
+            escalate_after=_escalate_after)
     _dispatch_cap = int(os.getenv("PHASE_C_TDD_MAX_DISPATCH",
                                   str(DEFAULT_MAX_DISPATCH)))
     # Units this PASS has already handed to the engine. Cleared when a pass
@@ -6782,6 +6801,13 @@ def run_phase_c_tdd(
         _asks = _asks.for_oracle(_oracle_fp(iter_n))
         _due = DueReading({})
         if _owed_on:
+            # A test this sweep read passing closes its red episode: its
+            # count of asks below the maximum and its functions' maximum
+            # tries start again if it goes red later. Positive evidence
+            # only (libtest's `ok` lines); a test the sweep did not run is
+            # not green.
+            _asks.green(bare_test_name(n_)
+                        for n_ in parse_test_output(output).passed)
             try:
                 _due = _owed_now(_stub_hold, eligible, _session_slices,
                                  _tree_sha, _walk_owners)
@@ -7522,16 +7548,11 @@ def run_phase_c_tdd(
         # read here instead of found by hand days later.
         _health = reasoning_cap.health_reading()
         if _health is not None:
+            # The budget through the resolver the transport plans with,
+            # never the raw env (`ModelKnobs.budget_line`).
             deps.log(f"  {tag} [llm/health] iter {iter_n}: "
                      f"{_health.describe()}; {_cut_knobs.describe()}; "
-                     f"VLLM_REASONING_BUDGET="
-                     f"{os.getenv('VLLM_REASONING_BUDGET', 'fixed')} "
-                     f"VLLM_THINKING_BUDGET="
-                     f"{os.getenv('VLLM_THINKING_BUDGET', '')} "
-                     f"VLLM_MAX_THINK_CHARS="
-                     f"{os.getenv('VLLM_MAX_THINK_CHARS', '')} "
-                     f"VLLM_CONTENT_BUDGET="
-                     f"{os.getenv('VLLM_CONTENT_BUDGET', '')}")
+                     f"{resolve_model_knobs(os.environ).budget_line()}")
         # The ordered frontier this iteration walked, as one digest. It is a
         # DIAGNOSTIC and never a gate: a hash of the population cannot decide
         # whether a carried cursor is valid, because the population moves for
@@ -8137,6 +8158,7 @@ def run_phase_c_tdd(
                     owner_starved=frozenset(_starved),
                     due=frozenset(_due_fill),
                     due_rungs={u_: _due.rung_of(u_) for u_ in _due_fill},
+                    max_units=_due.max_units & _due_fill,
                     unit_evidence=_unit_evidence,
                     body_rows=_body_rows,
                     # The pool starts units in the order this driver chose;
@@ -8352,6 +8374,34 @@ def run_phase_c_tdd(
                 _asks.record(u_, t_, fp_, rung=(
                     "session" if u_ in _session_kept else "unit"))
                 for u_, t_, fp_ in _ans)
+            # The level each owed ask was sent at, from the rows of the runs
+            # that kept or offered the unit (`RouteLedgerRow.effort`). A
+            # landing no row names (a write outside every run's `kept`) was
+            # sent at the policy's level. An ask at the maximum is the
+            # pair's maximum try only when this reading owed it there.
+            _low_level = call_effort()
+            _unit_levels: dict[str, set[EffortLevel]] = {}
+            for _row_l in _fill_rows:
+                _lv_l = (EffortLevel(_row_l.effort) if _row_l.effort
+                         else _low_level)
+                for _a_l, _b_l in (*_row_l.kept,
+                                   *(_row_l.opened if _row_l.opened is not None
+                                     else _row_l.targets)):
+                    _unit_levels.setdefault(f"{_a_l}::{_b_l}", set()).add(_lv_l)
+
+            def _ask_level(unit: str, test: str, *,
+                           levels: dict[str, set[EffortLevel]] = _unit_levels,
+                           low: EffortLevel = _low_level,
+                           due: DueReading = _due) -> EffortLevel:
+                got = levels.get(unit) or {low}
+                if EffortLevel.MAX in got and due.owes_max(unit, test):
+                    return EffortLevel.MAX
+                below = sorted(lv for lv in got if lv is not EffortLevel.MAX)
+                return below[0] if below else EffortLevel.MAX
+
+            for u_, t_, _fp in _ans:
+                _asks.count_ask(u_, t_, _ask_level(u_, t_), landed=True,
+                                owed_max=_due.owes_max(u_, t_))
 
             def _session_covers(
                     test: str, unit: str, *,
@@ -8426,10 +8476,16 @@ def run_phase_c_tdd(
                         _asks.note_repair(u_, t_, fp_, "repaired")
                     elif _asks.note_compile_pending(u_, t_, fp_):
                         continue
+                    _asks.count_ask(u_, t_, _ask_level(u_, t_), landed=False,
+                                    owed_max=_due.owes_max(u_, t_))
                     if (_asks.miss(u_, t_, fp_, "compile", rung=_rung_m,
                                    misses=_owed_misses) == _owed_misses):
                         _spent_now.append(f"{u_} (for {t_}, compile)")
                     continue
+                _asks.count_ask(u_, t_, _ask_level(u_, t_), landed=False,
+                                planned=_miss_why not in ("not_planned",
+                                                          "route_absent"),
+                                owed_max=_due.owes_max(u_, t_))
                 if (_asks.miss(u_, t_, fp_, _miss_why, rung=_rung_m,
                                misses=_owed_misses) == _owed_misses):
                     _spent_now.append(f"{u_} (for {t_}, {_miss_why})")
@@ -8496,7 +8552,14 @@ def run_phase_c_tdd(
                 "off_tier_missed": sorted({f"{u_} for {t_}"
                                            for u_, t_, _f, _r in _off_mis}),
                 "spent_by_misses": _spent_now,
-                "unread": sorted(_due.unread)})
+                "unread": sorted(_due.unread),
+                # Per red test still counted: its owed asks below the
+                # maximum this red episode, and the pairs whose maximum
+                # try is spent.
+                "low_asks": {t_: n_ for t_, n_ in sorted(_asks.low_asks.items())
+                             if t_ in _due.by_test},
+                "max_spent": sorted(k_ for k_, v_ in _asks.max_tries.items()
+                                    if v_ < 0 or v_ >= _owed_misses)})
         # A unit no route opened had no turn: put it back on the pass once.
         # If this batch closed the pass, the closure is taken back — the
         # traversal it counted did not happen for these units.
@@ -9100,7 +9163,8 @@ def run_phase_c_tdd(
                 last_failed, reading=_due, ledger=_asks, sight=_sight,
                 runs=_runs_led,
                 words={bare_test_name(t_): e_ for t_, e_ in
-                       failure_evidence_by_test(output).items()})
+                       failure_evidence_by_test(output).items()},
+                escalate_after=_escalate_after)
             for _line in render_red_ledger(_red_entries):
                 deps.log(f"  {tag} [phase-c/tdd] {_line}")
             deps.emit("phase_c.tdd.red_ledger", data={

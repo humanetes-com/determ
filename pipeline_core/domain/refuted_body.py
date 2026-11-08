@@ -82,7 +82,7 @@ def refuted_notes(entries: Iterable[LedgerEntry],
     return {
         FnLocator(e.key.file, e.key.fn_name): refuted_crash_note(
             "\n\n".join(e.bodies), e.crash_evidence, e.iteration,
-            unit=f"{e.key.file}::{e.key.fn_name}")
+            unit=f"{e.key.file}::{e.key.fn_name}", run_id=e.run_id)
         for e in latest.values()}
 
 

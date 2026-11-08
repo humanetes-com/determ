@@ -18,6 +18,12 @@ code the launch runs):
                  and OFF payloads gives different token ids. Ids, not counts:
                  `low` and `high` are one token each. Identical ids mean the
                  template dropped the variable — the wrong dialect.
+2b. levels     — `POST /tokenize` under the ON payload of each reasoning
+                 level (`EffortLevel`) gives different token ids when the
+                 levels send different words. Identical ids mean the template
+                 drops the level's word, so a call asked at medium would
+                 reason at the template's default (the maximum) and every
+                 reading of the level would measure nothing.
 3. parser split — one short generation with thinking on returns reasoning on
                  the reasoning channel, an answer in content, and no `<think>`
                  in content. With thinking off, a boolean-dialect model returns
@@ -44,12 +50,14 @@ from typing import Any
 import httpx
 
 from pipeline_core.domain.model_profile import (
+    EffortLevel,
     ModelProfile,
     ReasoningDialect,
     UnknownModelError,
     reasoning_payload,
     require_profile,
     resolve_model_knobs,
+    retired_knob_lines,
     served_model,
 )
 
@@ -60,6 +68,7 @@ EXIT_SERVED_ID = 3
 EXIT_DIALECT = 4
 EXIT_PARSER = 5
 EXIT_UNREACHABLE = 6
+EXIT_LEVELS = 7
 
 PROBE_MESSAGES: tuple[dict[str, str], ...] = (
     {"role": "user", "content": "Reply with exactly one word: ready"},
@@ -79,6 +88,8 @@ class ConformanceReport:
     family: str | None
     payload_on: dict[str, Any] = field(default_factory=dict)
     payload_off: dict[str, Any] = field(default_factory=dict)
+    #: The ON payload of each level, by level value (`payload_on` is MAX's).
+    payload_levels: dict[str, dict[str, Any]] = field(default_factory=dict)
     checks: list[CheckResult] = field(default_factory=list)
     checked_at: str = ""
 
@@ -89,6 +100,7 @@ class ConformanceReport:
     def as_dict(self) -> dict[str, Any]:
         return {"model": self.model, "family": self.family,
                 "payload_on": self.payload_on, "payload_off": self.payload_off,
+                "payload_levels": self.payload_levels,
                 "checks": [asdict(c) for c in self.checks],
                 "ok": self.ok, "checked_at": self.checked_at}
 
@@ -121,6 +133,39 @@ def check_dialect(ids_on: list[int] | None, ids_off: list[int] | None,
             "this is the wrong reasoning dialect for the served model")
     return CheckResult("dialect", True,
                        f"on/off render differently ({len(ids_on)} vs {len(ids_off)} tokens)")
+
+
+def check_levels(ids_by_level: Mapping[str, list[int] | None],
+                 payloads: Mapping[str, Mapping[str, Any]]) -> CheckResult:
+    """The template reads the level's word: two levels whose ON payloads
+    differ must render different prompts. Levels that send the same payload
+    have nothing to tell apart and pass, named."""
+    distinct: dict[str, str] = {}
+    for level, payload in payloads.items():
+        distinct.setdefault(json.dumps(dict(payload), sort_keys=True), level)
+    if len(distinct) < 2:
+        return CheckResult("levels", True,
+                           f"every level sends {next(iter(distinct), '{}')}: "
+                           "nothing to tell apart")
+    seen: dict[tuple[int, ...], str] = {}
+    for level in distinct.values():
+        ids = ids_by_level.get(level)
+        if not ids:
+            return CheckResult("levels", False,
+                               f"the server's /tokenize returned no token ids at {level}")
+        prior = seen.get(tuple(ids))
+        if prior is not None:
+            return CheckResult(
+                "levels", False,
+                f"{dict(payloads[prior])} and {dict(payloads[level])} render "
+                f"identical prompts ({len(ids)} tokens): the chat template drops "
+                f"the level's word, so a call at {level} reasons at the same "
+                f"depth as one at {prior}")
+        seen[tuple(ids)] = level
+    return CheckResult("levels", True,
+                       "each level renders its own prompt: "
+                       + ", ".join(f"{lv}={dict(payloads[lv])}"
+                                   for lv in distinct.values()))
 
 
 def message_parts(chat_json: Mapping[str, Any]) -> tuple[str, str, str | None]:
@@ -212,13 +257,18 @@ def generate(base_url: str, model: str, payload: Mapping[str, Any],
         return None
 
 
-def _payloads(profile: ModelProfile, env: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
+def _payload(profile: ModelProfile, env: Mapping[str, str], enable_thinking: bool,
+             level: EffortLevel) -> dict[str, Any]:
     knobs = resolve_model_knobs(env)
-    on = reasoning_payload(profile.dialect, True,
-                           strength_on=knobs.strength_on, strength_off=knobs.strength_off)
-    off = reasoning_payload(profile.dialect, False,
-                            strength_on=knobs.strength_on, strength_off=knobs.strength_off)
-    return dict(on), dict(off)
+    return dict(reasoning_payload(profile.dialect, enable_thinking,
+                                  effort_word=knobs.effort_word(level),
+                                  strength_off=knobs.strength_off))
+
+
+def _payloads(profile: ModelProfile, env: Mapping[str, str]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """MAX's ON payload and the OFF payload (OFF is below every level)."""
+    return (_payload(profile, env, True, EffortLevel.MAX),
+            _payload(profile, env, False, EffortLevel.MAX))
 
 
 def run_conformance(env: Mapping[str, str], *, deadline_s: float = 1200.0,
@@ -237,6 +287,8 @@ def run_conformance(env: Mapping[str, str], *, deadline_s: float = 1200.0,
         return EXIT_UNKNOWN_PROFILE, report
     report.family = profile.family
     report.payload_on, report.payload_off = _payloads(profile, env)
+    report.payload_levels = {lv.value: _payload(profile, env, True, lv)
+                             for lv in EffortLevel}
 
     t0 = time.monotonic()
     models: dict[str, Any] | None = None
@@ -262,6 +314,14 @@ def run_conformance(env: Mapping[str, str], *, deadline_s: float = 1200.0,
     log(f"  [conformance] dialect {profile.dialect.value}: {dialect.detail}")
     if not dialect.ok:
         return EXIT_DIALECT, report
+
+    levels = check_levels(
+        {lv: tokenize_ids(base, model, p) for lv, p in report.payload_levels.items()},
+        report.payload_levels)
+    report.checks.append(levels)
+    log(f"  [conformance] levels: {levels.detail}")
+    if not levels.ok:
+        return EXIT_LEVELS, report
 
     # Inference comes up after the API (CUDA graph capture): retry the first
     # generation until the deadline rather than reading a 5xx as a verdict.
@@ -292,6 +352,9 @@ def report_at_run_start(env: Mapping[str, str], *, log: Callable[[str], None],
     report — `status: absent` when no report names this served id."""
     knobs = resolve_model_knobs(env)
     log(f"  {knobs.summary()}")
+    log(f"  [model-profile] {knobs.effort_line()}")
+    for line in retired_knob_lines(env):
+        log(f"  [model-profile] {line}")
     if knobs.sources().get("VLLM_RUNAWAY_THINK_CHARS") == "uncalibrated":
         log(f"  [model-profile] WARNING: {knobs.family} has no measured runaway cap: "
             "per_call reasoning runs until it fills the context")
@@ -304,7 +367,7 @@ def report_at_run_start(env: Mapping[str, str], *, log: Callable[[str], None],
         return
     emit("model.conformance", status="pass" if saved.get("ok") else "fail", **{
         k: saved.get(k) for k in ("model", "family", "payload_on", "payload_off",
-                                  "checks", "checked_at")})
+                                  "payload_levels", "checks", "checked_at")})
 
 
 def _load_env(env_file: Path) -> dict[str, str]:

@@ -81,7 +81,8 @@ def test_a_repeated_request_is_not_sent_twice(tmp_path: Path) -> None:
     answer, logs = _answerer(cluster, project)
     req = '<REQUEST kind="file" arg="src/big.rs"/>'
     first = answer(req) or ""
-    second = answer(req) or ""
+    # The conversation that carried the first answer, as every caller hands it.
+    second = answer(req, conversation=first) or ""
     assert "pub fn filler_00000()" in first
     assert "pub fn filler_00000()" not in second
     assert len(second) < 1_000

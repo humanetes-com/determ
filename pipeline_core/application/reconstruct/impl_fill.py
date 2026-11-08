@@ -5447,7 +5447,8 @@ def prepare_impl_fill(
                         tdd_test_cmd, target_src_dir, cluster_env, role=MeasureRole.PREMISE)
                     # The salvage is a transaction: the compiling image
                     # goes in, is checked, and is rolled back to the
-                    # stubbed pre-image byte for byte when it does not hold.
+                    # pre-fill image byte for byte when it does not hold: the
+                    # stubs, and any re-fill member's filled body as it was.
                     _sv_txn = TreeTxn(target_src_dir, validate_parse=_parse_ok)
                     _sv_txn.write(block.file, _salvaged.body)
                     _sv_rc, _, _ = _run_cargo_check_diag(
@@ -5464,7 +5465,7 @@ def prepare_impl_fill(
                              "attempt NOT salvaged ("
                              + ("no longer compiles here" if _sv_regr is None
                                 else f"would regress {_sv_regr[0].summary}")
-                             + ") — stubs kept.")
+                             + ") — pre-fill bodies kept.")
                         _verdict_row(
                             block_id, Disposition.SALVAGE_REFUSAL,
                             "best compiling image not salvaged — "

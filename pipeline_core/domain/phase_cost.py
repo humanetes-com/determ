@@ -33,7 +33,13 @@ from enum import StrEnum
 from typing import Any
 
 from .model_defaults import resolve_route_order
-from .model_profile import GLOBAL_DEFAULTS, resolve_model_knobs
+from .model_profile import (
+    GLOBAL_DEFAULTS,
+    EffortLevel,
+    ModelKnobs,
+    ReasoningDialect,
+    resolve_model_knobs,
+)
 from .phase_registry import PHASE_ENTER, PHASE_EXIT
 
 # ── work counters ────────────────────────────────────────────────────────────
@@ -201,6 +207,12 @@ def work_delta(record: Mapping[str, Any]) -> PhaseWork | None:
         resp = data.get("response")
         chars = _int(resp.get("char_count")) if isinstance(resp, Mapping) else 0
         return PhaseWork(llm_ms=_int(record.get("duration_ms")), response_chars=chars)
+    if ev == "llm.slot":
+        # The ask client times a call from before it waits for a server slot
+        # (`llm/slots.py`); the wait is emitted in the same phase scope, so
+        # taking it off here leaves `llm_ms` as the minutes the calls were on
+        # the server.
+        return PhaseWork(llm_ms=-_int(data.get("wait_ms")))
     if ev in ("llm.stream_meta", "llm.followup_meta"):
         return PhaseWork(prompt_tokens=_int(data.get("prompt_tokens")),
                          completion_tokens=_int(data.get("completion_tokens")))
@@ -340,9 +352,37 @@ _LATER_MODEL_KNOBS: tuple[str, ...] = (
     "VLLM_RUNAWAY_THINK_CHARS", "VLLM_REASONING_STRENGTH_OFF",
 )
 _MODEL_KNOBS: tuple[str, ...] = (
-    "VLLM_REASONING_STRENGTH", "VLLM_MAX_MODEL_LEN", "VLLM_MAX_THINK_CHARS",
+    "VLLM_MAX_MODEL_LEN", "VLLM_MAX_THINK_CHARS",
     "VLLM_REASONING_BUDGET", "VLLM_THINKING_BUDGET",
 ) + _LATER_MODEL_KNOBS
+#: The reasoning-level knobs (`domain/effort_policy.py`, `TDD_ESCALATE_AFTER`)
+#: with the value every run before 2026-11-07 ran under: every call at the
+#: maximum, nothing escalated. Hashed only when the run resolves to something
+#: else, so a run configured as before keeps its baseline and a medium run
+#: does not share one with it.
+_LEVEL_KNOBS: Mapping[str, str] = {
+    "LLM_EFFORT": EffortLevel.MAX.value,
+    "LLM_EFFORT_PHASES": "",
+    "TDD_ESCALATE_AFTER": "0",
+}
+#: The defaults the pipeline reads when a level knob is unset.
+_LEVEL_DEFAULTS: Mapping[str, str] = {
+    "LLM_EFFORT": EffortLevel.MEDIUM.value,
+    "LLM_EFFORT_PHASES": "",
+    "TDD_ESCALATE_AFTER": "12",
+}
+
+
+def _legacy_strength(knobs: ModelKnobs) -> str:
+    """The value the retired `VLLM_REASONING_STRENGTH` key held in every
+    stored fingerprint: the strength rung a thinking call was sent at on a
+    strength-dialect model (its MAX word now), and the unused global
+    default `high` on any other. Kept under the old key so a baseline does
+    not split on the rename."""
+    prof = knobs.profile
+    if prof is not None and prof.dialect is ReasoningDialect.STRENGTH:
+        return knobs.effort_word(EffortLevel.MAX) or "high"
+    return "high"
 
 
 def _env_int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -385,8 +425,14 @@ class RunConfig:
         }
         for name in _MODEL_KNOBS:
             resolved[name] = knobs.value(name)
-        keys = list(_KNOBS) + [k for k in _LATER_MODEL_KNOBS
-                               if resolved[k] != GLOBAL_DEFAULTS[k]]
+        resolved["VLLM_REASONING_STRENGTH"] = _legacy_strength(knobs)
+        for name, default in _LEVEL_DEFAULTS.items():
+            resolved[name] = (env.get(name) or "").strip() or default
+        keys = (list(_KNOBS)
+                + [k for k in _LATER_MODEL_KNOBS
+                   if resolved[k] != GLOBAL_DEFAULTS[k]]
+                + [k for k, noop in _LEVEL_KNOBS.items()
+                   if str(resolved[k]).lower() != noop])
         return cls(values=tuple((k, resolved[k]) for k in keys),
                    route_order_source=("env" if (route_env or "").strip()
                                        else "model-default"),

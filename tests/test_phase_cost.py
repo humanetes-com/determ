@@ -125,7 +125,8 @@ def test_run_config_fingerprint_ignores_where_the_route_order_came_from() -> Non
 def test_run_config_keeps_the_ledger_env_block_shape() -> None:
     """`tools/perf_ledger.py` rows written before the resolver moved carry
     these keys; `compare` diffs them by name."""
-    keys = set(RunConfig.from_env({}).as_dict())
+    keys = set(RunConfig.from_env({"LLM_EFFORT": "max",
+                                    "TDD_ESCALATE_AFTER": "0"}).as_dict())
     assert keys == {"MODEL", "PHASE_C_ROUTE_ORDER", "route_order_source",
                     "PHASE_C_DRIVER", "VLLM_REASONING_STRENGTH", "VLLM_MAX_MODEL_LEN",
                     "VLLM_MAX_THINK_CHARS", "VLLM_REASONING_BUDGET",

@@ -460,7 +460,14 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
     too. SKIPs when the run never overlapped two distinct threads — no
     parallelism exercised, nothing verified."""
     calls = [e for e in run.events
-             if e.get("event") in ("llm.request", "llm.response", "llm.error")]
+             if e.get("event") in ("llm.request", "llm.slot", "llm.response", "llm.error")]
+    # A call that waits for one of the process's server slots (`llm/slots.py`)
+    # has emitted `llm.request` and opened no stream yet: its stream file is
+    # opened after the slot. In a run that emits `llm.slot`, a call is live
+    # from its slot to its terminal event, so the concurrency count is what
+    # was on the server and a waiting call collides with no stream.
+    slotted = any(e.get("event") == "llm.slot" for e in calls)
+    opener = "llm.slot" if slotted else "llm.request"
     if not calls:
         return Verdict("C10 parallel-streams", SKIP, "no llm events in run")
     if not any(e.get("thread") for e in calls):
@@ -476,7 +483,9 @@ def check_parallel_stream_integrity(run: RunData) -> Verdict:
     for e in calls:
         t = e.get("thread", "?")
         tid: object = e["tid"] if e.get("tid") is not None else ("notid", id(e))
-        if e["event"] == "llm.request":
+        if e["event"] == "llm.request" and slotted:
+            continue
+        if e["event"] == opener:
             stack = open_by_name.setdefault(t, [])
             if any(o != tid for o in stack):
                 violations.append(f"{t} @ {e.get('ts', '?')}")

@@ -478,7 +478,7 @@ def _session_like(tmp_path: Path, replies: list[str], max_pulls: int = 5):
         max_pulls=max_pulls)
     transcript = ""
     for r in replies:
-        add = answer(r)
+        add = answer(r, conversation=transcript)
         if add:
             transcript += add
     return transcript
@@ -544,7 +544,7 @@ def test_a_changed_artifact_is_re_sent(tmp_path: Path) -> None:
     req = '<REQUEST kind="file" arg="src/long.rs"/>'
     a1 = answer(req) or ""
     f.write_text(f.read_text() + "pub fn added_later() {}\n")
-    a2 = answer(req) or ""
+    a2 = answer(req, conversation=a1) or ""
     assert "added_later" in a2 and "not repeated" not in a2 and a1 != a2
 
 

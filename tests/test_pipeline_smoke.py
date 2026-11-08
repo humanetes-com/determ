@@ -2603,6 +2603,8 @@ def test_slice6_models() -> None:
         "container": "impl Error", "impl_self_generic": False, "mod_path": "ext",
         "has_unimplemented_body": True, "is_test": False,
         "refs": [{"kind": "path", "qualifier": "Error", "name": "new"}],
+        "item_byte_start": 4, "item_byte_end": 71,
+        "impl_byte_start": 0, "impl_byte_end": 90,
     }
     fr = FnRecord.from_dict(fn_wire)
     assert fr.fn_name == "backtrace" and fr.container == "impl Error" and fr.has_unimplemented_body

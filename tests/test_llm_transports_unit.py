@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from pipeline_core.adapters import llm_transports as t
+from pipeline_core.domain.model_profile import EffortLevel
 
 
 def test_model_cap_helpers_default_and_lookup() -> None:
@@ -130,15 +131,15 @@ def test_timed_iter_passes_through_and_raises_on_error() -> None:
 # wrong dialect is a quiet wrong state rather than a failure.
 
 def test_qwen_keeps_the_boolean_thinking_dialect(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("VLLM_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("VLLM_EFFORT_WORD_MAX", raising=False)
     # Thinking on also names the profile's depth (the Qwen3.8 card's
     # `reasoning_effort`); a template without that variable ignores it.
-    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", True) == {
+    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", True, effort=EffortLevel.MAX) == {
         "enable_thinking": True, "reasoning_effort": "xhigh"}
-    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", False) == {"enable_thinking": False}
+    assert t.reasoning_template_kwargs("Qwen/Qwen3.6-27B-FP8", False, effort=EffortLevel.MAX) == {"enable_thinking": False}
     # A model absent from MODEL_CAPS gets the dialect every model here used
     # before Muse Glimmer.
-    assert t.reasoning_template_kwargs("unknown-model", True) == {"enable_thinking": True}
+    assert t.reasoning_template_kwargs("unknown-model", True, effort=EffortLevel.MAX) == {"enable_thinking": True}
 
 
 def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down(
@@ -152,22 +153,22 @@ def test_muse_glimmer_asks_by_strength_and_can_actually_turn_reasoning_down(
     and asks for code only, so a re-reasoned followup is the failure the
     thinking-off request exists to prevent. Assert the OFF request differs from
     the ON one, which is exactly what sending the boolean could not achieve."""
-    for v in ("VLLM_REASONING_STRENGTH", "VLLM_REASONING_STRENGTH_OFF", "MODEL_FAMILY"):
+    for v in ("VLLM_EFFORT_WORD_MAX", "VLLM_REASONING_STRENGTH_OFF", "MODEL_FAMILY"):
         monkeypatch.delenv(v, raising=False)
-    on = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True)
-    off = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", False)
+    on = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True, effort=EffortLevel.MAX)
+    off = t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", False, effort=EffortLevel.MAX)
     assert "enable_thinking" not in on and "enable_thinking" not in off
     # The rungs are the profile's when the env is silent, the env's when set.
     assert on == {"reasoning_strength": "high"}
     assert off == {"reasoning_strength": "low"}
-    monkeypatch.setenv("VLLM_REASONING_STRENGTH", "xhigh")
-    assert t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True) == {
+    monkeypatch.setenv("VLLM_EFFORT_WORD_MAX", "xhigh")
+    assert t.reasoning_template_kwargs("RedHatAI/Muse-Glimmer-30B-FP8-block", True, effort=EffortLevel.MAX) == {
         "reasoning_strength": "xhigh"}
-    monkeypatch.delenv("VLLM_REASONING_STRENGTH")
+    monkeypatch.delenv("VLLM_EFFORT_WORD_MAX")
     assert on != off, "thinking-off is indistinguishable from thinking-on"
     # Both rungs must be levels the template accepts; there is no 'off'.
     assert {on["reasoning_strength"], off["reasoning_strength"]} <= {"low", "medium", "high", "xhigh"}
-    assert t.reasoning_template_kwargs("meta-models/Muse-Glimmer-30B", True) == on
+    assert t.reasoning_template_kwargs("meta-models/Muse-Glimmer-30B", True, effort=EffortLevel.MAX) == on
 
 
 def test_reasoning_text_stays_reasoning_on_the_strength_dialect() -> None:
