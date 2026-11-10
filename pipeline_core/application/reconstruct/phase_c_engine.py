@@ -488,6 +488,7 @@ class PhaseCFillEngine:
         fill_premise: Mapping[str, PremiseEntry] | None = None,
         fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = None,
         fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = None,
+        fill_unwinding_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = None,
     ) -> ClusterFillResult:
         """Phase C — every route of one fill, ordered and budgeted by
         `fill_scheduler.execute_fill` (the sessions, pairs, file-first and
@@ -656,7 +657,7 @@ class PhaseCFillEngine:
                 unit_share_multiple=unit_share_multiple,
                 on_wave_kept=on_wave_kept,
                 premise=fill_premise, ground_now=fill_ground_now,
-                held_now=fill_held_now))
+                held_now=fill_held_now, unwinding_now=fill_unwinding_now))
         _impl_stats = (_prepared_fill.finish() if _prepared_fill is not None
                        else None)
         _per_fn = _per_fn_route.result

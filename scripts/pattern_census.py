@@ -2723,7 +2723,12 @@ def _stream_rows_by_run() -> dict[str, list[dict]]:
     global _STREAM_ROWS
     if _STREAM_ROWS is not None:
         return _STREAM_ROWS
+    root = Path(__file__).resolve().parent.parent
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from pipeline_core.domain.reasoning_cap import answer_decided  # noqa: PLC0415
     notes: set[str] = set()
+    followups: dict[tuple[str, str], dict] = {}
     out: dict[str, list[dict]] = defaultdict(list)
     try:
         with open(EVENTS_PATH, encoding="utf-8", errors="replace") as fh:
@@ -2737,6 +2742,19 @@ def _stream_rows_by_run() -> dict[str, list[dict]]:
                     if sha:
                         notes.add(str(sha))
                     continue
+                if '"llm.followup_meta"' in line:
+                    # A stream row written before the controller stamped
+                    # `decided` is judged with its followup's row (see
+                    # `reasoning_cap.is_cut`); the join is by run and prompt
+                    # sha, the followup row being emitted first.
+                    try:
+                        fev = json.loads(line)
+                    except ValueError:
+                        continue
+                    fd = fev.get("data") or {}
+                    followups[(str(fev.get("run_id", "")),
+                               str(fd.get("prompt_sha", "")))] = fd
+                    continue
                 if '"llm.stream_meta"' not in line:
                     continue
                 try:
@@ -2744,8 +2762,12 @@ def _stream_rows_by_run() -> dict[str, list[dict]]:
                 except ValueError:
                     continue
                 d = dict(ev.get("data") or {})
+                fu = followups.pop((str(ev.get("run_id", "")),
+                                    str(d.get("prompt_sha", ""))), None)
                 if str(d.get("prompt_sha", "")) in notes:
                     continue
+                if "decided" not in d:
+                    d["decided"] = answer_decided(d, fu)
                 out[str(ev.get("run_id", ""))].append(d)
     except OSError:
         pass

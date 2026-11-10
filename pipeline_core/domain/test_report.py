@@ -707,6 +707,15 @@ def _iter_located_panics(
         yield LocatedPanic(pf, pl, msg)
 
 
+def located_panics(text: str) -> tuple[LocatedPanic, ...]:
+    """Every ``panicked at`` occurrence of ``text`` whose location parses,
+    in the order printed (:func:`_iter_located_panics` without the
+    unknown-evidence entries). The order is the reading: in one test's own
+    block the first is where the test first failed, and every later one was
+    raised while it unwound."""
+    return tuple(p for p in _iter_located_panics(text) if p is not None)
+
+
 @dataclass(frozen=True, slots=True)
 class CrashPanics:
     """What the CRASHED binaries of a capture printed about why they died —

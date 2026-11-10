@@ -18,6 +18,7 @@ from pipeline_core.application.reconstruct.tdd_ratchet import (
     snapshot_due,
     snapshot_src_tree,
 )
+from pipeline_core.domain.assertion_position import TestKey
 from pipeline_core.domain.attribution import AttributionResult, FailureKind
 from pipeline_core.domain.layout_retrigger import RefillGrace
 from pipeline_core.domain.stub_inventory import StubInventory
@@ -67,7 +68,11 @@ def test_restore_noop_when_nothing_changed(tmp_path: Path) -> None:
     assert (src / "c.rs").exists()
 
 
-_G = frozenset({"a", "b", "c"})
+def _keys(*names: str, binary: str = "tests/t.rs") -> frozenset[TestKey]:
+    return frozenset(TestKey(binary, n) for n in names)
+
+
+_G = _keys("a", "b", "c")
 
 
 def test_ratchet_breach_conditions() -> None:
@@ -89,9 +94,9 @@ def test_lateral_swap_convicts_at_equal_count() -> None:
     """Count holds while a green test goes away and another arrives — the tree
     churned, so it is not a new baseline. Only a STRICT gain forgives a loss,
     otherwise the loop can thrash forever at a constant score."""
-    now = frozenset({"a", "b", "d"})
+    now = _keys("a", "b", "d")
     breach = ratchet_breach(14, 14, now, _G)
-    assert "lateral swap" in breach and "'c'" in breach
+    assert "lateral swap" in breach and "'tests/t.rs::c'" in breach
     # ...and a strict gain does forgive it.
     assert ratchet_breach(15, 14, now, _G) == ""
 
@@ -1212,8 +1217,8 @@ def test_closure_withhold_forgives_stub_crash_vanished_breach() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     reason = closure_withheld(
         "pass_count 11<13",
-        lost=frozenset({"x", "y"}),
-        judged_now=frozenset({"a", "b"}),
+        lost=_keys("x", "y"),
+        judged_now=_keys("a", "b"),
         stub_crash_sites=frozenset({("src/error.rs", 64)}),
         **_HSHRINK)
     assert reason and "src/error.rs:64" in reason
@@ -1226,8 +1231,8 @@ def test_closure_withhold_charges_when_hollow_did_not_shrink() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
         "pass_count 23<83",
-        lost=frozenset({"x", "y"}),
-        judged_now=frozenset({"a", "b"}),
+        lost=_keys("x", "y"),
+        judged_now=_keys("a", "b"),
         stub_crash_sites=frozenset({("src/error.rs", 287),
                                     ("src/error.rs", 402)}),
         **_HFLAT) == ""
@@ -1240,8 +1245,8 @@ def test_closure_withhold_charges_when_a_lost_test_flipped_red() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
         "pass_count 12<13",
-        lost=frozenset({"x"}),
-        judged_now=frozenset({"x"}),
+        lost=_keys("x"),
+        judged_now=_keys("x"),
         stub_crash_sites=frozenset({("src/error.rs", 64)}),
         **_HSHRINK) == ""
 
@@ -1250,7 +1255,7 @@ def test_closure_withhold_charges_without_stub_evidence() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
         "pass_count 11<13",
-        lost=frozenset({"x", "y"}),
+        lost=_keys("x", "y"),
         judged_now=frozenset(),
         stub_crash_sites=frozenset(),
         **_HSHRINK) == ""
@@ -1259,7 +1264,7 @@ def test_closure_withhold_charges_without_stub_evidence() -> None:
 def test_closure_withhold_needs_a_breach_and_a_loss() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import closure_withheld
     assert closure_withheld(
-        "", lost=frozenset({"x"}), judged_now=frozenset(),
+        "", lost=_keys("x"), judged_now=frozenset(),
         stub_crash_sites=frozenset({("src/error.rs", 64)}),
         **_HSHRINK) == ""
     assert closure_withheld(

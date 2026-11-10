@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from pipeline_core.application.reconstruct.tree_txn import PreImage, restore
+from pipeline_core.domain.assertion_position import TestKey
 from pipeline_core.domain.layout_retrigger import RefillGrace
 from pipeline_core.domain.rust_scan import stubbed_fn_names
 from pipeline_core.domain.test_report import stub_only_crash
@@ -25,11 +26,44 @@ from pipeline_core.domain.test_results import (
 )
 
 
+def passing_keys(reading: TestStateReading) -> frozenset[TestKey]:
+    """The tests the ratchet compares, per (binary, test): passing in a
+    COMPLETED binary (`TestStateReading.keyed().passed`).
+
+    The count the ratchet charges (`pass_count`) counts one verdict per
+    binary and world, so the sets it compares must count the same thing. A
+    bare name set does not. Run `630503-f5ca6540` (2026-11-09, iter 3) read
+    `pass_count 95<96` and reverted fill 2's 18 kept bodies with the
+    event's `lost []`. The sweep's reconciliation said why: "32 further
+    execution(s) lost to the same 6 crashed binary/binaries, their bare
+    names also defined in a surviving binary". Every lost pass had a
+    namesake passing elsewhere, so the bare `lost` set was empty and the
+    closure exemption, which forgives only a non-empty `lost`, could not
+    fire. The fill gate had kept those bodies by the same exemption,
+    judged per binary."""
+    return reading.keyed().passed
+
+
+def judged_unaborted_keys(reading: TestStateReading) -> frozenset[TestKey]:
+    """The tests of ``reading`` that received a verdict in a completed
+    binary and whose own process did not abort, per (binary, test): the
+    set :func:`closure_withheld` asks "did a lost test get a verdict". An
+    isolated abort carries a red verdict, and for the exemption it vanished
+    with its process exactly as a crashed binary's tests do."""
+    return reading.judged_keys() - reading.keyed().aborted
+
+
+def render_keys(keys: frozenset[TestKey], limit: int | None = None) -> list[str]:
+    """`binary::test`, sorted: how a ratchet line or event names a test."""
+    out = [f"{k.binary}::{k.test}" for k in sorted(keys)]
+    return out if limit is None else out[:limit]
+
+
 def ratchet_breach(
     pass_count: int,
     best_pass: int,
-    passing_now: frozenset[str],
-    passing_at_snapshot: frozenset[str],
+    passing_now: frozenset[TestKey],
+    passing_at_snapshot: frozenset[TestKey],
 ) -> str:
     """Which ratchet signal (if any) says the tree net-regressed vs the
     best-known snapshot: '' = no breach, else a printable description.
@@ -48,11 +82,13 @@ def ratchet_breach(
 
     The one thing a count alone misses is a LATERAL swap: some tests go green
     while as many green ones die, so the count holds over a tree that really
-    did churn. Comparing the passing NAME SETS catches that, and only a STRICT
+    did churn. Comparing the passing SETS catches that, and only a STRICT
     gain forgives a loss — otherwise the loop thrashes forever at a constant
-    score. Names come from COMPLETED binaries only, so a crashed binary's
-    nondeterministic partial output (observed live: 21..24 tests varying
-    across sweeps of an unchanged tree) can manufacture neither signal.
+    score. The sets are per (binary, test) (:func:`passing_keys`), the unit
+    the count counts, and come from COMPLETED binaries only, so a crashed
+    binary's nondeterministic partial output (observed live: 21..24 tests
+    varying across sweeps of an unchanged tree) can manufacture neither
+    signal.
 
     Either signal can still be perturbed by crash timing — the caller must
     confirm a breach on a fresh sweep before acting on it destructively."""
@@ -62,7 +98,7 @@ def ratchet_breach(
     if pass_count == best_pass and lost:
         return (f"lateral swap at pass_count {pass_count} — {len(lost)} "
                 f"test(s) green at the snapshot no longer pass: "
-                f"{sorted(lost)[:10]}")
+                f"{render_keys(lost, 10)}")
     return ""
 
 
@@ -142,21 +178,10 @@ def closure_stub_sites(
                            aborted_tests=cmp.newly_red_aborted)
 
 
-def aborted_names(output: str) -> frozenset[str]:
-    """The tests of ``output`` whose own process aborted (isolated re-run).
-    They carry a red verdict, and for the closure exemption they vanished
-    with their process exactly as a crashed binary's tests do: the caller
-    removes them from the judged set it hands :func:`closure_withheld`."""
-    out: set[str] = set()
-    for b in parse_binary_results(output):
-        out |= b.aborted
-    return frozenset(out)
-
-
 def closure_withheld(
     breach: str,
-    lost: frozenset[str],
-    judged_now: frozenset[str],
+    lost: frozenset[TestKey],
+    judged_now: frozenset[TestKey],
     stub_crash_sites: frozenset[tuple[str, int]],
     *,
     hollow_now: int,
@@ -185,7 +210,11 @@ def closure_withheld(
     verdict in a completed binary really regressed — charge), the capture's
     panics must be stub panics exclusively (a segfault or an assertion panic
     is the fill's own fault — charge), AND the hollow set must have strictly
-    shrunk versus the snapshot. A sweep that costs passing tests with the
+    shrunk versus the snapshot. ``lost`` and ``judged_now`` are per
+    (binary, test) (:func:`passing_keys`, :func:`judged_unaborted_keys`):
+    the annotation is the identity, so a caller holding bare names cannot
+    hand them in and a bare ``lost`` can no longer hide a loss behind a
+    namesake that passes in another binary. A sweep that costs passing tests with the
     same hollow set is not a closure: run `1160135-7b10cdfa` (2026-08-29)
     peeled `construct_from_boxed` and `context` back to `unimplemented!()`,
     kept ten accessor rewrites, and 60 passes vanished with binaries dying

@@ -55,6 +55,30 @@ What follows from it:
   of those changes touch; `restart_from.sh task2a` reaches the same loop in
   seconds. Only the t1.5 layout-gate half of the plan needed construction.
 
+## The reference run that reached green
+
+The last run that took anyhow from scratch to all tests passing was launched
+on commit `23b6967d489bc289cb9c22c8185e98bd5c750b2d` ("Tell a refuted body as
+history, whatever body is on the tree"). Every leg of it records that HEAD as
+its `pipeline_sha`.
+
+- `336559-eb0222a5`: from scratch, started 2026-11-06 21:10 UTC, every call
+  at `xhigh`. t0d took 16.7 h. t2a went 60 → 68 → 76 in three fills, about
+  8.5 h. It was stopped 2026-11-08 06:10.
+- `3323407-984b07f2`: `continue.sh` on that tree, started 2026-11-08 06:11
+  UTC. Its cluster-entry line reads `effort=medium, escalate-after=12`. t2a
+  went 76 → 241 → 420 → green in 274 min. The process exited 1 at the end
+  gate on one unreached stub (`write_str`).
+- `479767-af5fb863`: 2026-11-08 15:43 UTC, `SUCCESS: all tests passed on
+  iteration 1`.
+
+That run is not a clean e2e by this file's goal: the user stopped it, it was
+resumed, and the resume ran uncommitted working-tree changes (the reasoning
+level among them) that were committed later in `a6648be`. No single commit
+reproduces the resume exactly. Compare a new run against it per fill
+(`scripts/fill_time_split.py`) and per sweep, not by wall clock: its first
+leg's fills were model-bound at `xhigh`.
+
 ## A live run continues only to gather insight
 
 A climbing score is never a reason to keep a run alive. A run that reaches

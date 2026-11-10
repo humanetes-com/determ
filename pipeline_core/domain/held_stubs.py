@@ -38,7 +38,7 @@ from pipeline_core.domain.models import FnLocator, Frontier
 from pipeline_core.domain.oracle_ledger import bare_test_name
 from pipeline_core.domain.test_outcome import StubHold
 
-__all__ = ["Blockers", "HeldStubs"]
+__all__ = ["Blockers", "HeldStubs", "offered_after_deferral"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,3 +184,28 @@ class Blockers:
         stopped = self.held.tests_held_by(unit) | self.blamed.get(
             unit, frozenset())
         return bool(aimed & stopped)
+
+
+def offered_after_deferral(
+    before: Frontier, active: Frontier, offered: Collection[FnLocator],
+) -> tuple[Frontier, frozenset[FnLocator]]:
+    """`active` (the result of :meth:`HeldStubs.consumer_deferrals` over
+    `before`) with every unit of `offered` that the deferral removed put back
+    with the tests it had before the split, and the units put back.
+
+    `offered` is what this sweep must offer: the held stubs and the stubs
+    the failing tests panicked in while they unwound
+    (`test_outcome.StubHold.unwinding`). The deferral is a first-failure
+    rule: it defers a unit whose every test first-fails in another stub. A
+    stub that only appears while tests unwind is exactly such a unit, since
+    its tests are the ones that first fail elsewhere. So without this step,
+    the unit that ends their aborts is never ranked on a sweep where the
+    fill that measured it could not write it (the share refusal of run
+    `630503-f5ca6540`, fill 2, line 2604, found in review 2026-11-09)."""
+    out: Frontier = dict(active)
+    back: set[FnLocator] = set()
+    for unit in offered:
+        if unit in before and unit not in out:
+            out[unit] = before[unit]
+            back.add(unit)
+    return out, frozenset(back)

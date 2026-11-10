@@ -18,12 +18,13 @@ again reintroduce a private cap or a missing followup.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pipeline_core.domain.llm_output import salvage_complete_blocks
 from pipeline_core.domain.reasoning_cap import (
+    answer_decided,
     is_bookkeeping_call,
     record_followup_meta,
     record_stream_meta,
@@ -121,6 +122,10 @@ class _FollowupOutcome:
     stop: str | None = None
     raw_chars: int = 0
     salvaged_chars: int = 0
+    # The `llm.followup_meta` row this followup recorded, so the call's
+    # stream row is decided from the SAME row a replay joins
+    # (`reasoning_cap.answer_decided`). None only when no row was recorded.
+    row: Mapping[str, Any] | None = None
 
     @property
     def cut(self) -> bool:
@@ -437,7 +442,7 @@ class LLMController:
         # Prometheus endpoint. A `char_count: 0` response is indistinguishable
         # there from a short one, so four calls that each burned ~20 minutes of
         # GPU producing zero characters looked like ordinary slow calls.
-        self._h.emit("llm.stream_meta", {
+        row: dict[str, Any] = {
             "prompt_sha": prompt_sha,
             "model": model,
             "finish_reason": meta.finish_reason,
@@ -450,14 +455,20 @@ class LLMController:
             "request_max": plan.request_max,
             "think_char_cap": plan.thinking_char_cap,
             "enable_thinking": enable_thinking,
+            "effort": effort.value,
+        }
+        # Whether this call put a decided answer on record, by the one rule
+        # every reader of the cut rate uses, over this row and the row the
+        # followup recorded. Stamped here because only here do both exist:
+        # the main row alone says a followup ran, never whether it answered.
+        row["decided"] = answer_decided(row, fu.row if followup else None)
+        self._h.emit("llm.stream_meta", {
+            **row,
             # What that boolean was sent as: `{"reasoning_strength": "low"}`
             # on Muse is a reasoning call; `{"enable_thinking": false}` on
             # Qwen is not.
             "reasoning_payload": transport.reasoning_payload(
                 enable_thinking, effort=effort),
-            # The level the call was sent at (`pipeline_core.effort`); the
-            # payload above is the word that level renders as on this model.
-            "effort": effort.value,
             # So a reader replaying events.jsonl (the monitor's live cut-rate
             # gauge) can exclude bookkeeping calls the same way
             # `record_stream_meta` excludes them from the in-process
@@ -465,21 +476,7 @@ class LLMController:
             # guess reconstructed after the fact.
             "bookkeeping": is_bookkeeping_call(),
         })
-        record_stream_meta({
-            "prompt_sha": prompt_sha,
-            "model": model,
-            "finish_reason": meta.finish_reason,
-            "prompt_tokens": meta.prompt_tokens,
-            "completion_tokens": meta.completion_tokens,
-            "content_chars": len(result),
-            "reasoning_chars": len(reasoning_text),
-            "stop": cap.stop,
-            "followup": bool(followup),
-            "request_max": plan.request_max,
-            "think_char_cap": plan.thinking_char_cap,
-            "enable_thinking": enable_thinking,
-            "effort": effort.value,
-        })
+        record_stream_meta(row)
 
         self._h.sock_close()
         if not result:
@@ -577,13 +574,13 @@ class LLMController:
                 break
             except (TransportTimeout, TransportUnavailable) as exc:
                 self._h.guard("llm/followup_network", f"err={type(exc).__name__}: {exc}")
-                self._emit_followup_meta(
+                row = self._emit_followup_meta(
                     prompt_sha=prompt_sha, model=model, finish_reason="error",
                     result="", fu_reasoning="", reasoning_text=reasoning_text,
                     messages=messages, fu_messages=fu_messages,
                     request_max=fu_plan.request_max, followup_think=followup_think,
                     effort=effort, stop=None)
-                return _FollowupOutcome(finish_reason="error")
+                return _FollowupOutcome(finish_reason="error", row=row)
             except InputTooLong as exc:
                 # The main stream retries this (run() :181); the followup
                 # used to let it escape unemitted, so a followup 400 left
@@ -595,13 +592,13 @@ class LLMController:
                 if attempt >= _MAX_ATTEMPTS - 1 or fu_real is None:
                     self._h.guard("llm/followup_input",
                                   f"err=InputTooLong real_tokens={fu_real}")
-                    self._emit_followup_meta(
+                    row = self._emit_followup_meta(
                         prompt_sha=prompt_sha, model=model, finish_reason="error",
                         result="", fu_reasoning="", reasoning_text=reasoning_text,
                         messages=messages, fu_messages=fu_messages,
                         request_max=fu_plan.request_max, followup_think=followup_think,
                         effort=effort, stop=None)
-                    return _FollowupOutcome(finish_reason="error")
+                    return _FollowupOutcome(finish_reason="error", row=row)
                 state.update(fu_chars, fu_real)
                 fu_plan = self._replan_with_input(
                     spec, state, fu_real, max_tokens, followup_think, fu_plan)
@@ -624,7 +621,7 @@ class LLMController:
                 f"raw_chars={len(raw)} salvaged_chars={len(usable)} "
                 f"fn_blocks={usable.count('<FN ')}")
         self._h.guard("llm/followup", f"model={model} thinking_len={len(reasoning_text)} result_len={len(usable)}")
-        self._emit_followup_meta(
+        row = self._emit_followup_meta(
             prompt_sha=prompt_sha, model=model, finish_reason=meta.finish_reason,
             prompt_tokens=meta.prompt_tokens, completion_tokens=meta.completion_tokens,
             result=raw, fu_reasoning=fu_reasoning, reasoning_text=reasoning_text,
@@ -634,7 +631,8 @@ class LLMController:
         return _FollowupOutcome(
             result=usable, reasoning=fu_reasoning,
             finish_reason=meta.finish_reason, stop=cap.stop,
-            raw_chars=len(raw), salvaged_chars=len(usable) if was_cut else 0)
+            raw_chars=len(raw), salvaged_chars=len(usable) if was_cut else 0,
+            row=row)
 
     def _emit_followup_meta(
         self, *, prompt_sha: str, model: str, finish_reason: str | None,
@@ -643,7 +641,7 @@ class LLMController:
         request_max: int | None, followup_think: bool, stop: str | None,
         effort: EffortLevel, salvaged_chars: int = 0, prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """`result` is the RAW reply, so `content_chars` measures what the
         stream produced; `salvaged_chars` is how much of it survived the cut
         (0 when the reply was not cut). A reader can therefore tell a clean
@@ -668,6 +666,7 @@ class LLMController:
         }
         self._h.emit("llm.followup_meta", fu_meta)
         record_followup_meta(fu_meta)
+        return fu_meta
 
     @staticmethod
     def _replan_with_input(spec: BudgetSpec, state: BudgetState, real_tokens: int,

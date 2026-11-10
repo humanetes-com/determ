@@ -73,6 +73,7 @@ from pipeline_core.domain.test_outcome import (
     PremiseEntry,
     ground_left,
     held_locators,
+    holder_order,
     moved_in_scope,
     names_of,
     premise_moved,
@@ -190,6 +191,13 @@ class FillExecutionDeps:
     #: and a run is opened on a blocker no run writes, carrying the tests
     #: per body; None keeps the plan-time blockers only.
     held_now: Callable[[], HeldSites | None] | None = None
+    #: The unwinding relation of the same capture (`test_outcome.StubHold.
+    #: unwinding`): per failing test that aborted on a double panic, the
+    #: still-stubbed bodies that panicked while it unwound. Read only by the
+    #: holder admission and its order (:func:`unwritten_holders`,
+    #: :func:`_holder_run`); the yield and the promotion keep reading
+    #: ``held_now``. None: no unwinding holder is taken.
+    unwinding_now: Callable[[], HeldSites | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,13 +231,16 @@ class _Cursor:
     #: The holders the fill would open a run on (:func:`unwritten_holders`),
     #: for an asking run that takes holders into its own queue (its own
     #: targets are not "ahead") or for anyone else (None).
-    unwritten: Callable[[HeldSites, RouteRun | None, Collection[str]],
+    #: The second `HeldSites` of each is the unwinding relation
+    #: (`FillExecutionDeps.unwinding_now`).
+    unwritten: Callable[[HeldSites, RouteRun | None, Collection[str], HeldSites],
                         Collection[FnLocator]] | None = None
     #: Open a per-fn run on these holders at the cursor.
-    open_run: Callable[[Sequence[FnLocator], HeldSites], None] | None = None
+    open_run: Callable[[Sequence[FnLocator], HeldSites, HeldSites],
+                       None] | None = None
     #: Hand these holders to the asking run's queue.
-    admit: Callable[[Sequence[FnLocator], HeldSites, RouteRun, HolderQueue],
-                    None] | None = None
+    admit: Callable[[Sequence[FnLocator], HeldSites, RouteRun, HolderQueue,
+                     HeldSites], None] | None = None
     #: The first run ahead the fill opened on holders, not yet run.
     opened_ahead: Callable[[], ScheduledRun | None] = lambda: None
 
@@ -296,6 +307,10 @@ class _GroundGate:
         #: Read only here, at a claim; the executor acts on it through
         #: :class:`_Cursor`.
         self.held: HeldSites = {}
+        self._unwinding_read = deps.unwinding_now
+        #: The unwinding relation of the same ground (`FillExecutionDeps.
+        #: unwinding_now`). Read only by the holder admission.
+        self.unwinding: HeldSites = {}
         #: The executor's runs ahead and what a claim may do to them (bound
         #: by the executor); None reacts to no measurement.
         self._cursor: _Cursor | None = None
@@ -324,6 +339,8 @@ class _GroundGate:
             held = self._held_read()
             if held is not None:
                 self.held = held
+                if self._unwinding_read is not None:
+                    self.unwinding = self._unwinding_read() or {}
         grown = set(self.moved) | set(premise_moved(self._premise, now))
         if len(grown) == len(self.moved):
             return
@@ -594,14 +611,15 @@ class _GroundGate:
             return
         taker = run if holders is not None else None
         busy = holders.claimed() if holders is not None else frozenset()
-        new = [u for u in cur.unwritten(self.held, taker, self.moved)
+        new = [u for u in cur.unwritten(self.held, taker, self.moved,
+                                        self.unwinding)
                if u not in units and u not in busy]
         if not new:
             return
         if holders is not None and run is not None and cur.admit is not None:
-            cur.admit(new, self.held, run, holders)
+            cur.admit(new, self.held, run, holders, self.unwinding)
         elif cur.open_run is not None:
-            cur.open_run(new, self.held)
+            cur.open_run(new, self.held, self.unwinding)
 
 
 def _notify_wave(deps: FillExecutionDeps,
@@ -820,6 +838,7 @@ def unwritten_holders(
     planned_held: Collection[FnLocator], landed: Collection[FnLocator],
     opened: Collection[FnLocator], asked: FillAsks,
     own: Collection[FnLocator] = (), moved: Collection[str] = (),
+    unwinding: HeldSites | None = None,
 ) -> list[FnLocator]:
     """The still-stubbed functions red tests first fail in on the ground now
     that the fill would have a run write: not written by a run still ahead
@@ -862,23 +881,32 @@ def unwritten_holders(
     also left out when a run still ahead aims at it, when a run of this
     fill kept a body for it (the sweep grades that body first), when every
     run of this fill that asked it did so under evidence nothing has moved
-    since (`FillAsks`), or when this fill already took it."""
-    by_test = held_by_leaf(held)
+    since (`FillAsks`), or when this fill already took it.
+
+    ``unwinding`` (`test_outcome.StubHold.unwinding`) adds the stubs the
+    failing tests panicked in while they unwound, under the same filters.
+    The list is in `test_outcome.holder_order`: unwinding stubs first, then
+    by how many tests each holds."""
+    first = held_by_leaf(held)
+    unwound = held_by_leaf(unwinding or {})
+    by_test = {t: first.get(t, frozenset()) | unwound.get(t, frozenset())
+               for t in first.keys() | unwound.keys()}
     blockers = frozenset().union(*by_test.values()) if by_test else frozenset()
     moved_leaves = {test_leaf(str(t)) for t in moved}
     measured_own = {u for t, hs in by_test.items() if t in moved_leaves
                     for u in hs if u in own}
-    return sorted(
+    return holder_order(
         (u for u in blockers
          if u not in ahead and (u in measured_own or u not in planned_held)
          and u not in landed and u not in opened
          and not asked.would_defer(((u.file, u.fn_name),))),
-        key=lambda k: (k.file, k.fn_name))
+        first, unwound)
 
 
 def _holder_run(
     new: Sequence[FnLocator], held: HeldSites, *, parent: str, seq: int,
     bodies_sha: Callable[[frozenset[FnLocator]], str], iteration: int,
+    unwinding: HeldSites | None = None,
 ) -> RouteRun:
     """A per-fn run on holders a keep of this fill measured. It is a carved
     run of the per-fn route (`parent`), which writes exactly the targets it
@@ -887,12 +915,18 @@ def _holder_run(
     the tests the run is judged on (`attribution.frontier_for_run`) and a
     name can have several bodies of which one is the stub. A run in flight
     that takes the holders carries the same `held_tests`
-    (`HolderAdmission`)."""
-    by_unit = held_locators(held)
+    (`HolderAdmission`), in `test_outcome.holder_order` over the bodies:
+    `HolderQueue.take` writes them front first. A test the run's body
+    unwinds through (``unwinding``) is one of its tests."""
+    unwound = unwinding or {}
+    both: dict[str, frozenset[FnSite]] = {
+        t: held.get(t, frozenset()) | unwound.get(t, frozenset())
+        for t in held.keys() | unwound.keys()}
+    by_unit = held_locators(both)
     tests_of = {u: frozenset(t for t, hs in by_unit.items() if u in hs)
                 for u in new}
     sites_of: dict[FnSite, frozenset[str]] = {}
-    for t, ss in held.items():
+    for t, ss in both.items():
         for site in ss:
             if FnLocator(site.file, site.fn_name) in tests_of:
                 sites_of[site] = sites_of.get(site, frozenset()) | {t}
@@ -905,7 +939,8 @@ def _holder_run(
         stubs_in_targets=targets,
         files=tuple(sorted({u.file for u in new})),
         unit_tests=tuple((u, tests_of[u]) for u in new),
-        held_tests=tuple(sorted(sites_of.items())),
+        held_tests=tuple((s_, sites_of[s_]) for s_ in holder_order(
+            sites_of, held, unwound)),
         # Distinct per opened run: `key` carries it, and two runs of one
         # fill must not share a key.
         seq=seq,
@@ -918,8 +953,11 @@ def _log_holders(deps: FillExecutionDeps, run: RouteRun, *,
     """The line and event of holders taken: opened at the cursor (``into``
     None) or handed to the run ``into`` names, ahead of its unclaimed
     units."""
-    names = [f"{u.file}::{u.fn_name}" for u in sorted(
-        run.targets, key=lambda k: (k.file, k.fn_name))]
+    # In take order (`test_outcome.holder_order`, the order of
+    # `unit_tests`), so the line says which holder is written first.
+    names = [f"{u.file}::{u.fn_name}" for u, _t in run.unit_tests] or [
+        f"{u.file}::{u.fn_name}" for u in sorted(
+            run.targets, key=lambda k: (k.file, k.fn_name))]
     where = (f"{run.label} opened at the cursor" if into is None else
              f"taken into {into} ahead of its unclaimed units")
     deps.log(
@@ -1317,20 +1355,23 @@ def execute_fill(
         return True
 
     def _unwritten(h: HeldSites, taker: RouteRun | None,
-                   moved: Collection[str]) -> list[FnLocator]:
+                   moved: Collection[str], uw: HeldSites) -> list[FnLocator]:
         ahead = {u for x in ordered[i:] for u in x.run.targets}
         ahead |= {u for k, x in wave_runs.items()
                   if taker is None or k != taker.key for u in x.run.targets}
         return unwritten_holders(
             h, ahead=ahead, planned_held=plan_held, landed=landed_fill,
             opened=opened_for_blockers, asked=fill_asks,
-            own=taker.targets if taker is not None else (), moved=moved)
+            own=taker.targets if taker is not None else (), moved=moved,
+            unwinding=uw)
 
-    def _open_run(new: Sequence[FnLocator], h: HeldSites) -> None:
+    def _open_run(new: Sequence[FnLocator], h: HeldSites,
+                  uw: HeldSites) -> None:
         nonlocal ordered, held_units
         run = _holder_run(new, h, parent=per_fn_parent,
                           seq=_OPENED_SEQ_BASE + len(opened_for_blockers),
-                          bodies_sha=bodies_sha, iteration=deps.iteration)
+                          bodies_sha=bodies_sha, iteration=deps.iteration,
+                          unwinding=uw)
         position = ordered[i - 1].position if 0 < i <= len(ordered) else 0
         opened_for_blockers.update(new)
         opened_keys.add(run.key)
@@ -1343,11 +1384,12 @@ def execute_fill(
         _log_holders(deps, run, into=None)
 
     def _admit(new: Sequence[FnLocator], h: HeldSites, taker: RouteRun,
-               queue: HolderQueue) -> None:
+               queue: HolderQueue, uw: HeldSites) -> None:
         nonlocal held_units
         run = _holder_run(new, h, parent=per_fn_parent,
                           seq=_OPENED_SEQ_BASE + len(opened_for_blockers),
-                          bodies_sha=bodies_sha, iteration=deps.iteration)
+                          bodies_sha=bodies_sha, iteration=deps.iteration,
+                          unwinding=uw)
         opened_for_blockers.update(new)
         held_units = held_units | run.targets
         queue.admit(HolderAdmission(run.targets, run.held_tests))

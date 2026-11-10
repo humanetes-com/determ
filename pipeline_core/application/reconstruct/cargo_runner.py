@@ -11,8 +11,10 @@ caller both a rendered-text view (prompts / logs) and structured diagnostics
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shlex
+import threading
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -103,6 +105,7 @@ from pipeline_core.domain.test_results import (
     render_regression_detail,
 )
 from pipeline_core.ports import Cargo
+from pipeline_core.threads import ContextPool
 
 # Pre-fill snapshot of the cluster's runtime test state, per test binary.
 # `None` means the suite could not be MEASURED (crate did not compile → no
@@ -160,6 +163,19 @@ def isolation_enabled() -> bool:
     return os.environ.get("PHASE_C_TEST_ISOLATION", "1").strip() != "0"
 
 
+def isolation_workers() -> int:
+    """`PHASE_C_ISOLATION_WORKERS` (default 4): how many single-test
+    processes :func:`isolate_aborted_binaries` runs at once. Read per call,
+    like :func:`isolation_enabled`. `1` is the serial reading, the negative
+    control of the pool. A value that does not parse, or one below 1, reads
+    as 1."""
+    raw = os.environ.get("PHASE_C_ISOLATION_WORKERS", "4").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 1
+
+
 def isolate_aborted_binaries(
     cargo: Cargo,
     cmd: str,
@@ -181,7 +197,19 @@ def isolate_aborted_binaries(
     will not splice unambiguously keeps its original section — the
     shared-process reading, never a guessed one. The environment is the
     run's own plus `CARGO_MANIFEST_DIR` (cargo sets it when it runs a test
-    binary, and a harness may read it at runtime)."""
+    binary, and a harness may read it at runtime).
+
+    The single-test processes of every aborted binary run in one pool of
+    :func:`isolation_workers` processes. Each test is its own process, so
+    its verdict cannot depend on what else runs beside it, and each section
+    is rendered in its listed order, so the capture is the bytes the serial
+    loop wrote (`render_isolated_section` prints no timing). A serial loop
+    is what made the abort window cost what it did: run `630503-f5ca6540`
+    (2026-11-09), one world of a tree with 153 aborting tests read in 79.2 s
+    against 13.3 s without isolation, and fill 2 spent 530.8 of its 634.9
+    unit-minutes outside the model, about 130 s per reading per thread. A
+    crate whose tests cannot run side by side in separate processes sets
+    `PHASE_C_ISOLATION_WORKERS=1`."""
     if not (isolation_enabled() and is_isolatable_test_run(cmd)):
         return stdout, stderr
     # Sections are read from stdout only, so this is stdout's own section
@@ -194,7 +222,7 @@ def isolate_aborted_binaries(
     deadline = time.monotonic() + max(1, timeout)
     run_env = dict(env)
     run_env.setdefault("CARGO_MANIFEST_DIR", str(cwd))
-    rebuilt: dict[int, str] = {}
+    listed: dict[int, tuple[Path, tuple[str, ...]]] = {}
     for idx, b in targets:
         exe = Path(str(b.exe_path))
         if not exe.is_absolute():
@@ -209,23 +237,44 @@ def isolate_aborted_binaries(
         if listing.returncode != 0:
             continue
         names = listed_tests(listing.stdout)
-        if not names:
-            continue
-        runs: list[IsolatedTest] = []
-        for name in names:
-            left = deadline - time.monotonic()
-            if left <= 0:
+        if names:
+            listed[idx] = (exe, tuple(names))
+
+    def _one(exe: Path, name: str) -> IsolatedTest | None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        one = cargo.run(shlex.join([str(exe), *run_args(cmd, name)]), cwd,
+                        env=run_env, timeout=int(max(1, min(left, timeout))))
+        timed_out = (one.returncode == -1
+                     and getattr(one, "failure", None) is not ProcessFailure.BINARY_MISSING)
+        return read_single_test_run(
+            name, one.returncode, one.stdout, stderr=one.stderr,
+            timed_out=timed_out, timeout=min(left, timeout))
+
+    jobs = [(idx, k, exe, name) for idx, (exe, names) in listed.items()
+            for k, name in enumerate(names)]
+    runs: dict[int, list[IsolatedTest | None]] = {
+        idx: [None] * len(names) for idx, (_exe, names) in listed.items()}
+    width = min(isolation_workers(), max(1, len(jobs)))
+    if width <= 1:
+        for idx, k, exe, name in jobs:
+            one_run = _one(exe, name)
+            if one_run is None:
                 break
-            one = cargo.run(shlex.join([str(exe), *run_args(cmd, name)]), cwd,
-                            env=run_env, timeout=int(max(1, min(left, timeout))))
-            timed_out = (one.returncode == -1
-                         and getattr(one, "failure", None) is not ProcessFailure.BINARY_MISSING)
-            runs.append(read_single_test_run(
-                name, one.returncode, one.stdout, stderr=one.stderr,
-                timed_out=timed_out, timeout=min(left, timeout)))
-        if len(runs) != len(names):
+            runs[idx][k] = one_run
+    else:
+        with ContextPool(max_workers=width,
+                                thread_name_prefix="isolate") as pool:
+            futs = {pool.submit(_one, exe, name): (idx, k)
+                    for idx, k, exe, name in jobs}
+            for fut, (idx, k) in futs.items():
+                runs[idx][k] = fut.result()
+    rebuilt: dict[int, str] = {}
+    for idx, done in runs.items():
+        if any(r is None for r in done):
             continue
-        rebuilt[idx] = render_isolated_section(runs)
+        rebuilt[idx] = render_isolated_section([r for r in done if r is not None])
     spliced = splice_isolated_sections(stdout, stderr, rebuilt)
     return spliced if spliced is not None else (stdout, stderr)
 
@@ -302,8 +351,12 @@ def measure_test_state(
 
     `raw_sink`, when given, receives the raw combined capture: the READING
     deliberately drops panic text, but crash attribution (was the abort a
-    still-hollow stub's panic?) is decided from exactly that text."""
-    rc, out = run_cargo_fn(test_cmd, cwd, env, timeout=timeout)
+    still-hollow stub's panic?) is decided from exactly that text.
+
+    A completed capture of the same command, env and tree bytes is reused
+    (:func:`measured_capture`): a keep's premise is the tree the previous
+    keep's judgment read, unless another write landed in between."""
+    rc, out = measured_capture(run_cargo_fn, test_cmd, cwd, env, timeout)
     if raw_sink is not None:
         raw_sink.append(out)
     if rc == -1:
@@ -323,6 +376,107 @@ def measure_test_state(
     if not reading.binaries and rc != 0:
         return None
     return with_crash_positions(reading)
+
+
+def measure_cache_enabled() -> bool:
+    """`PHASE_C_MEASURE_CACHE` (default on). Read per call. `0` measures
+    every call afresh, the negative control of the reuse."""
+    return os.environ.get("PHASE_C_MEASURE_CACHE", "1").strip() != "0"
+
+
+def tree_bytes_digest(root: Path) -> str | None:
+    """One identity for the bytes a test run of ``root`` reads: every file
+    under it, symlinks followed (a cluster tree's `tests` is a link into the
+    oracle), except the build directories (any top-level `target*`, which
+    the run itself writes) and `.git`. None when the tree cannot be read:
+    such a tree is never served from the cache."""
+    h = hashlib.sha256()
+    try:
+        tops = sorted(root.iterdir())
+    except OSError:
+        return None
+    try:
+        for top in tops:
+            if top.name.startswith("target") or top.name == ".git":
+                continue
+            files = ([top] if top.is_file() else
+                     sorted(q for q in top.rglob("*") if q.is_file()))
+            for f in files:
+                h.update(str(f.relative_to(root)).encode("utf-8"))
+                h.update(b"\0")
+                h.update(f.read_bytes())
+                h.update(b"\0")
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+#: The tree whose measurements may be reused (:func:`bind_measure_cache`),
+#: and its last completed measurements, by (command, env, tree bytes), each
+#: with the seconds it took. Bounded: a keep's premise reuses the judgment
+#: just before it, and nothing older is ever the tree on disk again under the
+#: splice lock.
+_MEASURE_ROOT: list[Path | None] = [None]
+_MEASURED: dict[tuple[str, str, str], tuple[int, str, float]] = {}
+_MEASURED_MAX = 4
+_MEASURED_LOCK = threading.Lock()
+
+
+def bind_measure_cache(root: Path | None) -> None:
+    """Reuse completed measurements of ``root`` (None: of no tree). The TDD
+    loop binds its cluster tree at each sweep. A measurement is a pure
+    function of the command, the env and the bytes only for a real cargo
+    run, and only the loop knows its runner is one: a caller that binds
+    nothing measures every call afresh."""
+    with _MEASURED_LOCK:
+        _MEASURE_ROOT[0] = root.resolve() if root is not None else None
+        _MEASURED.clear()
+
+
+def measured_capture(run_cargo_fn: RunCargo, test_cmd: str, cwd: Path,
+                     env: Mapping[str, str], timeout: int) -> tuple[int, str]:
+    """`run_cargo_fn(test_cmd, cwd, env)`, or the capture a completed run of
+    the same command and env took on the same tree bytes of the bound tree
+    (:func:`bind_measure_cache`).
+
+    Every keep took a premise reading and a judgment, each a full suite in
+    every world, and the fill's ground (`phase_c_tdd._ground_now`) read the
+    same tree once more after each keep. In the abort window a reading cost
+    about 130 s per thread (run `630503-f5ca6540`, 2026-11-09). The premise
+    of a keep, and the ground read after it, see the tree the previous
+    judgment read whenever no other write landed in between. So all three
+    are readers of this one store. The ground was found still calling cargo
+    in review the same day.
+
+    A stored run serves a request whose timeout it ran within: the keep
+    gates measure under `U2_TEST_TIMEOUT` and the ground under
+    `PHASE_C_TEST_TIMEOUT`, and a completed run inside the smaller of the two
+    is the reading under either. A timeout (rc -1) is never stored: it
+    measured the clock. A capture whose tree changed while it ran is not
+    stored. The sweep and the ratchet's confirming re-sweep call the runner
+    directly and are never served from here."""
+    with _MEASURED_LOCK:
+        root = _MEASURE_ROOT[0]
+    if root is None or not measure_cache_enabled() or cwd.resolve() != root:
+        return run_cargo_fn(test_cmd, cwd, dict(env), timeout=timeout)
+    digest = tree_bytes_digest(cwd)
+    key = (test_cmd, repr(sorted(env.items())), digest or "")
+    if digest is not None:
+        with _MEASURED_LOCK:
+            hit = _MEASURED.get(key)
+        if hit is not None and hit[2] <= timeout:
+            return hit[0], hit[1]
+    t0 = time.monotonic()
+    rc, out = run_cargo_fn(test_cmd, cwd, dict(env), timeout=timeout)
+    took = time.monotonic() - t0
+    if digest is not None and rc != -1 and tree_bytes_digest(cwd) == digest:
+        with _MEASURED_LOCK:
+            if _MEASURE_ROOT[0] == root:
+                _MEASURED.pop(key, None)
+                _MEASURED[key] = (rc, out, took)
+                while len(_MEASURED) > _MEASURED_MAX:
+                    _MEASURED.pop(next(iter(_MEASURED)))
+    return rc, out
 
 
 # The crash positions the last sweep localized, per (binary, test): the
@@ -1314,21 +1468,34 @@ class PortBoundCargoRunner:
         asking: a body that passes the default world's suite and fails one
         nightly test fails this run. The return code is the first non-zero
         one, and a world that timed out makes the whole run a timeout (-1):
-        a world that gave no reading is not a world that passed."""
-        home = run_cargo(self.cargo, cmd, cwd, env, timeout)
+        a world that gave no reading is not a world that passed.
+
+        The worlds run side by side, each under its own deadline, in its own
+        target directory and toolchain, and the capture joins them in the
+        same order as one after another would (home first, then
+        `WorldChecks.others`). Sequential worlds doubled every keep's
+        reading in the abort window (run `630503-f5ca6540`, 2026-11-09:
+        about 130 s per reading per thread). Both worlds read one
+        `Cargo.lock`. On that tree its mtime stayed at strip time while both
+        worlds ran every reading for seven hours, so neither toolchain
+        writes it."""
         if (self.worlds is None or not judges_every_world(env)
                 or not is_isolatable_test_run(cmd)):
-            return home
+            return run_cargo(self.cargo, cmd, cwd, env, timeout)
         others = self.worlds.others(env)
         if not others:
-            return home
-        parts = [(world_of_env(env), home[1])]
-        rcs = [home[0]]
-        for cluster in others:
-            rc, text = run_cargo(self.cargo, cmd_for_world(cmd, cluster), cwd,
-                                 self.worlds.env_for(cluster, cwd, env), timeout)
-            parts.append((str(cluster.name), text))
-            rcs.append(rc)
+            return run_cargo(self.cargo, cmd, cwd, env, timeout)
+        runs: list[tuple[str, str, dict[str, str]]] = [
+            (world_of_env(env), cmd, env),
+            *((str(c.name), cmd_for_world(cmd, c),
+               self.worlds.env_for(c, cwd, env)) for c in others)]
+        with ContextPool(max_workers=len(runs),
+                                thread_name_prefix="world") as pool:
+            futs = [pool.submit(run_cargo, self.cargo, c_, cwd, e_, timeout)
+                    for _w, c_, e_ in runs]
+            got = [f.result() for f in futs]
+        parts = [(w, text) for (w, _c, _e), (_rc, text) in zip(runs, got, strict=True)]
+        rcs = [rc for rc, _t in got]
         rc_all = -1 if -1 in rcs else next((r for r in rcs if r != 0), 0)
         # Each world runs under its own deadline, so the one that timed out
         # is named by its own return code, not by its place in the order.

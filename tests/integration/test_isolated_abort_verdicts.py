@@ -169,6 +169,72 @@ def test_negative_control_shared_process_charges_the_fill(
     assert cmp.regressed and cmp.newly_crashed
 
 
+# ---- the unwinding stub and the isolation pool (2026-11-09) ----
+#
+# Run `630503-f5ca6540`: every aborting test unwound through a still-stubbed
+# destructor that no hold named (`StubHold.unwinding` now does), and every
+# reading re-ran the aborted tests one process after another. The same
+# invented crate: `a_red_then_drop` fails its own assertion, and the unwind
+# drops a `Handle`, whose `Drop` calls the stub `release` (src/lib.rs:12).
+
+
+def _release_site(file: str, line: int):
+    from pipeline_core.domain.models import FnSite
+    if file == "src/lib.rs" and 11 <= line <= 13:
+        return FnSite("src/lib.rs", "release", "")
+    return None
+
+
+def _capture(root: Path, monkeypatch: pytest.MonkeyPatch, tag: str,
+             workers: str = "4") -> str:
+    monkeypatch.setenv("PHASE_C_TEST_ISOLATION", "1")
+    monkeypatch.setenv("PHASE_C_ISOLATION_WORKERS", workers)
+    env = dict(os.environ)
+    env["CARGO_TARGET_DIR"] = str(_TARGET / tag)
+    env["RUST_BACKTRACE"] = "0"
+    _rc, out = run_cargo(CargoCli(), _CMD, root, env, timeout=600)
+    return out
+
+
+def test_premise_the_cleanup_panic_follows_the_first_panic_in_the_test_s_block(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_report import located_panics
+    from pipeline_core.domain.test_results import failure_bodies_for
+    out = _capture(_crate(tmp_path / "uw", "Handle { id }"), monkeypatch,
+                   "filled")
+    block = failure_bodies_for(out, {"a_red_then_drop"})["a_red_then_drop"]
+    panics = located_panics(block)
+    assert len(panics) >= 2, (
+        "the isolated block no longer prints the first panic and the cleanup "
+        "panic in order; the unwinding hold reads that order: " + block[:400])
+    assert panics[0].file.startswith("tests/")
+    assert panics[1].site == ("src/lib.rs", 12) and panics[1].is_stub
+
+
+def test_the_unwinding_hold_names_the_destructor_stub(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from pipeline_core.domain.test_outcome import stub_hold_of
+    out = _capture(_crate(tmp_path / "uw", "Handle { id }"), monkeypatch,
+                   "filled")
+    hold = stub_hold_of(out, _release_site, is_stub=lambda _s: True)
+    (site,) = hold.unwinding["a_red_then_drop"]
+    assert site.fn_name == "release"
+    # The first failure is the test's own assertion: no first-failure hold.
+    assert "a_red_then_drop" not in hold.by_test
+
+
+def test_the_isolation_pool_reads_what_the_serial_loop_reads(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Also the premise of the pool: single-test runs of one libtest binary
+    in parallel each print only their own test."""
+    root = _crate(tmp_path / "pool", "Handle { id }")
+    serial = _capture(root, monkeypatch, "filled", workers="1")
+    pooled = _capture(root, monkeypatch, "filled", workers="4")
+    assert _handles(TestStateReading(parse_binary_results(pooled))).completed
+    assert (TestStateReading(parse_binary_results(pooled)).keyed()
+            == TestStateReading(parse_binary_results(serial)).keyed())
+
+
 # ---- a stderr line is never a verdict (2026-09-27) ----
 #
 # The sanitized sweep of run `12616-8345ae1d` joined stdout and stderr with no

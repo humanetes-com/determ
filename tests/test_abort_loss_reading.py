@@ -156,18 +156,65 @@ def test_an_isolated_abort_with_a_crate_panic_is_not_exonerated(tmp_path: Path) 
 
 def test_the_sweep_closure_reads_the_same_isolated_abort() -> None:
     from pipeline_core.application.reconstruct.tdd_ratchet import (
-        aborted_names,
         closure_stub_sites,
         closure_withheld,
+        judged_unaborted_keys,
     )
+    from pipeline_core.domain.assertion_position import TestKey
     after = _isolated_after(_STUB + "\n" + _RUNTIME)
     sites = closure_stub_sites(_reading(_capture(_DONE)), after)
     assert sites == frozenset({("src/holder.rs", 12)})
-    judged = _reading(after).judged_names
-    assert "b" in judged and aborted_names(after) == frozenset({"b"})
-    assert closure_withheld("breach", frozenset({"b"}), judged - aborted_names(after),
+    b = TestKey("tests/holder.rs", "b")
+    judged = _reading(after).judged_keys()
+    assert b in judged and _reading(after).keyed().aborted == frozenset({b})
+    assert closure_withheld("breach", frozenset({b}), judged_unaborted_keys(_reading(after)),
                             sites, hollow_now=0, hollow_at_snapshot=1)
     # NEGATIVE CONTROL: the judged set as passed before keeps the aborted
     # test, and the exemption never fires.
-    assert closure_withheld("breach", frozenset({"b"}), judged, sites,
+    assert closure_withheld("breach", frozenset({b}), judged, sites,
                             hollow_now=0, hollow_at_snapshot=1) == ""
+
+
+def test_a_pass_lost_in_one_world_is_lost_though_its_namesake_passes_in_the_other() -> None:
+    """Run `630503-f5ca6540` (2026-11-09, iter 3): `pass_count 95<96`, the
+    revert event's `lost []`, and the sweep's own line "32 further
+    execution(s) lost to the same 6 crashed binary/binaries, their bare
+    names also defined in a surviving binary". Invented shape: one test
+    passes in both worlds at the snapshot; after a keep, world `base`'s
+    binary aborts on a stub panic during unwind while `nightly` still
+    passes it, and the hollow set shrank. The pass the count lost is a loss
+    of the closure the fill gate kept, so the ratchet forgives it."""
+    from pipeline_core.application.reconstruct.tdd_ratchet import (
+        closure_stub_sites,
+        closure_withheld,
+        judged_unaborted_keys,
+        passing_keys,
+        ratchet_breach,
+    )
+    from pipeline_core.domain.assertion_position import TestKey
+    base = _joined({"base": _DONE, "nightly": _DONE})
+    after = _joined({"base": _SHARED_ABORT, "nightly": _DONE})
+    snap_r, now_r = _reading(base), _reading(after)
+    # The crashed section's partial `ok` for `a` still counts (no trailer);
+    # the keyed set takes completed binaries only, so both are lost there.
+    assert (snap_r.pass_count, now_r.pass_count) == (4, 3)
+    snap_p, now_p = passing_keys(snap_r), passing_keys(now_r)
+    lost = snap_p - now_p
+    assert lost == frozenset({TestKey("base::tests/holder.rs", "a"),
+                              TestKey("base::tests/holder.rs", "b")})
+    breach = ratchet_breach(now_r.pass_count, snap_r.pass_count, now_p, snap_p)
+    sites = closure_stub_sites(snap_r, after)
+    assert breach and sites == frozenset({("src/holder.rs", 12)})
+    assert closure_withheld(breach, lost, judged_unaborted_keys(now_r), sites,
+                            hollow_now=4, hollow_at_snapshot=5)
+    # Second control: the same capture with the hollow set flat charges.
+    assert closure_withheld(breach, lost, judged_unaborted_keys(now_r), sites,
+                            hollow_now=5, hollow_at_snapshot=5) == ""
+    # NEGATIVE CONTROL: the bare-name sets the ratchet read before. Both
+    # names still pass in `nightly`, so `lost` is empty, the exemption
+    # returns "" on its first line, and the count breach is charged.
+    bare_lost = snap_r.passed_names - now_r.passed_names
+    assert bare_lost == frozenset()
+    assert closure_withheld(breach, bare_lost,  # type: ignore[arg-type]
+                            now_r.judged_names - now_r.aborted_names,  # type: ignore[arg-type]
+                            sites, hollow_now=4, hollow_at_snapshot=5) == ""

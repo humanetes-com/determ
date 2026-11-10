@@ -31,6 +31,7 @@ ALLOWED: dict[tuple[str, str], str] = {
     ("domain/test_results.py", "TestStateReading.passed_names"): "verdict bookkeeping, not a crash decision",
     ("domain/test_results.py", "TestStateReading.keyed"): "verdict bookkeeping per (binary, test), the passed_names rule per key; not a crash decision",
     ("domain/test_results.py", "TestStateReading.judged_names"): "verdict bookkeeping, not a crash decision",
+    ("domain/test_results.py", "TestStateReading.judged_keys"): "verdict bookkeeping per (binary, test), the judged_names rule per key; not a crash decision",
     ("domain/test_results.py", "TestStateReading.crashed"): "unclosed sections for compare_readings' fallback branches",
     ("domain/test_results.py", "compare_readings"): "per-test comparison; unclosed sections are the documented fallback",
     ("domain/test_isolation.py", "read_single_test_run"): "reads ONE test's own process",

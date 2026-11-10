@@ -1606,6 +1606,22 @@ class TestStateReading:
             aborted_silent=frozenset(silent), positions=dict(self.positions),
             opened=frozenset(opened))
 
+    def judged_keys(self) -> frozenset[TestKey]:
+        """Per (binary, test), the tests that RECEIVED a verdict in a
+        COMPLETED binary, passed or failed: :attr:`judged_names` without
+        the union across binaries. `keyed().failed` holds every binary's
+        failures, a crashed binary's partial prefix included, so it is not
+        this set: a test that vanished with its crashed binary must read as
+        unjudged here, whatever its partial output printed."""
+        from pipeline_core.domain.assertion_position import TestKey
+
+        out: set[TestKey] = set()
+        for b in self.binaries:
+            if b.completed:
+                out |= {TestKey(b.key, bare_test_name(n))
+                        for n in (*b.passed, *b.failed)}
+        return frozenset(out)
+
 
 # Verdict tokens libtest itself prints. Anything ELSE sitting where a verdict
 # belongs is not a verdict: libtest writes `test NAME ... ` WITHOUT a newline

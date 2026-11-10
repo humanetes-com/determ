@@ -29,15 +29,19 @@ runtime does not move), and a doc test's name drops its `(line N)` suffix
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterable, Mapping
+from dataclasses import dataclass, field
 from enum import StrEnum
 
-from pipeline_core.domain.abort_cause import AbortReading, read_abort
+from pipeline_core.domain.abort_cause import AbortCause, AbortReading, read_abort
 from pipeline_core.domain.generation import is_gen_tests_sibling_name
 from pipeline_core.domain.models import FnLocator, FnSite
 from pipeline_core.domain.reference_floor import doc_test_head
-from pipeline_core.domain.test_report import parse_test_output, stub_abort_reading
+from pipeline_core.domain.test_report import (
+    located_panics,
+    parse_test_output,
+    stub_abort_reading,
+)
 from pipeline_core.domain.test_results import (
     failure_bodies_for,
     parse_binary_results,
@@ -47,6 +51,7 @@ from pipeline_core.domain.test_results import (
 __all__ = [
     "abort_readings",
     "first_fail_units",
+    "holder_order",
     "test_leaf",
     "RunKind",
     "SiteKind",
@@ -260,9 +265,30 @@ class StubHold:
 
     The shared-process reading survives only as what it now is: the fallback
     for a binary isolation could not rebuild, whose tests have no outcome.
+
+    ``unwinding`` is a second relation, never merged into ``by_test``: per
+    failing test whose own process aborted on the runtime's double panic
+    (`abort_cause.AbortCause.PANIC_IN_PANIC`), the still-stubbed functions
+    that panicked AFTER its first failure, while it unwound. Such a stub is
+    the destructor path of a value the test built. The same destructor runs
+    at that value's scope exit on the passing path, so once the first-failure
+    stub has a body the test first-fails there. It is also the stub whose
+    body ends the abort, and every reading of the tree pays for aborted
+    binaries by re-running them one test per process. Run `630503-f5ca6540`
+    (2026-11-09) re-read through `scripts/unwinding_hold.py`: 153 of 153
+    aborting tests unwound through `Drop for Error`, and first failure named
+    it for 2. In fill 2 the `construct` keep's holder admission listed it
+    10th of 18 by file sort, and it was kept about three hours later. Its
+    readers are the fill's holder admission and order
+    (`fill_scheduler.unwritten_holders`, `_holder_run`) and the rank's held
+    count. Sight, the frontier's first-failure holds, the ledger's grade
+    and :class:`held_stubs.HeldStubs` (deferral, session planner, the
+    schedule's hollow map) keep reading ``by_test``. A test held there did
+    not first fail in that stub.
     """
 
     by_test: Mapping[str, frozenset[FnSite]]
+    unwinding: Mapping[str, frozenset[FnSite]] = field(default_factory=dict)
 
     @property
     def blockers(self) -> frozenset[FnSite]:
@@ -273,6 +299,16 @@ class StubHold:
 
     def held_by(self, site: FnSite) -> frozenset[str]:
         return frozenset(t for t, ss in self.by_test.items() if site in ss)
+
+    @property
+    def unwinding_blockers(self) -> frozenset[FnSite]:
+        out: set[FnSite] = set()
+        for sites in self.unwinding.values():
+            out |= sites
+        return frozenset(out)
+
+    def unwound_by(self, site: FnSite) -> frozenset[str]:
+        return frozenset(t for t, ss in self.unwinding.items() if site in ss)
 
 
 #: The held view a fill reads after its own keeps: per failing test (bare
@@ -308,9 +344,15 @@ def stub_hold_of(
     function. Then, for the tests the capture has no outcome for
     (``vanished``: a binary isolation could not rebuild), the shared-process
     stub-abort reading adds the stubs its unfinished sections name.
+
+    ``unwinding`` (:class:`StubHold`): for a test whose own process aborted
+    on a double panic, every stub panic in its own block after the first
+    panic that ``locate`` resolves to a function ``is_stub`` accepts, less
+    the test's first-failure holds.
     """
     held: dict[str, set[FnSite]] = {}
-    for top in outcomes_of(capture).values():
+    outcomes = outcomes_of(capture)
+    for top in outcomes.values():
         for o in (top, *top.others):
             if (o.passed or o.site_kind is not SiteKind.CRATE
                     or o.first_file is None or o.first_line is None):
@@ -323,7 +365,59 @@ def stub_hold_of(
         fallback = stub_abort_reading(capture, locate)
         for t, sites in fallback.hollow(vanished, test_files or {}).items():
             held.setdefault(t, set()).update(sites)
-    return StubHold({t: frozenset(ss) for t, ss in held.items()})
+    return StubHold({t: frozenset(ss) for t, ss in held.items()},
+                    _unwinding_of(capture, outcomes, locate, is_stub, held))
+
+
+def _unwinding_of(
+    capture: str, outcomes: Mapping[str, TestOutcome], locate: Locate,
+    is_stub: Callable[[FnSite], bool], first: Mapping[str, set[FnSite]],
+) -> dict[str, frozenset[FnSite]]:
+    names = {n for n, o in outcomes.items()
+             if o.abort is not None and o.abort.cause is AbortCause.PANIC_IN_PANIC}
+    if not names:
+        return {}
+    bodies = failure_bodies_for(capture, names)
+    out: dict[str, frozenset[FnSite]] = {}
+    for n in names:
+        later: set[FnSite] = set()
+        for p in located_panics(bodies.get(n, ""))[1:]:
+            if not p.is_stub:
+                continue
+            site = locate(p.file, p.line)
+            if site is not None and is_stub(site):
+                later.add(site)
+        later -= first.get(n, set())
+        if later:
+            out[n] = frozenset(later)
+    return out
+
+
+def holder_order[K: (FnSite, FnLocator)](
+    units: Iterable[K], held: Mapping[str, Collection[K]],
+    unwinding: Mapping[str, Collection[K]],
+) -> list[K]:
+    """The order a fill takes the holders its keeps measured, over bodies
+    (:class:`FnSite`) or units (:class:`FnLocator`) alike.
+
+    A stub that tests unwind through comes first. Inside each group, the
+    stub that holds more tests comes first. Ties are broken by file, name and
+    container. The unwinding stub ends the aborts every reading pays for,
+    and it holds those same tests as soon as their first-failure stub has a
+    body (:class:`StubHold`). Before 2026-11-09 holders were taken by file
+    sort, so on run `630503-f5ca6540` fill 2, `Drop for Error` (the cleanup
+    panic of the aborting tests) came 10th of 18. A stub's count is over
+    both relations, each test counted once."""
+    def tests_of(u: K) -> set[str]:
+        return ({t for t, us in held.items() if u in us}
+                | {t for t, us in unwinding.items() if u in us})
+
+    def tie(u: K) -> tuple[str, ...]:
+        return (u.file, u.fn_name, getattr(u, "container", "") or "")
+
+    unwound = {u for us in unwinding.values() for u in us}
+    return sorted(dict.fromkeys(units), key=lambda u: (
+        0 if u in unwound else 1, -len(tests_of(u)), *tie(u)))
 
 
 def test_leaf(name: str) -> str:

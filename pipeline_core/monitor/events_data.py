@@ -20,7 +20,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from pipeline_core.domain.reasoning_cap import CutRate, CutStopKnobs, mark_of
+from pipeline_core.domain.reasoning_cap import (
+    CutRate,
+    CutStopKnobs,
+    mark_of,
+    pair_call_rows,
+)
 from pipeline_core.monitor import iteration_steps as _steps
 from pipeline_core.monitor.fill_progress import FillProgress, fold_fill
 
@@ -832,10 +837,12 @@ def cut_rate_reading(knobs: CutStopKnobs) -> CutRate:
     ladder, `adapters/model_notes_store.py`) are skipped, exactly as
     `record_stream_meta` skips them live — via the flag the controller now
     stamps on the event, not a caller-site guess reconstructed after the
-    fact. `followup` rows (`llm.followup_meta`) are a different event name
-    and are never read here: `_observe_health` (the live fold this mirrors)
-    is only ever called from `record_stream_meta`, never
-    `record_followup_meta`.
+    fact. `followup` rows (`llm.followup_meta`) are never folded as calls:
+    `_observe_health` (the live fold this mirrors) is only ever called from
+    `record_stream_meta`. They are read for one thing — a stream row written
+    before the controller stamped `decided` is judged with its followup's
+    row joined (`pair_call_rows`), which is what the stamp itself was
+    computed from on newer rows.
 
     `rate.seen` undercounts a long run's true call count: `read_recent_events`
     only tails the last 8 MB of events.jsonl, while the live process's `seen`
@@ -843,11 +850,12 @@ def cut_rate_reading(knobs: CutStopKnobs) -> CutRate:
     the gauge: both are the cut COUNT over `marks` (the last `window` calls),
     which the tail carries."""
     rate = CutRate(knobs.window, knobs.share_pct)
-    for ev in read_recent_events(lambda n: n == "llm.stream_meta"):
+    wanted = ("llm.stream_meta", "llm.followup_meta")
+    for ev, followup in pair_call_rows(read_recent_events(lambda n: n in wanted)):
         data = ev.get("data") or {}
         if data.get("bookkeeping"):
             continue
-        rate = rate.add(mark_of(data, ""))
+        rate = rate.add(mark_of(data, "", followup))
     return rate
 
 

@@ -324,6 +324,7 @@ class ImplFillPath(Protocol):
         fill_premise: Mapping[str, Any] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, Any] | None] | None = ...,
         fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
+        fill_unwinding_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
     ) -> ClusterFillResult: ...
 
 
@@ -439,4 +440,5 @@ class FillPassPort(Protocol):
         fill_premise: Mapping[str, PremiseEntry] | None = ...,
         fill_ground_now: Callable[[], Mapping[str, PremiseEntry] | None] | None = ...,
         fill_held_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
+        fill_unwinding_now: Callable[[], Mapping[str, frozenset[FnSite]] | None] | None = ...,
     ) -> ClusterFillResult: ...

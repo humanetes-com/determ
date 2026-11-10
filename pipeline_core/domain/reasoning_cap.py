@@ -83,15 +83,92 @@ def _is_followup_row(row: Mapping[str, Any]) -> bool:
     return str(row.get(_KIND) or "") == _FOLLOWUP
 
 
-def is_cut(meta: Mapping[str, Any]) -> bool:
-    """A main-stream call that returned no decided answer: reasoning ran out
-    (:func:`is_reasoning_capped`, which includes the forced followup that
-    fires on an empty main reply) or the reply on record is empty.
+def followup_answered(row: Mapping[str, Any]) -> bool:
+    """A forced followup that finished a reply of its own accord: it wrote
+    content and stopped neither on the server budget (`length`), nor on the
+    client's think cap, nor on a transport failure (`error`, which
+    `LLMController._followup` emits for a network or input-too-long loss). A
+    cut followup whose closed prefix was salvaged is NOT answered — the
+    budget still lost the element it was writing."""
+    return (int(row.get("content_chars") or 0) > 0
+            and str(row.get("finish_reason") or "") not in ("length", "error")
+            and str(row.get("stop") or "") != "think_cap")
 
-    `stop == "closed"` with no `finish_reason` is the StopDetector ending a
-    FINISHED structure early and is not a cut — 83 such rows on record, all
-    with content (events.jsonl through 2026-09-21)."""
-    return is_reasoning_capped(meta) or int(meta.get("content_chars") or 0) == 0
+
+def answer_decided(main: Mapping[str, Any],
+                   followup: Mapping[str, Any] | None = None) -> bool:
+    """Whether ONE call put a decided answer on record — the fact the
+    run-level cut stop counts the absence of.
+
+    Two completions can write a call's reply, and the rule is the same for
+    whichever did: it finished on its own and wrote something. Without a
+    followup that is the main stream (content, and neither `length` nor
+    `think_cap`; `stop == "closed"` is the StopDetector ending a FINISHED
+    structure and counts as finished). With one, the main stream decided
+    nothing by construction (the followup fires only on an empty or
+    budget-cut main reply), so the followup's own row decides
+    (:func:`followup_answered`); a followup row that is not available
+    cannot vouch for the call, so it is undecided.
+
+    Why the followup's outcome and not its firing: on run
+    `2833915-23e0c633` (2026-11-09, Qwen3.8-27B-FP8 at `medium`) the stop
+    fired on 4 calls whose main stream had ended `finish_reason=stop` at
+    16,918-24,867 completion tokens against a 78,973-90,528 request max —
+    the model ended its turn inside its reasoning, two of the traces ending
+    on the decision itself ("Let's request `src/backtrace.rs`") — and every
+    one of the four followups finished on its own and wrote the reply the
+    pipeline then served (three context requests and one fn body). Counting
+    the firing called those four answers budget failures and stopped a fill
+    at 376 of 424."""
+    if main.get("followup"):
+        return followup is not None and followup_answered(followup)
+    return (int(main.get("content_chars") or 0) > 0
+            and str(main.get("finish_reason") or "") != "length"
+            and str(main.get("stop") or "") != "think_cap")
+
+
+def is_cut(meta: Mapping[str, Any],
+           followup: Mapping[str, Any] | None = None) -> bool:
+    """A main-stream call that returned no decided answer
+    (:func:`answer_decided`).
+
+    The controller stamps the verdict on the row it records (`decided`),
+    computed by :func:`answer_decided` on the row and its followup's row at
+    the moment both exist, and that stamp is what this reads. A row written
+    before the stamp existed (events.jsonl before 2026-11-09) is decided
+    here from the row plus the followup row a replay joined to it
+    (:func:`pair_call_rows`); without that join a followup row reads as
+    undecided, which is the old rule — every forced followup a cut."""
+    if "decided" in meta:
+        return not bool(meta.get("decided"))
+    return not answer_decided(meta, followup)
+
+
+def pair_call_rows(
+    events: Iterable[Mapping[str, Any]],
+) -> Iterator[tuple[Mapping[str, Any], Mapping[str, Any] | None]]:
+    """`(llm.stream_meta event, its llm.followup_meta data or None)` over an
+    event stream in emission order, for the replays (the monitor's gauge,
+    the censuses) that fold recorded calls through :func:`is_cut`.
+
+    The controller emits a call's followup row BEFORE its stream row, both
+    keyed on the call's prompt sha, so the join is the last followup row
+    seen for that `(run_id, prompt_sha)`. A stream row without
+    `followup=True` takes no followup row, and consumes any stale one so it
+    cannot attach to a later call of the same prompt. Other events pass
+    through untouched (they are not yielded)."""
+    pending: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for ev in events:
+        name = str(ev.get("event") or "")
+        data = ev.get("data") or {}
+        if not isinstance(data, Mapping):
+            continue
+        key = (str(ev.get("run_id") or ""), str(data.get("prompt_sha") or ""))
+        if name == "llm.followup_meta":
+            pending[key] = data
+        elif name == "llm.stream_meta":
+            fu = pending.pop(key, None)
+            yield ev, (fu if data.get("followup") else None)
 
 
 @contextmanager
@@ -124,6 +201,10 @@ class CallMark:
     cut: bool             # :func:`is_cut`
     empty: bool           # the reply on record is empty
     prompt_tokens: int    # the server's prompt count (0 when not reported)
+    # The main stream decided nothing and the forced followup wrote the
+    # decided answer: not a cut, but the shape that preceded the false stop
+    # on run `2833915-23e0c633`, so the breakdown still prints it.
+    recovered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,17 +285,23 @@ class CutRate:
         routes = ", ".join(f"{r} {c}/{n}" for r, (c, n)
                            in sorted(self.by_route().items()))
         empty = sum(1 for m in self.marks if m.empty)
+        recovered = sum(1 for m in self.marks if m.recovered)
         largest = max((m.prompt_tokens for m in self.marks), default=0)
         return (f"calls={len(self.marks)} (of {self.seen} seen) "
                 f"cut={self.cut}/{self.threshold or '-'} empty={empty} "
                 f"share={self.share:.1f}% [{routes or 'none'}] "
-                f"largest-prompt={largest} tok")
+                f"largest-prompt={largest} tok followup-answered={recovered}")
 
 
-def mark_of(meta: Mapping[str, Any], route: str) -> CallMark:
-    return CallMark(route=route, cut=is_cut(meta),
+def mark_of(meta: Mapping[str, Any], route: str,
+            followup: Mapping[str, Any] | None = None) -> CallMark:
+    """`followup` is the call's followup row, for a replay of rows recorded
+    before the controller stamped `decided` (see :func:`is_cut`)."""
+    cut = is_cut(meta, followup)
+    return CallMark(route=route, cut=cut,
                     empty=int(meta.get("content_chars") or 0) == 0,
-                    prompt_tokens=int(meta.get("prompt_tokens") or 0))
+                    prompt_tokens=int(meta.get("prompt_tokens") or 0),
+                    recovered=bool(meta.get("followup")) and not cut)
 
 
 def summarize_capped(rows: Sequence[Mapping[str, Any]]) -> tuple[int, int]:

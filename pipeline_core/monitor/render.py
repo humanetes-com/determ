@@ -188,6 +188,16 @@ def progress_bar(pct: float, width: int = 18, label: str = "") -> str:
     return "".join(s)
 
 
+def score_bar(pct: float, ahead_pct: float | None = None, width: int = 24) -> str:
+    """The score bar in colour: green is the last sweep's passing share, yellow
+    is what the running fill's latest reading adds beyond it (the `(…N)` on the
+    cluster row), dim blocks are the rest of the oracle."""
+    done = round(pct / 100 * width)
+    upto = done if ahead_pct is None else max(done, round(ahead_pct / 100 * width))
+    return (green("█" * done) + yellow("█" * (upto - done))
+            + "░" * (width - upto))
+
+
 def _iso_ts_seconds(ts: str) -> float | None:
     """Epoch seconds from an events.jsonl ISO timestamp, else None."""
     try:
@@ -465,7 +475,11 @@ def score_row(state: dict[str, Any]) -> str | None:
     failing = state.get("tdd_fail")
     if failing is not None:
         seg.append(red(f"{failing} failing") if failing else green("0 failing"))
-    return f"           score    [{progress_bar(pct, 24)}]  {'  '.join(seg)}"
+    ahead = state.get("tdd_fill_pass")
+    ahead_pct = None
+    if isinstance(ahead, int) and ahead > passed:
+        ahead_pct = min(100.0, ahead / oracle * 100)
+    return f"           score    [{score_bar(pct, ahead_pct)}]  {'  '.join(seg)}"
 
 
 def oracle_row(state: dict[str, Any]) -> str | None:

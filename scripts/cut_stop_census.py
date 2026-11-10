@@ -22,11 +22,23 @@ USAGE
     .venv/bin/python scripts/cut_stop_census.py [--events logs/events.jsonl]
                                                 [--window 100] [--share 4]
                                                 [--min-calls 25] [--since YYYY-MM-DD]
+                                                [--legacy] [--run RUN_ID]
 
 No GPU, no vLLM, no pipeline state: it reads the event log and prints. On the
 full log (~284 MB) it takes about a minute.
 
 HOW TO INTERPRET THE OUTPUT
+
+Which calls are cut is the pipeline's own `is_cut`: a call is cut when it
+put no decided answer on record (`answer_decided`). Rows the controller
+stamped `decided` (2026-11-09 on) read the stamp; older rows are judged
+with their `llm.followup_meta` row joined (`pair_call_rows`), so a forced
+followup that finished its reply is not a cut. `--legacy` restores the
+rule before 2026-11-09 — every forced followup a cut — as the negative
+control: the difference between the two runs of the script is the calls
+the old rule called budget failures although a followup answered them.
+`--run <id>` adds that run's cut-call indices and where the count rule
+fires on it.
 
 `runs` is how many runs made at least one main-stream call. `cut/calls` is
 the whole corpus. Then, per candidate rule, the runs it would have STOPPED
@@ -60,7 +72,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline_core.domain.reasoning_cap import is_cut  # noqa: E402
+from pipeline_core.domain.reasoning_cap import (  # noqa: E402
+    is_cut,
+    pair_call_rows,
+)
 
 
 def _fires_share(marks: list[bool], window: int, share: float,
@@ -92,31 +107,41 @@ def main() -> int:
     ap.add_argument("--share", type=float, default=4.0)
     ap.add_argument("--min-calls", type=int, default=25)
     ap.add_argument("--since", default="")
+    ap.add_argument("--legacy", action="store_true",
+                    help="count every forced followup as a cut (the rule "
+                         "before 2026-11-09), ignoring the followup's outcome")
+    ap.add_argument("--run", default="",
+                    help="also print the cut-call indices of this run id")
     args = ap.parse_args()
 
     by_run: dict[str, list[bool]] = defaultdict(list)
     first_ts: dict[str, str] = {}
-    with open(args.events, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if '"llm.stream_meta"' not in line:
-                continue
-            try:
-                ev = json.loads(line)
-            except ValueError:
-                continue
-            if ev.get("event") != "llm.stream_meta":
-                continue
-            ts = str(ev.get("ts") or "")
-            if args.since and ts[:10] < args.since:
-                continue
-            run = str(ev.get("run_id") or "?")
-            # `followup=True` on a stream row says the MAIN stream was cut
-            # and a forced completion ran — `is_cut` counts it, so dropping
-            # those rows drops exactly the cuts (1 of 10,954 "cut calls" on
-            # the first run of this script, against 1,810 of 12,002 on the
-            # record `CutRate`'s docstring quotes).
-            by_run[run].append(is_cut(ev.get("data") or {}))
-            first_ts.setdefault(run, ts)
+
+    def _events():
+        with open(args.events, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"llm.stream_meta"' not in line and '"llm.followup_meta"' not in line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+
+    for ev, followup in pair_call_rows(_events()):
+        ts = str(ev.get("ts") or "")
+        if args.since and ts[:10] < args.since:
+            continue
+        run = str(ev.get("run_id") or "?")
+        # The pipeline's own rule: a row the controller stamped `decided`
+        # reads the stamp; an older row is judged with its followup's row
+        # joined (`pair_call_rows`). `--legacy` reads every forced followup
+        # as a cut, the rule before 2026-11-09, as the negative control.
+        data = ev.get("data") or {}
+        if args.legacy:
+            data = {k: v for k, v in data.items() if k != "decided"}
+            followup = None
+        by_run[run].append(is_cut(data, followup))
+        first_ts.setdefault(run, ts)
 
     threshold = max(1, math.ceil(args.share * args.window / 100.0))
     calls = sum(len(m) for m in by_run.values())
@@ -162,6 +187,12 @@ def main() -> int:
     print(f"\ncut calls in each run's first {args.window}: "
           + ", ".join(f"{k if k < 10 else '10+'}:{dist[k]}"
                       for k in sorted(dist)))
+    if args.run:
+        marks = by_run.get(args.run, [])
+        cuts = [i for i, c in enumerate(marks, 1) if c]
+        print(f"\nrun {args.run}: calls={len(marks)} cut={len(cuts)} "
+              f"at call(s) {cuts}; count rule fires at "
+              f"{_fires_count(marks, args.window, threshold)}")
     return 0
 
 

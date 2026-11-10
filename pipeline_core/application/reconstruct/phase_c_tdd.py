@@ -44,6 +44,8 @@ from pipeline_core.application.reconstruct.body_reseed import (
 )
 from pipeline_core.application.reconstruct.cargo_runner import (
     bind_crash_positions,
+    bind_measure_cache,
+    measured_capture,
     oracle_test_source,
 )
 from pipeline_core.application.reconstruct.close_stub_account import report_close_stubs
@@ -68,12 +70,14 @@ from pipeline_core.application.reconstruct.site_revert import (
     revert_site_regressions,
 )
 from pipeline_core.application.reconstruct.tdd_ratchet import (
-    aborted_names,
     breach_withheld,
     closure_stub_sites,
     closure_withheld,
     hollow_count,
+    judged_unaborted_keys,
+    passing_keys,
     ratchet_breach,
+    render_keys,
     restore_src_tree,
     snapshot_due,
     snapshot_src_tree,
@@ -83,6 +87,7 @@ from pipeline_core.application.reconstruct.tree_txn import (
 )
 from pipeline_core.domain import fill_phase_clock, reasoning_cap
 from pipeline_core.domain.assertion_position import (
+    TestKey,
     assertion_positions,
     crash_positions,
 )
@@ -167,7 +172,10 @@ from pipeline_core.domain.crash_scope import (
     scope_convicting,
     scope_to_crash_culprits,
 )
-from pipeline_core.domain.crash_settlement import held_stub_evidence
+from pipeline_core.domain.crash_settlement import (
+    held_stub_evidence,
+    unwinding_stub_evidence,
+)
 from pipeline_core.domain.crash_site import (
     CrashSites,
     blamed_locators,
@@ -251,7 +259,7 @@ from pipeline_core.domain.flat_score import (
 )
 from pipeline_core.domain.fn_execution import FnCoverageRecord
 from pipeline_core.domain.graceful_stop import request_graceful_stop
-from pipeline_core.domain.held_stubs import HeldStubs
+from pipeline_core.domain.held_stubs import HeldStubs, offered_after_deferral
 from pipeline_core.domain.installable_fns import producer_dispatch_ranks
 from pipeline_core.domain.landed_change import (
     changed_units,
@@ -712,11 +720,13 @@ class SweepReading(NamedTuple):
     """One reconciled cargo-test sweep. Carried as a value object rather than a
     bare tuple because `passing` and `failed` are both name sets over the same
     sweep: positional unpacking of two same-typed neighbours is how a caller
-    silently compares the wrong one."""
+    silently compares the wrong one. `passing` is per (binary, test)
+    (`tdd_ratchet.passing_keys`): it is what the batch ratchet compares
+    against its snapshot, and the count it charges counts per binary."""
     fail_count: int
     failed: set[str]
     oracle: SweepOracle
-    passing: frozenset[str]
+    passing: frozenset[TestKey]
 
 
 def _read_cluster_file(target_src_dir: Path, rel: str) -> str | None:
@@ -1997,10 +2007,12 @@ def run_phase_c_tdd(
     _bratchet_score: WorldScore | None = None
     _bratchet_snap: dict[str, str] | None = None
     _bratchet_sha: str | None = None   # tree the snapshot was taken from
-    # Tests passing in COMPLETED binaries at the snapshot. The ratchet scores a
-    # candidate tree against these, so a crash costs exactly the passes it
-    # took and nothing more.
-    _bratchet_passing: frozenset[str] = frozenset()
+    # Tests passing in COMPLETED binaries at the snapshot, per (binary, test)
+    # (`tdd_ratchet.passing_keys`). The ratchet scores a candidate tree
+    # against these, so a crash costs exactly the passes it took and nothing
+    # more, and a pass lost in one binary is not hidden by its namesake in
+    # another.
+    _bratchet_passing: frozenset[TestKey] = frozenset()
     # The per-binary reading of the snapshot sweep. The closure exemption
     # below forgives a breach only on stub-panic evidence from the binaries
     # that were complete WITH a pass here and crashed since — the same
@@ -2426,7 +2438,7 @@ def run_phase_c_tdd(
         # count as failing. Only a cut before any section opened (a build
         # that did not finish) has no oracle to reconcile against.
         _bins = parse_binary_results(output_, timed_out=(rc_ == -1))
-        _passing = TestStateReading(_bins).passed_names
+        _passing = passing_keys(TestStateReading(_bins))
         if ((rc_ == -1 and not any(b.hung for b in _bins))
                 or deps.active_test_inventory is None):
             return SweepReading(fail_n, failed_, SweepOracle(frozenset(), 0),
@@ -2747,8 +2759,8 @@ def run_phase_c_tdd(
             # is last iter's fills, and the charge restores the snapshot.
             _withheld = closure_withheld(
                 _breach, _bratchet_passing - _sweep.passing,
-                TestStateReading(parse_binary_results(output)).judged_names
-                - aborted_names(output),
+                judged_unaborted_keys(
+                    TestStateReading(parse_binary_results(output))),
                 closure_stub_sites(_bratchet_reading, output),
                 hollow_now=hollow_count(snapshot_src_tree(target_src_dir)),
                 hollow_at_snapshot=hollow_count(_bratchet_snap),
@@ -2805,8 +2817,8 @@ def run_phase_c_tdd(
                     # What the breach lost and gained against the best tree,
                     # and the fill's runs, so a revert names its tests and
                     # the runs it throws away.
-                    "lost": sorted(_bratchet_passing - _sweep.passing),
-                    "gained": sorted(_sweep.passing - _bratchet_passing),
+                    "lost": render_keys(_bratchet_passing - _sweep.passing),
+                    "gained": render_keys(_sweep.passing - _bratchet_passing),
                     "fill_runs": [
                         {"label": r_.label, "outcome": r_.outcome.value,
                          "kept": [f"{a_}::{b_}" for a_, b_ in r_.kept],
@@ -2994,17 +3006,48 @@ def run_phase_c_tdd(
             another stub. Read off the tree as it stands at the grade."""
             return held_locators(_held_sites_of(output_, vanished_))
 
+        # The last capture's `StubHold`: the fill reads its first-failure
+        # and its unwinding relation off the same capture at each look. Keyed
+        # on the stub set too: a keep can change the tree and leave the
+        # capture's bytes as they were.
+        _hold_memo: list[tuple[str, tuple[str, ...], frozenset[FnLocator],
+                               StubHold]] = []
+
         def _held_sites_of(output_: str, vanished_: Iterable[str],
                            ) -> dict[str, frozenset[FnSite]]:
             """:func:`_held_of` per body, container included: the view the
             fill reads after its own keeps, so a run opened on a measured
             blocker names the body its tests stop in
-            (`test_outcome.HeldSites`)."""
+            (`test_outcome.HeldSites`). First failure only: the ledger's
+            grade reads this too, and a test that unwound through a stub
+            did not first fail in it."""
+            _h = _stub_hold_of_capture(output_, vanished_)
+            return {} if _h is None else {
+                bare_test_name(t_): frozenset(ss_)
+                for t_, ss_ in _h.by_test.items()}
+
+        def _unwinding_sites_of(output_: str) -> dict[str, frozenset[FnSite]]:
+            """The same capture's unwinding relation
+            (`test_outcome.StubHold.unwinding`), for the fill's holder
+            admission and order only."""
+            _h = _stub_hold_of_capture(output_, ())
+            return {} if _h is None else {
+                bare_test_name(t_): frozenset(ss_)
+                for t_, ss_ in _h.unwinding.items()}
+
+        def _stub_hold_of_capture(
+                output_: str, vanished_: Iterable[str],
+                _memo: list[tuple[str, tuple[str, ...], frozenset[FnLocator],
+                                  StubHold]] = _hold_memo,
+        ) -> StubHold | None:
+            _v = tuple(vanished_)
             if deps.enumerate_fns is None:
-                return {}
+                return None
             try:
                 _keys_h = frozenset(deps.scan_unimplemented_for_cluster(
                     target_src_dir, cluster).units)
+                if _memo and _memo[0][:3] == (output_, _v, _keys_h):
+                    return _memo[0][3]
 
                 def _is_stub_h(site_: FnSite,
                                keys_: frozenset[FnLocator] = _keys_h) -> bool:
@@ -3016,11 +3059,11 @@ def run_phase_c_tdd(
                         SimpleNamespace(enumerate_fns=deps.enumerate_fns),
                         target_src_dir),
                     is_stub=_is_stub_h,
-                    vanished=vanished_, test_files=_test_files)
+                    vanished=_v, test_files=_test_files)
             except (OSError, ValueError, TypeError, AttributeError):
-                return {}
-            return {bare_test_name(t_): frozenset(ss_)
-                    for t_, ss_ in _hold_h.by_test.items()}
+                return None
+            _memo[:] = [(output_, _v, _keys_h, _hold_h)]
+            return _hold_h
 
         # One localization per sweep capture (`localize_crashes` re-runs the
         # crashed binaries under gdb and the sanitizer): the ledger grade
@@ -3399,6 +3442,10 @@ def run_phase_c_tdd(
         # line, is compared with (`observation_move`, `cargo_runner.
         # with_crash_positions`). Only the sweep runs the debugger.
         _fps_c = failure_fingerprints(output)
+        # The keep readings of this tree may reuse a completed capture of
+        # the same bytes (`cargo_runner.bind_measure_cache`); a sweep starts
+        # from none.
+        bind_measure_cache(target_src_dir)
         bind_crash_positions({
             k_: (line_, _fps_c[k_])
             for k_, line_ in crash_positions(_sweep_view.crash_sites,
@@ -4880,6 +4927,40 @@ def run_phase_c_tdd(
                          sorted(_stub_hold.held_by(s))[:50]
                          for s in sorted(_stub_hold.blockers)},
                 "held_tests": len(_stub_hold.by_test)})
+        # The second relation of the same capture: stubs the failing tests
+        # panicked in while they unwound (`test_outcome.StubHold.unwinding`).
+        # Such a stub is on the frontier with those tests and counts in the
+        # rank's held count, so it is HELD on this sweep's batch. It does not
+        # enter `_holds`: no test first fails in it, so it defers no
+        # consumer and does not make a test held for the session planner.
+        _unwound_by_unit: dict[FnLocator, frozenset[str]] = {}
+        if _stub_hold.unwinding:
+            for _site in sorted(_stub_hold.unwinding_blockers):
+                _uw = _stub_hold.unwound_by(_site)
+                _loc = locator_of(_site)
+                _unwound_by_unit[_loc] = (
+                    _unwound_by_unit.get(_loc, frozenset())
+                    | frozenset(bare_test_name(t_) for t_ in _uw))
+                if _site not in _stub_hold.blockers:
+                    crash_texts.setdefault(_loc, unwinding_stub_evidence(
+                        len(_stub_hold.held_by(_site)), len(_uw)))
+                frontier.setdefault(_loc, set()).update(_uw)
+            deps.log(
+                f"  {tag} [phase-c/crash] iter {iter_n}: "
+                f"{len(_stub_hold.unwinding_blockers)} still-stubbed fn(s) "
+                f"panicked in while {len(_stub_hold.unwinding)} failing "
+                "test(s) unwound (their process aborted): "
+                + ", ".join(
+                    f"{s.file}::{s.fn_name} ({len(_stub_hold.unwound_by(s))})"
+                    for s in sorted(_stub_hold.unwinding_blockers,
+                                    key=lambda s_: (-len(_stub_hold.unwound_by(s_)),
+                                                    s_.file, s_.fn_name))))
+            deps.emit("phase_c.crash.stub_unwinding", data={
+                "cluster": cluster.name, "iter": iter_n,
+                "unwinding": {f"{s.file}::{s.fn_name}":
+                              sorted(_stub_hold.unwound_by(s))[:50]
+                              for s in sorted(_stub_hold.unwinding_blockers)},
+                "unwound_tests": len(_stub_hold.unwinding)})
 
         # Futility escalation: a failing test whose attributed
         # unit-set is identical to last iteration's has been fully served by
@@ -5166,7 +5247,12 @@ def run_phase_c_tdd(
         # localized faulting stack, so "nothing left to try" no longer holds.
         # A held stub is never exhausted: its tests stop at it whatever else
         # is written, so "nothing left to try" cannot hold while it is a stub.
-        permanently_exhausted -= set(crash_texts) | _holds.units
+        # What this sweep must offer: the held stubs and the stubs the
+        # failing tests unwound through. Neither is exhausted, deferred,
+        # crash-scoped away or cut by the cap (`held_stubs.
+        # offered_after_deferral`, `_held_in` below).
+        _must_offer = _holds.units | frozenset(_unwound_by_unit)
+        permanently_exhausted -= set(crash_texts) | _must_offer
         eligible = {}
         skipped_perm: int = 0
         for key, tests in frontier.items():
@@ -5240,7 +5326,12 @@ def run_phase_c_tdd(
                 })
                 _baseline_broken = True
                 break
+        _before_deferral = eligible
         eligible, _deferred = _holds.consumer_deferrals(eligible)
+        eligible, _offered_back = offered_after_deferral(
+            _before_deferral, eligible, _must_offer)
+        _deferred = {k: v for k, v in _deferred.items()
+                     if k not in _offered_back}
         _not_ranked.note(_deferred, "deferred_behind_held_stub")
         if _deferred:
             deps.log(f"  {tag} [phase-c/tdd] iter {iter_n}: deferred "
@@ -6757,7 +6848,7 @@ def run_phase_c_tdd(
         # batch for this sweep.
         _scope = scope_to_crash_culprits(
             ordered, crash_culprits_by_test(_sites, _owed_red),
-            exempt=_holds.units)
+            exempt=_must_offer)
         _not_ranked.note(_scope.dropped, "crash_scoped")
         if _scope.blocked:
             convicting = scope_convicting(convicting, _scope)
@@ -6882,7 +6973,8 @@ def run_phase_c_tdd(
         _culprit_tests = blocker_culprit_tests(_sites)
         _facts: dict[FnLocator, UnitFacts] = {}
         for _i, _k in enumerate(_static):
-            _held_names = _holds.tests_held_by(_k)
+            _held_names = (_holds.tests_held_by(_k)
+                           | _unwound_by_unit.get(_k, frozenset()))
             _crash_names = _culprit_tests.get(_k, frozenset())
             _held_n = len(_held_names)
             _crash_k = (Crash.BLAMED if _k in crash_blamed
@@ -6942,8 +7034,8 @@ def run_phase_c_tdd(
             k for k, fact in _facts.items()
             if fact.crash in (Crash.BLAMED, Crash.SITED))
         ordered = [(k, eligible.get(k, set())) for k in _ranked]
-        _held_in = (_holds.units | frozenset(_culprit_tests)) & frozenset(_ranked)
-        _held_off = _not_ranked.held_violations(_holds.units)
+        _held_in = (_must_offer | frozenset(_culprit_tests)) & frozenset(_ranked)
+        _held_off = _not_ranked.held_violations(_must_offer)
         if _held_off:
             deps.log(
                 f"  HEALTH ‼ HELD_WITHHELD iter {iter_n}: "
@@ -7924,6 +8016,7 @@ def run_phase_c_tdd(
         _plan_premise: dict[str, PremiseEntry] | None = None
         _ground_now: Callable[[], dict[str, PremiseEntry] | None] | None = None
         _held_now: Callable[[], dict[str, frozenset[FnSite]] | None] | None = None
+        _unwinding_now: Callable[[], dict[str, frozenset[FnSite]] | None] | None = None
         # The capture `_ground_now` last read: the held view the fill's
         # in-fill blockers-first reads is taken from the same suite run.
         _ground_capture: list[str] = []
@@ -7949,9 +8042,12 @@ def run_phase_c_tdd(
                     check_measurement(
                         target_src_dir,
                         MeasureRole.PREMISE if _take else MeasureRole.JUDGMENT)
-                    _rc_g, _out_g = deps.run_cargo(
-                        test_cmd, target_src_dir, cluster_env,
-                        timeout=test_timeout)
+                    # The judgment of the keep that moved the ground just
+                    # measured these bytes: read its capture
+                    # (`cargo_runner.measured_capture`), cargo only on a miss.
+                    _rc_g, _out_g = measured_capture(
+                        deps.run_cargo, test_cmd, target_src_dir, cluster_env,
+                        test_timeout)
                 finally:
                     if _take:
                         _lk.release()
@@ -7968,6 +8064,14 @@ def run_phase_c_tdd(
                 if not _cap:
                     return None
                 return _held_sites_of(_cap[0], ())
+
+            def _unwinding_now(
+                    _cap: list[str] = _ground_capture,
+            ) -> dict[str, frozenset[FnSite]] | None:
+                # The unwinding relation of the same capture.
+                if not _cap:
+                    return None
+                return _unwinding_sites_of(_cap[0])
 
         def _culprits_after(captured: str) -> frozenset[FnLocator]:
             # The in-fill cargo reading names the abort and not its frames.
@@ -8180,6 +8284,7 @@ def run_phase_c_tdd(
                     fill_premise=_plan_premise,
                     fill_ground_now=_ground_now,
                     fill_held_now=_held_now,
+                    fill_unwinding_now=_unwinding_now,
                 )
         except BaseException as _fill_exc:
             # Before the restore: a restored tree no longer holds these

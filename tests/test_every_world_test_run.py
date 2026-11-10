@@ -235,9 +235,12 @@ def _loop_env() -> dict[str, str]:
 def test_a_loop_test_run_is_every_worlds_run(tmp_path: Path) -> None:
     cargo = _Cargo({"base": (0, BASE_RUN), "alt": (101, ALT_RUN)})
     rc, text = _runner(cargo).run("cargo test --no-fail-fast", tmp_path, _loop_env())
-    assert [c[0] for c in cargo.calls] == ["base", "alt"]
-    assert cargo.calls[1][1] == "cargo +nightly test --no-fail-fast"
-    assert cargo.calls[1][2].endswith("target/worlds/alt")
+    # The worlds run side by side, so the order cargo saw them in is not a
+    # reading; the capture's order is (`join_world_captures`).
+    by_world = {c[0]: c for c in cargo.calls}
+    assert sorted(by_world) == ["alt", "base"] and len(cargo.calls) == 2
+    assert by_world["alt"][1] == "cargo +nightly test --no-fail-fast"
+    assert by_world["alt"][2].endswith("target/worlds/alt")
     assert rc == 101
     assert sorted(world_sections(text)) == ["alt", "base"]
 

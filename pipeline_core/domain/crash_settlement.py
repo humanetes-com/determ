@@ -296,3 +296,19 @@ def held_stub_evidence(held_tests: int) -> str:
             "test(s) stop at its `unimplemented!()` before they check "
             "anything else. No other body can move those tests until "
             "this one exists. Give it a real body.")
+
+
+def unwinding_stub_evidence(held_tests: int, unwound_tests: int) -> str:
+    """CRASH_EVIDENCE for a still-stubbed fn that ``unwound_tests`` failing
+    tests panicked in while they unwound from an earlier failure
+    (`test_outcome.StubHold.unwinding`), and that ``held_tests`` hold at
+    their first failure. The text must not say those tests stop at it
+    first: they did not."""
+    head = (f"This fn is still a stub, and {held_tests} failing test(s) stop "
+            "at its `unimplemented!()` first. " if held_tests else
+            "This fn is still a stub. ")
+    return (head + f"{unwound_tests} failing test(s) panic inside it while "
+            "they unwind from an earlier failure, which aborts each test's "
+            "process. It runs when those tests' values are dropped, so once "
+            "their first failure has a body they stop here. Give it a real "
+            "body.")

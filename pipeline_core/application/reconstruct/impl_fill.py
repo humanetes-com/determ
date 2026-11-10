@@ -7528,7 +7528,8 @@ def fill_impl_blocks(
             on_wave_kept=kw.get("on_wave_kept"),
             premise=kw.get("fill_premise"),
             ground_now=kw.get("fill_ground_now"),
-            held_now=kw.get("fill_held_now")))
+            held_now=kw.get("fill_held_now"),
+            unwinding_now=kw.get("fill_unwinding_now")))
     return prepared.finish()
 
 
