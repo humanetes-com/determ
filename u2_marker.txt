@@ -1,5 +1,0 @@
-U2 test-acceptance everywhere — marker
-T0_UTC=2026-05-30T16:27:15.672432+00:00
-events_total_at_marker=26680
-last_hour_baseline={'llm.request': 43, 'fn.fill.done': 0, 'fn.fill.fail': 2, 'impl.fill.done': 1, 'impl.fill.fail': 0, 'u2_test_fail': 0}
-last_hour_pass_range=(14, 14)

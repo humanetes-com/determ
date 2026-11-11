@@ -45,3 +45,16 @@ tools/skeleton_extractor/target/
 # ./commit.sh. It is overwritten every batch and describes changes that are
 # about to be committed, not repository content.
 last_commit_message.txt
+
+# Editor and hand backups. .env backups carry credentials: a .env~ and a
+# .env.bak-premuse holding a live HF_TOKEN were committed on 2026-06-29 and
+# 2026-08-11 before this rule existed.
+*~
+.env.*
+*.bak
+*.orig
+
+# Build outputs. A cargo target/ under a generated fixture (253 files) and
+# the setuptools egg-info were committed by accident.
+target/
+*.egg-info/
